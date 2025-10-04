@@ -3,6 +3,7 @@
 #include "../types.h"
 #include "GLView.h"
 #include "OrbitalCamera.h"
+#include "render/AsyncRenderController.h"
 #include "compute/ComputeCore.h"
 #include <CL/cl_platform.h>
 #include <atomic>
@@ -122,6 +123,16 @@ namespace gladius::ui
       private:
         void render(RenderWindowState & state);
         void slider();
+                void initializeAsyncRendering();
+                void renderSync(RenderWindowState & state);
+                void renderAsync(RenderWindowState & state);
+                void processAsyncResults(RenderWindowState & state);
+                bool scheduleAsyncRenderJob(RenderWindowState & state);
+                async_rendering::FrameResultMeta executeAsyncRenderJob(
+                    async_rendering::RenderJob const & job,
+                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+                void notifyAsyncEpochIncrement();
+                void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
 
         GLView * m_view{};
 
@@ -225,5 +236,13 @@ namespace gladius::ui
         bool shouldRecalculateCenter();
         CameraState getCurrentCameraState();
         void onCameraManuallyMoved();
+
+        async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
+        std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
+        std::atomic<uint64_t> m_asyncEpochCounter{0};
+        std::atomic<uint64_t> m_asyncCurrentEpoch{0};
+        std::atomic<uint64_t> m_asyncInFlightEpoch{0};
+        std::atomic<uint64_t> m_asyncFrameCounter{0};
+        std::atomic<bool> m_asyncJobInFlight{false};
     };
 }

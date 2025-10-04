@@ -44,6 +44,63 @@ namespace gladius::ui
             m_permanentCenteringEnabled =
               m_configManager->getValue<bool>("renderWindow", "permanentCenteringEnabled", false);
         }
+
+                initializeAsyncRendering();
+    }
+
+    void RenderWindow::initializeAsyncRendering()
+    {
+        m_asyncConfig = async_rendering::loadAsyncRenderFeatureConfig(m_configManager);
+
+        if (m_asyncConfig.wantsCoroutineBackend())
+        {
+            if (!m_asyncController)
+            {
+                m_asyncController = std::make_shared<async_rendering::AsyncRenderController>();
+            }
+            m_asyncController->setJobExecutor(
+              [this](async_rendering::RenderJob const & job,
+                     async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+              { return executeAsyncRenderJob(job, cancelCheck); });
+            m_asyncController->start();
+            m_asyncEpochCounter.store(0, std::memory_order_release);
+            m_asyncCurrentEpoch.store(0, std::memory_order_release);
+            m_asyncInFlightEpoch.store(0, std::memory_order_release);
+            m_asyncFrameCounter.store(0, std::memory_order_release);
+            m_asyncJobInFlight.store(false, std::memory_order_release);
+            notifyAsyncEpochIncrement();
+        }
+        else
+        {
+            if (m_asyncController)
+            {
+                m_asyncController->stop();
+                m_asyncController.reset();
+            }
+            m_asyncEpochCounter.store(0, std::memory_order_release);
+            m_asyncCurrentEpoch.store(0, std::memory_order_release);
+            m_asyncInFlightEpoch.store(0, std::memory_order_release);
+            m_asyncFrameCounter.store(0, std::memory_order_release);
+            m_asyncJobInFlight.store(false, std::memory_order_release);
+        }
+    }
+
+    void RenderWindow::notifyAsyncEpochIncrement()
+    {
+        if (!m_asyncConfig.wantsCoroutineBackend())
+        {
+            return;
+        }
+
+        auto const newEpoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
+        m_asyncInFlightEpoch.store(0, std::memory_order_release);
+        m_asyncJobInFlight.store(false, std::memory_order_release);
+
+        if (m_asyncController)
+        {
+            m_asyncController->setLatestEpoch(newEpoch);
+        }
     }
 
     void RenderWindow::renderWindow()
@@ -365,6 +422,7 @@ namespace gladius::ui
         m_renderWindowState.currentLine = 0;
         m_renderWindowState.renderingStepSize = 1;
         m_renderWindowState.isRendering = false;
+        notifyAsyncEpochIncrement();
     }
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
@@ -841,7 +899,17 @@ namespace gladius::ui
             invalidateViewDuetoModelUpdate();
             return;
         }
+        if (m_asyncConfig.wantsCoroutineBackend())
+        {
+            renderAsync(state);
+            return;
+        }
 
+        renderSync(state);
+    }
+
+    void RenderWindow::renderSync(RenderWindowState & state)
+    {
         m_view->stopAnimationMode();
 
         if (!m_dirty || state.isRendering)
@@ -854,11 +922,9 @@ namespace gladius::ui
             m_view->startAnimationMode();
         }
 
-        // Check if this is the first time we have a valid bounding box for this model
         bool const firstTimeBoundingBoxAvailable =
           !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();
 
-        // Handle both manual center requests, permanent centering, and first-time centering
         bool const shouldCenter =
           m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
 
@@ -878,7 +944,6 @@ namespace gladius::ui
                     m_camera.adjustDistanceToTarget(
                       bb, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
 
-                    // Update tracking state for permanent centering
                     if (m_permanentCenteringEnabled)
                     {
                         updateCameraStateTracking();
@@ -889,7 +954,6 @@ namespace gladius::ui
 
                     m_centerViewRequested = false;
 
-                    // Mark that we now have a bounding box available
                     if (firstTimeBoundingBoxAvailable)
                     {
                         m_boundingBoxEverAvailable = true;
@@ -897,12 +961,10 @@ namespace gladius::ui
                 }
             }
 
-            if (!boundingBoxValid) // no bounding box or bounding box contains inf or nan
+            if (!boundingBoxValid)
             {
-                // just set the look at point to the center of the build platform
                 m_camera.setLookAt({200.0, 200.0, 50.0});
 
-                // Update tracking state for permanent centering
                 if (m_permanentCenteringEnabled)
                 {
                     updateCameraStateTracking();
@@ -961,39 +1023,31 @@ namespace gladius::ui
             renderScene(state);
 
             auto const img = m_core->getResultImage();
-            img->bind(); // triggers texture transfer
+            img->bind();
             img->unbind();
         };
 
-        // PID controller parameters
-        float constexpr kp = 0.0001f;   // Proportional gain
-        float constexpr ki = 0.00001f;  // Integral gain
-        float constexpr kd = 0.000001f; // Derivative gain
+        float constexpr kp = 0.0001f;
+        float constexpr ki = 0.00001f;
+        float constexpr kd = 0.000001f;
 
         auto const executionDuration_ms =
           measure<std::chrono::milliseconds>::execution(renderFrame);
 
         auto constexpr progressiveTargetRenderTime_ms = 100;
         auto constexpr tolerance_ms = 1;
-        auto constexpr targetFrameTime_ms = 50; // Target frame time for 60 FPS
-        // Calculate the error
+        auto constexpr targetFrameTime_ms = 50;
         float error = targetFrameTime_ms - executionDuration_ms;
         if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgress()) &&
             executionDuration_ms > 0 && fabs(error) > 0)
         {
             state.fpsIntegral *= 0.8f;
-            // Update integral and derivative
             state.fpsIntegral += error;
 
             float derivative = error - state.fpsPreviousError;
-
-            // Calculate the adjustment using PID formula
             float adjustment = kp * error + ki * state.fpsIntegral + kd * derivative;
 
-            // Adjust render quality
             state.renderQualityWhileMoving += adjustment;
-
-            // Clamp the render quality to valid range
             state.renderQualityWhileMoving =
               std::clamp(state.renderQualityWhileMoving, 0.05f, state.renderQuality);
         }
@@ -1017,8 +1071,370 @@ namespace gladius::ui
             }
         }
 
+        state.fpsPreviousError = error;
         state.isMoving = false;
         state.isRendering = false;
+    }
+
+    void RenderWindow::renderAsync(RenderWindowState & state)
+    {
+        processAsyncResults(state);
+
+        if (!m_asyncController || !m_asyncController->isRunning())
+        {
+            renderSync(state);
+            return;
+        }
+
+        bool const jobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
+
+        m_view->stopAnimationMode();
+
+        if (!m_dirty && !state.isRendering && !jobInFlight)
+        {
+            return;
+        }
+
+        m_view->startAnimationMode();
+
+        bool const firstTimeBoundingBoxAvailable =
+          !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();
+
+        bool const shouldCenter =
+          m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
+
+        if (shouldCenter)
+        {
+            bool boundingBoxValid = m_core->getBoundingBox().has_value();
+            if (boundingBoxValid)
+            {
+                auto bb = m_core->getBoundingBox().value();
+                boundingBoxValid =
+                  (fabs(bb.max.x - bb.min.x > 0.f) && fabs(bb.max.y - bb.min.y > 0.f) &&
+                   fabs(bb.max.z - bb.min.z > 0.f));
+
+                if (boundingBoxValid)
+                {
+                    m_camera.centerView(bb);
+                    m_camera.adjustDistanceToTarget(
+                      bb, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
+
+                    if (m_permanentCenteringEnabled)
+                    {
+                        updateCameraStateTracking();
+                        m_modelModifiedSinceLastCenter = false;
+                        m_viewportSizeChangedSinceLastCenter = false;
+                        m_lastViewportSize = m_renderWindowSize_px;
+                    }
+
+                    m_centerViewRequested = false;
+
+                    if (firstTimeBoundingBoxAvailable)
+                    {
+                        m_boundingBoxEverAvailable = true;
+                    }
+                }
+            }
+
+            if (!boundingBoxValid)
+            {
+                m_camera.setLookAt({200.0, 200.0, 50.0});
+
+                if (m_permanentCenteringEnabled)
+                {
+                    updateCameraStateTracking();
+                    m_modelModifiedSinceLastCenter = false;
+                    m_viewportSizeChangedSinceLastCenter = false;
+                    m_lastViewportSize = m_renderWindowSize_px;
+                }
+            }
+
+            invalidateView();
+        }
+
+        if (state.isMoving && m_preComputedSdfDirty)
+        {
+            m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
+        }
+
+        if (m_core->setScreenResolution(
+              static_cast<int>(
+                std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f)),
+              static_cast<int>(
+                std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f))))
+        {
+            invalidateView();
+        }
+
+        std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
+
+        int newWidth = static_cast<int>(
+          std::clamp(m_renderWindowSize_px.x * state.renderQualityWhileMoving, 1.f, 16000.f));
+        int newHeight = static_cast<int>(
+          std::clamp(m_renderWindowSize_px.y * state.renderQualityWhileMoving, 1.f, 16000.f));
+
+        float widthChangePercent = std::abs(newWidth - lowResPreviewResolution.first) /
+                                   static_cast<float>(lowResPreviewResolution.first) * 100.0f;
+        float heightChangePercent = std::abs(newHeight - lowResPreviewResolution.second) /
+                                    static_cast<float>(lowResPreviewResolution.second) * 100.0f;
+
+        float currentAspectRatio =
+          static_cast<float>(lowResPreviewResolution.first) / lowResPreviewResolution.second;
+        float newAspectRatio = static_cast<float>(newWidth) / newHeight;
+
+        if (widthChangePercent > 20.0f || heightChangePercent > 20.0f ||
+            std::abs(currentAspectRatio - newAspectRatio) > 0.01f)
+        {
+            m_core->setLowResPreviewResolution(newWidth, newHeight);
+        }
+
+        if (state.isMoving)
+        {
+            auto token = m_core->requestComputeToken();
+            if (token.has_value())
+            {
+                m_core->renderLowResPreview();
+                m_lastLowResRenderTime = std::chrono::system_clock::now();
+            }
+            state.isRendering = false;
+            m_asyncJobInFlight.store(false, std::memory_order_release);
+            return;
+        }
+
+        if (!m_enableHQRendering)
+        {
+            m_core->setPreCompSdfSize(128u);
+            return;
+        }
+
+        m_core->setPreCompSdfSize(256u);
+
+        auto const timeSinceLastLowResRender =
+          std::chrono::system_clock::now() - m_lastLowResRenderTime;
+        if (timeSinceLastLowResRender < std::chrono::seconds(1))
+        {
+            return;
+        }
+
+        if (!m_asyncJobInFlight.load(std::memory_order_acquire))
+        {
+            state.isRendering = true;
+            if (!scheduleAsyncRenderJob(state))
+            {
+                state.isRendering = false;
+            }
+        }
+    }
+
+    void RenderWindow::processAsyncResults(RenderWindowState & state)
+    {
+        if (!m_asyncController)
+        {
+            return;
+        }
+
+        while (auto resultOpt = m_asyncController->tryConsumeResult())
+        {
+            auto & result = *resultOpt;
+
+            if (result.epoch < m_asyncCurrentEpoch.load(std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            if (result.precomputedSdfUpdated)
+            {
+                m_preComputedSdfDirty.store(false, std::memory_order_release);
+            }
+
+            if (result.cancelled)
+            {
+                if (result.epoch == m_asyncInFlightEpoch.load(std::memory_order_acquire))
+                {
+                    m_asyncJobInFlight.store(false, std::memory_order_release);
+                    state.isRendering = false;
+                }
+                continue;
+            }
+
+            size_t const maxHeight = static_cast<size_t>(result.height);
+            state.currentLine = std::min(result.completedLine, maxHeight);
+            adjustProgressFromDuration(state, result.computeDurationNs);
+
+            if (auto const img = m_core->getResultImage())
+            {
+                img->bind();
+                img->unbind();
+            }
+
+            if (result.completedFrame)
+            {
+                m_dirty = false;
+                state.isRendering = false;
+                state.isMoving = false;
+                m_view->stopAnimationMode();
+            }
+            else
+            {
+                state.isRendering = false;
+                state.isMoving = false;
+            }
+
+            m_asyncJobInFlight.store(false, std::memory_order_release);
+            m_asyncInFlightEpoch.store(0, std::memory_order_release);
+        }
+    }
+
+    bool RenderWindow::scheduleAsyncRenderJob(RenderWindowState & state)
+    {
+        if (!m_asyncController || !m_asyncController->isRunning())
+        {
+            return false;
+        }
+
+        auto const image = m_core->getResultImage();
+        if (!image)
+        {
+            return false;
+        }
+
+        size_t const height = static_cast<size_t>(image->getHeight());
+        if (height == 0 || state.currentLine >= height)
+        {
+            m_dirty = false;
+            state.isRendering = false;
+            return false;
+        }
+
+        async_rendering::RenderJob job{};
+        job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+        if (job.epoch == 0)
+        {
+            job.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+            m_asyncCurrentEpoch.store(job.epoch, std::memory_order_release);
+        }
+        m_asyncController->setLatestEpoch(job.epoch);
+        job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        job.type = async_rendering::RenderJobType::HighQuality;
+        job.width = static_cast<uint32_t>(image->getWidth());
+        job.height = static_cast<uint32_t>(height);
+        job.startLine = std::min(state.currentLine, height);
+        job.stepSize =
+          std::max<size_t>(1, std::min(state.renderingStepSize, height - job.startLine));
+        job.precomputeSdf = m_preComputedSdfDirty.load(std::memory_order_acquire) &&
+                            job.startLine == 0;
+        job.enableHighQuality = m_enableHQRendering;
+
+        m_asyncInFlightEpoch.store(job.epoch, std::memory_order_release);
+        m_asyncJobInFlight.store(true, std::memory_order_release);
+        m_asyncController->enqueueJob(job);
+        return true;
+    }
+
+    async_rendering::FrameResultMeta RenderWindow::executeAsyncRenderJob(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+    {
+        async_rendering::FrameResultMeta result{};
+        result.frameId = job.frameHint;
+        result.epoch = job.epoch;
+        result.width = job.width;
+        result.height = job.height;
+
+        if (cancelCheck() || !job.enableHighQuality)
+        {
+            result.cancelled = true;
+            return result;
+        }
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        auto computeToken = m_core->waitForComputeToken();
+        (void) computeToken;
+
+        if (cancelCheck())
+        {
+            result.cancelled = true;
+            return result;
+        }
+
+        try
+        {
+            if (job.precomputeSdf)
+            {
+                m_core->precomputeSdfForWholeBuildPlatform();
+                result.precomputedSdfUpdated = true;
+            }
+
+            size_t const endLine =
+              std::min(job.startLine + job.stepSize, static_cast<size_t>(job.height));
+
+            if (cancelCheck())
+            {
+                result.cancelled = true;
+            }
+            else
+            {
+                bool const advanced = m_core->renderScene(job.startLine, endLine);
+                result.completedLine = advanced ? endLine : job.startLine;
+                result.completedFrame = result.completedLine >= job.height;
+            }
+        }
+        catch (...)
+        {
+            result.cancelled = true;
+        }
+
+        auto const endTime = std::chrono::steady_clock::now();
+        result.computeDurationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
+
+        return result;
+    }
+
+    void RenderWindow::adjustProgressFromDuration(RenderWindowState & state,
+                                                  uint64_t computeDurationNs)
+    {
+        if (computeDurationNs == 0)
+        {
+            return;
+        }
+
+        float const executionDurationMs =
+          static_cast<float>(static_cast<double>(computeDurationNs) / 1'000'000.0);
+        if (executionDurationMs <= 0.0f)
+        {
+            return;
+        }
+
+        auto constexpr progressiveTargetRenderTime_ms = 100.0f;
+        auto constexpr tolerance_ms = 1.0f;
+
+        if (state.isMoving || m_core->isAnyCompilationInProgress())
+        {
+            return;
+        }
+
+        auto const image = m_core->getResultImage();
+        if (!image)
+        {
+            return;
+        }
+        auto const maxHeight = static_cast<size_t>(image->getHeight());
+
+        if (executionDurationMs > progressiveTargetRenderTime_ms + tolerance_ms)
+        {
+            auto const fraction = m_preComputedSdfDirty ? 0.1f : 0.5f;
+            state.renderingStepSize = std::clamp(static_cast<size_t>(state.renderingStepSize * fraction),
+                                                 size_t{2},
+                                                 maxHeight);
+        }
+        else if (executionDurationMs < progressiveTargetRenderTime_ms - tolerance_ms)
+        {
+            state.renderingStepSize = std::clamp(static_cast<size_t>(state.renderingStepSize * 1.5f + 1.0f),
+                                                 size_t{1},
+                                                 maxHeight);
+        }
     }
 
     void RenderWindow::slider()
