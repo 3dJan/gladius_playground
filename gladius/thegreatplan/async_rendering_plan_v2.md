@@ -22,7 +22,7 @@ RenderWindow::renderAsync()                       AsyncRenderWorker loop
    │                                                   │
    ├─ Poll worker state / check Ready buffers          │
    │                                                   ├─ Acquire compute slot (no UI blocking)
-   │                                                   ├─ Invoke ComputeCore::renderSceneComputeOnly()
+   │                                                   ├─ Invoke ComputeCore::renderScene()
    │                                                   ├─ (Kernels write Back buffer)
    │                                                   ├─ Finish / event callback
    │                                                   └─ Publish Ready (frameId, epoch)
