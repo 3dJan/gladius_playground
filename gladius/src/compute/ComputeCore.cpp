@@ -1245,6 +1245,49 @@ namespace gladius
         return true;
     }
 
+    bool ComputeCore::renderSceneComputeOnly(size_t startLine, 
+                                             size_t endLine,
+                                             ImageRGBA & targetImage)
+    {
+        ProfileFunction
+        
+        // This method is designed to be called from worker threads
+        // It does NOT require GL context and does NOT call GL functions
+        
+        if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+        
+        // Don't call throwIfNoOpenGL() - we don't need GL for pure compute!
+        recompileIfRequired();
+
+        if (getBestRenderProgram()->isCompilationInProgress())
+        {
+            LOG_LOCATION
+            return false;
+        }
+
+        // No glFinish() call - we're not using GL!
+        // Just ensure OpenCL is ready
+        m_ComputeContext->GetQueue().finish();
+
+        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        
+        // Render directly to the target CL image buffer (no GL involved)
+        getBestRenderProgram()->renderScene(
+          *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
+          
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        // Ensure OpenCL commands are submitted
+        m_ComputeContext->GetQueue().flush();
+
+        LOG_LOCATION
+        return true;
+    }
+
     void ComputeCore::renderLowResPreview() const
     {
         ProfileFunction

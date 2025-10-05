@@ -1455,6 +1455,16 @@ namespace gladius::ui
                 // Progressive chunk completed - keep rendering flag set to schedule next chunk
                 std::cout << "  -> Chunk completed at line " << result.completedLine << "/" << result.height 
                           << ", continuing progressive render" << std::endl;
+                
+                // Update GL texture with the new chunk (UI thread safe)
+                auto resultImage = m_core->getResultImage();
+                if (resultImage)
+                {
+                    resultImage->bind();   // Updates GL texture from CL buffer
+                    resultImage->unbind();
+                    std::cout << "     Updated display texture with progressive chunk" << std::endl;
+                }
+                
                 // Don't reset state.isRendering - we want to continue rendering
                 // state.isRendering remains true to trigger next chunk scheduling
             }
@@ -1543,6 +1553,11 @@ namespace gladius::ui
         ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
         tracy::SetThreadName("AsyncRenderWorker");
         
+        // Log thread ID to verify we're on worker thread
+        std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] executeAsyncRenderJob() starting" << std::endl;
+        std::cout << "  job: startLine=" << job.startLine << ", stepSize=" << job.stepSize 
+                  << ", epoch=" << job.epoch << std::endl;
+        
         ZoneValue(job.startLine);
         ZoneValue(job.stepSize);
         ZoneValue(job.epoch);
@@ -1556,6 +1571,7 @@ namespace gladius::ui
         if (cancelCheck())
         {
             ZoneText("CancelledEarly", 14);
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled early" << std::endl;
             result.cancelled = true;
             return result;
         }
@@ -1563,6 +1579,7 @@ namespace gladius::ui
         if (!job.enableHighQuality)
         {
             ZoneText("HQDisabled", 10);
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] HQ disabled" << std::endl;
             result.cancelled = true;
             return result;
         }
@@ -1584,6 +1601,29 @@ namespace gladius::ui
                 result.cancelled = true;
                 return result;
             }
+            
+            // IMPORTANT: Initialize with low-res preview as base for progressive enhancement
+            // This ensures progressive rendering enhances the preview, not a black screen
+            if (writeBuffer->image)
+            {
+                ZoneScopedN("CopyLowResPreviewAsBase");
+                auto const resultImage = m_core->getResultImage();
+                if (resultImage)
+                {
+                    std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
+                              << "] Initializing progressive buffer with low-res preview" << std::endl;
+                    
+                    auto & queue = m_core->getComputeContext()->GetQueue();
+                    queue.enqueueCopyImage(resultImage->getBuffer(),
+                                          writeBuffer->image->getBuffer(),
+                                          {0, 0, 0},
+                                          {0, 0, 0},
+                                          {job.width, job.height, 1});
+                    queue.finish(); // Ensure base is copied before rendering
+                    writeBuffer->image->invalidateContent();
+                }
+            }
+            
             m_asyncProgressiveBuffer = writeBuffer;
             m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
         }
@@ -1628,47 +1668,53 @@ namespace gladius::ui
             }
             else
             {
-                ZoneScopedN("RenderSceneToStagingBuffer");
+                ZoneScopedN("RenderSceneComputeOnly");
                 
-                // TODO: This is the critical part - we need to render to the staging buffer
-                // instead of m_resultImage. For now, we still render to m_resultImage
-                // but will copy to staging buffer afterwards.
-                // A proper implementation would modify renderScene to accept a target buffer.
-                bool const advanced = m_core->renderScene(job.startLine, endLine);
-                result.completedLine = advanced ? endLine : job.startLine;
-                result.completedFrame = result.completedLine >= job.height;
-
-                if (advanced && !cancelCheck())
+                // NEW APPROACH: Render directly to writeBuffer's CL image (no GL required)
+                // This is safe to call from any thread since it doesn't touch GL
+                
+                if (writeBuffer && writeBuffer->image)
                 {
-                    ZoneScopedN("CopyToFrameBuffer");
-                    // Copy from m_resultImage to writeBuffer->image
-                    // This is a temporary workaround until we refactor renderScene
-                    auto const srcImage = m_core->getResultImage();
-                    if (srcImage && writeBuffer->image)
+                    // Cast to ImageRGBA& to use only the CL buffer part (not GL)
+                    // This allows rendering without GL context
+                    ImageRGBA & targetCLBuffer = *writeBuffer->image;
+                    
+                    bool const advanced = m_core->renderSceneComputeOnly(
+                        job.startLine, endLine, targetCLBuffer);
+                    
+                    result.completedLine = advanced ? endLine : job.startLine;
+                    result.completedFrame = result.completedLine >= job.height;
+
+                    if (advanced && !cancelCheck())
                     {
-                        // Copy pixel data from source to destination
-                        // Both are GLImageBuffer instances
-                        auto const width = srcImage->getWidth();
-                        auto const height = srcImage->getHeight();
+                        ZoneScopedN("CopyToResultImageForDisplay");
                         
-                        if (width == writeBuffer->image->getWidth() &&
-                            height == writeBuffer->image->getHeight())
+                        // For progressive rendering visibility, copy writeBuffer → m_resultImage
+                        // This allows the UI thread to display progressive updates
+                        auto const resultImage = m_core->getResultImage();
+                        if (resultImage)
                         {
-                            // Use OpenCL to copy between images
                             auto & queue = m_core->getComputeContext()->GetQueue();
-                            queue.enqueueCopyImage(srcImage->getBuffer(),
-                                                  writeBuffer->image->getBuffer(),
+                            queue.enqueueCopyImage(writeBuffer->image->getBuffer(),
+                                                  resultImage->getBuffer(),
                                                   {0, 0, 0},
                                                   {0, 0, 0},
-                                                  {width, height, 1});
-                            queue.finish();
-                            writeBuffer->image->invalidateContent();
+                                                  {result.width, result.height, 1});
+                            queue.finish(); // Wait for copy to complete
                             
-                            // Update GL texture with the new CL data
-                            writeBuffer->image->bind();
-                            writeBuffer->image->unbind();
+                            // Mark both buffers as dirty
+                            writeBuffer->image->invalidateContent();
+                            resultImage->invalidateContent();
                         }
+                        
+                        std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
+                                  << "] Chunk " << job.startLine << "->" << endLine 
+                                  << " complete, copied to display buffer" << std::endl;
                     }
+                }
+                else
+                {
+                    result.cancelled = true;
                 }
             }
         }

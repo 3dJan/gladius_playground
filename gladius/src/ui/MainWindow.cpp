@@ -2123,6 +2123,7 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
+            std::cout << "[MainWindow] Parameter changed - updating and invalidating view" << std::endl;
             m_doc->updateParameter();
             m_renderWindow.invalidateViewDuetoModelUpdate();
             m_parameterDirty = false;
