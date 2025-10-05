@@ -146,23 +146,37 @@ namespace gladius::ui
         {
             // Use the front buffer from triple buffering system
             auto * frontBuf = m_asyncController->frontBuffer();
+            auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+            
             std::cout << "  -> frontBuffer() returned: " << (frontBuf ? "EXISTS" : "NULL");
             if (frontBuf) {
                 std::cout << ", epoch=" << frontBuf->epoch << ", state=" << static_cast<int>(frontBuf->state.load());
             }
-            std::cout << std::endl;
+            std::cout << ", currentEpoch=" << currentEpoch << std::endl;
             
-            // Only use front buffer if it has valid content (epoch > 0 means it's been rendered to)
-            if (frontBuf && frontBuf->image && frontBuf->epoch > 0)
+            // Only use front buffer if it matches current epoch and is not actively rendering
+            // During progressive rendering (state.isRendering), always show m_resultImage for live updates
+            bool const useFrontBuffer = frontBuf && frontBuf->image && 
+                                       frontBuf->epoch == currentEpoch &&
+                                       !m_renderWindowState.isRendering;
+            
+            if (useFrontBuffer)
             {
                 std::cout << "  -> Displaying FRONT BUFFER (epoch=" << frontBuf->epoch << ")" << std::endl;
                 displayImage = frontBuf->image;
             }
             else
             {
-                std::cout << "  -> Displaying RESULT IMAGE (fallback, frontBuf epoch=" 
-                          << (frontBuf ? std::to_string(frontBuf->epoch) : "null") << ")" << std::endl;
-                // Fallback to result image if no front buffer yet or for low-res preview
+                std::cout << "  -> Displaying RESULT IMAGE (";
+                if (m_renderWindowState.isRendering) {
+                    std::cout << "progressive rendering";
+                } else if (!frontBuf || frontBuf->epoch != currentEpoch) {
+                    std::cout << "epoch mismatch";
+                } else {
+                    std::cout << "no valid front buffer";
+                }
+                std::cout << ")" << std::endl;
+                // Fallback to result image for progressive rendering or when no valid front buffer
                 displayImage = m_core->getResultImage();
             }
         }
@@ -1649,6 +1663,10 @@ namespace gladius::ui
                                                   {width, height, 1});
                             queue.finish();
                             writeBuffer->image->invalidateContent();
+                            
+                            // Update GL texture with the new CL data
+                            writeBuffer->image->bind();
+                            writeBuffer->image->unbind();
                         }
                     }
                 }
