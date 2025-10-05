@@ -44,7 +44,8 @@ namespace gladius::ui::async_rendering
     enum class RenderJobType
     {
         HighQuality,
-        LowResPreview
+        LowResPreview,
+        BoundingBoxUpdate
     };
 
     /**
@@ -70,6 +71,7 @@ namespace gladius::ui::async_rendering
     {
         uint64_t frameId{0};
         uint64_t epoch{0};
+        RenderJobType jobType{RenderJobType::HighQuality};
         uint32_t width{0};
         uint32_t height{0};
         bool cancelled{false};

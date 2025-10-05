@@ -91,7 +91,7 @@ namespace gladius::ui::async_rendering
     }
 
     AsyncRenderController::AsyncRenderController()
-        : AsyncRenderController(coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 1}))
+        : AsyncRenderController(coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2}))
     {
     }
 
@@ -99,7 +99,7 @@ namespace gladius::ui::async_rendering
     {
         if (workerPool == nullptr)
         {
-            workerPool = coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 1});
+            workerPool = coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2});
         }
 
         m_state = std::make_shared<ControllerState>(std::move(workerPool));
