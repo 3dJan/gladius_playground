@@ -314,21 +314,21 @@ namespace gladius::ui
         if (m_computeAvailable)
         {
             setup(m_core, m_doc, m_logger);
+            // Note: setup() already sets up all callbacks including nodeEditor()
         }
         else
         {
             // Minimal UI: welcome screen, menus, status bar
             m_welcomeScreen.setLogger(m_logger);
             m_welcomeScreen.setRecentFiles(getRecentFiles(100));
+            
+            // Set up minimal callbacks when compute is disabled
+            m_mainView.clearViewCallback();
+            m_renderCallback = [&]() { /* no-op when compute disabled */ };
+            m_mainView.setRenderCallback(m_renderCallback);
+            m_mainView.addViewCallBack([&]() { render(); });
+            m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
         }
-
-        // Hook up the basic UI rendering callbacks regardless of compute availability
-        m_mainView.clearViewCallback();
-        m_renderCallback =
-          [&]() { /* no-op when compute disabled; updateModel() set in full setup */ };
-        m_mainView.setRenderCallback(m_renderCallback);
-        m_mainView.addViewCallBack([&]() { render(); });
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
 
         
     }
