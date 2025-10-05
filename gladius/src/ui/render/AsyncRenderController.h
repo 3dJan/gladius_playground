@@ -1,8 +1,10 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,9 +13,20 @@
 
 #include "AsyncRenderTypes.h"
 
+// Include OpenCL platform types for cl_float4
+#include <CL/cl_platform.h>
+
+// Forward declarations for OpenCL types
+namespace cl
+{
+    class CommandQueue;
+    class Image2D;
+}
+
 namespace gladius
 {
     class ConfigManager;
+    class ComputeContext;
 }
 
 namespace gladius::ui::async_rendering
@@ -41,6 +54,11 @@ namespace gladius::ui::async_rendering
      *
      * This initial scaffold focuses on providing the foundational job queue and worker management
      * that later stages (C2+) will extend with actual rendering logic.
+     *
+     * For Option A (OpenCL-Only Async), this controller owns:
+     * - A dedicated worker command queue (separate from UI thread's queue)
+     * - A staging buffer (CL-only, no GL interop) for async rendering
+     * - CPU-side pixel buffer for async pixel transfers
      */
     class AsyncRenderController
     {
@@ -69,6 +87,38 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool isRunning() const noexcept;
         [[nodiscard]] std::shared_ptr<coro::thread_pool> workerPool() const noexcept;
 
+        /// Initialize OpenCL resources for async rendering (worker queue + staging buffer)
+        void initializeAsyncResources(ComputeContext & context, size_t width, size_t height);
+
+        /// Get worker-specific command queue (used by worker thread for rendering)
+        [[nodiscard]] cl::CommandQueue * workerQueue() noexcept;
+
+        /// Get staging buffer (used by worker thread for rendering output)
+        [[nodiscard]] cl::Image2D * stagingBuffer() noexcept;
+
+        /// Download pixels from staging buffer to CPU memory (called from UI thread)
+        void downloadStagingBufferAsync(std::vector<cl_float4> & outPixels);
+
+        /// Get a buffer in a specific state (for buffer management)
+        [[nodiscard]] FrameBuffer * findBufferInState(FrameState state) noexcept;
+
+        /// Try to transition a buffer from one state to another atomically
+        [[nodiscard]] bool tryTransitionBuffer(FrameBuffer * buffer,
+                                              FrameState expectedState,
+                                              FrameState newState) noexcept;
+
+        /// Get the current front buffer (displayed frame)
+        [[nodiscard]] FrameBuffer * frontBuffer() noexcept;
+
+        /// Get a writable buffer for the worker (finds Idle buffer)
+        [[nodiscard]] FrameBuffer * acquireWriteBuffer(uint64_t epoch) noexcept;
+
+        /// Publish a finished frame (Writing → Ready)
+        void publishFrame(FrameBuffer * buffer, uint64_t frameId, uint64_t epoch) noexcept;
+
+        /// Promote a Ready buffer to Front (for UI display)
+        [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
+
       private:
         struct ControllerState;
 
@@ -77,5 +127,16 @@ namespace gladius::ui::async_rendering
 
         std::shared_ptr<ControllerState> m_state;
         std::atomic<bool> m_running{false};
+
+        // OpenCL resources for async rendering (Option A: separate CL queue, no GL interop)
+        std::unique_ptr<cl::CommandQueue> m_workerQueue;
+        std::unique_ptr<cl::Image2D> m_stagingBuffer;
+        size_t m_stagingWidth{0};
+        size_t m_stagingHeight{0};
+
+        // Triple buffer state machine
+        std::array<FrameBuffer, 3> m_frameBuffers;
+        std::atomic<size_t> m_frontBufferIndex{0};
+        mutable std::mutex m_bufferMutex;
     };
 }

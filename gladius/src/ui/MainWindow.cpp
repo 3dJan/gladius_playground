@@ -278,6 +278,10 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
+            
+            // Hide welcome screen so error is immediately visible
+            m_welcomeScreen.hide();
+            
             if (m_logger)
             {
                 m_logger->addEvent(
@@ -289,6 +293,10 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
+            
+            // Hide welcome screen so error is immediately visible
+            m_welcomeScreen.hide();
+            
             if (m_logger)
             {
                 m_logger->addEvent(
@@ -302,14 +310,6 @@ namespace gladius::ui
             loadRenderSettings();
         }
 
-        // Hook up the basic UI rendering callbacks regardless of compute availability
-        m_mainView.clearViewCallback();
-        m_renderCallback =
-          [&]() { /* no-op when compute disabled; updateModel() set in full setup */ };
-        m_mainView.setRenderCallback(m_renderCallback);
-        m_mainView.addViewCallBack([&]() { render(); });
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
-
         // If compute is available, continue normal setup. Otherwise, keep UI minimal.
         if (m_computeAvailable)
         {
@@ -321,6 +321,16 @@ namespace gladius::ui
             m_welcomeScreen.setLogger(m_logger);
             m_welcomeScreen.setRecentFiles(getRecentFiles(100));
         }
+
+        // Hook up the basic UI rendering callbacks regardless of compute availability
+        m_mainView.clearViewCallback();
+        m_renderCallback =
+          [&]() { /* no-op when compute disabled; updateModel() set in full setup */ };
+        m_mainView.setRenderCallback(m_renderCallback);
+        m_mainView.addViewCallBack([&]() { render(); });
+        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+
+        
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
@@ -665,7 +675,12 @@ namespace gladius::ui
 
             logViewer();
             m_about.render();
-            m_renderWindow.updateCamera();
+            // Camera update moved to RenderWindow::render() methods where core is guaranteed to be ready
+            // m_renderWindow.updateCamera();
+
+            // Render compute error modal ALWAYS (even when welcome screen is visible)
+            // This ensures critical errors are shown immediately
+            renderComputeErrorModal();
 
             // Render status bar if welcome screen is not visible
             if (!welcomeScreenVisible)
@@ -796,6 +811,9 @@ namespace gladius::ui
 
     void MainWindow::newModel()
     {
+        std::cout << "newModel() called: m_computeAvailable=" << m_computeAvailable 
+                  << ", m_doc=" << (m_doc ? "valid" : "nullptr") << std::endl;
+        
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -803,6 +821,8 @@ namespace gladius::ui
                 m_logger->addEvent({"New model is unavailable: compute/renderer disabled",
                                     events::Severity::Warning});
             }
+            std::cout << "newModel() FAILED: compute=" << m_computeAvailable 
+                      << ", doc=" << (m_doc ? "valid" : "null") << std::endl;
             return;
         }
         if (m_fileChanged)
@@ -1196,6 +1216,9 @@ namespace gladius::ui
 
     void MainWindow::open()
     {
+        std::cout << "open() called: m_computeAvailable=" << m_computeAvailable 
+                  << ", m_doc=" << (m_doc ? "valid" : "nullptr") << std::endl;
+        
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -1203,6 +1226,8 @@ namespace gladius::ui
                 m_logger->addEvent(
                   {"Open is unavailable: compute/renderer disabled", events::Severity::Warning});
             }
+            std::cout << "open() FAILED: compute=" << m_computeAvailable 
+                      << ", doc=" << (m_doc ? "valid" : "null") << std::endl;
             return;
         }
         if (m_fileChanged)
@@ -1624,8 +1649,12 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar(3);
+    }
 
-        // Compute error details modal
+    void MainWindow::renderComputeErrorModal()
+    {
+        // Compute error details modal - rendered independently of other UI elements
+        // to ensure it's always visible when OpenCL initialization fails
         if (m_showComputeErrorModal)
         {
             if (!ImGui::IsPopupOpen("OpenCL/Compute Unavailable"))
@@ -1640,9 +1669,10 @@ namespace gladius::ui
                 ImGui::TextWrapped("Gladius couldn't initialize OpenCL. The UI stays usable, but "
                                    "rendering and slicing are disabled.");
                 ImGui::Separator();
+                
                 if (!m_computeErrorMessage.empty())
                 {
-                    ImGui::TextUnformatted("Details:");
+                    ImGui::TextUnformatted("Error Details:");
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
                     ImGui::BeginChild("##oclErrDetails", ImVec2(600, 160), true);
@@ -1652,7 +1682,22 @@ namespace gladius::ui
                     ImGui::EndChild();
                     ImGui::PopStyleColor(2);
                 }
+                
                 ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // Provide helpful troubleshooting guidance
+                ImGui::TextWrapped("Common solutions:");
+                ImGui::BulletText("Install OpenCL drivers for your GPU (NVIDIA, AMD, or Intel)");
+                ImGui::BulletText("On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
+                ImGui::BulletText("Check if other OpenCL applications work (e.g., clinfo)");
+                ImGui::BulletText("Restart the application after installing drivers");
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
                 if (ImGui::Button("Retry Initialization"))
                 {
                     try
@@ -1671,6 +1716,9 @@ namespace gladius::ui
                             m_core = std::make_shared<ComputeCore>(
                               context, RequiredCapabilities::OpenGLInterop, m_logger);
                             m_doc = std::make_shared<Document>(m_core);
+                            
+                            // If retry successful, complete the full setup
+                            setup(m_core, m_doc, m_logger);
                         }
                         else
                         {
@@ -1680,26 +1728,44 @@ namespace gladius::ui
                         m_computeErrorMessage.clear();
                         m_showComputeErrorModal = false;
                         loadRenderSettings();
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent({"OpenCL initialized successfully!", 
+                                              events::Severity::Info});
+                        }
                     }
                     catch (const std::exception & e)
                     {
                         m_computeAvailable = false;
                         m_computeErrorMessage = e.what();
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent({std::string("Retry failed: ") + e.what(), 
+                                              events::Severity::Error});
+                        }
                     }
                 }
+                
                 ImGui::SameLine();
                 if (ImGui::Button("Copy Details"))
                 {
-                    std::string details = m_computeErrorMessage.empty()
-                                            ? std::string("No details available")
-                                            : m_computeErrorMessage;
+                    std::string details = "Gladius OpenCL Initialization Error\n\n";
+                    details += m_computeErrorMessage.empty()
+                                 ? std::string("No details available")
+                                 : m_computeErrorMessage;
                     ImGui::SetClipboardText(details.c_str());
                 }
+                
                 ImGui::SameLine();
-                if (ImGui::Button("Close"))
+                if (ImGui::Button("Continue Without OpenCL"))
                 {
                     m_showComputeErrorModal = false;
+                    // Show welcome screen again so user can browse examples or documentation
+                    m_welcomeScreen.show();
                 }
+                
                 ImGui::EndPopup();
             }
         }

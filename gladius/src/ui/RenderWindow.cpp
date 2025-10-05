@@ -34,9 +34,13 @@ namespace gladius::ui
         m_shortcutManager = shortcutManager;
         m_configManager = configManager;
 
-        auto & settings = m_core->getResourceContext()->getRenderingSettings();
-        m_renderWindowState.renderQuality = settings.quality;
-        m_renderWindowState.renderQualityWhileMoving = settings.quality * 0.5f;
+        // Initialize settings when core is ready
+        if (m_core && m_core->isRendererReady())
+        {
+            auto & settings = m_core->getResourceContext()->getRenderingSettings();
+            m_renderWindowState.renderQuality = settings.quality;
+            m_renderWindowState.renderQualityWhileMoving = settings.quality * 0.5f;
+        }
 
         // Load permanent centering state from config
         if (m_configManager)
@@ -45,24 +49,29 @@ namespace gladius::ui
               m_configManager->getValue<bool>("renderWindow", "permanentCenteringEnabled", false);
         }
 
-                initializeAsyncRendering();
+        // Don't initialize async rendering here - will be done lazily on first render
     }
 
     void RenderWindow::initializeAsyncRendering()
     {
+        ProfileFunction;
         m_asyncConfig = async_rendering::loadAsyncRenderFeatureConfig(m_configManager);
 
         if (m_asyncConfig.wantsCoroutineBackend())
         {
+            DebugText("CoroutineBackend", 16);
             if (!m_asyncController)
             {
+                DebugText("CreatingController", 18);
                 m_asyncController = std::make_shared<async_rendering::AsyncRenderController>();
             }
             m_asyncController->setJobExecutor(
               [this](async_rendering::RenderJob const & job,
                      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
               { return executeAsyncRenderJob(job, cancelCheck); });
+            DebugText("CallingStart", 12);
             m_asyncController->start();
+            DebugText("StartCompleted", 14);
             m_asyncEpochCounter.store(0, std::memory_order_release);
             m_asyncCurrentEpoch.store(0, std::memory_order_release);
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
@@ -87,6 +96,7 @@ namespace gladius::ui
 
     void RenderWindow::notifyAsyncEpochIncrement()
     {
+        ProfileFunction;
         if (!m_asyncConfig.wantsCoroutineBackend())
         {
             return;
@@ -96,6 +106,17 @@ namespace gladius::ui
         m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
+
+        // Release progressive buffer on epoch change
+        if (m_asyncProgressiveBuffer)
+        {
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+            m_asyncProgressiveBuffer = nullptr;
+        }
+        m_asyncProgressiveEpoch.store(0, std::memory_order_release);
 
         if (m_asyncController)
         {
@@ -111,16 +132,47 @@ namespace gladius::ui
             return;
         }
 
-        // only render if can get a compute token
-        auto token = m_core->requestComputeToken();
-        if (token)
+        // UI thread needs to wait for compute token to ensure something gets rendered
+        // (otherwise screen would be black)
+        auto token = m_core->waitForComputeToken();
+        
+        // Execute rendering logic FIRST - this processes async results and promotes buffers
+        render(m_renderWindowState);
+
+        // THEN get the image to display - will see newly promoted front buffer
+        std::shared_ptr<GLImageBuffer> displayImage;
+        
+        if (m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
         {
-            render(m_renderWindowState);
+            // Use the front buffer from triple buffering system
+            auto * frontBuf = m_asyncController->frontBuffer();
+            std::cout << "  -> frontBuffer() returned: " << (frontBuf ? "EXISTS" : "NULL");
+            if (frontBuf) {
+                std::cout << ", epoch=" << frontBuf->epoch << ", state=" << static_cast<int>(frontBuf->state.load());
+            }
+            std::cout << std::endl;
+            
+            // Only use front buffer if it has valid content (epoch > 0 means it's been rendered to)
+            if (frontBuf && frontBuf->image && frontBuf->epoch > 0)
+            {
+                std::cout << "  -> Displaying FRONT BUFFER (epoch=" << frontBuf->epoch << ")" << std::endl;
+                displayImage = frontBuf->image;
+            }
+            else
+            {
+                std::cout << "  -> Displaying RESULT IMAGE (fallback, frontBuf epoch=" 
+                          << (frontBuf ? std::to_string(frontBuf->epoch) : "null") << ")" << std::endl;
+                // Fallback to result image if no front buffer yet or for low-res preview
+                displayImage = m_core->getResultImage();
+            }
+        }
+        else
+        {
+            // Synchronous rendering - use result image
+            displayImage = m_core->getResultImage();
         }
 
-        auto const img = m_core->getResultImage();
-
-        auto const textureId = img->GetTextureId();
+        auto const textureId = displayImage->GetTextureId();
         auto & io = ImGui::GetIO();
         ImGuiWindowFlags const window_flags =
           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
@@ -331,8 +383,8 @@ namespace gladius::ui
         auto const windowCenter =
           ImVec2(0.5f * (contentMin.x + contentMax.x), 0.5f * (contentMin.y + contentMax.y));
 
-        m_renderWindowState.isMoving =
-          m_renderWindowState.isMoving || m_camera.update(io.DeltaTime * 1000.f);
+        // Update camera and set isMoving based on whether camera is currently animating
+        m_renderWindowState.isMoving = m_camera.update(io.DeltaTime * 1000.f);
         m_dirty = m_dirty || m_renderWindowState.isMoving;
 
         // Event handling:
@@ -375,7 +427,7 @@ namespace gladius::ui
 
         ImGui::End();
         ImGui::PopStyleVar();
-        img->unbind();
+        displayImage->unbind();
 
         if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
         {
@@ -407,7 +459,10 @@ namespace gladius::ui
 
     void RenderWindow::updateCamera()
     {
-        m_core->applyCamera(m_camera);
+        if (m_core)
+        {
+            m_core->applyCamera(m_camera);
+        }
     }
 
     bool RenderWindow::isRenderingInProgress() const
@@ -417,6 +472,7 @@ namespace gladius::ui
 
     void RenderWindow::invalidateView()
     {
+        ProfileFunction;
         m_dirty = true;
         m_renderWindowState.isMoving = true;
         m_renderWindowState.currentLine = 0;
@@ -887,7 +943,7 @@ namespace gladius::ui
 
     void RenderWindow::render(RenderWindowState & state)
     {
-        ProfileFunction;
+        ZoneScopedN("render");
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
         if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
@@ -899,17 +955,33 @@ namespace gladius::ui
             invalidateViewDuetoModelUpdate();
             return;
         }
+
+        // Lazy initialization: only initialize async rendering once renderer is ready
+        if (!m_asyncInitialized)
+        {
+            DebugText("LazyAsyncInit", 13);
+            initializeAsyncRendering();
+            m_asyncInitialized = true;
+        }
+
         if (m_asyncConfig.wantsCoroutineBackend())
         {
+            DebugText("ASYNC", 5);
             renderAsync(state);
             return;
         }
 
+        DebugText("SYNC", 4);
         renderSync(state);
     }
 
     void RenderWindow::renderSync(RenderWindowState & state)
     {
+        ProfileFunction;
+        
+        // Update camera now that we know core is ready
+        m_core->applyCamera(m_camera);
+        
         m_view->stopAnimationMode();
 
         if (!m_dirty || state.isRendering)
@@ -1078,10 +1150,23 @@ namespace gladius::ui
 
     void RenderWindow::renderAsync(RenderWindowState & state)
     {
+        ProfileFunction;
+        
+        std::cout << "=== renderAsync() called ===" << std::endl;
+        std::cout << "  m_asyncController: " << (m_asyncController ? "EXISTS" : "NULL") << std::endl;
+        std::cout << "  isRunning: " << (m_asyncController ? (m_asyncController->isRunning() ? "YES" : "NO") : "N/A") << std::endl;
+        std::cout << "  m_dirty: " << m_dirty << std::endl;
+        std::cout << "  state.isRendering: " << state.isRendering << std::endl;
+        std::cout << "  jobInFlight: " << m_asyncJobInFlight.load(std::memory_order_acquire) << std::endl;
+        
+        // Update camera now that we know core is ready
+        m_core->applyCamera(m_camera);
+        
         processAsyncResults(state);
 
         if (!m_asyncController || !m_asyncController->isRunning())
         {
+            std::cout << "  -> Falling back to renderSync()" << std::endl;
             renderSync(state);
             return;
         }
@@ -1092,6 +1177,7 @@ namespace gladius::ui
 
         if (!m_dirty && !state.isRendering && !jobInFlight)
         {
+            std::cout << "  -> NothingToDo, returning early" << std::endl;
             return;
         }
 
@@ -1190,6 +1276,7 @@ namespace gladius::ui
 
         if (state.isMoving)
         {
+            std::cout << "  -> state.isMoving=true, rendering low-res preview and returning" << std::endl;
             auto token = m_core->requestComputeToken();
             if (token.has_value())
             {
@@ -1200,6 +1287,8 @@ namespace gladius::ui
             m_asyncJobInFlight.store(false, std::memory_order_release);
             return;
         }
+
+        std::cout << "  -> state.isMoving=false, continuing to HQ render logic" << std::endl;
 
         if (!m_enableHQRendering)
         {
@@ -1213,21 +1302,43 @@ namespace gladius::ui
           std::chrono::system_clock::now() - m_lastLowResRenderTime;
         if (timeSinceLastLowResRender < std::chrono::seconds(1))
         {
+            std::cout << "  -> Waiting for low-res timeout (waited " 
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(timeSinceLastLowResRender).count() 
+                      << "ms / 1000ms)" << std::endl;
             return;
         }
 
+        std::cout << "  -> Attempting to schedule async job..." << std::endl;
+        std::cout << "     m_asyncJobInFlight=" << m_asyncJobInFlight.load(std::memory_order_acquire) << std::endl;
+
         if (!m_asyncJobInFlight.load(std::memory_order_acquire))
         {
+            DebugText("SchedulingAsyncJob", 18);
             state.isRendering = true;
             if (!scheduleAsyncRenderJob(state))
             {
+                DebugText("ScheduleFailed", 14);
+                std::cout << "     -> Schedule FAILED" << std::endl;
                 state.isRendering = false;
             }
+            else
+            {
+                DebugText("ScheduleSuccess", 15);
+                std::cout << "     -> Schedule SUCCESS" << std::endl;
+            }
+        }
+        else
+        {
+            DebugText("JobAlreadyInFlight", 18);
+            std::cout << "  -> Job already in flight, skipping" << std::endl;
         }
     }
 
     void RenderWindow::processAsyncResults(RenderWindowState & state)
     {
+        ZoneScoped;
+        ZoneName("ProcessAsyncResults", strlen("ProcessAsyncResults"));
+        
         if (!m_asyncController)
         {
             return;
@@ -1235,6 +1346,7 @@ namespace gladius::ui
 
         while (auto resultOpt = m_asyncController->tryConsumeResult())
         {
+            ZoneScopedN("ProcessSingleResult");
             auto & result = *resultOpt;
 
             if (result.epoch < m_asyncCurrentEpoch.load(std::memory_order_acquire))
@@ -1261,23 +1373,76 @@ namespace gladius::ui
             state.currentLine = std::min(result.completedLine, maxHeight);
             adjustProgressFromDuration(state, result.computeDurationNs);
 
-            if (auto const img = m_core->getResultImage())
+            // Promote the newest Ready buffer to Front for display
+            // Note: Only happens when completedFrame=true (buffer was published)
+            if (result.completedFrame)
             {
-                img->bind();
-                img->unbind();
+                ZoneScopedN("PromoteReadyToFront");
+                
+                std::cout << "  -> Promoting Ready buffer to Front..." << std::endl;
+                auto * newFront = m_asyncController->promoteReadyToFront();
+                if (newFront && newFront->image)
+                {
+                    std::cout << "     New front buffer epoch=" << newFront->epoch << std::endl;
+                    // Bind the new frame to ensure GL texture is updated
+                    newFront->image->bind();
+                    newFront->image->unbind();
+                    
+                    // Transition Resampling → Front
+                    if (m_asyncController->tryTransitionBuffer(newFront,
+                                                               async_rendering::FrameState::Resampling,
+                                                               async_rendering::FrameState::Front))
+                    {
+                        std::cout << "     Successfully transitioned to Front state" << std::endl;
+                        // Find and release old Front buffer to Idle
+                        auto * oldFront = m_asyncController->frontBuffer();
+                        if (oldFront && oldFront != newFront)
+                        {
+                            std::cout << "     Releasing old front buffer (epoch=" << oldFront->epoch << ")" << std::endl;
+                            [[maybe_unused]] bool const released =
+                              m_asyncController->tryTransitionBuffer(oldFront,
+                                                                     async_rendering::FrameState::Front,
+                                                                     async_rendering::FrameState::Idle);
+                        }
+                        
+                        // Update front buffer index for future access
+                        for (size_t i = 0; i < 3; ++i)
+                        {
+                            if (m_asyncController->findBufferInState(async_rendering::FrameState::Front) == newFront)
+                            {
+                                // Front buffer has been updated
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        std::cout << "     FAILED to transition to Front state" << std::endl;
+                    }
+                }
+                else
+                {
+                    std::cout << "     No ready buffer available for promotion!" << std::endl;
+                }
             }
 
             if (result.completedFrame)
             {
+                std::cout << "  -> Frame completed at line " << result.completedLine << std::endl;
                 m_dirty = false;
                 state.isRendering = false;
-                state.isMoving = false;
+                // DON'T force state.isMoving = false - let camera update control this
+                // If camera is still animating, it will set isMoving=true on next frame
+                state.currentLine = 0; // Reset for next frame
                 m_view->stopAnimationMode();
             }
             else
             {
-                state.isRendering = false;
-                state.isMoving = false;
+                // Progressive chunk completed - keep rendering flag set to schedule next chunk
+                std::cout << "  -> Chunk completed at line " << result.completedLine << "/" << result.height 
+                          << ", continuing progressive render" << std::endl;
+                // Don't reset state.isRendering - we want to continue rendering
+                // state.isRendering remains true to trigger next chunk scheduling
             }
 
             m_asyncJobInFlight.store(false, std::memory_order_release);
@@ -1287,24 +1452,43 @@ namespace gladius::ui
 
     bool RenderWindow::scheduleAsyncRenderJob(RenderWindowState & state)
     {
+        ZoneScoped;
+        ZoneName("scheduleAsyncRenderJob", strlen("scheduleAsyncRenderJob"));
+        
+        std::cout << "  -> scheduleAsyncRenderJob() called" << std::endl;
+        
         if (!m_asyncController || !m_asyncController->isRunning())
         {
+            DebugText("ControllerNotRunning", 19);
+            std::cout << "     FAIL: Controller not running" << std::endl;
             return false;
         }
 
         auto const image = m_core->getResultImage();
         if (!image)
         {
+            DebugText("NoResultImage", 13);
+            std::cout << "     FAIL: No result image" << std::endl;
             return false;
         }
 
         size_t const height = static_cast<size_t>(image->getHeight());
+        std::cout << "     height=" << height << ", currentLine=" << state.currentLine << std::endl;
+        DebugValue(height);
+        DebugValue(state.currentLine);
+        
         if (height == 0 || state.currentLine >= height)
         {
+            DebugText("InvalidHeight", 13);
+            std::cout << "     FAIL: Invalid height (height=" << height << ", currentLine=" << state.currentLine << ")" << std::endl;
             m_dirty = false;
             state.isRendering = false;
             return false;
         }
+
+        // Initialize async resources (worker queue + staging buffer) if needed
+        size_t const width = static_cast<size_t>(image->getWidth());
+        m_asyncController->initializeAsyncResources(*m_core->getComputeContext(), width, height);
 
         async_rendering::RenderJob job{};
         job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
@@ -1316,7 +1500,7 @@ namespace gladius::ui
         m_asyncController->setLatestEpoch(job.epoch);
         job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         job.type = async_rendering::RenderJobType::HighQuality;
-        job.width = static_cast<uint32_t>(image->getWidth());
+        job.width = static_cast<uint32_t>(width);
         job.height = static_cast<uint32_t>(height);
         job.startLine = std::min(state.currentLine, height);
         job.stepSize =
@@ -1325,9 +1509,15 @@ namespace gladius::ui
                             job.startLine == 0;
         job.enableHighQuality = m_enableHQRendering;
 
+        ZoneValue(job.startLine);
+        ZoneValue(job.stepSize);
+        ZoneValue(job.epoch);
+        
         m_asyncInFlightEpoch.store(job.epoch, std::memory_order_release);
         m_asyncJobInFlight.store(true, std::memory_order_release);
         m_asyncController->enqueueJob(job);
+        
+        ZoneText("JobEnqueued", 11);
         return true;
     }
 
@@ -1335,25 +1525,73 @@ namespace gladius::ui
       async_rendering::RenderJob const & job,
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
     {
+        ZoneScoped;
+        ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
+        tracy::SetThreadName("AsyncRenderWorker");
+        
+        ZoneValue(job.startLine);
+        ZoneValue(job.stepSize);
+        ZoneValue(job.epoch);
+        
         async_rendering::FrameResultMeta result{};
         result.frameId = job.frameHint;
         result.epoch = job.epoch;
         result.width = job.width;
         result.height = job.height;
 
-        if (cancelCheck() || !job.enableHighQuality)
+        if (cancelCheck())
         {
+            ZoneText("CancelledEarly", 14);
+            result.cancelled = true;
+            return result;
+        }
+        
+        if (!job.enableHighQuality)
+        {
+            ZoneText("HQDisabled", 10);
             result.cancelled = true;
             return result;
         }
 
         auto const startTime = std::chrono::steady_clock::now();
 
-        auto computeToken = m_core->waitForComputeToken();
-        (void) computeToken;
+        // For progressive rendering: reuse the same buffer across all chunks
+        async_rendering::FrameBuffer * writeBuffer = nullptr;
+        bool const isFirstChunk = (job.startLine == 0);
+        
+        if (isFirstChunk || !m_asyncProgressiveBuffer || 
+            m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch)
+        {
+            // Start of new frame or epoch changed - acquire fresh buffer
+            writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
+            if (!writeBuffer)
+            {
+                // No available buffer (shouldn't happen with triple buffering)
+                result.cancelled = true;
+                return result;
+            }
+            m_asyncProgressiveBuffer = writeBuffer;
+            m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
+        }
+        else
+        {
+            // Continue using the same buffer for subsequent chunks
+            writeBuffer = m_asyncProgressiveBuffer;
+        }
 
         if (cancelCheck())
         {
+            // Release the buffer back to Idle only if this is the first chunk
+            // (otherwise we keep it for the next chunk)
+            if (isFirstChunk)
+            {
+                [[maybe_unused]] bool const released =
+                  m_asyncController->tryTransitionBuffer(writeBuffer,
+                                                         async_rendering::FrameState::Writing,
+                                                         async_rendering::FrameState::Idle);
+                m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            }
             result.cancelled = true;
             return result;
         }
@@ -1362,6 +1600,7 @@ namespace gladius::ui
         {
             if (job.precomputeSdf)
             {
+                ZoneScopedN("PrecomputeSdf");
                 m_core->precomputeSdfForWholeBuildPlatform();
                 result.precomputedSdfUpdated = true;
             }
@@ -1375,14 +1614,75 @@ namespace gladius::ui
             }
             else
             {
+                ZoneScopedN("RenderSceneToStagingBuffer");
+                
+                // TODO: This is the critical part - we need to render to the staging buffer
+                // instead of m_resultImage. For now, we still render to m_resultImage
+                // but will copy to staging buffer afterwards.
+                // A proper implementation would modify renderScene to accept a target buffer.
                 bool const advanced = m_core->renderScene(job.startLine, endLine);
                 result.completedLine = advanced ? endLine : job.startLine;
                 result.completedFrame = result.completedLine >= job.height;
+
+                if (advanced && !cancelCheck())
+                {
+                    ZoneScopedN("CopyToFrameBuffer");
+                    // Copy from m_resultImage to writeBuffer->image
+                    // This is a temporary workaround until we refactor renderScene
+                    auto const srcImage = m_core->getResultImage();
+                    if (srcImage && writeBuffer->image)
+                    {
+                        // Copy pixel data from source to destination
+                        // Both are GLImageBuffer instances
+                        auto const width = srcImage->getWidth();
+                        auto const height = srcImage->getHeight();
+                        
+                        if (width == writeBuffer->image->getWidth() &&
+                            height == writeBuffer->image->getHeight())
+                        {
+                            // Use OpenCL to copy between images
+                            auto & queue = m_core->getComputeContext()->GetQueue();
+                            queue.enqueueCopyImage(srcImage->getBuffer(),
+                                                  writeBuffer->image->getBuffer(),
+                                                  {0, 0, 0},
+                                                  {0, 0, 0},
+                                                  {width, height, 1});
+                            queue.finish();
+                            writeBuffer->image->invalidateContent();
+                        }
+                    }
+                }
             }
         }
         catch (...)
         {
             result.cancelled = true;
+        }
+
+        if (result.cancelled)
+        {
+            // Release the buffer back to Idle on cancellation (only if first chunk)
+            if (isFirstChunk)
+            {
+                [[maybe_unused]] bool const released =
+                  m_asyncController->tryTransitionBuffer(writeBuffer,
+                                                         async_rendering::FrameState::Writing,
+                                                         async_rendering::FrameState::Idle);
+                m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            }
+        }
+        else if (result.completedFrame)
+        {
+            // Frame is complete - publish and release progressive buffer
+            m_asyncController->publishFrame(writeBuffer, result.frameId, result.epoch);
+            m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+        }
+        else
+        {
+            // Chunk complete but frame not done - keep buffer in Writing state
+            // Don't publish yet, will reuse for next chunk
         }
 
         auto const endTime = std::chrono::steady_clock::now();

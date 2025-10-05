@@ -765,11 +765,20 @@ namespace gladius
     }
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
+        if (!m_meshResourceState)
+        {
+            return false;
+        }
         if (!m_meshResourceState->isModelUpToDate())
         {
             return false;
         }
-        return (!getBestRenderProgram()->isCompilationInProgress());
+        auto renderProgram = getBestRenderProgram();
+        if (!renderProgram)
+        {
+            return false;
+        }
+        return (!renderProgram->isCompilationInProgress());
     }
 
     void ComputeCore::compileSlicerProgramBlocking()
@@ -1227,6 +1236,10 @@ namespace gladius
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         m_resultImage->invalidateContent();
+        
+        // Bind to update GL texture with new rendering
+        m_resultImage->bind();
+        m_resultImage->unbind();
 
         LOG_LOCATION
         return true;
@@ -1238,6 +1251,7 @@ namespace gladius
 
           if (!m_computeMutex.try_lock())
         {
+            std::cout << "  -> renderLowResPreview: could not lock mutex, skipping" << std::endl;
             return;
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
@@ -1248,6 +1262,7 @@ namespace gladius
         if (!m_precompSdfIsValid)
         {
             LOG_LOCATION
+            std::cout << "  -> renderLowResPreview: precomputed SDF is not valid, skipping" << std::endl;
             return;
         }
 
@@ -1262,6 +1277,15 @@ namespace gladius
         getBestRenderProgram()->resample(
           *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
         m_resultImage->invalidateContent();
+        
+        // Ensure GL texture is updated (especially important for readpixel mode)
+        m_resultImage->bind();
+        m_resultImage->unbind();
+        
+        std::cout << "  -> renderLowResPreview complete: resultImage size=" 
+                  << m_resultImage->getWidth() << "x" << m_resultImage->getHeight()
+                  << ", textureId=" << m_resultImage->GetTextureId()
+                  << ", bound and ready" << std::endl;
         LOG_LOCATION
     }
 
@@ -1417,9 +1441,13 @@ namespace gladius
     }
     void ComputeCore::applyCamera(ui::OrbitalCamera const & camera)
     {
-        getResourceContext()->setEyePosition(camera.getEyePosition());
-        getResourceContext()->setModelViewPerspectiveMat(
-          camera.computeModelViewPerspectiveMatrix());
+        auto resources = getResourceContext();
+        if (!resources)
+        {
+            return;
+        }
+        resources->setEyePosition(camera.getEyePosition());
+        resources->setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
     }
 
     void ComputeCore::injectSmoothingKernel(std::string const & kernel)

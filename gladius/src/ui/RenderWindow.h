@@ -244,5 +244,10 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncInFlightEpoch{0};
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
+        bool m_asyncInitialized{false};
+        
+        // Progressive rendering: reuse same buffer for all chunks in a frame
+        async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
+        std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
     };
 }
