@@ -119,6 +119,10 @@ namespace gladius::ui::async_rendering
         /// Promote a Ready buffer to Front (for UI display)
         [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
 
+        /// Release any Writing buffers from old epochs back to Idle
+        /// (used when epoch changes to clean up cancelled jobs)
+        void releaseStaleBuffers(uint64_t oldEpoch) noexcept;
+
       private:
         struct ControllerState;
 

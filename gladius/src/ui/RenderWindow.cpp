@@ -102,10 +102,13 @@ namespace gladius::ui
             return;
         }
 
+        auto const oldEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
         auto const newEpoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
+        
+        std::cout << "=== [notifyAsyncEpochIncrement] Epoch changed: " << oldEpoch << " -> " << newEpoch << " ===" << std::endl;
 
         // Release progressive buffer on epoch change
         if (m_asyncProgressiveBuffer)
@@ -114,9 +117,17 @@ namespace gladius::ui
               m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
                                                      async_rendering::FrameState::Writing,
                                                      async_rendering::FrameState::Idle);
+            std::cout << "  Released progressive buffer: " << (released ? "SUCCESS" : "FAILED") << std::endl;
             m_asyncProgressiveBuffer = nullptr;
         }
         m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+        
+        // IMPORTANT: Release any other Writing buffers from old epoch
+        // (they belong to cancelled jobs and should be returned to Idle)
+        if (m_asyncController)
+        {
+            m_asyncController->releaseStaleBuffers(oldEpoch);
+        }
 
         if (m_asyncController)
         {
@@ -1263,7 +1274,17 @@ namespace gladius::ui
               static_cast<int>(
                 std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f))))
         {
-            invalidateView();
+            // Resolution changed - mark dirty but DON'T bump epoch if already rendering
+            // (bumping epoch would cancel in-flight jobs)
+            if (!state.isRendering && !m_asyncJobInFlight.load(std::memory_order_acquire))
+            {
+                invalidateView();
+            }
+            else
+            {
+                m_dirty = true;
+                std::cout << "[renderAsync] Resolution changed during rendering - marked dirty without epoch bump" << std::endl;
+            }
         }
 
         std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
@@ -1312,14 +1333,25 @@ namespace gladius::ui
 
         m_core->setPreCompSdfSize(256u);
 
-        auto const timeSinceLastLowResRender =
-          std::chrono::system_clock::now() - m_lastLowResRenderTime;
-        if (timeSinceLastLowResRender < std::chrono::seconds(1))
+        // Only enforce timeout if we're NOT already in middle of progressive rendering
+        // (otherwise chunks would be blocked after any interaction)
+        bool const isProgressiveRenderInProgress = state.isRendering && state.currentLine > 0;
+        
+        if (!isProgressiveRenderInProgress)
         {
-            std::cout << "  -> Waiting for low-res timeout (waited " 
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(timeSinceLastLowResRender).count() 
-                      << "ms / 1000ms)" << std::endl;
-            return;
+            auto const timeSinceLastLowResRender =
+              std::chrono::system_clock::now() - m_lastLowResRenderTime;
+            if (timeSinceLastLowResRender < std::chrono::seconds(1))
+            {
+                std::cout << "  -> Waiting for low-res timeout (waited " 
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(timeSinceLastLowResRender).count() 
+                          << "ms / 1000ms)" << std::endl;
+                return;
+            }
+        }
+        else
+        {
+            std::cout << "  -> Progressive rendering in progress (line " << state.currentLine << "), skipping timeout" << std::endl;
         }
 
         std::cout << "  -> Attempting to schedule async job..." << std::endl;
@@ -1353,13 +1385,19 @@ namespace gladius::ui
         ZoneScoped;
         ZoneName("ProcessAsyncResults", strlen("ProcessAsyncResults"));
         
+        std::cout << "[UI THREAD] processAsyncResults() called" << std::endl;
+        
         if (!m_asyncController)
         {
+            std::cout << "[UI THREAD] No async controller" << std::endl;
             return;
         }
 
+        int resultCount = 0;
         while (auto resultOpt = m_asyncController->tryConsumeResult())
         {
+            resultCount++;
+            std::cout << "[UI THREAD] Processing result #" << resultCount << std::endl;
             ZoneScopedN("ProcessSingleResult");
             auto & result = *resultOpt;
 
@@ -1571,7 +1609,7 @@ namespace gladius::ui
         if (cancelCheck())
         {
             ZoneText("CancelledEarly", 14);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled early" << std::endl;
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled early (POINT 1)" << std::endl;
             result.cancelled = true;
             return result;
         }
@@ -1579,7 +1617,7 @@ namespace gladius::ui
         if (!job.enableHighQuality)
         {
             ZoneText("HQDisabled", 10);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] HQ disabled" << std::endl;
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] HQ disabled (POINT 2)" << std::endl;
             result.cancelled = true;
             return result;
         }
@@ -1598,6 +1636,7 @@ namespace gladius::ui
             if (!writeBuffer)
             {
                 // No available buffer (shouldn't happen with triple buffering)
+                std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] acquireWriteBuffer returned nullptr (POINT 3)" << std::endl;
                 result.cancelled = true;
                 return result;
             }
@@ -1637,6 +1676,7 @@ namespace gladius::ui
         {
             // Release the buffer back to Idle only if this is the first chunk
             // (otherwise we keep it for the next chunk)
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled after buffer acquire (POINT 4)" << std::endl;
             if (isFirstChunk)
             {
                 [[maybe_unused]] bool const released =
@@ -1664,6 +1704,7 @@ namespace gladius::ui
 
             if (cancelCheck())
             {
+                std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled inside try block (POINT 5)" << std::endl;
                 result.cancelled = true;
             }
             else
@@ -1714,12 +1755,14 @@ namespace gladius::ui
                 }
                 else
                 {
+                    std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] No writeBuffer or writeBuffer->image (POINT 6)" << std::endl;
                     result.cancelled = true;
                 }
             }
         }
         catch (...)
         {
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Exception caught (POINT 7)" << std::endl;
             result.cancelled = true;
         }
 
