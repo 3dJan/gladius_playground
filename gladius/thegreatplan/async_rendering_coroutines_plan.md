@@ -1,7 +1,7 @@
 # Async Rendering Coroutine Integration Plan
 
 Date: 2025-10-04
-Status: Draft
+Status: In Progress (C1 Partial)
 
 ## 1. Purpose
 Leverage existing libcoro (C++20 coroutine) infrastructure to implement the async rendering architecture (double/triple buffering, worker offload, minimal UI blocking) using structured, composable coroutine primitives instead of ad-hoc threads, condition variables, and manual state polling.
@@ -65,12 +65,23 @@ struct FrameBuffer
     std::atomic<uint64_t> publishTimestampNs{0};
 };
 
+enum class RenderJobType
+{
+    HighQuality,
+    LowResPreview
+};
+
 struct RenderJob
 {
-    uint64_t epoch; // snapshot
-    CameraSnapshot camera;
-    RenderingSettings settings;
-    // maybe resolution, quality tier
+    uint64_t epoch;          // snapshot
+    uint64_t frameHint;      // logical ordering id
+    RenderJobType type;      // HQ vs preview
+    uint32_t width;
+    uint32_t height;
+    size_t startLine;        // progressive chunk start
+    size_t stepSize;         // progressive chunk height
+    bool precomputeSdf;      // request SDF regeneration
+    bool enableHighQuality;  // fallback control
 };
 
 struct FrameResultMeta
@@ -80,6 +91,10 @@ struct FrameResultMeta
     uint32_t width;
     uint32_t height;
     bool cancelled{false};
+    bool completedFrame{false};
+    bool precomputedSdfUpdated{false};
+    size_t completedLine{0};
+    uint64_t computeDurationNs{0};
 };
 ```
 
@@ -183,15 +198,24 @@ coro::generator<Chunk> render_frame_chunks(FrameBuffer & fb, RenderJob const & j
 UI could co_await next `co_yield` via adapter that bridges generator to an event.
 
 ## 9. Integration Strategy
-| Phase | Description | Deliverable |
-|-------|-------------|-------------|
-| C1 | Introduce coroutine primitives & job channel | Worker coroutine compiling, no rendering yet |
-| C2 | Wrap existing synchronous renderScene in coroutine | Equivalent behavior to thread version |
-| C3 | Double buffer state machine with coroutine events | Non-blocking UI resample path |
-| C4 | Cancellation (epoch) integration | Smooth camera churn handling |
-| C5 | Metrics + tracing await points | Idle %, latency charts |
-| C6 | Optional triple buffering | Config flag + metrics delta |
-| C7 | Progressive chunk prototype (behind flag) | Generator-based partial refresh |
+| Phase | Description | Deliverable | Status |
+|-------|-------------|-------------|--------|
+| C1 | Introduce coroutine primitives & job channel | Worker coroutine compiling, no rendering yet | ✅ controller + worker loop in place |
+| C2 | Wrap existing synchronous renderScene in coroutine | Equivalent behavior to thread version | ✅ UI enqueues HQ jobs, compute executes chunks |
+| C3 | Double buffer state machine with coroutine events | Non-blocking UI resample path | ✅ Triple buffer system implemented with state machine |
+| C4 | Cancellation (epoch) integration | Smooth camera churn handling | ✅ epoch bump + cancellation checks |
+| C5 | Metrics + tracing await points | Idle %, latency charts | 🚧 duration captured per job, Tracy instrumentation |
+| C6 | Optional triple buffering | Config flag + metrics delta | ✅ Triple buffering implemented as default |
+| C7 | Progressive chunk prototype (behind flag) | Generator-based partial refresh | ⏳ not started |
+
+**Implementation Notes (2025-10-04):**
+- Implemented full triple buffer state machine with atomic state transitions (Idle → Writing → Ready → Resampling → Front → Idle)
+- Added frame buffer pool (3x GLImageBuffer) with per-buffer metadata (frameId, epoch, timestamps)
+- Worker acquires Idle buffer, renders to it, publishes as Ready
+- UI promotes newest Ready to Resampling, resamples to Front, releases old Front to Idle
+- Buffer copy mechanism uses OpenCL enqueueCopyImage for GPU-side transfer
+- frontBuffer() method provides stable access to currently displayed frame
+- All state transitions use memory_order_acq_rel for proper synchronization
 
 ## 10. Channels / Awaitable Implementation Details
 ### 10.1 Job Channel
