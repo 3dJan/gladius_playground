@@ -16,6 +16,7 @@
 - **DRY Principle**: Don't repeat yourself. Avoid code duplication.
 - **YAGNI Principle**: You aren't gonna need it. Avoid adding features until they are necessary.
 - **Tool usage**: Prefer using tools rather than doing things manually in the terminal.
+- **Keep files small**: Prefer smaller files (e.g., <400 lines) for better readability and maintainability.
 
 ## Code Structure
 - **Headers**: Use `.h` for declarations, `.cpp` for definitions.
