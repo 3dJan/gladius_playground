@@ -36,7 +36,7 @@ namespace gladius::ui::async_rendering
      */
     struct AsyncRenderFeatureConfig
     {
-        bool enabled{false};
+        bool enabled{true};
         std::string implementation{"legacy"};
         std::string bufferingMode{"double"};
 
@@ -118,6 +118,9 @@ namespace gladius::ui::async_rendering
 
         /// Promote a Ready buffer to Front (for UI display)
         [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
+
+  /// Finalize promotion by transitioning Resampling → Front and updating indices
+  [[nodiscard]] bool finalizeFrontPromotion(FrameBuffer * buffer) noexcept;
 
         /// Release any Writing buffers from old epochs back to Idle
         /// (used when epoch changes to clean up cancelled jobs)

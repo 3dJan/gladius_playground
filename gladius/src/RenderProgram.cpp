@@ -30,6 +30,21 @@ namespace gladius
                                     size_t startHeight,
                                     size_t endHeight)
     {
+        renderScene(m_ComputeContext->GetQueue(),
+                    lines,
+                    targetImage,
+                    z_mm,
+                    startHeight,
+                    endHeight);
+    }
+
+    void RenderProgram::renderScene(cl::CommandQueue const & queue,
+                                    const Primitives & lines,
+                                    ImageRGBA & targetImage,
+                                    cl_float z_mm,
+                                    size_t startHeight,
+                                    size_t endHeight)
+    {
         ProfileFunction;
         if (!m_programFront->isValid())
         {
@@ -67,24 +82,25 @@ namespace gladius
             {
                 return;
             }
-            m_programFront->run("renderScene",
-                                origin,
-                                globalRange,
-                                targetImage.getBuffer(),
-                                m_resoures->getBuildArea(),
-                                lines.primitives.getBuffer(),
-                                cl_int(lines.primitives.getSize()),
-                                lines.data.getBuffer(),
-                                cl_int(lines.data.getSize()),
-                                m_resoures->getRenderingSettings(),
-                                m_resoures->getPrecompSdfBuffer().getBuffer(),
-                                m_resoures->getParameterBuffer().getBuffer(),
-                                m_resoures->getCommandBuffer().getBuffer(),
-                                cl_int(m_resoures->getCommandBuffer().getData().size()),
-                                m_resoures->getPreCompSdfBBox(),
-                                // m_resoures->getImageStacks(),
-                                m_resoures->getEyePosition(),
-                                m_resoures->getModelViewPerspectiveMat());
+                m_programFront->run(queue,
+                                    "renderScene",
+                                    origin,
+                                    globalRange,
+                                    targetImage.getBuffer(),
+                                    m_resoures->getBuildArea(),
+                                    lines.primitives.getBuffer(),
+                                    cl_int(lines.primitives.getSize()),
+                                    lines.data.getBuffer(),
+                                    cl_int(lines.data.getSize()),
+                                    m_resoures->getRenderingSettings(),
+                                    m_resoures->getPrecompSdfBuffer().getBuffer(),
+                                    m_resoures->getParameterBuffer().getBuffer(),
+                                    m_resoures->getCommandBuffer().getBuffer(),
+                                    cl_int(m_resoures->getCommandBuffer().getData().size()),
+                                    m_resoures->getPreCompSdfBBox(),
+                                    // m_resoures->getImageStacks(),
+                                    m_resoures->getEyePosition(),
+                                    m_resoures->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {

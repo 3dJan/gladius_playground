@@ -690,14 +690,13 @@ namespace gladius
 
     bool ComputeCore::updateBBox()
     {
-        ProfileFunction
-
-          return updateBoundingBoxFast();
+        return updateBoundingBoxFast();
     }
 
     void ComputeCore::updateBBoxOrThrow()
     {
-        ProfileFunction if (!updateBBox())
+        ProfileFunction
+        if (!updateBBox())
         {
             throw std::runtime_error("Bounding box computation failed");
         }
@@ -1245,7 +1244,8 @@ namespace gladius
         return true;
     }
 
-    bool ComputeCore::renderSceneComputeOnly(size_t startLine, 
+    bool ComputeCore::renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
+                                             size_t startLine,
                                              size_t endLine,
                                              ImageRGBA & targetImage)
     {
@@ -1269,20 +1269,24 @@ namespace gladius
             return false;
         }
 
-        // No glFinish() call - we're not using GL!
-        // Just ensure OpenCL is ready
-        m_ComputeContext->GetQueue().finish();
+                // No glFinish() call - we're not using GL!
+                // Just ensure OpenCL is ready on the provided queue
+                commandQueue.finish();
 
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
         
         // Render directly to the target CL image buffer (no GL involved)
-        getBestRenderProgram()->renderScene(
-          *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
+                getBestRenderProgram()->renderScene(commandQueue,
+                                                                                        *m_primitives,
+                                                                                        targetImage,
+                                                                                        m_sliceHeight_mm,
+                                                                                        startLine,
+                                                                                        endLine);
           
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
-        // Ensure OpenCL commands are submitted
-        m_ComputeContext->GetQueue().flush();
+                // Ensure OpenCL commands are submitted on the same queue
+                commandQueue.flush();
 
         LOG_LOCATION
         return true;

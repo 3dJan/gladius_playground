@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace gladius::ui
@@ -121,8 +122,8 @@ namespace gladius::ui
         bool isFocused() const;
 
       private:
-        void render(RenderWindowState & state);
-        void slider();
+                void render(RenderWindowState & state);
+                void slider();
                 void initializeAsyncRendering();
                 void renderSync(RenderWindowState & state);
                 void renderAsync(RenderWindowState & state);
@@ -134,6 +135,15 @@ namespace gladius::ui
                 void notifyAsyncEpochIncrement();
                 void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
 
+                [[nodiscard]] bool isAsyncBackendActive() const noexcept;
+                [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
+
+                // Async bounding box computation
+                void scheduleAsyncBboxUpdate();
+                async_rendering::FrameResultMeta executeAsyncBboxUpdate(
+                    async_rendering::RenderJob const & job,
+                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+
         GLView * m_view{};
 
         ComputeCore * m_core;
@@ -143,6 +153,7 @@ namespace gladius::ui
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_preComputedSdfDirty{true};
+        std::atomic<bool> m_forceLowResRenderOnNextFrame{false};
 
         ui::OrbitalCamera m_camera;
 
@@ -244,6 +255,8 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncInFlightEpoch{0};
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
+        std::atomic<bool> m_asyncBboxJobInFlight{false};
+        std::atomic<bool> m_asyncBboxUpdatePending{false};  // Tracks if bbox needs update after current job
         bool m_asyncInitialized{false};
         
         // Progressive rendering: reuse same buffer for all chunks in a frame

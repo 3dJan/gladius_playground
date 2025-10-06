@@ -68,7 +68,17 @@ namespace gladius::ui
             m_asyncController->setJobExecutor(
               [this](async_rendering::RenderJob const & job,
                      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
-              { return executeAsyncRenderJob(job, cancelCheck); });
+              { 
+                  // Dispatch to the appropriate executor based on job type
+                  if (job.type == async_rendering::RenderJobType::BoundingBoxUpdate)
+                  {
+                      return executeAsyncBboxUpdate(job, cancelCheck);
+                  }
+                  else
+                  {
+                      return executeAsyncRenderJob(job, cancelCheck);
+                  }
+              });
             DebugText("CallingStart", 12);
             m_asyncController->start();
             DebugText("StartCompleted", 14);
@@ -222,7 +232,9 @@ namespace gladius::ui
             if (ImGui::MenuItem(
                   reinterpret_cast<const char *>(ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View")))
             {
-                if (m_core->updateBBox() && m_core->getBoundingBox().has_value())
+                bool const asyncActive = isAsyncBackendActive();
+                auto const bbox = tryFetchBoundingBox(true);
+                if (bbox.has_value() || asyncActive)
                 {
                     centerView();
                 }
@@ -501,23 +513,42 @@ namespace gladius::ui
         m_dirty = true;
         m_renderWindowState.isMoving = true;
         m_renderWindowState.currentLine = 0;
-        m_renderWindowState.renderingStepSize = 1;
+        m_renderWindowState.renderingStepSize = 16; // Start with larger chunks for better performance
         m_renderWindowState.isRendering = false;
         notifyAsyncEpochIncrement();
     }
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
     {
+        std::cout << "[invalidateViewDuetoModelUpdate] Called - triggering render and bbox update" << std::endl;
+        
+        // Force a low-res render on next frame for immediate visual feedback
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+        
         invalidateView();
         m_preComputedSdfDirty = true;
         m_parameterDirty = true;
-        m_renderWindowState.renderingStepSize = 1;
+        m_renderWindowState.renderingStepSize = 16; // Start with larger chunks for better performance
 
         // Mark model as modified for permanent centering
         m_modelModifiedSinceLastCenter = true;
 
         // Reset first-time bounding box availability for new model
         m_boundingBoxEverAvailable = false;
+        
+        // Reset bounding box so it will be recomputed
+        m_core->resetBoundingBox();
+        
+        // Schedule async bounding box update (don't block UI)
+        if (m_core->isAutoUpdateBoundingBoxEnabled())
+        {
+            std::cout << "[invalidateViewDuetoModelUpdate] Auto-update enabled, scheduling bbox update" << std::endl;
+            scheduleAsyncBboxUpdate();
+        }
+        else
+        {
+            std::cout << "[invalidateViewDuetoModelUpdate] Auto-update DISABLED, not scheduling bbox" << std::endl;
+        }
     }
 
     void RenderWindow::renderScene(RenderWindowState & state)
@@ -677,12 +708,14 @@ namespace gladius::ui
     void RenderWindow::zoomExtents()
     {
         // Zoom to fit all objects in view
-        if (m_core->updateBBox() && m_core->getBoundingBox().has_value())
+        auto const bbox = tryFetchBoundingBox(true);
+        if (!bbox.has_value())
         {
-            auto const bbox = m_core->getBoundingBox().value();
-            m_camera.adjustDistanceToTarget(bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
-            invalidateView();
+            return;
         }
+
+        m_camera.adjustDistanceToTarget(*bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
+        invalidateView();
     }
 
     void RenderWindow::zoomSelected()
@@ -1000,6 +1033,42 @@ namespace gladius::ui
         renderSync(state);
     }
 
+    bool RenderWindow::isAsyncBackendActive() const noexcept
+    {
+        return m_asyncConfig.wantsCoroutineBackend() && m_asyncInitialized && m_asyncController &&
+               m_asyncController->isRunning();
+    }
+
+    std::optional<BoundingBox> RenderWindow::tryFetchBoundingBox(bool requestAsyncUpdate)
+    {
+        if (m_core == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        auto bbox = m_core->getBoundingBox();
+        if (bbox.has_value())
+        {
+            return bbox;
+        }
+
+        if (isAsyncBackendActive())
+        {
+            if (requestAsyncUpdate)
+            {
+                scheduleAsyncBboxUpdate();
+            }
+            return std::nullopt;
+        }
+
+        if (!m_core->updateBBox())
+        {
+            return std::nullopt;
+        }
+
+        return m_core->getBoundingBox();
+    }
+
     void RenderWindow::renderSync(RenderWindowState & state)
     {
         ProfileFunction;
@@ -1309,9 +1378,19 @@ namespace gladius::ui
             m_core->setLowResPreviewResolution(newWidth, newHeight);
         }
 
-        if (state.isMoving)
+        // Check if we need to force a low-res render (e.g., after parameter change)
+        bool const forceLowResRender = m_forceLowResRenderOnNextFrame.exchange(false, std::memory_order_acq_rel);
+        
+        if (state.isMoving || forceLowResRender)
         {
-            std::cout << "  -> state.isMoving=true, rendering low-res preview and returning" << std::endl;
+            if (forceLowResRender)
+            {
+                std::cout << "  -> forceLowResRender=true, rendering low-res preview and returning" << std::endl;
+            }
+            else
+            {
+                std::cout << "  -> state.isMoving=true, rendering low-res preview and returning" << std::endl;
+            }
             auto token = m_core->requestComputeToken();
             if (token.has_value())
             {
@@ -1406,6 +1485,20 @@ namespace gladius::ui
                 continue;
             }
 
+            // Handle bbox update results
+            if (result.jobType == async_rendering::RenderJobType::BoundingBoxUpdate)
+            {
+                std::cout << "[UI THREAD] Bbox update completed, cancelled=" << result.cancelled << std::endl;
+                
+                // Check if another update is pending
+                if (m_asyncBboxUpdatePending.load(std::memory_order_acquire))
+                {
+                    std::cout << "[UI THREAD] Pending bbox update detected, rescheduling" << std::endl;
+                    scheduleAsyncBboxUpdate();
+                }
+                continue;
+            }
+
             if (result.precomputedSdfUpdated)
             {
                 m_preComputedSdfDirty.store(false, std::memory_order_release);
@@ -1440,36 +1533,14 @@ namespace gladius::ui
                     newFront->image->bind();
                     newFront->image->unbind();
                     
-                    // Transition Resampling → Front
-                    if (m_asyncController->tryTransitionBuffer(newFront,
-                                                               async_rendering::FrameState::Resampling,
-                                                               async_rendering::FrameState::Front))
+                    bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+                    if (promoted)
                     {
                         std::cout << "     Successfully transitioned to Front state" << std::endl;
-                        // Find and release old Front buffer to Idle
-                        auto * oldFront = m_asyncController->frontBuffer();
-                        if (oldFront && oldFront != newFront)
-                        {
-                            std::cout << "     Releasing old front buffer (epoch=" << oldFront->epoch << ")" << std::endl;
-                            [[maybe_unused]] bool const released =
-                              m_asyncController->tryTransitionBuffer(oldFront,
-                                                                     async_rendering::FrameState::Front,
-                                                                     async_rendering::FrameState::Idle);
-                        }
-                        
-                        // Update front buffer index for future access
-                        for (size_t i = 0; i < 3; ++i)
-                        {
-                            if (m_asyncController->findBufferInState(async_rendering::FrameState::Front) == newFront)
-                            {
-                                // Front buffer has been updated
-                                break;
-                            }
-                        }
                     }
                     else
                     {
-                        std::cout << "     FAILED to transition to Front state" << std::endl;
+                        std::cout << "     FAILED to finalize front promotion" << std::endl;
                     }
                 }
                 else
@@ -1600,9 +1671,19 @@ namespace gladius::ui
         ZoneValue(job.stepSize);
         ZoneValue(job.epoch);
         
+                auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+                auto const & commandQueue =
+                    workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+                if (workerQueue == nullptr)
+                {
+                        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                                            << "] No dedicated worker queue, falling back to primary queue" << std::endl;
+                }
+
         async_rendering::FrameResultMeta result{};
         result.frameId = job.frameHint;
         result.epoch = job.epoch;
+        result.jobType = job.type;
         result.width = job.width;
         result.height = job.height;
 
@@ -1652,13 +1733,12 @@ namespace gladius::ui
                     std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
                               << "] Initializing progressive buffer with low-res preview" << std::endl;
                     
-                    auto & queue = m_core->getComputeContext()->GetQueue();
-                    queue.enqueueCopyImage(resultImage->getBuffer(),
-                                          writeBuffer->image->getBuffer(),
-                                          {0, 0, 0},
-                                          {0, 0, 0},
-                                          {job.width, job.height, 1});
-                    queue.finish(); // Ensure base is copied before rendering
+                    commandQueue.enqueueCopyImage(resultImage->getBuffer(),
+                                                   writeBuffer->image->getBuffer(),
+                                                   {0, 0, 0},
+                                                   {0, 0, 0},
+                                                   {job.width, job.height, 1});
+                    commandQueue.finish(); // Ensure base is copied before rendering
                     writeBuffer->image->invalidateContent();
                 }
             }
@@ -1720,8 +1800,10 @@ namespace gladius::ui
                     // This allows rendering without GL context
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
                     
-                    bool const advanced = m_core->renderSceneComputeOnly(
-                        job.startLine, endLine, targetCLBuffer);
+                    bool const advanced = m_core->renderSceneComputeOnly(commandQueue,
+                                                                           job.startLine,
+                                                                           endLine,
+                                                                           targetCLBuffer);
                     
                     result.completedLine = advanced ? endLine : job.startLine;
                     result.completedFrame = result.completedLine >= job.height;
@@ -1735,13 +1817,12 @@ namespace gladius::ui
                         auto const resultImage = m_core->getResultImage();
                         if (resultImage)
                         {
-                            auto & queue = m_core->getComputeContext()->GetQueue();
-                            queue.enqueueCopyImage(writeBuffer->image->getBuffer(),
-                                                  resultImage->getBuffer(),
-                                                  {0, 0, 0},
-                                                  {0, 0, 0},
-                                                  {result.width, result.height, 1});
-                            queue.finish(); // Wait for copy to complete
+                            commandQueue.enqueueCopyImage(writeBuffer->image->getBuffer(),
+                                                          resultImage->getBuffer(),
+                                                          {0, 0, 0},
+                                                          {0, 0, 0},
+                                                          {result.width, result.height, 1});
+                            commandQueue.finish(); // Wait for copy to complete
                             
                             // Mark both buffers as dirty
                             writeBuffer->image->invalidateContent();
@@ -1904,6 +1985,7 @@ namespace gladius::ui
         invalidateView();
     }
 
+
     void RenderWindow::zoomOut()
     {
         m_camera.zoom(0.1f); // Positive zoom means zoom out
@@ -1914,12 +1996,114 @@ namespace gladius::ui
     {
         // Reset to a reasonable default distance
         // We need to access the private members, so let's use the centerView logic
-        if (m_core->updateBBox() && m_core->getBoundingBox().has_value())
+        auto const bbox = tryFetchBoundingBox(true);
+        if (!bbox.has_value())
         {
-            auto const bbox = m_core->getBoundingBox().value();
-            m_camera.adjustDistanceToTarget(bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
-            invalidateView();
+            return;
         }
+
+        m_camera.adjustDistanceToTarget(*bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
+        invalidateView();
+    }
+
+    void RenderWindow::scheduleAsyncBboxUpdate()
+    {
+        if (!m_asyncController || !m_asyncInitialized)
+        {
+            return;
+        }
+
+        // If a bbox job is already in flight, mark that we need another update
+        if (m_asyncBboxJobInFlight.load(std::memory_order_acquire))
+        {
+            std::cout << "[scheduleAsyncBboxUpdate] Job already in flight, setting pending flag" << std::endl;
+            m_asyncBboxUpdatePending.store(true, std::memory_order_release);
+            return;
+        }
+
+        // Clear pending flag since we're starting a new job
+        m_asyncBboxUpdatePending.store(false, std::memory_order_release);
+        m_asyncBboxJobInFlight.store(true, std::memory_order_release);
+
+        async_rendering::RenderJob job{};
+        job.type = async_rendering::RenderJobType::BoundingBoxUpdate;
+        job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+
+        std::cout << "[scheduleAsyncBboxUpdate] Scheduling bbox update job, epoch=" << job.epoch << std::endl;
+
+        m_asyncController->enqueueJob(job);
+    }
+
+    async_rendering::FrameResultMeta RenderWindow::executeAsyncBboxUpdate(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+    {
+        using namespace async_rendering;
+
+        std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
+                  << "] executeAsyncBboxUpdate() starting, epoch=" << job.epoch << std::endl;
+
+        FrameResultMeta result{};
+        result.epoch = job.epoch;
+        result.jobType = job.type;
+        result.cancelled = false;
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        // Check cancellation before starting
+        if (cancelCheck())
+        {
+            std::cout << "[executeAsyncBboxUpdate] Cancelled before computation" << std::endl;
+            result.cancelled = true;
+            m_asyncBboxJobInFlight.store(false, std::memory_order_release);
+            return result;
+        }
+
+        try
+        {
+            // Call the existing bbox computation - it's already OpenCL-based and thread-safe
+            bool const success = m_core->updateBBox();
+
+            std::cout << "[executeAsyncBboxUpdate] updateBBox returned: " 
+                      << (success ? "success" : "failure") << std::endl;
+
+            if (!success)
+            {
+                std::cout << "[executeAsyncBboxUpdate] Bbox computation failed" << std::endl;
+            }
+        }
+        catch (std::exception const & e)
+        {
+            std::cout << "[executeAsyncBboxUpdate] Exception during bbox computation: " 
+                      << e.what() << std::endl;
+            result.cancelled = true;
+        }
+        catch (...)
+        {
+            std::cout << "[executeAsyncBboxUpdate] Unknown exception during bbox computation" << std::endl;
+            result.cancelled = true;
+        }
+
+        auto const endTime = std::chrono::steady_clock::now();
+        result.computeDurationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
+
+        std::cout << "[executeAsyncBboxUpdate] Completed in " 
+                  << (result.computeDurationNs / 1'000'000.0) << "ms" << std::endl;
+
+        // Clear in-flight flag
+        m_asyncBboxJobInFlight.store(false, std::memory_order_release);
+        
+        // Check if another update is pending (model changed while we were computing)
+        if (m_asyncBboxUpdatePending.load(std::memory_order_acquire))
+        {
+            std::cout << "[executeAsyncBboxUpdate] Pending update detected, scheduling another bbox update" << std::endl;
+            // Schedule from UI thread to avoid race conditions
+            // We'll do this in processAsyncResults when the result is consumed
+        }
+
+        return result;
     }
 
 }
+

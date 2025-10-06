@@ -15,6 +15,7 @@
 #include <CL/opencl.hpp>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -569,6 +570,52 @@ namespace gladius::ui::async_rendering
         // After resampling completes, we'll transition Resampling → Front
         // and old Front → Idle in a separate call
         return newestReady;
+    }
+
+    bool AsyncRenderController::finalizeFrontPromotion(FrameBuffer * buffer) noexcept
+    {
+        ProfileFunction
+
+        if (buffer == nullptr)
+        {
+            return false;
+        }
+
+        auto const now = std::chrono::high_resolution_clock::now();
+        auto const ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+
+        auto const it = std::find_if(m_frameBuffers.begin(),
+                                     m_frameBuffers.end(),
+                                     [buffer](FrameBuffer & candidate)
+                                     { return &candidate == buffer; });
+        if (it == m_frameBuffers.end())
+        {
+            return false;
+        }
+
+        if (!tryTransitionBuffer(&(*it), FrameState::Resampling, FrameState::Front))
+        {
+            return false;
+        }
+
+        size_t const newIndex = static_cast<size_t>(std::distance(m_frameBuffers.begin(), it));
+        size_t const previousIndex = m_frontBufferIndex.exchange(newIndex, std::memory_order_acq_rel);
+
+        if (previousIndex != newIndex && previousIndex < m_frameBuffers.size())
+        {
+            auto & previousFront = m_frameBuffers[previousIndex];
+            FrameState expectedFront = FrameState::Front;
+            [[maybe_unused]] bool const released =
+              previousFront.state.compare_exchange_strong(expectedFront,
+                                                          FrameState::Idle,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire);
+        }
+
+        it->publishTimestampNs.store(static_cast<uint64_t>(ns), std::memory_order_release);
+        return true;
     }
 
     void AsyncRenderController::releaseStaleBuffers(uint64_t oldEpoch) noexcept
