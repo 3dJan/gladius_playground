@@ -327,9 +327,9 @@ namespace gladius
     {
         ProfileFunction auto constexpr padding = 10.f;
         cl_float4 const newClippingArea{m_boundingBox->min.x - padding,
-                                         m_boundingBox->min.y - padding,
-                                         m_boundingBox->max.x + padding,
-                                         m_boundingBox->max.y + padding};
+                                        m_boundingBox->min.y - padding,
+                                        m_boundingBox->max.x + padding,
+                                        m_boundingBox->max.y + padding};
 
         if (isValidClippingArea(newClippingArea))
         {
@@ -695,8 +695,7 @@ namespace gladius
 
     void ComputeCore::updateBBoxOrThrow()
     {
-        ProfileFunction
-        if (!updateBBox())
+        ProfileFunction if (!updateBBox())
         {
             throw std::runtime_error("Bounding box computation failed");
         }
@@ -1235,7 +1234,7 @@ namespace gladius
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         m_resultImage->invalidateContent();
-        
+
         // Bind to update GL texture with new rendering
         m_resultImage->bind();
         m_resultImage->unbind();
@@ -1247,19 +1246,20 @@ namespace gladius
     bool ComputeCore::renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
                                              size_t startLine,
                                              size_t endLine,
-                                             ImageRGBA & targetImage)
+                                             ImageRGBA & targetImage,
+                                             cl::Event * completionEvent)
     {
         ProfileFunction
-        
-        // This method is designed to be called from worker threads
-        // It does NOT require GL context and does NOT call GL functions
-        
-        if (!m_computeMutex.try_lock())
+
+          // This method is designed to be called from worker threads
+          // It does NOT require GL context and does NOT call GL functions
+
+          if (!m_computeMutex.try_lock())
         {
             return false;
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
-        
+
         // Don't call throwIfNoOpenGL() - we don't need GL for pure compute!
         recompileIfRequired();
 
@@ -1269,27 +1269,28 @@ namespace gladius
             return false;
         }
 
-                // No glFinish() call - we're not using GL!
-                // Just ensure OpenCL is ready on the provided queue
-                commandQueue.finish();
-
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
-        
+
         // Render directly to the target CL image buffer (no GL involved)
-                getBestRenderProgram()->renderScene(commandQueue,
-                                                                                        *m_primitives,
-                                                                                        targetImage,
-                                                                                        m_sliceHeight_mm,
-                                                                                        startLine,
-                                                                                        endLine);
-          
+        cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
+          commandQueue, *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
+
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
-                // Ensure OpenCL commands are submitted on the same queue
-                commandQueue.flush();
+        if (completionEvent != nullptr)
+        {
+            *completionEvent = renderEvent;
+        }
+
+        if (renderEvent())
+        {
+            commandQueue.flush();
+            LOG_LOCATION
+            return true;
+        }
 
         LOG_LOCATION
-        return true;
+        return false;
     }
 
     void ComputeCore::renderLowResPreview() const
@@ -1309,7 +1310,8 @@ namespace gladius
         if (!m_precompSdfIsValid)
         {
             LOG_LOCATION
-            std::cout << "  -> renderLowResPreview: precomputed SDF is not valid, skipping" << std::endl;
+            std::cout << "  -> renderLowResPreview: precomputed SDF is not valid, skipping"
+                      << std::endl;
             return;
         }
 
@@ -1324,15 +1326,15 @@ namespace gladius
         getBestRenderProgram()->resample(
           *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
         m_resultImage->invalidateContent();
-        
+
         // Ensure GL texture is updated (especially important for readpixel mode)
         m_resultImage->bind();
         m_resultImage->unbind();
-        
-        std::cout << "  -> renderLowResPreview complete: resultImage size=" 
+
+        std::cout << "  -> renderLowResPreview complete: resultImage size="
                   << m_resultImage->getWidth() << "x" << m_resultImage->getHeight()
-                  << ", textureId=" << m_resultImage->GetTextureId()
-                  << ", bound and ready" << std::endl;
+                  << ", textureId=" << m_resultImage->GetTextureId() << ", bound and ready"
+                  << std::endl;
         LOG_LOCATION
     }
 

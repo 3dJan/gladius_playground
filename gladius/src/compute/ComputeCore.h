@@ -406,19 +406,20 @@ namespace gladius
         void createBuffer();
 
         [[nodiscard]] bool renderScene(size_t startLine, size_t endLine);
-        
-    /// @brief Render scene to a pure OpenCL image buffer (no GL interop required)
-    /// @param commandQueue OpenCL command queue used for dispatch
-    /// @param startLine Starting line for rendering
-    /// @param endLine Ending line for rendering  
-    /// @param targetImage Pure CL image buffer to render into (no GL texture)
-    /// @return true if rendering succeeded, false otherwise
-    /// @note This method is safe to call from worker threads as it doesn't use GL
-    [[nodiscard]] bool renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
-                          size_t startLine,
-                          size_t endLine,
-                          ImageRGBA & targetImage);
-        
+
+        /// @brief Render scene to a pure OpenCL image buffer (no GL interop required)
+        /// @param commandQueue OpenCL command queue used for dispatch
+        /// @param startLine Starting line for rendering
+        /// @param endLine Ending line for rendering
+        /// @param targetImage Pure CL image buffer to render into (no GL texture)
+        /// @return true if rendering succeeded, false otherwise
+        /// @note This method is safe to call from worker threads as it doesn't use GL
+        [[nodiscard]] bool renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
+                                                  size_t startLine,
+                                                  size_t endLine,
+                                                  ImageRGBA & targetImage,
+                                                  cl::Event * completionEvent = nullptr);
+
         void renderLowResPreview() const;
 
         bool precomputeSdfForWholeBuildPlatform();
