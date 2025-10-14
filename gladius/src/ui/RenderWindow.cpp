@@ -201,8 +201,6 @@ namespace gladius::ui
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
         
-        std::cout << "=== [notifyAsyncEpochIncrement] Epoch changed: " << oldEpoch << " -> " << newEpoch << " ===" << std::endl;
-
         // Release progressive buffer on epoch change
         if (m_asyncProgressiveBuffer)
         {
@@ -210,7 +208,6 @@ namespace gladius::ui
               m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
                                                      async_rendering::FrameState::Writing,
                                                      async_rendering::FrameState::Idle);
-            std::cout << "  Released progressive buffer: " << (released ? "SUCCESS" : "FAILED") << std::endl;
             m_asyncProgressiveBuffer = nullptr;
         }
         m_asyncProgressiveEpoch.store(0, std::memory_order_release);
@@ -252,34 +249,18 @@ namespace gladius::ui
             auto * frontBuf = m_asyncController->frontBuffer();
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
             
-            std::cout << "  -> frontBuffer() returned: " << (frontBuf ? "EXISTS" : "NULL");
-            if (frontBuf) {
-                std::cout << ", epoch=" << frontBuf->epoch << ", state=" << static_cast<int>(frontBuf->state.load());
-            }
-            std::cout << ", currentEpoch=" << currentEpoch << std::endl;
-            
             // Only use front buffer if it matches current epoch and is not actively rendering
             // During progressive rendering (state.isRendering), always show m_resultImage for live updates
-            bool const useFrontBuffer = frontBuf && frontBuf->image && 
+            bool const useFrontBuffer = frontBuf && frontBuf->image &&
                                        frontBuf->epoch == currentEpoch &&
                                        !m_renderWindowState.isRendering;
-            
+
             if (useFrontBuffer)
             {
-                std::cout << "  -> Displaying FRONT BUFFER (epoch=" << frontBuf->epoch << ")" << std::endl;
                 displayImage = frontBuf->image;
             }
             else
             {
-                std::cout << "  -> Displaying RESULT IMAGE (";
-                if (m_renderWindowState.isRendering) {
-                    std::cout << "progressive rendering";
-                } else if (!frontBuf || frontBuf->epoch != currentEpoch) {
-                    std::cout << "epoch mismatch";
-                } else {
-                    std::cout << "no valid front buffer";
-                }
-                std::cout << ")" << std::endl;
                 // Fallback to result image for progressive rendering or when no valid front buffer
                 displayImage = m_core->getResultImage();
             }
@@ -605,8 +586,6 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
     {
-        std::cout << "[invalidateViewDuetoModelUpdate] Called - triggering render and bbox update" << std::endl;
-        
         // Force a low-res render on next frame for immediate visual feedback
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
         
@@ -627,12 +606,10 @@ namespace gladius::ui
         // Schedule async bounding box update (don't block UI)
         if (m_core->isAutoUpdateBoundingBoxEnabled())
         {
-            std::cout << "[invalidateViewDuetoModelUpdate] Auto-update enabled, scheduling bbox update" << std::endl;
             scheduleAsyncBboxUpdate();
         }
         else
         {
-            std::cout << "[invalidateViewDuetoModelUpdate] Auto-update DISABLED, not scheduling bbox" << std::endl;
         }
     }
 
@@ -1331,13 +1308,6 @@ namespace gladius::ui
     {
         ProfileFunction;
         
-        std::cout << "=== renderAsync() called ===" << std::endl;
-        std::cout << "  m_asyncController: " << (m_asyncController ? "EXISTS" : "NULL") << std::endl;
-        std::cout << "  isRunning: " << (m_asyncController ? (m_asyncController->isRunning() ? "YES" : "NO") : "N/A") << std::endl;
-        std::cout << "  m_dirty: " << m_dirty << std::endl;
-        std::cout << "  state.isRendering: " << state.isRendering << std::endl;
-        std::cout << "  jobInFlight: " << m_asyncJobInFlight.load(std::memory_order_acquire) << std::endl;
-        
         // Update camera now that we know core is ready
         m_core->applyCamera(m_camera);
         
@@ -1345,7 +1315,6 @@ namespace gladius::ui
 
         if (!m_asyncController || !m_asyncController->isRunning())
         {
-            std::cout << "  -> Falling back to renderSync()" << std::endl;
             renderSync(state);
             return;
         }
@@ -1356,7 +1325,6 @@ namespace gladius::ui
 
         if (!m_dirty && !state.isRendering && !jobInFlight)
         {
-            std::cout << "  -> NothingToDo, returning early" << std::endl;
             return;
         }
 
@@ -1437,7 +1405,6 @@ namespace gladius::ui
             else
             {
                 m_dirty = true;
-                std::cout << "[renderAsync] Resolution changed during rendering - marked dirty without epoch bump" << std::endl;
             }
         }
 
@@ -1468,14 +1435,6 @@ namespace gladius::ui
         
         if (state.isMoving || forceLowResRender)
         {
-            if (forceLowResRender)
-            {
-                std::cout << "  -> forceLowResRender=true, rendering low-res preview and returning" << std::endl;
-            }
-            else
-            {
-                std::cout << "  -> state.isMoving=true, rendering low-res preview and returning" << std::endl;
-            }
             auto token = m_core->requestComputeToken();
             if (token.has_value())
             {
@@ -1486,8 +1445,6 @@ namespace gladius::ui
             m_asyncJobInFlight.store(false, std::memory_order_release);
             return;
         }
-
-        std::cout << "  -> state.isMoving=false, continuing to HQ render logic" << std::endl;
 
         if (!m_enableHQRendering)
         {
@@ -1507,19 +1464,12 @@ namespace gladius::ui
               std::chrono::system_clock::now() - m_lastLowResRenderTime;
             if (timeSinceLastLowResRender < std::chrono::seconds(1))
             {
-                std::cout << "  -> Waiting for low-res timeout (waited " 
-                          << std::chrono::duration_cast<std::chrono::milliseconds>(timeSinceLastLowResRender).count() 
-                          << "ms / 1000ms)" << std::endl;
                 return;
             }
         }
         else
         {
-            std::cout << "  -> Progressive rendering in progress (line " << state.currentLine << "), skipping timeout" << std::endl;
         }
-
-        std::cout << "  -> Attempting to schedule async job..." << std::endl;
-        std::cout << "     m_asyncJobInFlight=" << m_asyncJobInFlight.load(std::memory_order_acquire) << std::endl;
 
         if (!m_asyncJobInFlight.load(std::memory_order_acquire))
         {
@@ -1528,19 +1478,16 @@ namespace gladius::ui
             if (!scheduleAsyncRenderJob(state))
             {
                 DebugText("ScheduleFailed", 14);
-                std::cout << "     -> Schedule FAILED" << std::endl;
                 state.isRendering = false;
             }
             else
             {
                 DebugText("ScheduleSuccess", 15);
-                std::cout << "     -> Schedule SUCCESS" << std::endl;
             }
         }
         else
         {
             DebugText("JobAlreadyInFlight", 18);
-            std::cout << "  -> Job already in flight, skipping" << std::endl;
         }
     }
 
@@ -1549,11 +1496,8 @@ namespace gladius::ui
         ZoneScoped;
         ZoneName("ProcessAsyncResults", strlen("ProcessAsyncResults"));
         
-        std::cout << "[UI THREAD] processAsyncResults() called" << std::endl;
-        
         if (!m_asyncController)
         {
-            std::cout << "[UI THREAD] No async controller" << std::endl;
             return;
         }
 
@@ -1561,7 +1505,6 @@ namespace gladius::ui
         while (auto resultOpt = m_asyncController->tryConsumeResult())
         {
             resultCount++;
-            std::cout << "[UI THREAD] Processing result #" << resultCount << std::endl;
             ZoneScopedN("ProcessSingleResult");
             auto & result = *resultOpt;
 
@@ -1573,12 +1516,9 @@ namespace gladius::ui
             // Handle bbox update results
             if (result.jobType == async_rendering::RenderJobType::BoundingBoxUpdate)
             {
-                std::cout << "[UI THREAD] Bbox update completed, cancelled=" << result.cancelled << std::endl;
-                
                 // Check if another update is pending
                 if (m_asyncBboxUpdatePending.load(std::memory_order_acquire))
                 {
-                    std::cout << "[UI THREAD] Pending bbox update detected, rescheduling" << std::endl;
                     scheduleAsyncBboxUpdate();
                 }
                 continue;
@@ -1608,35 +1548,19 @@ namespace gladius::ui
             if (result.completedFrame)
             {
                 ZoneScopedN("PromoteReadyToFront");
-                
-                std::cout << "  -> Promoting Ready buffer to Front..." << std::endl;
                 auto * newFront = m_asyncController->promoteReadyToFront();
                 if (newFront && newFront->image)
                 {
-                    std::cout << "     New front buffer epoch=" << newFront->epoch << std::endl;
                     // Bind the new frame to ensure GL texture is updated
                     newFront->image->bind();
                     newFront->image->unbind();
                     
                     bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
-                    if (promoted)
-                    {
-                        std::cout << "     Successfully transitioned to Front state" << std::endl;
-                    }
-                    else
-                    {
-                        std::cout << "     FAILED to finalize front promotion" << std::endl;
-                    }
-                }
-                else
-                {
-                    std::cout << "     No ready buffer available for promotion!" << std::endl;
                 }
             }
 
             if (result.completedFrame)
             {
-                std::cout << "  -> Frame completed at line " << result.completedLine << std::endl;
                 m_dirty = false;
                 state.isRendering = false;
                 // DON'T force state.isMoving = false - let camera update control this
@@ -1647,16 +1571,12 @@ namespace gladius::ui
             else
             {
                 // Progressive chunk completed - keep rendering flag set to schedule next chunk
-                std::cout << "  -> Chunk completed at line " << result.completedLine << "/" << result.height 
-                          << ", continuing progressive render" << std::endl;
-                
                 // Update GL texture with the new chunk (UI thread safe)
                 auto resultImage = m_core->getResultImage();
                 if (resultImage)
                 {
                     resultImage->bind();   // Updates GL texture from CL buffer
                     resultImage->unbind();
-                    std::cout << "     Updated display texture with progressive chunk" << std::endl;
                 }
                 
                 // Don't reset state.isRendering - we want to continue rendering
@@ -1673,12 +1593,9 @@ namespace gladius::ui
         ZoneScoped;
         ZoneName("scheduleAsyncRenderJob", strlen("scheduleAsyncRenderJob"));
         
-        std::cout << "  -> scheduleAsyncRenderJob() called" << std::endl;
-        
         if (!m_asyncController || !m_asyncController->isRunning())
         {
             DebugText("ControllerNotRunning", 19);
-            std::cout << "     FAIL: Controller not running" << std::endl;
             return false;
         }
 
@@ -1686,19 +1603,16 @@ namespace gladius::ui
         if (!image)
         {
             DebugText("NoResultImage", 13);
-            std::cout << "     FAIL: No result image" << std::endl;
             return false;
         }
 
         size_t const height = static_cast<size_t>(image->getHeight());
-        std::cout << "     height=" << height << ", currentLine=" << state.currentLine << std::endl;
         DebugValue(height);
         DebugValue(state.currentLine);
         
         if (height == 0 || state.currentLine >= height)
         {
             DebugText("InvalidHeight", 13);
-            std::cout << "     FAIL: Invalid height (height=" << height << ", currentLine=" << state.currentLine << ")" << std::endl;
             m_dirty = false;
             state.isRendering = false;
             return false;
@@ -1748,11 +1662,6 @@ namespace gladius::ui
         ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
         tracy::SetThreadName("AsyncRenderWorker");
 
-        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                  << "] executeAsyncRenderJob() starting" << std::endl;
-        std::cout << "  job: startLine=" << job.startLine << ", stepSize=" << job.stepSize
-                  << ", epoch=" << job.epoch << std::endl;
-
         ZoneValue(job.startLine);
         ZoneValue(job.stepSize);
         ZoneValue(job.epoch);
@@ -1762,8 +1671,6 @@ namespace gladius::ui
           workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
         if (workerQueue == nullptr)
         {
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                      << "] No dedicated worker queue, falling back to primary queue" << std::endl;
         }
 
         auto const cancellationRequested = [&]() -> bool
@@ -1781,8 +1688,6 @@ namespace gladius::ui
         if (cancellationRequested())
         {
             ZoneText("CancelledEarly", 14);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                      << "] Job cancelled early (POINT 1)" << std::endl;
             result.cancelled = true;
             co_return result;
         }
@@ -1790,8 +1695,6 @@ namespace gladius::ui
         if (!job.enableHighQuality)
         {
             ZoneText("HQDisabled", 10);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                      << "] HQ disabled (POINT 2)" << std::endl;
             result.cancelled = true;
             co_return result;
         }
@@ -1828,8 +1731,6 @@ namespace gladius::ui
             writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             if (!writeBuffer)
             {
-                std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                          << "] acquireWriteBuffer returned nullptr (POINT 3)" << std::endl;
                 result.cancelled = true;
                 co_return result;
             }
@@ -1839,10 +1740,6 @@ namespace gladius::ui
                 ZoneScopedN("CopyLowResPreviewAsBase");
                 if (auto const resultImage = m_core->getResultImage())
                 {
-                    std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                              << "] Initializing progressive buffer with low-res preview"
-                              << std::endl;
-
                     cl::Event previewCopyEvent{};
                     commandQueue.enqueueCopyImage(resultImage->getBuffer(),
                                                    writeBuffer->image->getBuffer(),
@@ -1875,8 +1772,6 @@ namespace gladius::ui
 
         if (cancellationRequested())
         {
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                      << "] Job cancelled after buffer acquire (POINT 4)" << std::endl;
             releaseProgressiveBuffer();
             result.cancelled = true;
             co_return result;
@@ -1896,8 +1791,6 @@ namespace gladius::ui
 
             if (cancellationRequested())
             {
-                std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                          << "] Job cancelled inside try block (POINT 5)" << std::endl;
                 result.cancelled = true;
             }
             else
@@ -1954,24 +1847,16 @@ namespace gladius::ui
                                 result.cancelled = true;
                             }
                         }
-
-                        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                                  << "] Chunk " << job.startLine << "->" << endLine
-                                  << " complete, copied to display buffer" << std::endl;
                     }
                 }
                 else
                 {
-                    std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                              << "] No writeBuffer or writeBuffer->image (POINT 6)" << std::endl;
                     result.cancelled = true;
                 }
             }
         }
         catch (...)
         {
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                      << "] Exception caught (POINT 7)" << std::endl;
             result.cancelled = true;
         }
 
@@ -2129,7 +2014,6 @@ namespace gladius::ui
         // If a bbox job is already in flight, mark that we need another update
         if (m_asyncBboxJobInFlight.load(std::memory_order_acquire))
         {
-            std::cout << "[scheduleAsyncBboxUpdate] Job already in flight, setting pending flag" << std::endl;
             m_asyncBboxUpdatePending.store(true, std::memory_order_release);
             return;
         }
@@ -2142,20 +2026,15 @@ namespace gladius::ui
         job.type = async_rendering::RenderJobType::BoundingBoxUpdate;
         job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
 
-        std::cout << "[scheduleAsyncBboxUpdate] Scheduling bbox update job, epoch=" << job.epoch << std::endl;
-
         m_asyncController->enqueueJob(job);
     }
 
-        auto RenderWindow::executeAsyncBboxUpdate(
-            async_rendering::RenderJob const & job,
-            async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
-            -> coro::task<async_rendering::FrameResultMeta>
+    auto RenderWindow::executeAsyncBboxUpdate(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
     {
         using namespace async_rendering;
-
-        std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
-                  << "] executeAsyncBboxUpdate() starting, epoch=" << job.epoch << std::endl;
 
         FrameResultMeta result{};
         result.epoch = job.epoch;
@@ -2167,34 +2046,26 @@ namespace gladius::ui
         // Check cancellation before starting
         if (cancelCheck())
         {
-            std::cout << "[executeAsyncBboxUpdate] Cancelled before computation" << std::endl;
             result.cancelled = true;
             m_asyncBboxJobInFlight.store(false, std::memory_order_release);
-                        co_return result;
+            co_return result;
         }
 
         try
         {
             // Call the existing bbox computation - it's already OpenCL-based and thread-safe
             bool const success = m_core->updateBBox();
-
-            std::cout << "[executeAsyncBboxUpdate] updateBBox returned: " 
-                      << (success ? "success" : "failure") << std::endl;
-
             if (!success)
             {
-                std::cout << "[executeAsyncBboxUpdate] Bbox computation failed" << std::endl;
+                result.cancelled = true;
             }
         }
-        catch (std::exception const & e)
+        catch (std::exception const &)
         {
-            std::cout << "[executeAsyncBboxUpdate] Exception during bbox computation: " 
-                      << e.what() << std::endl;
             result.cancelled = true;
         }
         catch (...)
         {
-            std::cout << "[executeAsyncBboxUpdate] Unknown exception during bbox computation" << std::endl;
             result.cancelled = true;
         }
 
@@ -2202,16 +2073,12 @@ namespace gladius::ui
         result.computeDurationNs = static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
 
-        std::cout << "[executeAsyncBboxUpdate] Completed in " 
-                  << (result.computeDurationNs / 1'000'000.0) << "ms" << std::endl;
-
         // Clear in-flight flag
         m_asyncBboxJobInFlight.store(false, std::memory_order_release);
-        
+
         // Check if another update is pending (model changed while we were computing)
         if (m_asyncBboxUpdatePending.load(std::memory_order_acquire))
         {
-            std::cout << "[executeAsyncBboxUpdate] Pending update detected, scheduling another bbox update" << std::endl;
             // Schedule from UI thread to avoid race conditions
             // We'll do this in processAsyncResults when the result is consumed
         }

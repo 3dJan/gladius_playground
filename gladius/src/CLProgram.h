@@ -94,11 +94,11 @@ namespace gladius
         void finishCompilation();
 
         template <typename... ArgumentTypes>
-        void runNonBlocking(cl::CommandQueue const & queue,
-                            const std::string & methodName,
-                            cl::NDRange origin,
-                            cl::NDRange range,
-                            const ArgumentTypes &... args)
+        [[nodiscard]] cl::Event runNonBlocking(cl::CommandQueue const & queue,
+                                               const std::string & methodName,
+                                               cl::NDRange origin,
+                                               cl::NDRange range,
+                                               const ArgumentTypes &... args)
         {
             ProfileFunction;
 
@@ -139,7 +139,7 @@ namespace gladius
             if (!isValid())
             {
                 logError("Program not valid - returning");
-                return;
+                return cl::Event{};
             }
             std::scoped_lock lock(m_compilationMutex);
 
@@ -263,16 +263,19 @@ namespace gladius
                 throw;
             }
 
+            cl::Event kernelEvent;
             try
             {
                 CL_ERROR(
-                  queue.enqueueNDRangeKernel(m_kernels[methodName], origin, range, cl::NullRange));
+                  queue.enqueueNDRangeKernel(m_kernels[methodName], origin, range, cl::NullRange, nullptr, &kernelEvent));
             }
             catch (const OpenCLError & e)
             {
                 logError("Kernel enqueue failed", e.what());
                 throw;
             }
+
+            return kernelEvent;
         }
 
         template <typename... ArgumentTypes>
@@ -329,22 +332,22 @@ namespace gladius
 
             try
             {
-                runNonBlocking(queue, methodName, origin, range, args...);
-            }
-            catch (const std::exception & e)
-            {
-                logError("RunNonBlocking failed", e.what());
-                throw;
-            }
-
-            try
-            {
+                cl::Event const event = runNonBlocking(queue, methodName, origin, range, args...);
+                if (event())
+                {
+                    event.wait();
+                }
                 CL_ERROR(queue.finish());
             }
             catch (const OpenCLError & e)
             {
                 logError("Queue finish failed", e.what());
 
+                throw;
+            }
+            catch (const std::exception & e)
+            {
+                logError("RunNonBlocking failed", e.what());
                 throw;
             }
         }

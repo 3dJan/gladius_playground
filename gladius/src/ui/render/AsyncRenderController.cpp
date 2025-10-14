@@ -320,15 +320,10 @@ namespace gladius::ui::async_rendering
             FrameResultMeta result{};
             try
             {
-                std::cout << "[WORKER] About to execute job executor..." << std::endl;
                 result = co_await data->jobExecutor(job, cancellationCheck);
-                std::cout << "[WORKER] Job executor returned: cancelled=" << result.cancelled
-                          << ", completedLine=" << result.completedLine
-                          << ", completedFrame=" << result.completedFrame << std::endl;
             }
             catch (...)
             {
-                std::cout << "[WORKER] Job executor threw exception!" << std::endl;
                 result.epoch = job.epoch;
                 result.frameId = job.frameHint;
                 result.cancelled = true;
@@ -336,10 +331,8 @@ namespace gladius::ui::async_rendering
 
             {
                 std::lock_guard<std::mutex> guard(data->resultMutex);
-                std::cout << "[WORKER] Storing result in pendingResult" << std::endl;
                 data->pendingResult = std::move(result);
                 data->hasPendingResult.store(true, std::memory_order_release);
-                std::cout << "[WORKER] Result stored, hasPendingResult=true" << std::endl;
             }
         }
 
@@ -478,30 +471,18 @@ namespace gladius::ui::async_rendering
         ProfileFunction
         std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        // Log current buffer states for debugging
-        std::cout << "[acquireWriteBuffer] Looking for Idle buffer, epoch=" << epoch << std::endl;
-        for (size_t i = 0; i < m_frameBuffers.size(); ++i)
-        {
-            auto const state = m_frameBuffers[i].state.load(std::memory_order_acquire);
-            auto const bufEpoch = m_frameBuffers[i].epoch.load(std::memory_order_acquire);
-            std::cout << "  Buffer[" << i << "]: state=" << static_cast<int>(state) 
-                      << ", epoch=" << bufEpoch << std::endl;
-        }
-
         // Find an Idle buffer to write to
         for (auto & buffer : m_frameBuffers)
         {
             if (tryTransitionBuffer(&buffer, FrameState::Idle, FrameState::Writing))
             {
                 buffer.epoch.store(epoch, std::memory_order_release);
-                std::cout << "[acquireWriteBuffer] SUCCESS - acquired buffer" << std::endl;
                 return &buffer;
             }
         }
 
         // No Idle buffer available - this shouldn't happen with triple buffering
         // but can happen with double buffering if UI is slow
-        std::cout << "[acquireWriteBuffer] FAILED - no Idle buffer available!" << std::endl;
         return nullptr;
     }
 
@@ -627,8 +608,6 @@ namespace gladius::ui::async_rendering
 
         std::lock_guard<std::mutex> lock(m_bufferMutex);
         
-        std::cout << "[releaseStaleBuffers] Checking for stale buffers from epoch " << oldEpoch << std::endl;
-        
         for (auto & buffer : m_frameBuffers)
         {
             auto const state = buffer.state.load(std::memory_order_acquire);
@@ -637,8 +616,6 @@ namespace gladius::ui::async_rendering
             // Release Writing buffers from old epochs
             if (state == FrameState::Writing && bufEpoch <= oldEpoch)
             {
-                std::cout << "  Found stale Writing buffer with epoch " << bufEpoch 
-                          << ", releasing to Idle" << std::endl;
                 [[maybe_unused]] bool const released =
                   tryTransitionBuffer(&buffer, FrameState::Writing, FrameState::Idle);
             }
