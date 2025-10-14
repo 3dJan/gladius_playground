@@ -64,8 +64,8 @@ namespace gladius::ui::async_rendering
     {
       public:
         using CancelCheck = std::function<bool()>;
-        using JobExecutor =
-          std::function<FrameResultMeta(RenderJob const &, CancelCheck const & cancellationCheck)>;
+        using JobExecutor = std::function<coro::task<FrameResultMeta>(RenderJob const &,
+                                                                      CancelCheck const &)>;
 
         AsyncRenderController();
         explicit AsyncRenderController(std::shared_ptr<coro::thread_pool> workerPool);

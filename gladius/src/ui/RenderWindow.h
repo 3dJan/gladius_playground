@@ -36,7 +36,7 @@ namespace gladius::ui
         bool isRendering = false;
         bool isMoving = false;
         size_t currentLine = 0;
-        size_t renderingStepSize = 5;
+        size_t renderingStepSize = 20;
 
         float fpsPreviousError = 0.0f;
         float fpsIntegral = 0.0f;
@@ -129,9 +129,9 @@ namespace gladius::ui
                 void renderAsync(RenderWindowState & state);
                 void processAsyncResults(RenderWindowState & state);
                 bool scheduleAsyncRenderJob(RenderWindowState & state);
-                async_rendering::FrameResultMeta executeAsyncRenderJob(
-                    async_rendering::RenderJob const & job,
-                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+                                coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
+                                    async_rendering::RenderJob const & job,
+                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
                 void notifyAsyncEpochIncrement();
                 void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
 
@@ -140,9 +140,9 @@ namespace gladius::ui
 
                 // Async bounding box computation
                 void scheduleAsyncBboxUpdate();
-                async_rendering::FrameResultMeta executeAsyncBboxUpdate(
-                    async_rendering::RenderJob const & job,
-                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+                                coro::task<async_rendering::FrameResultMeta> executeAsyncBboxUpdate(
+                                    async_rendering::RenderJob const & job,
+                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
         GLView * m_view{};
 

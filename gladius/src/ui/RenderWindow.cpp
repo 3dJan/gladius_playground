@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <coroutine>
 
 #include "../CLMath.h"
 #include "../ComputeContext.h"
@@ -23,6 +24,90 @@
 namespace gladius::ui
 {
     using namespace std;
+
+    namespace
+    {
+        class ClEventAwaiter
+        {
+          public:
+            explicit ClEventAwaiter(cl::Event event)
+                : m_event(std::move(event))
+            {
+            }
+
+            bool await_ready() const
+            {
+                if (!m_event())
+                {
+                    return true;
+                }
+                try
+                {
+                    auto const status =
+                      m_event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>();
+                    return status == CL_COMPLETE;
+                }
+                catch (...)
+                {
+                    return true;
+                }
+            }
+
+            void await_suspend(std::coroutine_handle<> handle)
+            {
+                if (!m_event())
+                {
+                    handle.resume();
+                    return;
+                }
+
+                auto * state = new CallbackState{handle};
+                try
+                {
+                    m_event.setCallback(CL_COMPLETE, &ClEventAwaiter::onComplete, state);
+                }
+                catch (...)
+                {
+                    delete state;
+                    throw;
+                }
+            }
+
+            void await_resume() const noexcept
+            {
+            }
+
+          private:
+            struct CallbackState
+            {
+                std::coroutine_handle<> handle;
+            };
+
+            static void CL_CALLBACK onComplete(cl_event, cl_int, void * userData)
+            {
+                auto * state = static_cast<CallbackState *>(userData);
+                auto handle = state->handle;
+                delete state;
+                handle.resume();
+            }
+
+            cl::Event m_event;
+        };
+
+        coro::task<void> waitForEvent(
+          cl::Event event,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+        {
+            if (!event() || (cancelCheck && cancelCheck()))
+            {
+                co_return;
+            }
+
+            co_await ClEventAwaiter(std::move(event));
+        }
+
+        constexpr size_t kInitialProgressiveStepSize = 8;
+    }
 
     void RenderWindow::initialize(ComputeCore * core,
                                   GLView * view,
@@ -68,16 +153,14 @@ namespace gladius::ui
             m_asyncController->setJobExecutor(
               [this](async_rendering::RenderJob const & job,
                      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
-              { 
-                  // Dispatch to the appropriate executor based on job type
+                -> coro::task<async_rendering::FrameResultMeta>
+              {
                   if (job.type == async_rendering::RenderJobType::BoundingBoxUpdate)
                   {
-                      return executeAsyncBboxUpdate(job, cancelCheck);
+                      co_return co_await executeAsyncBboxUpdate(job, cancelCheck);
                   }
-                  else
-                  {
-                      return executeAsyncRenderJob(job, cancelCheck);
-                  }
+
+                  co_return co_await executeAsyncRenderJob(job, cancelCheck);
               });
             DebugText("CallingStart", 12);
             m_asyncController->start();
@@ -513,8 +596,10 @@ namespace gladius::ui
         m_dirty = true;
         m_renderWindowState.isMoving = true;
         m_renderWindowState.currentLine = 0;
-        m_renderWindowState.renderingStepSize = 16; // Start with larger chunks for better performance
+        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_renderWindowState.isRendering = false;
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+        m_lastLowResRenderTime = std::chrono::system_clock::now();
         notifyAsyncEpochIncrement();
     }
 
@@ -528,7 +613,7 @@ namespace gladius::ui
         invalidateView();
         m_preComputedSdfDirty = true;
         m_parameterDirty = true;
-        m_renderWindowState.renderingStepSize = 16; // Start with larger chunks for better performance
+    m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
 
         // Mark model as modified for permanent centering
         m_modelModifiedSinceLastCenter = true;
@@ -1200,7 +1285,7 @@ namespace gladius::ui
         auto const executionDuration_ms =
           measure<std::chrono::milliseconds>::execution(renderFrame);
 
-        auto constexpr progressiveTargetRenderTime_ms = 100;
+        auto constexpr progressiveTargetRenderTime_ms = 500;
         auto constexpr tolerance_ms = 1;
         auto constexpr targetFrameTime_ms = 50;
         float error = targetFrameTime_ms - executionDuration_ms;
@@ -1654,31 +1739,37 @@ namespace gladius::ui
         return true;
     }
 
-    async_rendering::FrameResultMeta RenderWindow::executeAsyncRenderJob(
+    auto RenderWindow::executeAsyncRenderJob(
       async_rendering::RenderJob const & job,
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
     {
         ZoneScoped;
         ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
         tracy::SetThreadName("AsyncRenderWorker");
-        
-        // Log thread ID to verify we're on worker thread
-        std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] executeAsyncRenderJob() starting" << std::endl;
-        std::cout << "  job: startLine=" << job.startLine << ", stepSize=" << job.stepSize 
+
+        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                  << "] executeAsyncRenderJob() starting" << std::endl;
+        std::cout << "  job: startLine=" << job.startLine << ", stepSize=" << job.stepSize
                   << ", epoch=" << job.epoch << std::endl;
-        
+
         ZoneValue(job.startLine);
         ZoneValue(job.stepSize);
         ZoneValue(job.epoch);
-        
-                auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
-                auto const & commandQueue =
-                    workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
-                if (workerQueue == nullptr)
-                {
-                        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
-                                            << "] No dedicated worker queue, falling back to primary queue" << std::endl;
-                }
+
+        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto const & commandQueue =
+          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+        if (workerQueue == nullptr)
+        {
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                      << "] No dedicated worker queue, falling back to primary queue" << std::endl;
+        }
+
+        auto const cancellationRequested = [&]() -> bool
+        {
+            return cancelCheck && cancelCheck();
+        };
 
         async_rendering::FrameResultMeta result{};
         result.frameId = job.frameHint;
@@ -1687,87 +1778,108 @@ namespace gladius::ui
         result.width = job.width;
         result.height = job.height;
 
-        if (cancelCheck())
+        if (cancellationRequested())
         {
             ZoneText("CancelledEarly", 14);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled early (POINT 1)" << std::endl;
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                      << "] Job cancelled early (POINT 1)" << std::endl;
             result.cancelled = true;
-            return result;
+            co_return result;
         }
-        
+
         if (!job.enableHighQuality)
         {
             ZoneText("HQDisabled", 10);
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] HQ disabled (POINT 2)" << std::endl;
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                      << "] HQ disabled (POINT 2)" << std::endl;
             result.cancelled = true;
-            return result;
+            co_return result;
         }
 
         auto const startTime = std::chrono::steady_clock::now();
 
-        // For progressive rendering: reuse the same buffer across all chunks
         async_rendering::FrameBuffer * writeBuffer = nullptr;
         bool const isFirstChunk = (job.startLine == 0);
-        
-        if (isFirstChunk || !m_asyncProgressiveBuffer || 
+
+        auto releaseProgressiveBuffer = [&]()
+        {
+            if (!writeBuffer)
+            {
+                return;
+            }
+
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(writeBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+
+            if (writeBuffer == m_asyncProgressiveBuffer)
+            {
+                m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            }
+
+            writeBuffer = nullptr;
+        };
+
+        if (isFirstChunk || !m_asyncProgressiveBuffer ||
             m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch)
         {
-            // Start of new frame or epoch changed - acquire fresh buffer
             writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             if (!writeBuffer)
             {
-                // No available buffer (shouldn't happen with triple buffering)
-                std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] acquireWriteBuffer returned nullptr (POINT 3)" << std::endl;
+                std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                          << "] acquireWriteBuffer returned nullptr (POINT 3)" << std::endl;
                 result.cancelled = true;
-                return result;
+                co_return result;
             }
-            
-            // IMPORTANT: Initialize with low-res preview as base for progressive enhancement
-            // This ensures progressive rendering enhances the preview, not a black screen
+
             if (writeBuffer->image)
             {
                 ZoneScopedN("CopyLowResPreviewAsBase");
-                auto const resultImage = m_core->getResultImage();
-                if (resultImage)
+                if (auto const resultImage = m_core->getResultImage())
                 {
-                    std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
-                              << "] Initializing progressive buffer with low-res preview" << std::endl;
-                    
+                    std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                              << "] Initializing progressive buffer with low-res preview"
+                              << std::endl;
+
+                    cl::Event previewCopyEvent{};
                     commandQueue.enqueueCopyImage(resultImage->getBuffer(),
                                                    writeBuffer->image->getBuffer(),
                                                    {0, 0, 0},
                                                    {0, 0, 0},
-                                                   {job.width, job.height, 1});
-                    commandQueue.finish(); // Ensure base is copied before rendering
+                                                   {job.width, job.height, 1},
+                                                   nullptr,
+                                                   &previewCopyEvent);
+                    commandQueue.flush();
+                    co_await waitForEvent(previewCopyEvent, cancelCheck);
+
+                    if (cancellationRequested())
+                    {
+                        releaseProgressiveBuffer();
+                        result.cancelled = true;
+                        co_return result;
+                    }
+
                     writeBuffer->image->invalidateContent();
                 }
             }
-            
+
             m_asyncProgressiveBuffer = writeBuffer;
             m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
         }
         else
         {
-            // Continue using the same buffer for subsequent chunks
             writeBuffer = m_asyncProgressiveBuffer;
         }
 
-        if (cancelCheck())
+        if (cancellationRequested())
         {
-            // Release the buffer back to Idle only if this is the first chunk
-            // (otherwise we keep it for the next chunk)
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled after buffer acquire (POINT 4)" << std::endl;
-            if (isFirstChunk)
-            {
-                [[maybe_unused]] bool const released =
-                  m_asyncController->tryTransitionBuffer(writeBuffer,
-                                                         async_rendering::FrameState::Writing,
-                                                         async_rendering::FrameState::Idle);
-                m_asyncProgressiveBuffer = nullptr;
-                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-            }
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                      << "] Job cancelled after buffer acquire (POINT 4)" << std::endl;
+            releaseProgressiveBuffer();
             result.cancelled = true;
-            return result;
+            co_return result;
         }
 
         try
@@ -1782,102 +1894,103 @@ namespace gladius::ui
             size_t const endLine =
               std::min(job.startLine + job.stepSize, static_cast<size_t>(job.height));
 
-            if (cancelCheck())
+            if (cancellationRequested())
             {
-                std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Job cancelled inside try block (POINT 5)" << std::endl;
+                std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                          << "] Job cancelled inside try block (POINT 5)" << std::endl;
                 result.cancelled = true;
             }
             else
             {
                 ZoneScopedN("RenderSceneComputeOnly");
-                
-                // NEW APPROACH: Render directly to writeBuffer's CL image (no GL required)
-                // This is safe to call from any thread since it doesn't touch GL
-                
-                if (writeBuffer && writeBuffer->image)
+
+                if (writeBuffer != nullptr && writeBuffer->image)
                 {
-                    // Cast to ImageRGBA& to use only the CL buffer part (not GL)
-                    // This allows rendering without GL context
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
-                    
+
+                    cl::Event renderEvent{};
                     bool const advanced = m_core->renderSceneComputeOnly(commandQueue,
-                                                                           job.startLine,
-                                                                           endLine,
-                                                                           targetCLBuffer);
-                    
+                                                                          job.startLine,
+                                                                          endLine,
+                                                                          targetCLBuffer,
+                                                                          &renderEvent);
+
+                    if (renderEvent())
+                    {
+                        co_await waitForEvent(renderEvent, cancelCheck);
+                    }
+
+                    if (cancellationRequested())
+                    {
+                        result.cancelled = true;
+                    }
+
                     result.completedLine = advanced ? endLine : job.startLine;
                     result.completedFrame = result.completedLine >= job.height;
 
-                    if (advanced && !cancelCheck())
+                    if (advanced && !result.cancelled)
                     {
                         ZoneScopedN("CopyToResultImageForDisplay");
-                        
-                        // For progressive rendering visibility, copy writeBuffer → m_resultImage
-                        // This allows the UI thread to display progressive updates
-                        auto const resultImage = m_core->getResultImage();
-                        if (resultImage)
+                        if (auto const resultImage = m_core->getResultImage())
                         {
+                            cl::Event copyBackEvent{};
                             commandQueue.enqueueCopyImage(writeBuffer->image->getBuffer(),
                                                           resultImage->getBuffer(),
                                                           {0, 0, 0},
                                                           {0, 0, 0},
-                                                          {result.width, result.height, 1});
-                            commandQueue.finish(); // Wait for copy to complete
-                            
-                            // Mark both buffers as dirty
-                            writeBuffer->image->invalidateContent();
-                            resultImage->invalidateContent();
+                                                          {result.width, result.height, 1},
+                                                          nullptr,
+                                                          &copyBackEvent);
+                            commandQueue.flush();
+                            co_await waitForEvent(copyBackEvent, cancelCheck);
+
+                            if (!cancellationRequested())
+                            {
+                                writeBuffer->image->invalidateContent();
+                                resultImage->invalidateContent();
+                            }
+                            else
+                            {
+                                result.cancelled = true;
+                            }
                         }
-                        
-                        std::cout << "[WORKER THREAD " << std::this_thread::get_id() 
-                                  << "] Chunk " << job.startLine << "->" << endLine 
+
+                        std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                                  << "] Chunk " << job.startLine << "->" << endLine
                                   << " complete, copied to display buffer" << std::endl;
                     }
                 }
                 else
                 {
-                    std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] No writeBuffer or writeBuffer->image (POINT 6)" << std::endl;
+                    std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                              << "] No writeBuffer or writeBuffer->image (POINT 6)" << std::endl;
                     result.cancelled = true;
                 }
             }
         }
         catch (...)
         {
-            std::cout << "[WORKER THREAD " << std::this_thread::get_id() << "] Exception caught (POINT 7)" << std::endl;
+            std::cout << "[WORKER THREAD " << std::this_thread::get_id()
+                      << "] Exception caught (POINT 7)" << std::endl;
             result.cancelled = true;
         }
 
         if (result.cancelled)
         {
-            // Release the buffer back to Idle on cancellation (only if first chunk)
-            if (isFirstChunk)
-            {
-                [[maybe_unused]] bool const released =
-                  m_asyncController->tryTransitionBuffer(writeBuffer,
-                                                         async_rendering::FrameState::Writing,
-                                                         async_rendering::FrameState::Idle);
-                m_asyncProgressiveBuffer = nullptr;
-                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-            }
+            releaseProgressiveBuffer();
         }
         else if (result.completedFrame)
         {
-            // Frame is complete - publish and release progressive buffer
             m_asyncController->publishFrame(writeBuffer, result.frameId, result.epoch);
             m_asyncProgressiveBuffer = nullptr;
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-        }
-        else
-        {
-            // Chunk complete but frame not done - keep buffer in Writing state
-            // Don't publish yet, will reuse for next chunk
         }
 
         auto const endTime = std::chrono::steady_clock::now();
         result.computeDurationNs = static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
 
-        return result;
+        co_return result;
     }
 
     void RenderWindow::adjustProgressFromDuration(RenderWindowState & state,
@@ -2034,9 +2147,10 @@ namespace gladius::ui
         m_asyncController->enqueueJob(job);
     }
 
-    async_rendering::FrameResultMeta RenderWindow::executeAsyncBboxUpdate(
-      async_rendering::RenderJob const & job,
-      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+        auto RenderWindow::executeAsyncBboxUpdate(
+            async_rendering::RenderJob const & job,
+            async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+            -> coro::task<async_rendering::FrameResultMeta>
     {
         using namespace async_rendering;
 
@@ -2056,7 +2170,7 @@ namespace gladius::ui
             std::cout << "[executeAsyncBboxUpdate] Cancelled before computation" << std::endl;
             result.cancelled = true;
             m_asyncBboxJobInFlight.store(false, std::memory_order_release);
-            return result;
+                        co_return result;
         }
 
         try
@@ -2102,7 +2216,7 @@ namespace gladius::ui
             // We'll do this in processAsyncResults when the result is consumed
         }
 
-        return result;
+        co_return result;
     }
 
 }

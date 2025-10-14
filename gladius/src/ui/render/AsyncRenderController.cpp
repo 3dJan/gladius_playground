@@ -321,9 +321,9 @@ namespace gladius::ui::async_rendering
             try
             {
                 std::cout << "[WORKER] About to execute job executor..." << std::endl;
-                result = data->jobExecutor(job, cancellationCheck);
-                std::cout << "[WORKER] Job executor returned: cancelled=" << result.cancelled 
-                          << ", completedLine=" << result.completedLine 
+                result = co_await data->jobExecutor(job, cancellationCheck);
+                std::cout << "[WORKER] Job executor returned: cancelled=" << result.cancelled
+                          << ", completedLine=" << result.completedLine
                           << ", completedFrame=" << result.completedFrame << std::endl;
             }
             catch (...)
