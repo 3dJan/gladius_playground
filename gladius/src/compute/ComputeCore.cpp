@@ -1330,12 +1330,6 @@ namespace gladius
         // Ensure GL texture is updated (especially important for readpixel mode)
         m_resultImage->bind();
         m_resultImage->unbind();
-
-        std::cout << "  -> renderLowResPreview complete: resultImage size="
-                  << m_resultImage->getWidth() << "x" << m_resultImage->getHeight()
-                  << ", textureId=" << m_resultImage->GetTextureId() << ", bound and ready"
-                  << std::endl;
-        LOG_LOCATION
     }
 
     void ComputeCore::invalidatePreCompSdf()

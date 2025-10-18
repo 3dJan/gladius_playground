@@ -7,7 +7,7 @@
 #include <tracy/Tracy.hpp>
 
 // Enable debug output for async rendering diagnostics
-#define ASYNC_DEBUG_OUTPUT
+//#define ASYNC_DEBUG_OUTPUT
 
 namespace gladius
 {

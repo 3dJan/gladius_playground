@@ -1,25 +1,34 @@
 #include "NodeLayoutEngine.h"
-#include "imgui-node-editor/imgui_node_editor.h"
 #include "imgui.h"
 #include "nodes/graph/GraphAlgorithms.h"
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <unordered_set>
-
-namespace ed = ax::NodeEditor;
+#include <utility>
 
 namespace gladius::ui
 {
     void NodeLayoutEngine::performAutoLayout(nodes::Model & model, const LayoutConfig & config)
     {
 
-        auto const graph = model.getGraph();
+        model.updateGraphAndOrderIfNeeded();
+
+        auto * beginNode = model.getBeginNode();
+        auto * endNode = model.getEndNode();
+
+        if (!beginNode)
+        {
+            return;
+        }
+
+        auto const & graph = model.getGraph();
 
         // Special case: exactly two nodes (Begin and End)
-        if (model.getSize() == 2 && model.getBeginNode() && model.getEndNode())
+        if (model.getSize() == 2 && beginNode && endNode)
         {
-            model.getBeginNode()->screenPos() = nodes::float2(0.0f, 0.0f);
-            model.getEndNode()->screenPos() = nodes::float2(400.0f, 0.0f);
+            beginNode->screenPos() = nodes::float2(0.0f, 0.0f);
+            endNode->screenPos() = nodes::float2(400.0f, 0.0f);
             model.markAsLayouted();
             return;
         }
@@ -29,14 +38,7 @@ namespace gladius::ui
             return;
         }
 
-        model.updateGraphAndOrderIfNeeded();
-
-        if (!model.getBeginNode())
-        {
-            return;
-        }
-
-        auto const beginId = model.getBeginNode()->getId();
+        auto const beginId = beginNode->getId();
         auto depthMap = determineDepth(graph, beginId);
 
         // Correct depth for constant nodes with depth 0 (excluding begin node)
@@ -77,80 +79,71 @@ namespace gladius::ui
         }
 
         // Step 3: Layout each group separately and track occupied spaces
-        constexpr float GROUP_PADDING = 50.0f;
         std::vector<Rect> occupiedRects; // Rectangles representing occupied spaces
-        ImVec2 nextGroupOrigin(0.0f, 0.0f);
-        float maxRowHeight = 0.0f;
-        float maxX = 0.0f;
 
-        // Sort groups by minDepth for consistent placement order
-        std::sort(groups.begin(),
-                  groups.end(),
-                  [](const GroupInfo & a, const GroupInfo & b) { return a.minDepth < b.minDepth; });
         for (auto & group : groups)
-        { // Layout nodes in group (local coordinates)
-            layoutNodesInGroup(group, depthMap, config, occupiedRects);
+        {
+            layoutNodesInGroup(group, depthMap, config, occupiedRects, &graph);
             updateGroupBounds(group);
+        }
 
-            // Place group at next available position, considering occupied spaces
-            // For simplicity, arrange groups in a row with GROUP_PADDING between
-            ImVec2 groupOffset = nextGroupOrigin;
-            for (auto * node : group.nodes)
-            {
-                auto & nodePos = node->screenPos();
-                nodePos.x += groupOffset.x;
-                nodePos.y += groupOffset.y;
-            }
-            updateGroupBounds(group); // Track occupied rect
-            occupiedRects.push_back(
-              Rect(group.position,
-                   ImVec2(group.position.x + group.size.x, group.position.y + group.size.y)));
+        layoutGroups(groups, config);
 
-            // Update nextGroupOrigin for next group (to the right, with padding)
-            nextGroupOrigin.x += group.size.x + GROUP_PADDING;
-            maxRowHeight = std::max(maxRowHeight, group.size.y);
-            maxX = std::max(maxX, nextGroupOrigin.x);
+        float maxGroupRight = 0.0f;
+        for (auto & group : groups)
+        {
+            updateGroupBounds(group);
+            maxGroupRight = std::max(maxGroupRight, group.position.x + group.size.x);
+            occupiedRects.push_back(Rect(group.position,
+                                         ImVec2(group.position.x + group.size.x,
+                                                group.position.y + group.size.y)));
         }
 
         // Step 4: Place ungrouped nodes after all groups, considering occupied spaces
         if (!ungroupedNodes.empty()) // Check if there are any truly ungrouped nodes
         {                            // Layout ungrouped nodes (local coordinates)
-            layoutUngroupedNodes(ungroupedNodes, depthMap, config, occupiedRects);
+            layoutUngroupedNodes(ungroupedNodes, depthMap, config, occupiedRects, &graph);
 
-            // Find bounding box of all groups
-            float ungroupedOriginX = maxX;
-            float ungroupedOriginY = 0.0f;
-            if (!occupiedRects.empty())
+            float minUngroupedX = std::numeric_limits<float>::max();
+            for (auto * node : ungroupedNodes)
             {
-                bool firstOccupiedRect = true;
-                float minOccupiedX = std::numeric_limits<float>::max();
-                float maxOccupiedYAtMinX = 0.0f;
-
-                for (const auto & rect : occupiedRects)
-                {
-                    if (maxX < config.layerSpacing * 2)
-                    { // Heuristic: if groups are narrow
-                        ungroupedOriginY = std::max(ungroupedOriginY, rect.max.y + GROUP_PADDING);
-                    }
-                    ungroupedOriginX = std::max(ungroupedOriginX, rect.max.x + GROUP_PADDING);
-                }
+                minUngroupedX = std::min(minUngroupedX, node->screenPos().x);
             }
 
-            // Place all ungrouped nodes, adjusting their local layout positions
+            if (minUngroupedX == std::numeric_limits<float>::max())
+            {
+                minUngroupedX = 0.0f;
+            }
+
+            float const targetX = groups.empty() ? 0.0f : maxGroupRight + config.layerSpacing;
+            float const deltaX = targetX - minUngroupedX;
+
             for (auto * node : ungroupedNodes)
             {
                 auto & nodePos = node->screenPos();
-                nodePos.x += ungroupedOriginX;
-                nodePos.y += ungroupedOriginY;
+                nodePos.x += deltaX;
             }
         }
 
         model.markAsLayouted();
-    } // ========== Generic Layout Algorithm ==========
+    }
+
+    void NodeLayoutEngine::setNodeSizeProvider(NodeSizeProvider provider)
+    {
+        m_nodeSizeProvider = std::move(provider);
+    }
+
+    void NodeLayoutEngine::setNodePositionWriter(NodePositionWriter writer)
+    {
+        m_nodePositionWriter = std::move(writer);
+    }
+
+    // ========== Generic Layout Algorithm ==========
     template <typename T>
     void NodeLayoutEngine::performLayeredLayout(std::vector<LayoutEntity<T>> & entities,
                                                 const LayoutConfig & config,
-                                                const std::vector<Rect> & occupiedRects)
+                                                const std::vector<Rect> & occupiedRects,
+                                                const nodes::graph::IDirectedGraph * graph)
     {
         if (entities.empty())
         {
@@ -158,7 +151,7 @@ namespace gladius::ui
         }
 
         // Step 1: Arrange entities in layers based on depth
-        auto layers = arrangeInLayers(entities);
+            auto layers = arrangeInLayers(entities, graph);
 
         // Step 2: Calculate layer X positions
         std::map<int, float> layerXPositions;
@@ -211,6 +204,47 @@ namespace gladius::ui
 
         // Step 4: Optimize positions to minimize crossings using the simple approach
         optimizeLayerPositions(layers, config);
+
+        if constexpr (std::is_same_v<T, nodes::NodeBase>)
+        {
+            for (auto & entity : entities)
+            {
+                if (entity.item == nullptr)
+                {
+                    continue;
+                }
+
+                if (!isConstantNode(entity.item))
+                {
+                    continue;
+                }
+
+                if (entity.dependents.empty())
+                {
+                    continue;
+                }
+
+                float closestDependentX = std::numeric_limits<float>::infinity();
+                for (auto * dependent : entity.dependents)
+                {
+                    if (dependent == nullptr)
+                    {
+                        continue;
+                    }
+                    closestDependentX =
+                      std::min(closestDependentX, dependent->position.x - config.nodeDistance);
+                }
+
+                if (!std::isfinite(closestDependentX))
+                {
+                    continue;
+                }
+
+                float const targetX =
+                  std::min(entity.position.x + config.constantNodeOffset, closestDependentX);
+                entity.position.x = std::max(targetX, entity.position.x);
+            }
+        }
         // Step 5: Apply positions back to entities (handled by specific layout methods)
     }
 
@@ -278,7 +312,8 @@ namespace gladius::ui
     NodeLayoutEngine::layoutUngroupedNodes(const std::vector<nodes::NodeBase *> & ungroupedNodes,
                                            const std::unordered_map<nodes::NodeId, int> & depthMap,
                                            const LayoutConfig & config,
-                                           const std::vector<Rect> & occupiedRects)
+                                           const std::vector<Rect> & occupiedRects,
+                                           const nodes::graph::IDirectedGraph * graph)
     {
         if (ungroupedNodes.empty())
         {
@@ -300,25 +335,28 @@ namespace gladius::ui
         }
 
         // Apply generic layered layout
-        performLayeredLayout(entities, config, occupiedRects);
+    performLayeredLayout(entities, config, occupiedRects, graph);
 
         // Apply results back to nodes
-        for (size_t i = 0; i < entities.size(); ++i)
-        {
-            ungroupedNodes[i]->screenPos() =
-              nodes::float2(entities[i].position.x, entities[i].position.y);
+                for (size_t i = 0; i < entities.size(); ++i)
+                {
+                        ungroupedNodes[i]->screenPos() =
+                            nodes::float2(entities[i].position.x, entities[i].position.y);
 
-            // Also update the Dear ImGui Node Editor position
-            ed::SetNodePosition(ungroupedNodes[i]->getId(),
-                                ImVec2(entities[i].position.x, entities[i].position.y));
-        }
+                        if (m_nodePositionWriter)
+                        {
+                            m_nodePositionWriter(ungroupedNodes[i]->getId(),
+                                         ImVec2(entities[i].position.x, entities[i].position.y));
+                        }
+                }
     }
 
     void
     NodeLayoutEngine::layoutNodesInGroup(GroupInfo & groupInfo,
                                          const std::unordered_map<nodes::NodeId, int> & depthMap,
                                          const LayoutConfig & config,
-                                         const std::vector<Rect> & occupiedRects)
+                                         const std::vector<Rect> & occupiedRects,
+                                         const nodes::graph::IDirectedGraph * graph)
     {
         if (groupInfo.nodes.empty())
         {
@@ -344,18 +382,20 @@ namespace gladius::ui
         groupConfig.nodeDistance *= 0.7f; // Tighter spacing within groups
         groupConfig.layerSpacing *= 0.8f;
 
-        performLayeredLayout(entities, groupConfig, occupiedRects);
+    performLayeredLayout(entities, groupConfig, occupiedRects, graph);
 
         // Apply results back to nodes
-        for (size_t i = 0; i < entities.size(); ++i)
-        {
-            groupInfo.nodes[i]->screenPos() =
-              nodes::float2(entities[i].position.x, entities[i].position.y);
+                for (size_t i = 0; i < entities.size(); ++i)
+                {
+                        groupInfo.nodes[i]->screenPos() =
+                            nodes::float2(entities[i].position.x, entities[i].position.y);
 
-            // Also update the Dear ImGui Node Editor position
-            ed::SetNodePosition(groupInfo.nodes[i]->getId(),
-                                ImVec2(entities[i].position.x, entities[i].position.y));
-        }
+                        if (m_nodePositionWriter)
+                        {
+                            m_nodePositionWriter(groupInfo.nodes[i]->getId(),
+                                         ImVec2(entities[i].position.x, entities[i].position.y));
+                        }
+                }
 
         // Update group bounds
         updateGroupBounds(groupInfo);
@@ -432,15 +472,23 @@ namespace gladius::ui
 
         for (auto const & [id, node] : model)
         {
-            // Skip the begin node
             if (id == beginId)
             {
                 continue;
             }
 
-            // Check if this node has depth 0 and is a constant node
+            if (!isConstantNode(node.get()))
+            {
+                continue;
+            }
+
             auto depthIter = depthMap.find(id);
-            if (depthIter == depthMap.end() || depthIter->second == 0)
+            if (depthIter == depthMap.end())
+            {
+                continue;
+            }
+
+            if (depthIter->second == 0)
             {
                 constantNodesToCorrect.push_back(id);
             }
@@ -483,7 +531,8 @@ namespace gladius::ui
 
     template <typename T>
     std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>>
-    NodeLayoutEngine::arrangeInLayers(std::vector<LayoutEntity<T>> & entities)
+        NodeLayoutEngine::arrangeInLayers(std::vector<LayoutEntity<T>> & entities,
+                                          const nodes::graph::IDirectedGraph * graph)
     {
         std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> layers;
 
@@ -506,57 +555,49 @@ namespace gladius::ui
         // Establish connections between entities based on the graph structure
         if constexpr (std::is_same_v<T, nodes::NodeBase>)
         {
-            // Create lookup map for faster entity lookup by node ID
-            std::unordered_map<nodes::NodeId, LayoutEntity<T> *> entityByNodeId;
-            for (auto & entity : entities)
+            if (graph != nullptr)
             {
-                entityByNodeId[entity.item->getId()] = &entity;
-            }
-
-            // Clear existing connections
-            for (auto & entity : entities)
-            {
-                entity.dependencies.clear();
-                entity.dependents.clear();
-            }
-
-            // For each entity, find its dependencies and dependents
-            for (auto & entity : entities)
-            {
-                nodes::NodeId nodeId = entity.item->getId();
-
-                // For each node, find its dependencies in the model
-                // This would require access to the graph or model to determine actual connections
-                // For now, we'll use depth as a heuristic - nodes in lower layers are dependencies
-                for (auto & otherEntity : entities)
+                std::unordered_map<nodes::NodeId, LayoutEntity<T> *> entityByNodeId;
+                entityByNodeId.reserve(entities.size());
+                for (auto & entity : entities)
                 {
-                    if (otherEntity.item == entity.item)
-                        continue;
+                    entityByNodeId[entity.item->getId()] = &entity;
+                }
 
-                    nodes::NodeId otherId = otherEntity.item->getId();
+                for (auto & entity : entities)
+                {
+                    entity.dependencies.clear();
+                    entity.dependents.clear();
+                }
 
-                    // Use the graph structure to determine actual dependencies
-                    // We need access to the model/graph to check direct connections
-                    // For now, use depth-based heuristic with actual connection verification later
-                    bool hasConnection = false;
+                for (auto & entity : entities)
+                {
+                    nodes::NodeId const nodeId = entity.item->getId();
+                    auto const dependencies =
+                      nodes::graph::determineDirectDependencies(*graph, nodeId);
 
-                    // Check if there's a direct dependency relationship
-                    // This would need access to the graph structure from the model
-                    if (std::abs(entity.depth - otherEntity.depth) == 1)
+                    for (auto const dependencyId : dependencies)
                     {
-                        if (otherEntity.depth < entity.depth)
+                        auto const depIt = entityByNodeId.find(dependencyId);
+                        if (depIt == entityByNodeId.end())
                         {
-                            // Other entity is in a previous layer, could be a dependency
-                            entity.dependencies.push_back(&otherEntity);
-                            otherEntity.dependents.push_back(&entity);
-                            hasConnection = true;
+                            continue;
                         }
-                        else
+
+                        auto * dependencyEntity = depIt->second;
+
+                        if (std::find(entity.dependencies.begin(),
+                                      entity.dependencies.end(),
+                                      dependencyEntity) == entity.dependencies.end())
                         {
-                            // Other entity is in a later layer, this entity could be its dependency
-                            otherEntity.dependencies.push_back(&entity);
-                            entity.dependents.push_back(&otherEntity);
-                            hasConnection = true;
+                            entity.dependencies.push_back(dependencyEntity);
+                        }
+
+                        if (std::find(dependencyEntity->dependents.begin(),
+                                      dependencyEntity->dependents.end(),
+                                      &entity) == dependencyEntity->dependents.end())
+                        {
+                            dependencyEntity->dependents.push_back(&entity);
                         }
                     }
                 }
@@ -568,90 +609,180 @@ namespace gladius::ui
 
     template <typename T>
     void NodeLayoutEngine::optimizeLayerPositions(
-      std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> & layers,
-      const LayoutConfig & config)
+          std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> & layers,
+          const LayoutConfig & config)
     {
         if (layers.empty())
             return;
 
-        // Process layers from right to left (highest depth to lowest)
-        std::vector<int> layerDepths;
-        for (auto & [depth, _] : layers)
-        {
-            layerDepths.push_back(depth);
-        }
-        std::sort(layerDepths.rbegin(), layerDepths.rend()); // Reverse sort for right-to-left
-
-        for (int depth : layerDepths)
-        {
-            auto & layerEntities = layers[depth];
-            if (layerEntities.size() <= 1)
+            std::vector<int> layerDepths;
+            layerDepths.reserve(layers.size());
+            for (auto & [depth, _] : layers)
             {
-                // Single node - just center it
+                layerDepths.push_back(depth);
+            }
+            std::sort(layerDepths.begin(), layerDepths.end());
+
+            for (int depth : layerDepths)
+            {
+                auto & layerEntities = layers[depth];
                 if (layerEntities.size() == 1)
                 {
                     layerEntities[0]->position.y = 0.0f;
                 }
-                continue;
             }
 
-            optimizeLayerByConnectionOrder(layerEntities, layers, depth, config);
-        }
+            int const maxIterations = std::max(1, config.maxOptimizationIterations);
+            for (int iteration = 0; iteration < maxIterations; ++iteration)
+            {
+                float totalMovement = 0.0f;
+
+                for (int depth : layerDepths)
+                {
+                    auto & layerEntities = layers[depth];
+                    if (layerEntities.size() <= 1)
+                    {
+                        continue;
+                    }
+
+                    totalMovement +=
+                      optimizeLayerByConnectionOrder(layerEntities, layers, depth, config);
+                }
+
+                for (auto depthIt = layerDepths.rbegin(); depthIt != layerDepths.rend(); ++depthIt)
+                {
+                    auto & layerEntities = layers[*depthIt];
+                    if (layerEntities.size() <= 1)
+                    {
+                        continue;
+                    }
+
+                    totalMovement +=
+                      optimizeLayerByConnectionOrder(layerEntities, layers, *depthIt, config);
+                }
+
+                if (totalMovement < config.convergenceThreshold)
+                {
+                    break;
+                }
+            }
+
+            for (int relaxPass = 0; relaxPass < 3; ++relaxPass)
+            {
+                float relaxationMovement = 0.0f;
+                for (int depth : layerDepths)
+                {
+                    auto & layerEntities = layers[depth];
+                    if (layerEntities.size() <= 1)
+                    {
+                        continue;
+                    }
+
+                    relaxationMovement +=
+                      relaxLayerPositions(layerEntities, layers, depth, config);
+                }
+
+                if (relaxationMovement < config.convergenceThreshold)
+                {
+                    break;
+                }
+            }
     }
 
     template <typename T>
-    void NodeLayoutEngine::optimizeLayerByConnectionOrder(
-      std::vector<NodeLayoutEngine::LayoutEntity<T> *> & layerEntities,
-      const std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> & allLayers,
-      int currentDepth,
-      const LayoutConfig & config)
+    float NodeLayoutEngine::optimizeLayerByConnectionOrder(
+          std::vector<NodeLayoutEngine::LayoutEntity<T> *> & layerEntities,
+          const std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> & allLayers,
+          int currentDepth,
+          const LayoutConfig & config)
     {
-        if (layerEntities.empty())
-            return;
+                    if (layerEntities.empty())
+                            return 0.0f;
 
-        // Calculate average Y position of connected nodes for each entity in this layer
-        std::vector<std::pair<NodeLayoutEngine::LayoutEntity<T> *, float>> entityWithAvgY;
-
-        for (auto * entity : layerEntities)
-        {
-            float avgConnectedY =
-              calculateAverageConnectedY(entity, allLayers, currentDepth, config);
-            entityWithAvgY.emplace_back(entity, avgConnectedY);
-        }
-
-        // Sort entities by their average connected Y position
-        std::sort(entityWithAvgY.begin(),
-                  entityWithAvgY.end(),
-                  [](const auto & a, const auto & b) { return a.second < b.second; });
-
-        // Calculate the desired center for this layer based on the barycenter values
-        float desiredLayerCenterY = 0.0f;
-        if (!entityWithAvgY.empty())
-        {
-            float sumOfAvgs = 0.0f;
-            for (const auto & [entity, avgY] : entityWithAvgY)
+            struct Entry
             {
-                sumOfAvgs += avgY;
+                NodeLayoutEngine::LayoutEntity<T> * entity;
+                float desiredCenter;
+                float originalCenter;
+            };
+
+            std::vector<Entry> entries;
+            entries.reserve(layerEntities.size());
+
+            float desiredCenterSum = 0.0f;
+            for (auto * entity : layerEntities)
+            {
+                float const avgConnectedY =
+                  calculateAverageConnectedY(entity, allLayers, currentDepth, config);
+                float const originalCenter = entity->position.y + entity->size.y / 2.0f;
+                entries.push_back({entity, avgConnectedY, originalCenter});
+                desiredCenterSum += avgConnectedY;
             }
-            desiredLayerCenterY = sumOfAvgs / entityWithAvgY.size();
-        }
 
-        // Stack nodes vertically with proper spacing, starting from a temporary Y
-        float currentY = 0.0f;
-        for (auto & [entity, avgY] : entityWithAvgY)
-        {
-            entity->position.y = currentY;
-            currentY += entity->size.y + config.nodeDistance;
-        }
+            std::sort(entries.begin(),
+                      entries.end(),
+                      [](Entry const & a, Entry const & b)
+                      {
+                          if (a.desiredCenter == b.desiredCenter)
+                          {
+                              return a.originalCenter < b.originalCenter;
+                          }
+                          return a.desiredCenter < b.desiredCenter;
+                      });
 
-        // Center the layer vertically around the desired barycenter
-        float totalHeight = currentY - config.nodeDistance; // Remove last spacing
-        float centerOffset = desiredLayerCenterY - (totalHeight / 2.0f);
+            float previousBottom = -std::numeric_limits<float>::infinity();
+            float actualCenterSum = 0.0f;
 
-        for (auto & [entity, avgY] : entityWithAvgY)
-        {
-            entity->position.y += centerOffset;
-        }
+            for (auto & entry : entries)
+            {
+                auto * entity = entry.entity;
+                float const halfHeight = entity->size.y * 0.5f;
+                float targetTop = entry.desiredCenter - halfHeight;
+
+                if (!std::isfinite(targetTop))
+                {
+                    targetTop = entity->position.y;
+                }
+
+                if (std::isfinite(previousBottom))
+                {
+                    float const minTop = previousBottom + config.nodeDistance;
+                    if (targetTop < minTop)
+                    {
+                        targetTop = minTop;
+                    }
+                }
+
+                entity->position.y = targetTop;
+                previousBottom = targetTop + entity->size.y;
+                actualCenterSum += targetTop + halfHeight;
+            }
+
+            float const desiredAverage = desiredCenterSum / static_cast<float>(entries.size());
+            float const actualAverage = actualCenterSum / static_cast<float>(entries.size());
+            float const layerShift = desiredAverage - actualAverage;
+
+            for (auto & entry : entries)
+            {
+                entry.entity->position.y += layerShift;
+            }
+
+            std::vector<NodeLayoutEngine::LayoutEntity<T> *> reordered;
+            reordered.reserve(entries.size());
+            for (auto & entry : entries)
+            {
+                reordered.push_back(entry.entity);
+            }
+            layerEntities = std::move(reordered);
+
+            float totalMovement = 0.0f;
+            for (auto & entry : entries)
+            {
+                float const newCenter = entry.entity->position.y + entry.entity->size.y / 2.0f;
+                totalMovement += std::abs(newCenter - entry.originalCenter);
+            }
+
+            return totalMovement;
     }
 
     template <typename T>
@@ -692,6 +823,141 @@ namespace gladius::ui
 
         // If no connections found, return current center Y
         return entity->position.y + entity->size.y / 2.0f;
+    }
+
+template <typename T>
+float NodeLayoutEngine::relaxLayerPositions(
+      std::vector<NodeLayoutEngine::LayoutEntity<T> *> & layerEntities,
+      const std::map<int, std::vector<NodeLayoutEngine::LayoutEntity<T> *>> & allLayers,
+      int currentDepth,
+      const LayoutConfig & config)
+    {
+        size_t const count = layerEntities.size();
+        if (count <= 1)
+        {
+            return 0.0f;
+        }
+
+        struct PavBlock
+        {
+            size_t start;
+            size_t end;
+            float weight;
+            float value;
+        };
+
+        std::vector<float> heights(count);
+        std::vector<float> halfHeights(count);
+        std::vector<float> originalCenters(count);
+        std::vector<float> weights(count);
+        std::vector<float> targetCenters(count);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto * entity = layerEntities[i];
+            float const height = std::max(entity->size.y, 1.0f);
+            heights[i] = height;
+            halfHeights[i] = height * 0.5f;
+            originalCenters[i] = entity->position.y + halfHeights[i];
+
+            float weightedSum = originalCenters[i] * 0.1f;
+            float totalWeight = 0.1f;
+
+            if constexpr (std::is_same_v<T, nodes::NodeBase>)
+            {
+                auto accumulateNeighbor = [&](auto const & connections)
+                {
+                    for (auto * neighbor : connections)
+                    {
+                        if (neighbor == nullptr)
+                        {
+                            continue;
+                        }
+
+                        float const neighborCenter =
+                          neighbor->position.y + neighbor->size.y * 0.5f;
+                        int const depthDelta = std::abs(neighbor->depth - layerEntities[i]->depth);
+                        float const spanWeight = 1.0f + 0.5f * static_cast<float>(depthDelta);
+                        weightedSum += neighborCenter * spanWeight;
+                        totalWeight += spanWeight;
+                    }
+                };
+
+                accumulateNeighbor(layerEntities[i]->dependencies);
+                accumulateNeighbor(layerEntities[i]->dependents);
+            }
+
+            if (totalWeight <= 0.0f)
+            {
+                totalWeight = 1.0f;
+                weightedSum = originalCenters[i];
+            }
+
+            targetCenters[i] = weightedSum / totalWeight;
+            weights[i] = totalWeight;
+        }
+
+        std::vector<float> offsets(count, 0.0f);
+        for (size_t i = 1; i < count; ++i)
+        {
+            float const gap = heights[i - 1] + config.nodeDistance;
+            offsets[i] = offsets[i - 1] + gap;
+        }
+
+        std::vector<float> adjustedTargets(count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            float const targetTop = targetCenters[i] - halfHeights[i];
+            adjustedTargets[i] = targetTop - offsets[i];
+        }
+
+        std::vector<PavBlock> blockStack;
+        blockStack.reserve(count);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            float const weight = std::max(weights[i], 1e-3f);
+            PavBlock block{i, i, weight, adjustedTargets[i]};
+            blockStack.push_back(block);
+
+            while (blockStack.size() >= 2)
+            {
+                auto & last = blockStack.back();
+                auto & prev = blockStack[blockStack.size() - 2];
+                if (prev.value <= last.value)
+                {
+                    break;
+                }
+
+                float const combinedWeight = prev.weight + last.weight;
+                float const combinedValue =
+                  (prev.value * prev.weight + last.value * last.weight) / combinedWeight;
+                prev.end = last.end;
+                prev.weight = combinedWeight;
+                prev.value = combinedValue;
+                blockStack.pop_back();
+            }
+        }
+
+        std::vector<float> monotoneValues(count);
+        for (auto const & block : blockStack)
+        {
+            for (size_t idx = block.start; idx <= block.end; ++idx)
+            {
+                monotoneValues[idx] = block.value;
+            }
+        }
+
+        float totalMovement = 0.0f;
+        for (size_t i = 0; i < count; ++i)
+        {
+            float const topPosition = monotoneValues[i] + offsets[i];
+            float const newCenter = topPosition + halfHeights[i];
+            totalMovement += std::abs(newCenter - originalCenters[i]);
+            layerEntities[i]->position.y = topPosition;
+        }
+
+        return totalMovement;
     }
 
     template <typename T>
@@ -1055,14 +1321,23 @@ namespace gladius::ui
         }
     }
 
+    ImVec2 NodeLayoutEngine::resolveNodeSize(nodes::NodeBase & node) const
+    {
+        if (m_nodeSizeProvider)
+        {
+            auto size = m_nodeSizeProvider(node.getId());
+            if (size.x > 0.0f && size.y > 0.0f)
+            {
+                return size;
+            }
+        }
+
+        return ImVec2(500.0f, 400.0f);
+    }
+
     ImVec2 NodeLayoutEngine::calculateEntitySize(NodeEntity & entity)
     {
-        auto nodeSize = ed::GetNodeSize(entity.item->getId());
-        if (nodeSize.x <= 0.0f)
-            nodeSize.x = 500.0f; // Default width
-        if (nodeSize.y <= 0.0f)
-            nodeSize.y = 400.0f; // Default height
-        return nodeSize;
+        return resolveNodeSize(*entity.item);
     }
 
     ImVec2 NodeLayoutEngine::calculateGroupSize(const GroupInfo & groupInfo)
@@ -1080,11 +1355,7 @@ namespace gladius::ui
         for (auto * node : groupInfo.nodes)
         {
             auto pos = node->screenPos();
-            auto size = ed::GetNodeSize(node->getId());
-            if (size.x <= 0.0f)
-                size.x = 500.0f;
-            if (size.y <= 0.0f)
-                size.y = 400.0f;
+            auto size = resolveNodeSize(*node);
 
             minX = std::min(minX, pos.x);
             minY = std::min(minY, pos.y);
@@ -1110,11 +1381,7 @@ namespace gladius::ui
         for (auto * node : groupInfo.nodes)
         {
             auto pos = node->screenPos();
-            auto size = ed::GetNodeSize(node->getId());
-            if (size.x <= 0.0f)
-                size.x = 500.0f;
-            if (size.y <= 0.0f)
-                size.y = 400.0f;
+            auto size = resolveNodeSize(*node);
 
             minX = std::min(minX, pos.x);
             minY = std::min(minY, pos.y);

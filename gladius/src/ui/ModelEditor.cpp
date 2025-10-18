@@ -1790,6 +1790,33 @@ namespace gladius::ui
         config.layerSpacing = m_nodeDistance * 1.5f;
         config.groupPadding = m_nodeDistance * 0.5f;
 
+        layoutEngine.setNodeSizeProvider([](nodes::NodeId nodeId) {
+            auto constexpr fallback = ImVec2(500.0F, 400.0F);
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return fallback;
+            }
+
+            auto size = ed::GetNodeSize(nodeId);
+            if (size.x <= 0.0f || size.y <= 0.0f)
+            {
+                return fallback;
+            }
+
+            return size;
+        });
+
+        layoutEngine.setNodePositionWriter([](nodes::NodeId nodeId, ImVec2 const & position) {
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return;
+            }
+
+            ed::SetNodePosition(nodeId, position);
+        });
+
         layoutEngine.performAutoLayout(*currentModel(), config);
 
         m_nodePositionsNeedUpdate = true;

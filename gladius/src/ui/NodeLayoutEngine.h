@@ -3,6 +3,7 @@
 #include "nodes/Model.h"
 #include "nodes/NodeBase.h"
 #include "nodes/graph/GraphAlgorithms.h"
+#include <functional>
 #include <imgui.h>
 #include <map>
 #include <string>
@@ -128,6 +129,12 @@ namespace gladius::ui
          */
         void performAutoLayout(nodes::Model & model, const LayoutConfig & config);
 
+        using NodeSizeProvider = std::function<ImVec2(nodes::NodeId)>;
+        using NodePositionWriter = std::function<void(nodes::NodeId, ImVec2 const &)>;
+
+        void setNodeSizeProvider(NodeSizeProvider provider);
+        void setNodePositionWriter(NodePositionWriter writer);
+
         /**
          * @brief Generic layered layout algorithm
          *
@@ -139,9 +146,10 @@ namespace gladius::ui
          * @param config Layout configuration
          */
         template <typename T>
-        void performLayeredLayout(std::vector<LayoutEntity<T>> & entities,
-                                  const LayoutConfig & config,
-                                  const std::vector<Rect> & occupiedRects = {});
+    void performLayeredLayout(std::vector<LayoutEntity<T>> & entities,
+                  const LayoutConfig & config,
+                  const std::vector<Rect> & occupiedRects = {},
+                  const nodes::graph::IDirectedGraph * graph = nullptr);
 
         /**
          * @brief Check if a node is a constant node (ConstantScalar, ConstantVector,
@@ -174,7 +182,8 @@ namespace gladius::ui
         void layoutUngroupedNodes(const std::vector<nodes::NodeBase *> & ungroupedNodes,
                                   const std::unordered_map<nodes::NodeId, int> & depthMap,
                                   const LayoutConfig & config,
-                                  const std::vector<Rect> & occupiedRects = {});
+                                  const std::vector<Rect> & occupiedRects = {},
+                                  const nodes::graph::IDirectedGraph * graph = nullptr);
 
         /**
          * @brief Layout nodes within a specific group
@@ -186,7 +195,8 @@ namespace gladius::ui
         void layoutNodesInGroup(GroupInfo & groupInfo,
                                 const std::unordered_map<nodes::NodeId, int> & depthMap,
                                 const LayoutConfig & config,
-                                const std::vector<Rect> & occupiedRects = {});
+                                const std::vector<Rect> & occupiedRects = {},
+                                const nodes::graph::IDirectedGraph * graph = nullptr);
 
         /**
          * @brief Layout groups themselves to avoid overlaps
@@ -233,7 +243,8 @@ namespace gladius::ui
          */
         template <typename T>
         std::map<int, std::vector<LayoutEntity<T> *>>
-        arrangeInLayers(std::vector<LayoutEntity<T>> & entities);
+    arrangeInLayers(std::vector<LayoutEntity<T>> & entities,
+            const nodes::graph::IDirectedGraph * graph = nullptr);
 
         /**
          * @brief Optimize positions within layers to minimize edge crossings
@@ -256,11 +267,11 @@ namespace gladius::ui
          * @param config Layout configuration
          */
         template <typename T>
-        void optimizeLayerByConnectionOrder(
-          std::vector<LayoutEntity<T> *> & layerEntities,
-          const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
-          int currentDepth,
-          const LayoutConfig & config);
+                float optimizeLayerByConnectionOrder(
+                    std::vector<LayoutEntity<T> *> & layerEntities,
+                    const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
+                    int currentDepth,
+                    const LayoutConfig & config);
 
         /**
          * @brief Calculate average Y position of connected nodes
@@ -278,6 +289,15 @@ namespace gladius::ui
                                    const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
                                    int currentDepth,
                                    const LayoutConfig & config);
+
+    /**
+     * @brief Iteratively relax positions within a layer to minimize edge lengths.
+     */
+    template <typename T>
+    float relaxLayerPositions(std::vector<LayoutEntity<T> *> & layerEntities,
+                  const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
+                  int currentDepth,
+                  const LayoutConfig & config);
 
         /**
          * @brief Check if two nodes are connected via ports
@@ -390,6 +410,11 @@ namespace gladius::ui
          */
         template <typename T>
         void resolveLayerOverlaps(std::vector<OptimizationUnit<T>> & units,
-                                  const LayoutConfig & config);
+                      const LayoutConfig & config);
+
+        ImVec2 resolveNodeSize(nodes::NodeBase & node) const;
+
+        NodeSizeProvider m_nodeSizeProvider{};
+        NodePositionWriter m_nodePositionWriter{};
     };
 }
