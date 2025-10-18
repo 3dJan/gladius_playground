@@ -9,6 +9,7 @@
 #include <tuple>
 
 #include <filesystem>
+#include <iostream>
 #include <map>
 
 #include "ComputeContext.h"
@@ -120,6 +121,63 @@ namespace gladius::ui::tests
 
 namespace
 {
+    void printMetrics(std::string const & label, LayoutQualityAnalyzer::Metrics const & metrics)
+    {
+        auto const previousFlags = std::cout.flags();
+        auto const previousPrecision = std::cout.precision();
+
+        std::cout.setf(std::ios::fixed, std::ios::floatfield);
+        std::cout.precision(3);
+
+        std::cout << "[LayoutMetrics] " << label << ": "
+                  << "width=" << metrics.width << ", height=" << metrics.height
+                  << ", occupiedArea=" << metrics.occupiedArea
+                  << ", sumEdgeLength=" << metrics.sumEdgeLength
+                  << ", maxEdgeLength=" << metrics.maxEdgeLength
+                  << ", edgeCount=" << metrics.edgeCount
+                  << ", edgeCrossings=" << metrics.edgeCrossings << std::endl;
+
+        if (!metrics.groupMetrics.empty())
+        {
+            std::cout << "  Groups (" << metrics.groupMetrics.size() << "):" << std::endl;
+            for (auto const & [groupName, groupMetrics] : metrics.groupMetrics)
+            {
+                std::cout << "    [" << groupName << "] width=" << groupMetrics.width
+                          << ", height=" << groupMetrics.height
+                          << ", occupiedArea=" << groupMetrics.occupiedArea
+                          << ", sumEdgeLength=" << groupMetrics.sumEdgeLength
+                          << ", maxEdgeLength=" << groupMetrics.maxEdgeLength
+                          << ", edgeCount=" << groupMetrics.edgeCount
+                          << ", edgeCrossings=" << groupMetrics.edgeCrossings
+                          << ", nodeCount=" << groupMetrics.nodeCount << std::endl;
+            }
+        }
+
+        if (!metrics.nodeOverlaps.empty())
+        {
+            std::cout << "  Node overlaps (" << metrics.nodeOverlaps.size() << "):";
+            for (auto const & overlap : metrics.nodeOverlaps)
+            {
+                std::cout << " (" << overlap.first << "," << overlap.second << ")";
+            }
+            std::cout << std::endl;
+        }
+
+        if (!metrics.groupOverlaps.empty())
+        {
+            std::cout << "  Group overlaps (" << metrics.groupOverlaps.size() << "):";
+            for (auto const & overlap : metrics.groupOverlaps)
+            {
+                std::cout << " (" << overlap.first << "," << overlap.second << ")";
+            }
+            std::cout << std::endl;
+        }
+
+        std::cout.flags(previousFlags);
+        std::cout.precision(previousPrecision);
+        std::cout << std::flush;
+    }
+
     void createRegressionGraph(nodes::Model & model)
     {
         auto constA = model.create<nodes::ConstantScalar>();
@@ -175,6 +233,8 @@ namespace
 
         LayoutQualityAnalyzer analyzer([](nodes::NodeId) { return ImVec2(200.0F, 140.0F); });
         auto const metrics = analyzer.analyze(*model);
+
+        printMetrics("RegressionGraph", metrics);
 
         ASSERT_FALSE(metrics.groupMetrics.empty());
 
@@ -248,6 +308,8 @@ namespace
             engine->performAutoLayout(*functionModel, config);
             auto metrics = analyzer.analyze(*functionModel);
             auto name = ensureModelName(*functionModel, resourceId);
+
+            printMetrics(name, metrics);
 
             metricsByModel.insert_or_assign(std::move(name), std::move(metrics));
         }
