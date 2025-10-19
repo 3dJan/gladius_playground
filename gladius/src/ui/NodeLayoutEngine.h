@@ -1,11 +1,15 @@
 #pragma once
 
+#include "ui/LayoutQualityAnalyzer.h"
+
 #include "nodes/Model.h"
 #include "nodes/NodeBase.h"
 #include "nodes/graph/GraphAlgorithms.h"
 #include <functional>
 #include <imgui.h>
+#include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,7 +24,6 @@ namespace gladius::ui
      * - Groups don't overlap with other groups
      * - Ungrouped nodes stay outside group boundaries
      * - Topological ordering is maintained
-     * - Constant nodes are placed close to their connected nodes
      * - Consistent structure with nodes arranged in dependency-based layers
      */
     class NodeLayoutEngine
@@ -31,12 +34,12 @@ namespace gladius::ui
          */
         struct LayoutConfig
         {
-            float nodeDistance = 200.0f;         ///< Basic distance between nodes
+            float nodeDistance = 50.0f;          ///< Basic distance between nodes
             float layerSpacing = 500.0f;         ///< Distance between layers
             float groupPadding = 200.0f;         ///< Padding around groups
-            float constantNodeOffset = 80.0f;    ///< Offset for constant nodes from their targets
             int maxOptimizationIterations = 100; ///< Max iterations for position optimization
             float convergenceThreshold = 5.0f;   ///< Threshold for optimization convergence
+            bool useMedianForOrdering = true;    ///< If true, use median (barycentric) Y for ordering instead of mean
         };
 
         /**
@@ -121,7 +124,6 @@ namespace gladius::ui
          * - Grouped vs ungrouped nodes
          * - Topological ordering
          * - Group boundaries and spacing
-         * - Constant node optimal positioning
          * - Overlap resolution
          *
          * @param model The node model to layout
@@ -134,6 +136,40 @@ namespace gladius::ui
 
         void setNodeSizeProvider(NodeSizeProvider provider);
         void setNodePositionWriter(NodePositionWriter writer);
+
+        enum class GroupLayoutMode
+        {
+            VerticalStack,
+            HorizontalRow,
+            BalancedGrid
+        };
+
+        struct LayoutStrategy
+        {
+            std::string name{};
+            GroupLayoutMode groupMode{GroupLayoutMode::VerticalStack};
+            float nodeDistanceScale{1.0F};
+            float layerSpacingScale{1.0F};
+            int maxOptimizationIterations{-1};
+            float convergenceScale{1.0F};
+            bool enableExtraRelaxation{false};
+            int extraRelaxationPasses{0};
+            bool enableGroupCompaction{false};
+            bool alignToOrigin{true};
+        };
+
+        struct StrategyResult
+        {
+            std::string name{};
+            LayoutQualityAnalyzer::Metrics metrics{};
+            float score{0.0F};
+            bool applied{false};
+        };
+
+        void setStrategies(std::vector<LayoutStrategy> strategies);
+        void clearCustomStrategies();
+        std::vector<StrategyResult> const & getLastResults() const;
+        std::optional<StrategyResult> const & getLastChampion() const;
 
         /**
          * @brief Generic layered layout algorithm
@@ -150,15 +186,6 @@ namespace gladius::ui
                   const LayoutConfig & config,
                   const std::vector<Rect> & occupiedRects = {},
                   const nodes::graph::IDirectedGraph * graph = nullptr);
-
-        /**
-         * @brief Check if a node is a constant node (ConstantScalar, ConstantVector,
-         * ConstantMatrix)
-         *
-         * @param node Node to check
-         * @return true if the node is a constant node
-         */
-        bool isConstantNode(nodes::NodeBase * node) const;
 
       private:
         /**
@@ -204,7 +231,37 @@ namespace gladius::ui
          * @param groups Vector of group information
          * @param config Layout configuration
          */
-        void layoutGroups(std::vector<GroupInfo> & groups, const LayoutConfig & config);
+        void layoutGroups(std::vector<GroupInfo> & groups,
+                          const LayoutConfig & config,
+                          GroupLayoutMode mode);
+
+        void layoutGroupsStacked(std::vector<GroupInfo> & groups, const LayoutConfig & config);
+        void layoutGroupsRowAligned(std::vector<GroupInfo> & groups, const LayoutConfig & config);
+        void layoutGroupsBalancedGrid(std::vector<GroupInfo> & groups, const LayoutConfig & config);
+
+        using PositionSnapshot = std::unordered_map<nodes::NodeId, nodes::float2>;
+
+        PositionSnapshot capturePositions(nodes::Model & model);
+        void restorePositions(nodes::Model & model,
+                      const PositionSnapshot & snapshot,
+                      bool notifyWriter);
+
+        bool performAutoLayoutVariant(nodes::Model & model,
+                          const LayoutConfig & config,
+                          GroupLayoutMode mode);
+
+        float computeLayoutScore(const gladius::ui::LayoutQualityAnalyzer::Metrics & metrics) const;
+        void applyPostProcessing(nodes::Model & model,
+                     const LayoutConfig & config,
+                     const LayoutStrategy & strategy);
+        void balanceLayers(nodes::Model & model,
+                   const std::unordered_map<nodes::NodeId, int> & depthMap,
+                   const LayoutConfig & config,
+                   int passes);
+        void compactLayersHorizontally(nodes::Model & model,
+                           const std::unordered_map<nodes::NodeId, int> & depthMap,
+                           const LayoutConfig & config);
+        void shiftLayoutToOrigin(nodes::Model & model);
 
         /**
          * @brief Helper to determine node topological depth from dependencies
@@ -215,24 +272,6 @@ namespace gladius::ui
          */
         std::unordered_map<nodes::NodeId, int>
         determineDepth(const nodes::graph::IDirectedGraph & graph, nodes::NodeId beginId);
-
-        /**
-         * @brief Correct depth for constant nodes with depth 0 (excluding begin node)
-         *
-         * Constant nodes that have depth 0 are placed in the same layer as the begin node.
-         * This method corrects their depth by setting it to the minimum depth of their
-         * connected/consuming nodes minus 1, placing them in the layer just before
-         * their consumers.
-         *
-         * @param model The node model
-         * @param graph The dependency graph
-         * @param depthMap The depth map to modify
-         * @param beginId The begin node ID (excluded from correction)
-         */
-        void correctConstantNodeDepths(nodes::Model & model,
-                                       const nodes::graph::IDirectedGraph & graph,
-                                       std::unordered_map<nodes::NodeId, int> & depthMap,
-                                       nodes::NodeId beginId);
 
         /**
          * @brief Arrange entities into layers by depth
@@ -290,6 +329,20 @@ namespace gladius::ui
                                    int currentDepth,
                                    const LayoutConfig & config);
 
+        template <typename T>
+        float
+        calculateMedianConnectedY(LayoutEntity<T> * entity,
+                       const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
+                       int currentDepth,
+                       const LayoutConfig & config);
+
+        template <typename T>
+        float
+        calculateWeightedMedianConnectedY(LayoutEntity<T> * entity,
+                       const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
+                       int currentDepth,
+                       const LayoutConfig & config);
+
     /**
      * @brief Iteratively relax positions within a layer to minimize edge lengths.
      */
@@ -298,6 +351,13 @@ namespace gladius::ui
                   const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
                   int currentDepth,
                   const LayoutConfig & config);
+
+                template <typename T>
+                void transposeReduceCrossings(
+                    std::vector<LayoutEntity<T> *> & layerEntities,
+                    const std::map<int, std::vector<LayoutEntity<T> *>> & allLayers,
+                    int currentDepth,
+                    const LayoutConfig & config);
 
         /**
          * @brief Check if two nodes are connected via ports
@@ -416,5 +476,9 @@ namespace gladius::ui
 
         NodeSizeProvider m_nodeSizeProvider{};
         NodePositionWriter m_nodePositionWriter{};
+        std::vector<LayoutStrategy> m_customStrategies{};
+        bool m_useCustomStrategies{false};
+        std::vector<StrategyResult> m_lastResults{};
+        std::optional<StrategyResult> m_lastChampion{};
     };
 }

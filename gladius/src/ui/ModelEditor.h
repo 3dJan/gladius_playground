@@ -4,12 +4,14 @@
 #include "../nodes/History.h"
 #include "ExpressionDialog.h"
 #include "LibraryBrowser.h"
+#include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
 
 #include <filesystem>
 #include <string>
 #include <typeindex>
+#include <vector>
 
 #include "Outline.h"
 #include "ResourceView.h"
@@ -181,7 +183,7 @@ namespace gladius::ui
         ImVec2 m_lastPasteCanvasPos{0.f, 0.f};
         int m_consecutivePasteCount{0};
         float m_pasteOffsetStep{20.f};
-        float m_nodeDistance = 50.f;
+        float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
         float m_scale = 0.5f;
         bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};
@@ -198,6 +200,30 @@ namespace gladius::ui
 
         FunctionType m_selectedFunctionType{FunctionType::Empty};
         int m_selectedSourceFunctionIndex{0};
+
+        enum class LayoutStrategyChoice
+        {
+            Auto = 0,
+            OptimizedLayeredMedian,
+            BalancedGridCompact,
+            MedianSweepTightY,
+            LayeredStackClassic,
+            LayeredRowSweep,
+            ForceRefinedHybrid
+        };
+
+        struct LayoutStrategyDescriptor
+        {
+            LayoutStrategyChoice choice;
+            const char * displayName;
+        };
+
+        [[nodiscard]] static std::vector<LayoutStrategyDescriptor> layoutStrategyDescriptors();
+        [[nodiscard]] static NodeLayoutEngine::LayoutStrategy
+        makeLayoutStrategy(LayoutStrategyChoice choice);
+        [[nodiscard]] static const char * layoutStrategyLabel(LayoutStrategyChoice choice);
+
+        LayoutStrategyChoice m_selectedLayoutStrategy{LayoutStrategyChoice::Auto};
 
         nodes::SharedAssembly m_assembly;
         nodes::SharedModel m_currentModel;

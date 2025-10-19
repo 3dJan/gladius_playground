@@ -355,6 +355,9 @@ namespace gladius::ui
             }
             m_parameterChanged = true;
         }
+
+        ImGui::TextUnformatted(fmt::format(" (Order: {})", baseNode.getOrder()).c_str());
+
         ImGui::PopItemWidth();
 
         ImGui::Indent(20.f * m_uiScale);
