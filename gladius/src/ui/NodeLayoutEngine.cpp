@@ -859,10 +859,18 @@ namespace gladius::ui
             {
                 if (depthMap.find(id) == depthMap.end())
                 {
-                    // Node not connected to output, use forward depth from begin
-                    // Place these near the beginning (inputs) of the layout
                     depthMap[id] = fallbackDepth;
                 }
+            }
+        }
+        
+        // For any remaining nodes not in either depth map (truly disconnected), assign default depth
+        // This ensures all nodes get laid out even if they're not connected
+        for (auto & [id, node] : model)
+        {
+            if (depthMap.find(id) == depthMap.end())
+            {
+                depthMap[id] = 0;
             }
         }
         
@@ -1031,6 +1039,15 @@ namespace gladius::ui
                     }
                 }
                 
+                // For any remaining disconnected nodes, assign default depth
+                for (auto & [id, node] : model)
+                {
+                    if (depthMap.find(id) == depthMap.end())
+                    {
+                        depthMap[id] = 0;
+                    }
+                }
+                
                 // Invert depth values so that inputs have low depth (left) and output has high depth (right)
                 int maxDepth = 0;
                 for (const auto & [id, depth] : depthMap)
@@ -1067,6 +1084,7 @@ namespace gladius::ui
     {
         if (passes <= 0 || depthMap.empty())
         {
+            std::cout << "[balanceLayers] Skipped: passes=" << passes << " depthMap.size()=" << depthMap.size() << std::endl;
             return;
         }
 
@@ -1079,12 +1097,35 @@ namespace gladius::ui
             }
 
             auto const depthIter = depthMap.find(id);
-            int const depth = (depthIter != depthMap.end()) ? depthIter->second : 0;
+            if (depthIter == depthMap.end())
+            {
+                // This should no longer happen since we assign depth to all nodes
+                continue;
+            }
+            int const depth = depthIter->second;
             layers[depth].push_back(node.get());
         }
 
         for (int pass = 0; pass < passes; ++pass)
         {
+            // First pass: compute global vertical center to anchor the layout
+            float globalMinY = std::numeric_limits<float>::max();
+            float globalMaxY = -std::numeric_limits<float>::max();
+            
+            for (auto & [depth, layerNodes] : layers)
+            {
+                for (auto * node : layerNodes)
+                {
+                    ImVec2 const size = resolveNodeSize(*node);
+                    float const nodeY = node->screenPos().y;
+                    globalMinY = std::min(globalMinY, nodeY);
+                    globalMaxY = std::max(globalMaxY, nodeY + size.y);
+                }
+            }
+            
+            float const globalCenter = (globalMinY + globalMaxY) * 0.5F;
+            
+            // Second pass: re-center each layer around the global center
             for (auto & [depth, layerNodes] : layers)
             {
                 if (layerNodes.empty())
@@ -1100,14 +1141,12 @@ namespace gladius::ui
                 std::vector<float> heights;
                 heights.reserve(layerNodes.size());
                 float totalHeight = -config.nodeDistance;
-                float centerSum = 0.0F;
 
                 for (auto * node : layerNodes)
                 {
                     ImVec2 const size = resolveNodeSize(*node);
                     heights.push_back(size.y);
                     totalHeight += size.y + config.nodeDistance;
-                    centerSum += node->screenPos().y + size.y * 0.5F;
                 }
 
                 if (layerNodes.size() == 1U)
@@ -1117,8 +1156,8 @@ namespace gladius::ui
 
                 totalHeight = std::max(totalHeight, 0.0F);
 
-                float const layerCenter = centerSum / static_cast<float>(layerNodes.size());
-                float const startY = layerCenter - totalHeight * 0.5F;
+                // Center this layer's content around the global center
+                float const startY = globalCenter - totalHeight * 0.5F;
                 float currentY = startY;
 
                 for (size_t index = 0U; index < layerNodes.size(); ++index)
@@ -1158,7 +1197,12 @@ namespace gladius::ui
             }
 
             auto const depthIter = depthMap.find(id);
-            int const depth = (depthIter != depthMap.end()) ? depthIter->second : 0;
+            if (depthIter == depthMap.end())
+            {
+                // Skip nodes that don't have a depth assigned - they're not part of the layout
+                continue;
+            }
+            int const depth = depthIter->second;
             layers[depth].push_back(node.get());
         }
 
