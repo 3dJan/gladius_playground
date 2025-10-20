@@ -340,9 +340,12 @@ namespace gladius::ui
         // Step 2: Calculate layer X positions
         // Ensure layerSpacing is measured from the rightmost edge of each layer
         // to guarantee no overlaps even if nodes have varying widths
+        // Note: Depths are inverted so that inputs (low depth) are on left, outputs (high depth) on right
         std::map<int, float> layerXPositions;
         std::map<int, float> layerMaxRightEdge; // Track rightmost extent of each layer
         float currentX = 0.0f;
+        
+        // Iterate layers in normal depth order (low depth = inputs on left, high depth = outputs on right)
         for (auto & [depth, layerEntities] : layers)
         {
             layerXPositions[depth] = currentX;
@@ -827,8 +830,9 @@ namespace gladius::ui
                                                     const LayoutConfig & config,
                                                     GroupLayoutMode mode)
     {
-        auto * beginNode = model.getBeginNode();
-        if (!beginNode)
+        // Since depth is now measured backward from output, we start from the end node
+        auto * endNode = model.getEndNode();
+        if (!endNode)
         {
             return false;
         }
@@ -839,8 +843,41 @@ namespace gladius::ui
             return false;
         }
 
-        auto const beginId = beginNode->getId();
-        auto depthMap = determineDepth(graph, beginId);
+        auto const endId = endNode->getId();
+        auto depthMap = determineDepth(graph, endId);
+        
+        // For nodes not connected to the output (e.g., unused nodes), compute depth from begin node
+        // This provides a fallback depth so they don't break the layout
+        auto * beginNode = model.getBeginNode();
+        if (beginNode)
+        {
+            auto const beginId = beginNode->getId();
+            auto fallbackDepthMap = determineDepth(graph, beginId);
+            
+            // Add any nodes not in the main depth map
+            for (const auto & [id, fallbackDepth] : fallbackDepthMap)
+            {
+                if (depthMap.find(id) == depthMap.end())
+                {
+                    // Node not connected to output, use forward depth from begin
+                    // Place these near the beginning (inputs) of the layout
+                    depthMap[id] = fallbackDepth;
+                }
+            }
+        }
+        
+        // Invert depth values so that inputs have low depth (left) and output has high depth (right)
+        // Find max depth first
+        int maxDepth = 0;
+        for (const auto & [id, depth] : depthMap)
+        {
+            maxDepth = std::max(maxDepth, depth);
+        }
+        // Invert all depths
+        for (auto & [id, depth] : depthMap)
+        {
+            depth = maxDepth - depth;
+        }
 
         std::vector<nodes::NodeBase *> ungroupedNodesPreFilter;
         ungroupedNodesPreFilter.reserve(model.getSize());
@@ -971,10 +1008,39 @@ namespace gladius::ui
 
         if (requiresDepth)
         {
-            auto * beginNode = model.getBeginNode();
-            if (beginNode != nullptr)
+            // Since depth is now measured backward from output, we start from the end node
+            auto * endNode = model.getEndNode();
+            if (endNode != nullptr)
             {
-                depthMap = determineDepth(model.getGraph(), beginNode->getId());
+                depthMap = determineDepth(model.getGraph(), endNode->getId());
+                
+                // For nodes not connected to the output (e.g., unused nodes), compute depth from begin node
+                auto * beginNode = model.getBeginNode();
+                if (beginNode != nullptr)
+                {
+                    auto const beginId = beginNode->getId();
+                    auto fallbackDepthMap = determineDepth(model.getGraph(), beginId);
+                    
+                    // Add any nodes not in the main depth map
+                    for (const auto & [id, fallbackDepth] : fallbackDepthMap)
+                    {
+                        if (depthMap.find(id) == depthMap.end())
+                        {
+                            depthMap[id] = fallbackDepth;
+                        }
+                    }
+                }
+                
+                // Invert depth values so that inputs have low depth (left) and output has high depth (right)
+                int maxDepth = 0;
+                for (const auto & [id, depth] : depthMap)
+                {
+                    maxDepth = std::max(maxDepth, depth);
+                }
+                for (auto & [id, depth] : depthMap)
+                {
+                    depth = maxDepth - depth;
+                }
             }
         }
 
@@ -1505,8 +1571,10 @@ namespace gladius::ui
         }
 
         // Build neighbor rank maps once per call
-        auto prevRank = buildRankMap<T>(allLayers, currentDepth - 1);
-        auto nextRank = buildRankMap<T>(allLayers, currentDepth + 1);
+        // Note: Depths are inverted so inputs have low depth, outputs have high depth
+        // Previous layer (dependencies/inputs) has lower depth, next layer (dependents/outputs) has higher depth
+        auto prevRank = buildRankMap<T>(allLayers, currentDepth - 1);  // dependencies (inputs, left)
+        auto nextRank = buildRankMap<T>(allLayers, currentDepth + 1);  // dependents (outputs, right)
 
         // Start from current vertical order by position.y (top to bottom)
         std::sort(layerEntities.begin(),
