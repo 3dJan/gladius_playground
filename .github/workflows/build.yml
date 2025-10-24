@@ -112,15 +112,22 @@ jobs:
       shell: pwsh
       run: |
         Invoke-WebRequest -Uri "https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-windows.zip" -OutFile "buildcache.zip"
-        Expand-Archive -Path "buildcache.zip" -DestinationPath "buildcache"
-        Move-Item -Path "buildcache\bin\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe"
+        Expand-Archive -Path "buildcache.zip" -DestinationPath "buildcache" -Force
+        Get-ChildItem -Path "buildcache" -Recurse
+        Copy-Item -Path "buildcache\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe" -Force
         buildcache --version
 
     - name: Get buildcache directory
       id: buildcache-dir
       shell: bash
       run: |
-        CACHE_DIR=$(buildcache -s | grep "Cache directory:" | awk '{print $3}')
+        # Initialize buildcache if needed and get cache directory
+        buildcache -s || true
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          CACHE_DIR="$LOCALAPPDATA/buildcache"
+        else
+          CACHE_DIR="$HOME/.buildcache"
+        fi
         echo "dir=$CACHE_DIR" >> "$GITHUB_OUTPUT"
         echo "Buildcache directory: $CACHE_DIR"
 
