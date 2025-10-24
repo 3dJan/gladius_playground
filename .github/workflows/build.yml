@@ -12,9 +12,15 @@ on:
   workflow_dispatch:
   workflow_call:  # Allow this workflow to be called by other workflows
 
+permissions:
+  packages: write  # Required for vcpkg binary caching with GitHub Packages
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    
+    env:
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/3dJan/index.json,readwrite"
 
     strategy:
       # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
@@ -88,6 +94,36 @@ jobs:
       if: runner.os == 'Windows'
       run: ./bootstrap-vcpkg.bat
       working-directory: ${{ github.workspace }}/vcpkg
+
+    - name: Setup NuGet authentication for vcpkg binary caching (Linux)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        mono `${{ github.workspace }}/vcpkg/vcpkg fetch nuget | tail -n 1` \
+          sources add \
+          -Source "https://nuget.pkg.github.com/3dJan/index.json" \
+          -StorePasswordInClearText \
+          -Name GitHubPackages \
+          -UserName "3dJan" \
+          -Password "${{ secrets.GITHUB_TOKEN }}"
+        mono `${{ github.workspace }}/vcpkg/vcpkg fetch nuget | tail -n 1` \
+          setapikey "${{ secrets.GITHUB_TOKEN }}" \
+          -Source "https://nuget.pkg.github.com/3dJan/index.json"
+
+    - name: Setup NuGet authentication for vcpkg binary caching (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & "$(${{ github.workspace }}/vcpkg/vcpkg fetch nuget)" `
+          sources add `
+          -Source "https://nuget.pkg.github.com/3dJan/index.json" `
+          -StorePasswordInClearText `
+          -Name GitHubPackages `
+          -UserName "3dJan" `
+          -Password "${{ secrets.GITHUB_TOKEN }}"
+        & "$(${{ github.workspace }}/vcpkg/vcpkg fetch nuget)" `
+          setapikey "${{ secrets.GITHUB_TOKEN }}" `
+          -Source "https://nuget.pkg.github.com/3dJan/index.json"
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
