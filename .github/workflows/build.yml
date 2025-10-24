@@ -117,24 +117,20 @@ jobs:
         Copy-Item -Path "buildcache\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe" -Force
         buildcache --version
 
-    - name: Get buildcache directory
-      id: buildcache-dir
-      shell: bash
-      run: |
-        # Initialize buildcache if needed and get cache directory
-        buildcache -s || true
-        if [ "$RUNNER_OS" == "Windows" ]; then
-          CACHE_DIR="$LOCALAPPDATA/buildcache"
-        else
-          CACHE_DIR="$HOME/.buildcache"
-        fi
-        echo "dir=$CACHE_DIR" >> "$GITHUB_OUTPUT"
-        echo "Buildcache directory: $CACHE_DIR"
-
-    - name: Cache buildcache
+    - name: Cache buildcache (Linux)
+      if: runner.os != 'Windows'
       uses: actions/cache@v4
       with:
-        path: ${{ steps.buildcache-dir.outputs.dir }}
+        path: ~/.buildcache
+        key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
+        restore-keys: |
+          buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-
+
+    - name: Cache buildcache (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\buildcache
         key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
         restore-keys: |
           buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-
