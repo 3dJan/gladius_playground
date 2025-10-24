@@ -95,6 +95,10 @@ jobs:
       run: ./bootstrap-vcpkg.bat
       working-directory: ${{ github.workspace }}/vcpkg
 
+    - name: Install mono for NuGet (Linux)
+      if: runner.os != 'Windows'
+      run: sudo apt-get install -y mono-complete
+
     - name: Setup NuGet authentication for vcpkg binary caching (Linux)
       if: runner.os != 'Windows'
       shell: bash
