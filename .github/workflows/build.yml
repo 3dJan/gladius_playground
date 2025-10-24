@@ -99,6 +99,36 @@ jobs:
       if: runner.os != 'Windows'
       run: sudo apt-get install -y mono-complete
 
+    - name: Install buildcache (Linux)
+      if: runner.os != 'Windows'
+      run: |
+        wget https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-linux.tar.gz
+        tar -xzf buildcache-linux.tar.gz
+        sudo cp buildcache/bin/buildcache /usr/local/bin/
+        buildcache --version
+
+    - name: Install buildcache (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        choco install buildcache -y
+        buildcache --version
+
+    - name: Get buildcache directory
+      id: buildcache-dir
+      shell: bash
+      run: |
+        CACHE_DIR=$(buildcache -s | grep "Cache directory:" | awk '{print $3}')
+        echo "dir=$CACHE_DIR" >> "$GITHUB_OUTPUT"
+        echo "Buildcache directory: $CACHE_DIR"
+
+    - name: Cache buildcache
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.buildcache-dir.outputs.dir }}
+        key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
+        restore-keys: |
+          buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-
+
     - name: Setup NuGet authentication for vcpkg binary caching (Linux)
       if: runner.os != 'Windows'
       shell: bash
@@ -144,6 +174,7 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DUSE_CACHE=ON
         -G Ninja
         -S ${{ github.workspace }}/gladius
       env:
