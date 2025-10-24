@@ -113,8 +113,7 @@ jobs:
       run: |
         Invoke-WebRequest -Uri "https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-windows.zip" -OutFile "buildcache.zip"
         Expand-Archive -Path "buildcache.zip" -DestinationPath "buildcache" -Force
-        Get-ChildItem -Path "buildcache" -Recurse
-        Copy-Item -Path "buildcache\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe" -Force
+        Copy-Item -Path "buildcache\buildcache\bin\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe" -Force
         buildcache --version
 
     - name: Cache buildcache (Linux)
