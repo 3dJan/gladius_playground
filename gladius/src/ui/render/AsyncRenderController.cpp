@@ -73,7 +73,7 @@ namespace gladius::ui::async_rendering
     };
 
     AsyncRenderFeatureConfig
-      loadAsyncRenderFeatureConfig(gladius::ConfigManager const * configManager)
+    loadAsyncRenderFeatureConfig(gladius::ConfigManager const * configManager)
     {
         AsyncRenderFeatureConfig config{};
         if (configManager == nullptr)
@@ -81,18 +81,18 @@ namespace gladius::ui::async_rendering
             return config;
         }
 
-        config.enabled = configManager->getValue<bool>(SECTION, ENABLED_KEY, AsyncDefaults::kEnabled);
-        config.implementation = configManager->getValue<std::string>(SECTION,
-                                                                     IMPLEMENTATION_KEY,
-                                                                     AsyncDefaults::kImplementation);
-        config.bufferingMode = configManager->getValue<std::string>(SECTION,
-                                                                    BUFFERING_KEY,
-                                                                    AsyncDefaults::kBufferingMode);
+        config.enabled =
+          configManager->getValue<bool>(SECTION, ENABLED_KEY, AsyncDefaults::kEnabled);
+        config.implementation = configManager->getValue<std::string>(
+          SECTION, IMPLEMENTATION_KEY, AsyncDefaults::kImplementation);
+        config.bufferingMode = configManager->getValue<std::string>(
+          SECTION, BUFFERING_KEY, AsyncDefaults::kBufferingMode);
         return config;
     }
 
     AsyncRenderController::AsyncRenderController()
-        : AsyncRenderController(coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2}))
+        : AsyncRenderController(
+            coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2}))
     {
     }
 
@@ -100,7 +100,8 @@ namespace gladius::ui::async_rendering
     {
         if (workerPool == nullptr)
         {
-            workerPool = coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2});
+            workerPool =
+              coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2});
         }
 
         m_state = std::make_shared<ControllerState>(std::move(workerPool));
@@ -119,7 +120,7 @@ namespace gladius::ui::async_rendering
     {
         ProfileFunction
 
-        if (!m_state)
+          if (!m_state)
         {
             DebugText("NoState", 7);
             return;
@@ -171,7 +172,8 @@ namespace gladius::ui::async_rendering
         coro::sync_wait(m_state->data.jobQueue.shutdown());
 
         std::unique_lock<std::mutex> lock(m_state->data.lifecycleMutex);
-        m_state->data.lifecycleCv.wait(lock, [data = &m_state->data]() { return !data->workerActive; });
+        m_state->data.lifecycleCv.wait(lock,
+                                       [data = &m_state->data]() { return !data->workerActive; });
     }
 
     void AsyncRenderController::enqueueJob(RenderJob job)
@@ -199,10 +201,8 @@ namespace gladius::ui::async_rendering
         auto & latestEpoch = m_state->data.latestEpoch;
         auto current = latestEpoch.load(std::memory_order_acquire);
         while (epoch > current &&
-               !latestEpoch.compare_exchange_weak(current,
-                                                  epoch,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire))
+               !latestEpoch.compare_exchange_weak(
+                 current, epoch, std::memory_order_acq_rel, std::memory_order_acquire))
         {
         }
     }
@@ -258,12 +258,15 @@ namespace gladius::ui::async_rendering
         return m_state->data.workerPool;
     }
 
-    auto AsyncRenderController::workerLoop(std::shared_ptr<ControllerState> state) -> coro::task<void>
+    auto AsyncRenderController::workerLoop(std::shared_ptr<ControllerState> state)
+      -> coro::task<void>
     {
         ZoneScopedN("workerLoop");
         DebugText("WorkerStarting", 14);
+#ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
-        
+#endif
+
         if (!state)
         {
             DebugText("NoState", 7);
@@ -271,10 +274,10 @@ namespace gladius::ui::async_rendering
         }
 
         auto * data = &state->data;
-        
+
         DebugText("SchedulingToPool", 16);
         co_await data->workerPool->schedule();
-        
+
         DebugText("Scheduled", 9);
 
         {
@@ -282,7 +285,7 @@ namespace gladius::ui::async_rendering
             data->workerActive = true;
             data->lifecycleCv.notify_all();
         }
-        
+
         DebugText("EnteringMainLoop", 16);
 
         while (!data->shutdownRequested.load(std::memory_order_acquire))
@@ -346,12 +349,13 @@ namespace gladius::ui::async_rendering
     }
 
     void AsyncRenderController::initializeAsyncResources(ComputeContext & context,
-                                                        size_t width,
-                                                        size_t height)
+                                                         size_t width,
+                                                         size_t height)
     {
         ProfileFunction
-        // Clean up old resources if dimensions changed
-        if (m_stagingWidth != width || m_stagingHeight != height || !m_workerQueue || !m_stagingBuffer)
+          // Clean up old resources if dimensions changed
+          if (m_stagingWidth != width || m_stagingHeight != height || !m_workerQueue ||
+              !m_stagingBuffer)
         {
             m_stagingBuffer.reset();
             m_workerQueue.reset();
@@ -362,12 +366,12 @@ namespace gladius::ui::async_rendering
             // Create CL-only staging buffer for async rendering
             static cl::ImageFormat const format = {CL_RGBA, CL_FLOAT};
             m_stagingBuffer = context.createImage2DChecked(format,
-                                                          width,
-                                                          height,
-                                                          CL_MEM_READ_WRITE,
-                                                          0,
-                                                          nullptr,
-                                                          "AsyncRenderController::stagingBuffer");
+                                                           width,
+                                                           height,
+                                                           CL_MEM_READ_WRITE,
+                                                           0,
+                                                           nullptr,
+                                                           "AsyncRenderController::stagingBuffer");
 
             m_stagingWidth = width;
             m_stagingHeight = height;
@@ -406,7 +410,7 @@ namespace gladius::ui::async_rendering
     {
         ProfileFunction
 
-        if (!m_workerQueue || !m_stagingBuffer)
+          if (!m_workerQueue || !m_stagingBuffer)
         {
             return;
         }
@@ -418,14 +422,15 @@ namespace gladius::ui::async_rendering
         }
 
         // Async read from staging buffer to CPU memory (UI thread uses UI queue for this)
-        // Note: This is intentionally blocking (CL_TRUE) to ensure pixels are available before upload
+        // Note: This is intentionally blocking (CL_TRUE) to ensure pixels are available before
+        // upload
         m_workerQueue->enqueueReadImage(*m_stagingBuffer,
-                                       CL_TRUE,
-                                       {},
-                                       {m_stagingWidth, m_stagingHeight, 1u},
-                                       0,
-                                       0,
-                                       outPixels.data());
+                                        CL_TRUE,
+                                        {},
+                                        {m_stagingWidth, m_stagingHeight, 1u},
+                                        0,
+                                        0,
+                                        outPixels.data());
         m_workerQueue->finish();
     }
 
@@ -442,21 +447,19 @@ namespace gladius::ui::async_rendering
     }
 
     bool AsyncRenderController::tryTransitionBuffer(FrameBuffer * buffer,
-                                                   FrameState expectedState,
-                                                   FrameState newState) noexcept
+                                                    FrameState expectedState,
+                                                    FrameState newState) noexcept
     {
         ProfileFunction
 
-        if (!buffer)
+          if (!buffer)
         {
             return false;
         }
 
         FrameState expected = expectedState;
-        return buffer->state.compare_exchange_strong(expected,
-                                                    newState,
-                                                    std::memory_order_acq_rel,
-                                                    std::memory_order_acquire);
+        return buffer->state.compare_exchange_strong(
+          expected, newState, std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
     FrameBuffer * AsyncRenderController::frontBuffer() noexcept
@@ -468,8 +471,7 @@ namespace gladius::ui::async_rendering
 
     FrameBuffer * AsyncRenderController::acquireWriteBuffer(uint64_t epoch) noexcept
     {
-        ProfileFunction
-        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
         // Find an Idle buffer to write to
         for (auto & buffer : m_frameBuffers)
@@ -487,11 +489,10 @@ namespace gladius::ui::async_rendering
     }
 
     void AsyncRenderController::publishFrame(FrameBuffer * buffer,
-                                            uint64_t frameId,
-                                            uint64_t epoch) noexcept
+                                             uint64_t frameId,
+                                             uint64_t epoch) noexcept
     {
-        ProfileFunction
-        if (!buffer)
+        ProfileFunction if (!buffer)
         {
             return;
         }
@@ -509,16 +510,13 @@ namespace gladius::ui::async_rendering
 
         // Transition Writing → Ready
         FrameState expected = FrameState::Writing;
-        buffer->state.compare_exchange_strong(expected,
-                                             FrameState::Ready,
-                                             std::memory_order_release,
-                                             std::memory_order_acquire);
+        buffer->state.compare_exchange_strong(
+          expected, FrameState::Ready, std::memory_order_release, std::memory_order_acquire);
     }
 
     FrameBuffer * AsyncRenderController::promoteReadyToFront() noexcept
     {
-        ProfileFunction
-        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
         // Find the newest Ready buffer (highest frameId)
         FrameBuffer * newestReady = nullptr;
@@ -557,20 +555,21 @@ namespace gladius::ui::async_rendering
     {
         ProfileFunction
 
-        if (buffer == nullptr)
+          if (buffer == nullptr)
         {
             return false;
         }
 
         auto const now = std::chrono::high_resolution_clock::now();
-        auto const ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        auto const ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
 
         std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        auto const it = std::find_if(m_frameBuffers.begin(),
-                                     m_frameBuffers.end(),
-                                     [buffer](FrameBuffer & candidate)
-                                     { return &candidate == buffer; });
+        auto const it =
+          std::find_if(m_frameBuffers.begin(),
+                       m_frameBuffers.end(),
+                       [buffer](FrameBuffer & candidate) { return &candidate == buffer; });
         if (it == m_frameBuffers.end())
         {
             return false;
@@ -582,7 +581,8 @@ namespace gladius::ui::async_rendering
         }
 
         size_t const newIndex = static_cast<size_t>(std::distance(m_frameBuffers.begin(), it));
-        size_t const previousIndex = m_frontBufferIndex.exchange(newIndex, std::memory_order_acq_rel);
+        size_t const previousIndex =
+          m_frontBufferIndex.exchange(newIndex, std::memory_order_acq_rel);
 
         if (previousIndex != newIndex && previousIndex < m_frameBuffers.size())
         {
@@ -607,12 +607,12 @@ namespace gladius::ui::async_rendering
         }
 
         std::lock_guard<std::mutex> lock(m_bufferMutex);
-        
+
         for (auto & buffer : m_frameBuffers)
         {
             auto const state = buffer.state.load(std::memory_order_acquire);
             auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
-            
+
             // Release Writing buffers from old epochs
             if (state == FrameState::Writing && bufEpoch <= oldEpoch)
             {
@@ -622,4 +622,3 @@ namespace gladius::ui::async_rendering
         }
     }
 }
-
