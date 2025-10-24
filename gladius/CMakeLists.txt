@@ -16,7 +16,7 @@ option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
 
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "2")
-set(CPACK_PACKAGE_VERSION_PATCH "14")
+set(CPACK_PACKAGE_VERSION_PATCH "15")
 
 # Set the version of the package in src/version.h
 configure_file(
@@ -286,7 +286,7 @@ file(COPY components/licenses DESTINATION "src/")
 install(DIRECTORY components/fonts/fontawesome-free-5.14.0-web/ DESTINATION ${INSTALL_PREFIX}/misc/fonts/)
 
 # Install licenses
-install(DIRECTORY components/licenses DESTINATION ${INSTALL_PREFIX}/doc/licenses/)
+install(DIRECTORY components/licenses DESTINATION ${INSTALL_PREFIX}/)
 
 # Install imgui.ini
 install(FILES src/imgui.ini DESTINATION ${INSTALL_PREFIX})
@@ -329,8 +329,10 @@ install(
     PATTERN "*.so"
     PATTERN "*.ttf"
     PATTERN "*.rtf"
+    PATTERN "*.txt"
     PATTERN "url"
     PATTERN "LICENSE.txt"
+    PATTERN "LICENSE"
     PATTERN "CMakeFiles" EXCLUDE
     PATTERN "vdb" EXCLUDE
     PATTERN "nodes" EXCLUDE

@@ -2,6 +2,7 @@
 
 #include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
+#include "BeamLatticeView.h"
 #include "ExpressionDialog.h"
 #include "LibraryBrowser.h"
 #include "NodeView.h"
@@ -99,17 +100,17 @@ namespace gladius::ui
          */
         bool switchToFunction(nodes::ResourceId functionId);
 
-    /**
-     * @brief Navigate to a function and record the navigation in history.
-     *        Use this instead of switchToFunction() for user-triggered navigation.
-     */
-    bool navigateToFunction(nodes::ResourceId functionId);
+        /**
+         * @brief Navigate to a function and record the navigation in history.
+         *        Use this instead of switchToFunction() for user-triggered navigation.
+         */
+        bool navigateToFunction(nodes::ResourceId functionId);
 
-    // Navigation history controls
-    bool canGoBack() const;
-    bool canGoForward() const;
-    bool goBack();
-    bool goForward();
+        // Navigation history controls
+        bool canGoBack() const;
+        bool canGoForward() const;
+        bool goBack();
+        bool goForward();
 
         /**
          * @brief Check if mouse is hovering over the model editor
@@ -157,6 +158,7 @@ namespace gladius::ui
         nodes::Model & copyExistingFunction(nodes::Model const & sourceModel,
                                             std::string const & name);
         void meshResourceToolBox(ImVec2 mousePos);
+        void beamLatticeResourceToolBox(ImVec2 mousePos);
         void showDeleteUnusedResourcesDialog();
         void validate();
 
@@ -233,6 +235,7 @@ namespace gladius::ui
         std::shared_ptr<Document> m_doc;
 
         ResourceView m_resourceView;
+        BeamLatticeView m_beamLatticeView;
 
         Outline m_outline;
 
@@ -264,8 +267,8 @@ namespace gladius::ui
 
         // --- Navigation history ---
         std::vector<nodes::ResourceId> m_navHistory; // sequence of visited function ids
-        std::size_t m_navIndex{0};                    // current index in history
-        bool m_inHistoryNav{false};                   // guard to avoid recording during back/forward
+        std::size_t m_navIndex{0};                   // current index in history
+        bool m_inHistoryNav{false};                  // guard to avoid recording during back/forward
 
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
