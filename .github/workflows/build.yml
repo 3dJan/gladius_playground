@@ -109,8 +109,11 @@ jobs:
 
     - name: Install buildcache (Windows)
       if: runner.os == 'Windows'
+      shell: pwsh
       run: |
-        choco install buildcache -y
+        Invoke-WebRequest -Uri "https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-windows.zip" -OutFile "buildcache.zip"
+        Expand-Archive -Path "buildcache.zip" -DestinationPath "buildcache"
+        Move-Item -Path "buildcache\bin\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe"
         buildcache --version
 
     - name: Get buildcache directory
