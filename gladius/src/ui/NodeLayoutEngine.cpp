@@ -734,6 +734,9 @@ namespace gladius::ui
             return lhsCenter < rhsCenter;
         });
 
+        // Track already-placed groups to detect overlaps
+        std::vector<Rect> placedGroupRects;
+
         float currentY = 0.0F;
         std::size_t i = 0U;
         while (i < groups.size())
@@ -748,7 +751,30 @@ namespace gladius::ui
                 auto & group = groups[i];
                 updateGroupBounds(group);
 
-                ImVec2 const targetPosition(currentX, currentY);
+                ImVec2 targetPosition(currentX, currentY);
+                
+                // Check for overlaps with already-placed groups and adjust Y if needed
+                bool hasOverlap = true;
+                int maxAdjustments = 100;
+                while (hasOverlap && maxAdjustments-- > 0)
+                {
+                    hasOverlap = false;
+                    Rect proposedRect(targetPosition,
+                                     ImVec2(targetPosition.x + group.size.x,
+                                            targetPosition.y + group.size.y));
+                    
+                    for (const auto & placedRect : placedGroupRects)
+                    {
+                        if (proposedRect.overlaps(placedRect))
+                        {
+                            // Shift down below the overlapping group
+                            targetPosition.y = placedRect.max.y + config.groupPadding;
+                            hasOverlap = true;
+                            break;
+                        }
+                    }
+                }
+
                 ImVec2 const delta(targetPosition.x - group.position.x,
                                    targetPosition.y - group.position.y);
 
@@ -773,6 +799,11 @@ namespace gladius::ui
 
                     updateGroupBounds(group);
                 }
+
+                // Add this group to the placed list
+                placedGroupRects.push_back(Rect(group.position,
+                                               ImVec2(group.position.x + group.size.x,
+                                                      group.position.y + group.size.y)));
 
                 currentX += group.size.x + config.groupPadding;
                 rowHeight = std::max(rowHeight, group.size.y);
