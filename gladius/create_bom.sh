@@ -241,11 +241,23 @@ determine_license_url_from_github() {
 }
 
 check_for_cve() {
-    cve=$(curl -s -d "{\"commit\": \"$1\"}" "https://api.osv.dev/v1/query" | jq -r '.aliases[0].id')
-    if [ "$cve" == "null" ]; then
+    local commit=$1
+    local package_name=$2
+    
+    # Try querying by commit hash
+    response=$(curl -s -X POST "https://api.osv.dev/v1/query" \
+        -H "Content-Type: application/json" \
+        -d "{\"commit\": \"$commit\"}")
+    
+    # Check if we got any vulnerabilities
+    vulns=$(echo "$response" | jq -r '.vulns[0].id // empty')
+    
+    if [ -z "$vulns" ]; then
         echo ""
     else
-        echo "$cve"
+        # Get all vulnerability IDs and join them with commas
+        all_vulns=$(echo "$response" | jq -r '[.vulns[].id] | join(", ")' 2>/dev/null)
+        echo "$all_vulns"
     fi
 }
 
@@ -276,10 +288,21 @@ find . -name "vcpkg.spdx.json" | while read file; do
     download_location=$(jq -r '.packages[0].downloadLocation' "$file")
     homepage=$(jq -r '.packages[0].homepage' "$file")
    
-    cve=$(check_for_cve "$commit_hash")
-    # Add a warning to the version if a cve is found
-    if [ "$cve" != "" ]; then
-        version="(Warning: CVE: $cve) $version"
+    cve=$(check_for_cve "$commit_hash" "$app_name")
+    
+    # Extract version first
+    # Split the name into application name and version
+    IFS='@' read -ra parts <<< "$name"
+    app_name_with_platform=${parts[0]}
+    version=${parts[1]}
+
+    # Remove the platform name from the application name
+    IFS=':' read -ra parts <<< "$app_name_with_platform"
+    app_name=${parts[0]}
+    
+    # Add a warning to the version if a CVE is found
+    if [ -n "$cve" ]; then
+        version="$version (⚠ CVE: $cve)"
     fi
 
 
@@ -365,9 +388,6 @@ git submodule status | while read submodule; do
     # Extract the URL of the origin
     origin_url=$(git -C $path config --get remote.origin.url)
 
-    # Extract the tag (if available)
-    version=$(git -C $path describe --tags --always)
-
     # Try to find a license file and construct its URL
     license_url=""
     for license_file in "${license_files[@]}"; do
@@ -392,10 +412,13 @@ git submodule status | while read submodule; do
         license_url=$(determine_license_url_from_github "$download_location")
     fi
 
-    cve=$(check_for_cve "$commit_hash")
-    # Add a warning to the version if a cve is found
-    if [ "$cve" != "" ]; then
-        version="(Warning: CVE: $cve) $version"
+    # Extract the tag (if available) - move before CVE check
+    version=$(git -C $path describe --tags --always)
+    
+    cve=$(check_for_cve "$commit_hash" "$repo_name")
+    # Add a warning to the version if a CVE is found
+    if [ -n "$cve" ]; then
+        version="$version (⚠ CVE: $cve)"
     fi
 
     # Check if the fields contain "null" or "NOASSERTION" and replace it with ""

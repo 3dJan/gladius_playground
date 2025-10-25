@@ -1,7 +1,10 @@
 #include "ToOCLVisitor.h"
 #include "nodesfwd.h"
+#include <array>
 #include <fmt/format.h>
 #include <iostream>
+#include <string>
+#include <unordered_map>
 
 #include <nodes/Assembly.h>
 
@@ -123,9 +126,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(node.getId(), outputPortName);
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -163,9 +163,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(node.getId(), outputPortName);
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -205,9 +202,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(node.getId(), outputPortName);
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -429,8 +423,6 @@ namespace gladius::nodes
         {
             auto const key = std::make_pair(composeVector.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -446,7 +438,7 @@ namespace gladius::nodes
             return;
         }
 
-    auto const & outputPort = composeMatrix.getOutputs().at(FieldNames::Result);
+        auto const & outputPort = composeMatrix.getOutputs().at(FieldNames::Result);
         auto const m00 = resolveParameter(composeMatrix.parameter().at(FieldNames::M00));
         auto const m01 = resolveParameter(composeMatrix.parameter().at(FieldNames::M01));
         auto const m02 = resolveParameter(composeMatrix.parameter().at(FieldNames::M02));
@@ -483,14 +475,11 @@ namespace gladius::nodes
                       m32,
                       m33);
 
-                bool const canInline = shouldInlineOutput(composeMatrix, FieldNames::Result);
+        bool const canInline = shouldInlineOutput(composeMatrix, FieldNames::Result);
         if (canInline)
         {
-                        auto const key =
-                            std::make_pair(composeMatrix.getId(), std::string(FieldNames::Result));
+            auto const key = std::make_pair(composeMatrix.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -506,8 +495,7 @@ namespace gladius::nodes
             return;
         }
 
-                auto const & outputPort =
-                    composeMatrixFromColumns.getOutputs().at(FieldNames::Result);
+        auto const & outputPort = composeMatrixFromColumns.getOutputs().at(FieldNames::Result);
         auto const col0 =
           resolveParameter(composeMatrixFromColumns.parameter().at(FieldNames::Col0));
         auto const col1 =
@@ -525,15 +513,12 @@ namespace gladius::nodes
                       col2,
                       col3);
 
-                bool const canInline =
-                    shouldInlineOutput(composeMatrixFromColumns, FieldNames::Result);
+        bool const canInline = shouldInlineOutput(composeMatrixFromColumns, FieldNames::Result);
         if (canInline)
         {
-                        auto const key =
-                            std::make_pair(composeMatrixFromColumns.getId(), std::string(FieldNames::Result));
+            auto const key =
+              std::make_pair(composeMatrixFromColumns.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -549,8 +534,7 @@ namespace gladius::nodes
             return;
         }
 
-                auto const & outputPort =
-                    composeMatrixFromRows.getOutputs().at(FieldNames::Result);
+        auto const & outputPort = composeMatrixFromRows.getOutputs().at(FieldNames::Result);
         auto const row0 = resolveParameter(composeMatrixFromRows.parameter().at(FieldNames::Row0));
         auto const row1 = resolveParameter(composeMatrixFromRows.parameter().at(FieldNames::Row1));
         auto const row2 = resolveParameter(composeMatrixFromRows.parameter().at(FieldNames::Row2));
@@ -564,15 +548,12 @@ namespace gladius::nodes
                       row2,
                       row3);
 
-                bool const canInline =
-                    shouldInlineOutput(composeMatrixFromRows, FieldNames::Result);
+        bool const canInline = shouldInlineOutput(composeMatrixFromRows, FieldNames::Result);
         if (canInline)
         {
-                        auto const key =
-                            std::make_pair(composeMatrixFromRows.getId(), std::string(FieldNames::Result));
+            auto const key =
+              std::make_pair(composeMatrixFromRows.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", outputPort.getUniqueName(), expression);
         }
         else
         {
@@ -587,7 +568,7 @@ namespace gladius::nodes
         {
             return;
         }
-        
+
         auto const inputVec = resolveParameter(decomposeVector.parameter()[FieldNames::A]);
         m_definition << fmt::format("float const {0} = ((float3)({1})).x;\n",
                                     decomposeVector.getOutputs()[FieldNames::X].getUniqueName(),
@@ -710,6 +691,324 @@ namespace gladius::nodes
         }
     }
 
+    void ToOclVisitor::visit(FunctionGradient & functionGradient)
+    {
+        if (!isOutPutOfNodeValid(functionGradient))
+        {
+            return;
+        }
+
+        auto gradientOutputIter =
+          functionGradient.getOutputs().find(FieldNames::NormalizedGradient);
+        if (gradientOutputIter == functionGradient.getOutputs().end())
+        {
+            return;
+        }
+
+        auto & gradientOutput = gradientOutputIter->second;
+        if (!gradientOutput.isUsed())
+        {
+            return;
+        }
+
+        auto emitFallback = [&](std::string reason)
+        {
+            std::string const fallbackExpr = "(float3)(0.0f)";
+
+            bool const canInline =
+              shouldInlineOutput(functionGradient, FieldNames::NormalizedGradient);
+            auto const key =
+              std::make_pair(functionGradient.getId(), std::string(FieldNames::NormalizedGradient));
+
+            // Always annotate generated source with a fallback comment for diagnostics
+            m_definition << fmt::format("// FunctionGradient fallback: {}\n", reason);
+
+            if (canInline)
+            {
+                m_inlineExpressions[key] = fallbackExpr;
+            }
+            else
+            {
+                m_definition << fmt::format(
+                  "float3 const {0} = {1};\n", gradientOutput.getUniqueName(), fallbackExpr);
+            }
+        };
+
+        if (!functionGradient.hasValidConfiguration())
+        {
+            emitFallback("node not fully configured");
+            return;
+        }
+
+        if (m_assembly == nullptr)
+        {
+            emitFallback("assembly is null");
+            return;
+        }
+
+        functionGradient.resolveFunctionId();
+        auto const functionId = functionGradient.getFunctionId();
+        auto referencedModel = m_assembly->findModel(functionId);
+
+        if (!referencedModel)
+        {
+            emitFallback(fmt::format("referenced model {} not found", functionId));
+            return;
+        }
+
+        auto const & selectedOutputName = functionGradient.getSelectedScalarOutput();
+        auto const & selectedVectorParamName = functionGradient.getSelectedVectorInput();
+
+        auto & referencedOutputs = referencedModel->getOutputs();
+        auto referencedOutputIter = referencedOutputs.find(selectedOutputName);
+        if (referencedOutputIter == referencedOutputs.end())
+        {
+            emitFallback(fmt::format("missing output '{}'", selectedOutputName));
+            return;
+        }
+
+        if (referencedOutputIter->second.getTypeIndex() != ParameterTypeIndex::Float)
+        {
+            emitFallback(fmt::format("output '{}' is not float", selectedOutputName));
+            return;
+        }
+
+        if (!referencedOutputIter->second.isConsumedByFunction())
+        {
+            emitFallback(fmt::format("output '{}' is not marked as consumed", selectedOutputName));
+            return;
+        }
+
+        auto * vectorParameter = functionGradient.getSelectedVectorParameter();
+        if (vectorParameter == nullptr)
+        {
+            emitFallback(fmt::format("vector input '{}' not selected", selectedVectorParamName));
+            return;
+        }
+
+        if (vectorParameter->getTypeIndex() != ParameterTypeIndex::Float3)
+        {
+            emitFallback(fmt::format("vector input '{}' is not float3", selectedVectorParamName));
+            return;
+        }
+
+        auto stepIter = functionGradient.parameter().find(FieldNames::StepSize);
+        if (stepIter == functionGradient.parameter().end())
+        {
+            emitFallback("step size parameter missing");
+            return;
+        }
+
+        auto const functionName = referencedModel->getModelName();
+        std::string const nodeIdStr = std::to_string(functionGradient.getId());
+
+        std::string const stepVarName = fmt::format("FG_step_{}", nodeIdStr);
+        std::string const rawStepExpr = resolveParameter(stepIter->second);
+        m_definition << fmt::format(
+          "float const {0} = fmax(fabs({1}), 1e-8f);\n", stepVarName, rawStepExpr);
+
+        std::string const baseVectorVar = fmt::format("FG_input_{}", nodeIdStr);
+        std::string const baseVectorExpr = resolveParameter(*vectorParameter);
+        m_definition << fmt::format(
+          "float3 const {0} = (float3)({1});\n", baseVectorVar, baseVectorExpr);
+
+        auto & parameters = functionGradient.parameter();
+
+        auto emitEvaluation = [&](std::string const & callTag,
+                                  std::string const & vectorExpression) -> std::string
+        {
+            std::stringstream args;
+            bool first = true;
+
+            for (auto const & [paramName, parameter] : parameters)
+            {
+                if (!parameter.isArgument())
+                {
+                    continue;
+                }
+
+                std::string argumentExpr;
+                if (paramName == selectedVectorParamName)
+                {
+                    argumentExpr = vectorExpression;
+                }
+                else
+                {
+                    argumentExpr = resolveParameter(parameter);
+                }
+
+                if (argumentExpr.empty())
+                {
+                    continue;
+                }
+
+                if (!first)
+                {
+                    args << ", ";
+                }
+
+                args << fmt::format(
+                  "({0})({1})", typeIndexToOpenCl(parameter.getTypeIndex()), argumentExpr);
+                first = false;
+            }
+
+            std::unordered_map<std::string, std::string> localOutputs;
+
+            for (auto & [outputName, outputPort] : referencedOutputs)
+            {
+                if (!outputPort.isConsumedByFunction())
+                {
+                    continue;
+                }
+
+                std::string const localVarName =
+                  fmt::format("{0}_{1}_{2}", callTag, outputName, nodeIdStr);
+                m_definition << fmt::format("{0} {1} = ({0})(0.f);\n",
+                                            typeIndexToOpenCl(outputPort.getTypeIndex()),
+                                            localVarName);
+
+                if (!first)
+                {
+                    args << ", ";
+                }
+
+                args << fmt::format("&{0}", localVarName);
+                first = false;
+
+                localOutputs.emplace(outputName, localVarName);
+            }
+
+            auto selectedOutputVar = localOutputs.find(selectedOutputName);
+            if (selectedOutputVar == localOutputs.end())
+            {
+                throw std::runtime_error(fmt::format(
+                  "FunctionGradient node {0}: referenced output '{1}' is not marked as consumed",
+                  functionGradient.getUniqueName(),
+                  selectedOutputName));
+            }
+
+            if (first)
+            {
+                m_definition << fmt::format("{0}(PASS_PAYLOAD_ARGS);\n", functionName);
+            }
+            else
+            {
+                m_definition << fmt::format(
+                  "{0}({1}, PASS_PAYLOAD_ARGS);\n", functionName, args.str());
+            }
+
+            return selectedOutputVar->second;
+        };
+
+        std::array<char, 3> const axisComponents{'x', 'y', 'z'};
+        std::unordered_map<std::string, std::string> positiveSamples;
+        std::unordered_map<std::string, std::string> negativeSamples;
+
+        for (char component : axisComponents)
+        {
+            std::string const componentStr(1, component);
+
+            std::string const posVectorVar =
+              fmt::format("{0}_pos_{1}", baseVectorVar, componentStr);
+            m_definition << fmt::format("float3 {0} = {1};\n", posVectorVar, baseVectorVar);
+            m_definition << fmt::format("{0}.{1} += {2};\n", posVectorVar, component, stepVarName);
+
+            std::string const posCallTag = fmt::format("FG_pos_{0}_{1}", nodeIdStr, componentStr);
+            std::string const posSample = emitEvaluation(posCallTag, posVectorVar);
+            positiveSamples.emplace(componentStr, posSample);
+
+            std::string const negVectorVar =
+              fmt::format("{0}_neg_{1}", baseVectorVar, componentStr);
+            m_definition << fmt::format("float3 {0} = {1};\n", negVectorVar, baseVectorVar);
+            m_definition << fmt::format("{0}.{1} -= {2};\n", negVectorVar, component, stepVarName);
+
+            std::string const negCallTag = fmt::format("FG_neg_{0}_{1}", nodeIdStr, componentStr);
+            std::string const negSample = emitEvaluation(negCallTag, negVectorVar);
+            negativeSamples.emplace(componentStr, negSample);
+        }
+
+        auto const gradientVarName = fmt::format("FG_gradient_{}", nodeIdStr);
+        m_definition << fmt::format(
+          "float3 const {0} = (float3)(({1} - {2}) / (2.0f * {3}), ({4} - {5}) / (2.0f * {3}),"
+          " ({6} - {7}) / (2.0f * {3}));\n",
+          gradientVarName,
+          positiveSamples.at("x"),
+          negativeSamples.at("x"),
+          stepVarName,
+          positiveSamples.at("y"),
+          negativeSamples.at("y"),
+          positiveSamples.at("z"),
+          negativeSamples.at("z"));
+
+        auto const gradientLenVarName = fmt::format("FG_gradient_len_{}", nodeIdStr);
+        m_definition << fmt::format(
+          "float const {0} = length({1});\n", gradientLenVarName, gradientVarName);
+
+        auto const normalizedVarName = fmt::format("FG_gradient_norm_{}", nodeIdStr);
+        m_definition << fmt::format(
+          "float3 const {0} = ({1} > 1e-8f) ? ({2} / {1}) : (float3)(0.0f);\n",
+          normalizedVarName,
+          gradientLenVarName,
+          gradientVarName);
+
+        // Emit normalized vector output (backward compatible)
+        bool const canInlineVector =
+          shouldInlineOutput(functionGradient, FieldNames::NormalizedGradient);
+        if (canInlineVector)
+        {
+            auto const key =
+              std::make_pair(functionGradient.getId(), std::string(FieldNames::NormalizedGradient));
+            m_inlineExpressions[key] = normalizedVarName;
+        }
+        else
+        {
+            m_definition << fmt::format(
+              "float3 const {0} = {1};\n", gradientOutput.getUniqueName(), normalizedVarName);
+        }
+
+        // Emit raw gradient output (new)
+        auto gradientRawOutputIter = functionGradient.getOutputs().find(FieldNames::Gradient);
+        if (gradientRawOutputIter != functionGradient.getOutputs().end() &&
+            gradientRawOutputIter->second.isUsed())
+        {
+            bool const canInlineGradient =
+              shouldInlineOutput(functionGradient, FieldNames::Gradient);
+            if (canInlineGradient)
+            {
+                auto const key =
+                  std::make_pair(functionGradient.getId(), std::string(FieldNames::Gradient));
+                m_inlineExpressions[key] = gradientVarName;
+            }
+            else
+            {
+                m_definition << fmt::format("float3 const {0} = {1};\n",
+                                            gradientRawOutputIter->second.getUniqueName(),
+                                            gradientVarName);
+            }
+        }
+
+        // Emit magnitude output (new)
+        auto magnitudeOutputIter = functionGradient.getOutputs().find(FieldNames::Magnitude);
+        if (magnitudeOutputIter != functionGradient.getOutputs().end() &&
+            magnitudeOutputIter->second.isUsed())
+        {
+            bool const canInlineMagnitude =
+              shouldInlineOutput(functionGradient, FieldNames::Magnitude);
+            if (canInlineMagnitude)
+            {
+                auto const key =
+                  std::make_pair(functionGradient.getId(), std::string(FieldNames::Magnitude));
+                m_inlineExpressions[key] = gradientLenVarName;
+            }
+            else
+            {
+                m_definition << fmt::format("float const {0} = {1};\n",
+                                            magnitudeOutputIter->second.getUniqueName(),
+                                            gradientLenVarName);
+            }
+        }
+    }
+
     void ToOclVisitor::visit(Addition & addition)
     {
         if (!isOutPutOfNodeValid(addition))
@@ -749,10 +1048,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(addition.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-
-            // Add a comment for debugging
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", addition.getResultOutputPort().getUniqueName(), expression);
         }
         else
         {
@@ -801,9 +1096,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(subtraction.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", subtraction.getResultOutputPort().getUniqueName(), expression);
         }
         else
         {
@@ -854,10 +1146,6 @@ namespace gladius::nodes
             auto const key =
               std::make_pair(multiplication.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format("// Inlined: {} {}\n",
-                                        multiplication.getResultOutputPort().getUniqueName(),
-                                        expression);
         }
         else
         {
@@ -907,9 +1195,6 @@ namespace gladius::nodes
             // Store the expression for inlining
             auto const key = std::make_pair(division.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", division.getResultOutputPort().getUniqueName(), expression);
         }
         else
         {
@@ -938,8 +1223,6 @@ namespace gladius::nodes
         {
             auto const key = std::make_pair(dotProduct.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", dotProduct.getResultOutputPort().getUniqueName(), expression);
         }
         else
         {
@@ -966,9 +1249,6 @@ namespace gladius::nodes
         {
             auto const key = std::make_pair(crossProduct.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format("// Inlined: {} {}\n",
-                                        crossProduct.getResultOutputPort().getUniqueName(),
-                                        expression);
         }
         else
         {
@@ -1097,8 +1377,6 @@ namespace gladius::nodes
         {
             auto const key = std::make_pair(lengthNode.getId(), std::string(FieldNames::Result));
             m_inlineExpressions[key] = expression;
-            m_definition << fmt::format(
-              "// Inlined: {} {}\n", lengthNode.getResultOutputPort().getUniqueName(), expression);
         }
         else
         {
@@ -1171,14 +1449,15 @@ namespace gladius::nodes
                                     static_cast<int>(imageSampler.getTileStyleV()),
                                     static_cast<int>(imageSampler.getTileStyleW()));
 
-        m_definition << fmt::format("float4 const {0}_rgba = {1}((float3)({2}), (float3)({3}), "
-                                    "{4}, {5}_tileStyle, PASS_PAYLOAD_ARGS);\n",
-                                    imageSampler.getOutputs().at(FieldNames::Color).getUniqueName(),
-                                    samplerName,
-                                    resolveParameter(imageSampler.parameter().at(FieldNames::UVW)),
-                                    resolveParameter(imageSampler.parameter().at(FieldNames::Dimensions)),
-                                    resolveParameter(imageSampler.parameter().at(FieldNames::Start)),
-                                    imageSampler.getUniqueName());
+        m_definition << fmt::format(
+          "float4 const {0}_rgba = {1}((float3)({2}), (float3)({3}), "
+          "{4}, {5}_tileStyle, PASS_PAYLOAD_ARGS);\n",
+          imageSampler.getOutputs().at(FieldNames::Color).getUniqueName(),
+          samplerName,
+          resolveParameter(imageSampler.parameter().at(FieldNames::UVW)),
+          resolveParameter(imageSampler.parameter().at(FieldNames::Dimensions)),
+          resolveParameter(imageSampler.parameter().at(FieldNames::Start)),
+          imageSampler.getUniqueName());
 
         m_definition << fmt::format(
           "float3 const {0} = {1}_rgba.xyz;\n",
@@ -1197,8 +1476,9 @@ namespace gladius::nodes
         {
             return;
         }
-        
-        auto const matrixParam = resolveParameter(decomposeMatrixNode.parameter()[FieldNames::Matrix]);
+
+        auto const matrixParam =
+          resolveParameter(decomposeMatrixNode.parameter()[FieldNames::Matrix]);
         m_definition << fmt::format(
           "float const {0} = {1}.s0;\n",
           decomposeMatrixNode.getOutputs()[FieldNames::M00].getUniqueName(),
