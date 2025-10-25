@@ -289,11 +289,14 @@ namespace gladius::nodes::graph
               std::max(currentNode.depth, result[currentNode.identifier]);
             nodesToVisit.pop_front();
 
-            auto const successorList = determineSuccessor(graph, currentNode.identifier);
-            for (auto successorId : successorList)
+            // Traverse backward through dependencies (predecessors)
+            // This ensures we capture all nodes that contribute to the output,
+            // including constant nodes and disconnected inputs
+            auto const predecessorList = determineDirectDependencies(graph, currentNode.identifier);
+            for (auto predecessorId : predecessorList)
             {
-                nodesToVisit.push_back({successorId, currentNode.depth + 1});
-                visited[successorId] = true;
+                nodesToVisit.push_back({predecessorId, currentNode.depth + 1});
+                visited[predecessorId] = true;
             }
         }
         return result;
