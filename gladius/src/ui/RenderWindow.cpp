@@ -158,6 +158,14 @@ namespace gladius::ui
                   {
                       co_return co_await executeAsyncBboxUpdate(job, cancelCheck);
                   }
+                  else if (job.type == async_rendering::RenderJobType::SDFPrecomputation)
+                  {
+                      co_return co_await executeAsyncSdfPrecomputation(job, cancelCheck);
+                  }
+                  else if (job.type == async_rendering::RenderJobType::ParameterUpdate)
+                  {
+                      co_return co_await executeAsyncParameterUpdate(job, cancelCheck);
+                  }
 
                   co_return co_await executeAsyncRenderJob(job, cancelCheck);
               });
@@ -169,6 +177,7 @@ namespace gladius::ui
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
+            m_asyncSdfJobInFlight.store(false, std::memory_order_release);
             notifyAsyncEpochIncrement();
         }
         else
@@ -183,6 +192,7 @@ namespace gladius::ui
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
+            m_asyncSdfJobInFlight.store(false, std::memory_order_release);
         }
     }
 
@@ -199,6 +209,7 @@ namespace gladius::ui
         m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
+        m_asyncSdfJobInFlight.store(false, std::memory_order_release);
 
         // Release progressive buffer on epoch change
         if (m_asyncProgressiveBuffer)
@@ -1311,6 +1322,28 @@ namespace gladius::ui
 
         processAsyncResults(state);
 
+        if (m_asyncController && m_asyncController->isRunning())
+        {
+            bool const sdfDirty = m_preComputedSdfDirty.load(std::memory_order_acquire);
+            bool const sdfJobActive = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
+
+            if (sdfDirty && !sdfJobActive)
+            {
+                async_rendering::RenderJob sdfJob{};
+                sdfJob.type = async_rendering::RenderJobType::SDFPrecomputation;
+                sdfJob.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+                if (sdfJob.epoch == 0)
+                {
+                    sdfJob.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    m_asyncCurrentEpoch.store(sdfJob.epoch, std::memory_order_release);
+                }
+                m_asyncController->setLatestEpoch(sdfJob.epoch);
+                m_asyncSdfJobInFlight.store(true, std::memory_order_release);
+                m_asyncController->enqueueJob(sdfJob);
+                DebugText("ScheduleSdfJob", 14);
+            }
+        }
+
         if (!m_asyncController || !m_asyncController->isRunning())
         {
             renderSync(state);
@@ -1510,6 +1543,11 @@ namespace gladius::ui
                 continue;
             }
 
+            if (result.jobType == async_rendering::RenderJobType::SDFPrecomputation)
+            {
+                m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+            }
+
             // Handle bbox update results
             if (result.jobType == async_rendering::RenderJobType::BoundingBoxUpdate)
             {
@@ -1634,8 +1672,7 @@ namespace gladius::ui
         job.startLine = std::min(state.currentLine, height);
         job.stepSize =
           std::max<size_t>(1, std::min(state.renderingStepSize, height - job.startLine));
-        job.precomputeSdf =
-          m_preComputedSdfDirty.load(std::memory_order_acquire) && job.startLine == 0;
+                job.precomputeSdf = false;
         job.enableHighQuality = m_enableHQRendering;
 
         ZoneValue(job.startLine);
@@ -1771,13 +1808,6 @@ namespace gladius::ui
 
         try
         {
-            if (job.precomputeSdf)
-            {
-                ZoneScopedN("PrecomputeSdf");
-                m_core->precomputeSdfForWholeBuildPlatform();
-                result.precomputedSdfUpdated = true;
-            }
-
             size_t const endLine =
               std::min(job.startLine + job.stepSize, static_cast<size_t>(job.height));
 
@@ -1937,7 +1967,7 @@ namespace gladius::ui
         m_core->setSliceHeight(z);
         if (zChanged)
         {
-            m_core->invalidatePreCompSdf();
+            m_core->invalidatePreCompSdf("sliderZChanged");
             m_core->precomputeSdfForWholeBuildPlatform();
             invalidateView();
         }
@@ -2068,6 +2098,137 @@ namespace gladius::ui
             // Schedule from UI thread to avoid race conditions
             // We'll do this in processAsyncResults when the result is consumed
         }
+
+        co_return result;
+    }
+
+    auto RenderWindow::executeAsyncSdfPrecomputation(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
+    {
+        ZoneScoped;
+        ZoneName("AsyncSdfPrecomputation", strlen("AsyncSdfPrecomputation"));
+
+        using namespace async_rendering;
+
+        FrameResultMeta result{};
+        result.epoch = job.epoch;
+        result.jobType = job.type;
+        result.cancelled = false;
+        result.precomputedSdfUpdated = false;
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        auto const markSdfInvalid = [this]()
+        {
+            auto computeToken = m_core->waitForComputeToken();
+            m_core->invalidatePreCompSdf("asyncSdfCancelledOrFailed");
+        };
+
+        auto const commitSdfSuccess = [this]()
+        {
+            auto computeToken = m_core->waitForComputeToken();
+            m_core->setSdfValid(true);
+            m_core->updateBBox();
+        };
+
+        // Check cancellation before starting
+        if (cancelCheck && cancelCheck())
+        {
+            result.cancelled = true;
+            markSdfInvalid();
+            co_return result;
+        }
+
+        try
+        {
+            // Get worker queue (or fallback to main queue)
+            auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+
+            cl::CommandQueue const * queuePtr = workerQueue != nullptr
+                                                  ? workerQueue
+                                                  : &m_core->getComputeContext()->GetQueue();
+
+            // Launch async SDF precomputation (returns cl::Event)
+            cl::Event sdfEvent = m_core->precomputeSdfAsync(*queuePtr);
+
+            if (!sdfEvent())
+            {
+                // Failed to launch (preconditions not met)
+                result.cancelled = true;
+                markSdfInvalid();
+                co_return result;
+            }
+
+            // Await SDF completion using waitForEvent helper
+            co_await waitForEvent(sdfEvent, cancelCheck);
+
+            // Check if cancelled during wait
+            if (cancelCheck && cancelCheck())
+            {
+                result.cancelled = true;
+                markSdfInvalid();
+                co_return result;
+            }
+
+            // SDF completed successfully
+            commitSdfSuccess();
+            result.precomputedSdfUpdated = true;
+        }
+        catch (std::exception const & e)
+        {
+            if (auto logger = m_core->getSharedLogger())
+            {
+                logger->logError(std::string("Async SDF precomputation failed: ") + e.what());
+            }
+            markSdfInvalid();
+            result.cancelled = true;
+        }
+        catch (...)
+        {
+            markSdfInvalid();
+            result.cancelled = true;
+        }
+
+        auto const endTime = std::chrono::steady_clock::now();
+        result.computeDurationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
+
+        co_return result;
+    }
+
+    auto RenderWindow::executeAsyncParameterUpdate(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
+    {
+        ZoneScoped;
+        ZoneName("AsyncParameterUpdate", strlen("AsyncParameterUpdate"));
+
+        using namespace async_rendering;
+
+        FrameResultMeta result{};
+        result.epoch = job.epoch;
+        result.jobType = job.type;
+        result.cancelled = false;
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        // Check cancellation before starting
+        if (cancelCheck && cancelCheck())
+        {
+            result.cancelled = true;
+            co_return result;
+        }
+
+        // Parameter updates are already very fast (<2ms) thanks to Phase 1
+        // This handler exists for completeness and future double-buffering
+        // For now, parameters are updated synchronously in Document::updateParameter()
+
+        auto const endTime = std::chrono::steady_clock::now();
+        result.computeDurationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
 
         co_return result;
     }

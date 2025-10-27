@@ -139,13 +139,86 @@ namespace gladius
         updateFlatAssembly();
 
         m_core->refreshProgram(m_flatAssembly);
-        m_core->recompileBlockingNoLock();
-        m_core->invalidatePreCompSdf();
-        m_core->resetBoundingBox();
-        if (m_core->precomputeSdfForWholeBuildPlatform())
+        
+        // Use non-blocking compilation with polling
+        m_core->recompileIfRequired();
+        
+        // Wait for compilation to complete with periodic checks
+        while (m_core->isCompilationInProgress())
         {
-            meshResourceState->signalCompilationFinished();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+
+        // One more pass ensures ProgramManager updates its internal ModelState flags
+        // (signalCompilationFinished) so subsequent steps observe up-to-date slicer state.
+        m_core->recompileIfRequired();
+        
+        // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
+        // The async computation will atomically replace it
+        m_core->resetBoundingBox();
+        
+        // Launch async SDF precomputation with OpenCL events
+        auto const & queue = m_core->getComputeContext()->GetQueue();
+        cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
+        bool const sdfEventValid = sdfEvent() != nullptr;
+        std::cout << "[Document::refreshWorker] precomputeSdfAsync returned "
+              << (sdfEventValid ? "valid event" : "no event") << std::endl;
+
+        bool sdfUpdated = false;
+        bool sdfUpdatedViaAsync = false;
+
+        // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
+        if (sdfEventValid)
+        {
+            std::cout << "[Document::refreshWorker] waiting for async SDF event" << std::endl;
+            sdfEvent.wait();
+            std::cout << "[Document::refreshWorker] async SDF event completed" << std::endl;
+            sdfUpdated = true;
+            sdfUpdatedViaAsync = true;
+        }
+        else
+        {
+            // Fallback to synchronous computation if async launch failed
+            std::cout
+              << "[Document::refreshWorker] async launch failed, running synchronous fallback"
+              << std::endl;
+            if (m_core->precomputeSdfForWholeBuildPlatform())
+            {
+                std::cout << "[Document::refreshWorker] synchronous SDF completed" << std::endl;
+                sdfUpdated = true;
+            }
+            else
+            {
+                std::cout << "[Document::refreshWorker] synchronous SDF failed" << std::endl;
+            }
+        }
+
+        if (sdfUpdated)
+        {
+            std::cout << "[Document::refreshWorker] marking SDF valid via "
+                      << (sdfUpdatedViaAsync ? "async" : "sync") << std::endl;
+            m_core->setSdfValid(true);
+            if (sdfUpdatedViaAsync)
+            {
+                // Now that the SDF exists, update the bounding box serially (still off the UI thread)
+                std::cout << "[Document::refreshWorker] updating bounding box after async SDF"
+                          << std::endl;
+                m_core->updateBBox();
+            }
+        }
+        else
+        {
+            std::cout << "[Document::refreshWorker] SDF computation failed, invalidating"
+                      << std::endl;
+            std::cout << "  -> coreState: isModelUpToDate="
+                      << (m_core->getMeshResourceState()->isModelUpToDate() ? 1 : 0)
+                      << " slicerValid=" << (m_core->getSlicerProgram()->isValid() ? 1 : 0)
+                      << " sdfValid=" << (m_core->isSdfValid() ? 1 : 0)
+                      << std::endl;
+            m_core->invalidatePreCompSdf("refreshWorkerFailure");
+        }
+
+        meshResourceState->signalCompilationFinished();
     }
 
     void Document::updateFlatAssembly()
@@ -334,18 +407,43 @@ namespace gladius
 
         updatePayload();
 
-        {
-            m_parameterDirty = m_core->tryToupdateParameter(*m_assembly);
-        }
+        // Check if we can use the fast path (parameter structure unchanged)
+        bool const canUseFastPath = m_core->isParameterSignatureCompatible(*m_assembly);
 
-        if (m_parameterDirty)
+        auto attemptParameterUpdate = [&]() -> bool
         {
-            m_parameterDirty = !m_core->precomputeSdfForWholeBuildPlatform();
+            if (!m_core->tryToupdateParameter(*m_assembly))
+            {
+                return false;
+            }
+            return true;
+        };
+
+        bool updateSucceeded = false;
+
+        if (canUseFastPath)
+        {
+            updateSucceeded = attemptParameterUpdate();
         }
         else
         {
-            m_parameterDirty = true;
+            // Slow path: parameter structure changed
+            // NOTE: We don't call refreshModelAsync() here because updateParameter()
+            // is often called FROM WITHIN refreshWorker(), which would cause recursion.
+            // Instead, we just update normally and let the signature be recaptured
+            // on the next full refresh cycle.
+            auto logger = getSharedLogger();
+            if (logger)
+            {
+                logger->addEvent(
+                  {"Parameter structure mismatch detected (will be updated on next refresh)",
+                   events::Severity::Info});
+            }
+
+            updateSucceeded = attemptParameterUpdate();
         }
+
+        m_parameterDirty = !updateSucceeded;
     }
 
     void Document::updateParameterRegistration()

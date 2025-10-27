@@ -17,6 +17,11 @@ namespace gladius::nodes
         return m_subModels;
     }
 
+    auto Assembly::getFunctions() const -> Models const &
+    {
+        return m_subModels;
+    }
+
     auto Assembly::assemblyModel() -> SharedModel &
     {
         return m_subModels.at(m_assemblyModelId);

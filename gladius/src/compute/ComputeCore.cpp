@@ -10,14 +10,17 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <iostream>
 
 #include <fmt/core.h>
+#include <fmt/format.h>
 #include <lodepng.h>
 
 #include "CliReader.h"
 #include "ComputeCore.h"
 #include "Contour.h"
 #include "Mesh.h"
+#include "ParameterSignature.h"
 #include "Profiling.h"
 #include "RenderProgram.h"
 #include "ResourceContext.h"
@@ -260,9 +263,19 @@ namespace gladius
         }
 
         paramBuf.write();
-        invalidatePreCompSdf();
+        invalidatePreCompSdf("updateParameterBlocking");
         LOG_LOCATION
         return true;
+    }
+
+    bool ComputeCore::isParameterSignatureCompatible(nodes::Assembly const & assembly) const
+    {
+        return m_programs.isParameterSignatureCompatible(assembly);
+    }
+
+    ParameterSignature const & ComputeCore::getCompiledParameterSignature() const
+    {
+        return m_programs.getCompiledParameterSignature();
     }
 
     void ComputeCore::setPreCompSdfSize(size_t size)
@@ -496,7 +509,7 @@ namespace gladius
         {
             m_boundingBox = BoundingBox{{0.f, 0.f, 0.f}, {400.f, 400.f, 400.f}};
         }
-        LOG_LOCATION
+        LOG_LOCATION;
         return true;
     }
 
@@ -507,7 +520,13 @@ namespace gladius
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
         m_programs.recompileIfRequired();
-        LOG_LOCATION
+        LOG_LOCATION;
+    }
+
+    bool ComputeCore::isCompilationInProgress() const
+    {
+        return m_programs.getRenderProgram()->isCompilationInProgress() ||
+               m_programs.getSlicerProgram()->isCompilationInProgress();
     }
 
     void ComputeCore::recompileBlockingNoLock()
@@ -721,7 +740,7 @@ namespace gladius
         }
 
         m_boundingBox.reset();
-        invalidatePreCompSdf();
+        invalidatePreCompSdf("refreshProgram");
         if (m_codeGenerator == CodeGenerator::CommandStream)
         {
             std::stringstream modelKernel;
@@ -753,6 +772,14 @@ namespace gladius
             visitor.write(optimizedKernel);
 
             m_programs.setModelSource(optimizedKernel.str());
+        }
+
+        // Capture parameter signature after code generation for fast-path validation
+        if (assembly)
+        {
+            auto const signature = ParameterSignature::compute(*assembly);
+            m_programs.setCompiledParameterSignature(signature);
+            logMsg(fmt::format("Captured parameter signature: {}", signature.toString()));
         }
     }
 
@@ -812,6 +839,11 @@ namespace gladius
         return *m_eventLogger;
     }
 
+    std::string ComputeCore::getProgramStateSummary() const
+    {
+        return m_programs.getDebugStateSummary();
+    }
+
     cl_int2 ComputeCore::determineBufferSize(float2 pixelSize_mm) const
     {
         auto const rect = m_resources->getClippingArea();
@@ -852,25 +884,45 @@ namespace gladius
     {
         ProfileFunction
 
+                    logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: begin");
+
           if (!m_programs.getSlicerState().isModelUpToDate())
         {
             recompileIfRequired();
+                        logMsg(fmt::format(
+                            "ComputeCore::precomputeSdfForWholeBuildPlatform: post-recompile state {}",
+                            m_programs.getDebugStateSummary()));
+            if (!m_programs.getSlicerState().isModelUpToDate())
+            {
+                std::cout
+                  << "[ComputeCore::precomputeSdfForWholeBuildPlatform] abort: slicer state not up to date"
+                  << std::endl;
+            }
             return false;
         }
 
         if (!m_programs.getSlicerProgram()->isValid())
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: slicer program invalid");
+            std::cout
+              << "[ComputeCore::precomputeSdfForWholeBuildPlatform] abort: slicer program invalid"
+              << std::endl;
             return false;
         }
 
         if (m_precompSdfIsValid)
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: SDF already valid");
             return true;
         }
         updateBBox();
 
         if (!m_boundingBox.has_value())
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: no bounding box available");
+                        std::cout
+                            << "[ComputeCore::precomputeSdfForWholeBuildPlatform] abort: bounding box unavailable"
+                            << std::endl;
             return false;
         }
 
@@ -891,6 +943,7 @@ namespace gladius
         m_resources->setPreCompSdfBBox(prevCompSdfBBox);
         m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, prevCompSdfBBox);
         m_precompSdfIsValid = true;
+        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: completed successfully");
         return true;
     }
 
@@ -904,6 +957,121 @@ namespace gladius
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(boundingBox);
         m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, boundingBox);
+    }
+
+    cl::Event ComputeCore::precomputeSdfAsync(cl::CommandQueue const & queue)
+    {
+        ProfileFunction;
+
+        // No mutex lock for async operation - caller must ensure thread safety
+        // Validate preconditions
+        if (!m_programs.getSlicerState().isModelUpToDate())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: model not up to date, requesting recompilation");
+            recompileIfRequired();
+
+            if (!m_programs.getSlicerState().isModelUpToDate())
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after recompilation");
+                std::cout << "[ComputeCore::precomputeSdfAsync] abort: slicer state not up to date"
+                          << std::endl;
+                return cl::Event{};
+            }
+            else
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: model marked up to date after recompilation");
+            }
+        }
+
+        if (!m_programs.getSlicerProgram()->isValid())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: slicer program invalid, requesting recompilation");
+            recompileIfRequired();
+
+            if (!m_programs.getSlicerProgram()->isValid())
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: slicer program remained invalid");
+                std::cout << "[ComputeCore::precomputeSdfAsync] abort: slicer program invalid"
+                          << std::endl;
+                return cl::Event{};
+            }
+            else
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: slicer program became valid after recompilation");
+            }
+        }
+
+        if (m_precompSdfIsValid)
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: SDF already valid, skipping");
+            std::cout << "[ComputeCore::precomputeSdfAsync] skip: SDF already valid" << std::endl;
+            return cl::Event{};
+        }
+
+        // Update bounding box (fast operation, synchronous)
+        if (!updateBBox())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: updateBBox failed");
+            std::cout << "[ComputeCore::precomputeSdfAsync] abort: updateBBox() failed" << std::endl;
+            return cl::Event{};
+        }
+
+        if (!m_boundingBox.has_value())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: no bounding box available, skipping");
+            std::cout << "[ComputeCore::precomputeSdfAsync] abort: bounding box unavailable" << std::endl;
+            return cl::Event{};
+        }
+
+        auto const & bbox = m_boundingBox.value();
+        logMsg(fmt::format(
+          "ComputeCore::precomputeSdfAsync: using bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f})",
+          bbox.min.x,
+          bbox.min.y,
+          bbox.min.z,
+          bbox.max.x,
+          bbox.max.y,
+          bbox.max.z));
+
+        // Expand bounding box with margin
+        auto const margin = 10.f;
+        auto sdfBBox = m_boundingBox.value();
+        sdfBBox.min.x -= margin;
+        sdfBBox.min.y -= margin;
+        sdfBBox.min.z -= margin;
+        sdfBBox.max.x += margin;
+        sdfBBox.max.y += margin;
+        sdfBBox.max.z += margin;
+
+        // Allocate SDF buffer
+        m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
+        m_resources->setPreCompSdfBBox(sdfBBox);
+
+                logMsg(fmt::format(
+                    "ComputeCore::precomputeSdfAsync: launching kernel with bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f}) size={}",
+                    sdfBBox.min.x,
+                    sdfBBox.min.y,
+                    sdfBBox.min.z,
+                    sdfBBox.max.x,
+                    sdfBBox.max.y,
+                    sdfBBox.max.z,
+                    m_preCompSdfSize));
+
+        // Launch async SDF kernel
+        cl::Event sdfEvent =
+          m_programs.getSlicerProgram()->precomputeSdfAsync(*m_primitives, sdfBBox, queue);
+
+        if (sdfEvent())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: SDF kernel enqueued successfully");
+            // Note: m_precompSdfIsValid will be set by caller after event.wait()
+        }
+        else
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: failed to enqueue SDF kernel");
+        }
+
+        return sdfEvent;
     }
 
     bool ComputeCore::prepareImageRendering()
@@ -1309,7 +1477,7 @@ namespace gladius
 
         if (!m_precompSdfIsValid)
         {
-            LOG_LOCATION
+            LOG_LOCATION;
             std::cout << "  -> renderLowResPreview: precomputed SDF is not valid, skipping"
                       << std::endl;
             return;
@@ -1332,9 +1500,37 @@ namespace gladius
         m_resultImage->unbind();
     }
 
-    void ComputeCore::invalidatePreCompSdf()
+    void ComputeCore::invalidatePreCompSdf(std::string_view reason)
     {
+        std::string const reasonStr = reason.empty() ? std::string{} : std::string(reason);
+
+        if (m_precompSdfIsValid)
+        {
+            std::cout << "[ComputeCore] invalidatePreCompSdf()"
+                      << (reasonStr.empty() ? "" : " reason=")
+                      << reasonStr << std::endl;
+        }
+        else if (!reasonStr.empty())
+        {
+            std::cout << "[ComputeCore] invalidatePreCompSdf(reason=" << reasonStr
+                      << ") (already invalid)" << std::endl;
+        }
         m_precompSdfIsValid = false;
+    }
+
+    void ComputeCore::setSdfValid(bool valid)
+    {
+        if (m_precompSdfIsValid != valid)
+        {
+            std::cout << "[ComputeCore] setSdfValid(" << (valid ? "true" : "false")
+                      << ")" << std::endl;
+        }
+        m_precompSdfIsValid = valid;
+    }
+
+    bool ComputeCore::isSdfValid() const
+    {
+        return m_precompSdfIsValid;
     }
 
     events::SharedLogger ComputeCore::getSharedLogger() const

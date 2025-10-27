@@ -304,4 +304,31 @@ namespace gladius
     {
         return m_renderState;
     }
+
+    ParameterSignature const & ProgramManager::getCompiledParameterSignature() const
+    {
+        std::lock_guard<std::mutex> lock(m_parameterSignatureMutex);
+        return m_compiledParameterSignature;
+    }
+
+    void ProgramManager::setCompiledParameterSignature(ParameterSignature signature)
+    {
+        std::lock_guard<std::mutex> lock(m_parameterSignatureMutex);
+        m_compiledParameterSignature = std::move(signature);
+    }
+
+    bool ProgramManager::isParameterSignatureCompatible(nodes::Assembly const & assembly) const
+    {
+        std::lock_guard<std::mutex> lock(m_parameterSignatureMutex);
+
+        // If no signature has been compiled yet, not compatible (need initial compilation)
+        if (!m_compiledParameterSignature.isValid())
+        {
+            return false;
+        }
+
+        // Compute current signature and compare
+        auto const currentSignature = ParameterSignature::compute(assembly);
+        return currentSignature.matches(m_compiledParameterSignature);
+    }
 }

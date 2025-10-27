@@ -150,6 +150,38 @@ namespace gladius
           "preComputeSdf", origin, range, target.getBuffer(), boundingBox, PAYLOAD_ARGUMENTS);
     }
 
+    cl::Event SlicerProgram::precomputeSdfAsync(const Primitives & lines,
+                                                BoundingBox boundingBox,
+                                                cl::CommandQueue const & queue)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        ProfileFunction;
+        swapProgramsIfNeeded();
+
+        auto & target = m_resoures->getPrecompSdfBuffer();
+        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        const cl::NDRange origin = {0, 0, 0};
+        const cl::NDRange range = {target.getWidth(), target.getHeight(), target.getDepth()};
+
+        // Use runNonBlocking to get the event without blocking
+        cl::Event sdfEvent = m_programFront->runNonBlocking(queue,
+                                                            "preComputeSdf",
+                                                            origin,
+                                                            range,
+                                                            target.getBuffer(),
+                                                            boundingBox,
+                                                            PAYLOAD_ARGUMENTS);
+
+        // Flush to ensure the kernel is submitted, but don't wait
+        if (sdfEvent())
+        {
+            queue.flush();
+        }
+
+        return sdfEvent;
+    }
+
     void SlicerProgram::calculateNormals(const Primitives & lines, const Mesh & mesh)
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);

@@ -18,6 +18,7 @@
 
 #include <compute/ProgramManager.h>
 
+#include <string_view>
 #include <mutex>
 
 namespace cl
@@ -425,6 +426,13 @@ namespace gladius
         bool precomputeSdfForWholeBuildPlatform();
         void precomputeSdfForBBox(const BoundingBox & boundingBox);
 
+        /**
+         * @brief Asynchronously precompute SDF for the whole build platform (non-blocking).
+         * @param queue OpenCL command queue to use for async execution
+         * @return Event that can be waited on to track SDF completion
+         */
+        [[nodiscard]] cl::Event precomputeSdfAsync(cl::CommandQueue const & queue);
+
         /// @brief Prepares the compute core for thumbnail generation in headless mode
         /// @return true if preparation succeeded, false otherwise
         bool prepareImageRendering();
@@ -468,11 +476,15 @@ namespace gladius
         void compileSlicerProgramBlocking();
 
         void logMsg(std::string msg) const;
+        [[nodiscard]] std::string getProgramStateSummary() const;
 
         void computeVertexNormals(Mesh & mesh) const;
 
         void recompileIfRequired();
         void recompileBlockingNoLock();
+        
+        /// Check if OpenCL program compilation is currently in progress
+        [[nodiscard]] bool isCompilationInProgress() const;
 
         void resetBoundingBox();
 
@@ -487,7 +499,9 @@ namespace gladius
 
         std::mutex & getContourExtractorMutex();
 
-        void invalidatePreCompSdf();
+        void invalidatePreCompSdf(std::string_view reason = {});
+        void setSdfValid(bool valid);
+        [[nodiscard]] bool isSdfValid() const;
         [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
@@ -508,6 +522,12 @@ namespace gladius
 
         [[nodiscard]] bool tryToupdateParameter(nodes::Assembly & assembly);
         [[nodiscard]] bool updateParameterBlocking(nodes::Assembly & assembly);
+
+        /// Check if parameter structure matches compiled signature (fast path possible)
+        [[nodiscard]] bool isParameterSignatureCompatible(nodes::Assembly const & assembly) const;
+
+        /// Get the compiled parameter signature from program manager
+        [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
 
         void setPreCompSdfSize(size_t size);
 

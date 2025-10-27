@@ -144,6 +144,16 @@ namespace gladius::ui
                                     async_rendering::RenderJob const & job,
                                     async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
+                // Async SDF precomputation
+                                coro::task<async_rendering::FrameResultMeta> executeAsyncSdfPrecomputation(
+                                    async_rendering::RenderJob const & job,
+                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+
+                // Async parameter update
+                                coro::task<async_rendering::FrameResultMeta> executeAsyncParameterUpdate(
+                                    async_rendering::RenderJob const & job,
+                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+
         GLView * m_view{};
 
         ComputeCore * m_core;
@@ -257,6 +267,7 @@ namespace gladius::ui
         std::atomic<bool> m_asyncJobInFlight{false};
         std::atomic<bool> m_asyncBboxJobInFlight{false};
         std::atomic<bool> m_asyncBboxUpdatePending{false};  // Tracks if bbox needs update after current job
+        std::atomic<bool> m_asyncSdfJobInFlight{false};
         bool m_asyncInitialized{false};
         
         // Progressive rendering: reuse same buffer for all chunks in a frame

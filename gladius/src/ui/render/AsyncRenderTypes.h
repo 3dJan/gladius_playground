@@ -45,7 +45,10 @@ namespace gladius::ui::async_rendering
     {
         HighQuality,
         LowResPreview,
-        BoundingBoxUpdate
+        BoundingBoxUpdate,
+        ParameterUpdate,      // Fast path: parameter values changed without structure change
+        SDFPrecomputation,    // Async SDF generation after model/bbox update
+        ProgramCompilation    // Async OpenCL program compilation
     };
 
     /**
@@ -62,6 +65,7 @@ namespace gladius::ui::async_rendering
         size_t stepSize{1};
         bool precomputeSdf{false};
         bool enableHighQuality{true};
+        bool precomputedSdf{false};  // True if SDF should be precomputed before rendering
     };
 
     /**
@@ -79,6 +83,9 @@ namespace gladius::ui::async_rendering
         bool precomputedSdfUpdated{false};
         size_t completedLine{0};
         uint64_t computeDurationNs{0};
+        float compilationProgress{0.0f};  // 0.0 - 1.0 for compilation jobs
+        bool compilationSucceeded{false};
+        std::string compilationError;     // Empty if no error
     };
 
     /**
