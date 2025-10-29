@@ -143,10 +143,8 @@ namespace gladius::ui
 
         if (m_asyncConfig.wantsCoroutineBackend())
         {
-            DebugText("CoroutineBackend", 16);
             if (!m_asyncController)
             {
-                DebugText("CreatingController", 18);
                 m_asyncController = std::make_shared<async_rendering::AsyncRenderController>();
             }
             m_asyncController->setJobExecutor(
@@ -169,9 +167,7 @@ namespace gladius::ui
 
                   co_return co_await executeAsyncRenderJob(job, cancelCheck);
               });
-            DebugText("CallingStart", 12);
             m_asyncController->start();
-            DebugText("StartCompleted", 14);
             m_asyncEpochCounter.store(0, std::memory_order_release);
             m_asyncCurrentEpoch.store(0, std::memory_order_release);
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
@@ -227,10 +223,6 @@ namespace gladius::ui
         if (m_asyncController)
         {
             m_asyncController->releaseStaleBuffers(oldEpoch);
-        }
-
-        if (m_asyncController)
-        {
             m_asyncController->setLatestEpoch(newEpoch);
         }
     }
@@ -604,6 +596,7 @@ namespace gladius::ui
         m_preComputedSdfDirty = true;
         m_parameterDirty = true;
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
+        m_lowResFeedbackPending.store(true, std::memory_order_release);
 
         // Mark model as modified for permanent centering
         m_modelModifiedSinceLastCenter = true;
@@ -645,7 +638,12 @@ namespace gladius::ui
 
         if (state.isMoving)
         {
+            bool const wasSdfValid = m_core->isSdfValid();
             m_core->renderLowResPreview();
+            if (m_core->isSdfValid() || wasSdfValid)
+            {
+                m_lowResFeedbackPending.store(false, std::memory_order_release);
+            }
             m_lastLowResRenderTime = std::chrono::system_clock::now();
             return;
         }
@@ -1088,19 +1086,16 @@ namespace gladius::ui
         // Lazy initialization: only initialize async rendering once renderer is ready
         if (!m_asyncInitialized)
         {
-            DebugText("LazyAsyncInit", 13);
             initializeAsyncRendering();
             m_asyncInitialized = true;
         }
 
         if (m_asyncConfig.wantsCoroutineBackend())
         {
-            DebugText("ASYNC", 5);
             renderAsync(state);
             return;
         }
 
-        DebugText("SYNC", 4);
         renderSync(state);
     }
 
@@ -1326,6 +1321,7 @@ namespace gladius::ui
         {
             bool const sdfDirty = m_preComputedSdfDirty.load(std::memory_order_acquire);
             bool const sdfJobActive = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
+            bool const lowResPending = m_lowResFeedbackPending.load(std::memory_order_acquire);
 
             if (sdfDirty && !sdfJobActive)
             {
@@ -1340,7 +1336,13 @@ namespace gladius::ui
                 m_asyncController->setLatestEpoch(sdfJob.epoch);
                 m_asyncSdfJobInFlight.store(true, std::memory_order_release);
                 m_asyncController->enqueueJob(sdfJob);
-                DebugText("ScheduleSdfJob", 14);
+            }
+
+            if (lowResPending)
+            {
+                // Delay progressive rendering until low-res feedback is presented
+                state.isRendering = false;
+                m_asyncJobInFlight.store(false, std::memory_order_release);
             }
         }
 
@@ -1464,14 +1466,38 @@ namespace gladius::ui
         // Check if we need to force a low-res render (e.g., after parameter change)
         bool const forceLowResRender =
           m_forceLowResRenderOnNextFrame.exchange(false, std::memory_order_acq_rel);
+        bool const lowResPending = m_lowResFeedbackPending.load(std::memory_order_acquire);
 
-        if (state.isMoving || forceLowResRender)
+        if (state.isMoving || forceLowResRender || lowResPending)
         {
+            bool const hadActiveProgressive =
+              state.isRendering || m_asyncJobInFlight.load(std::memory_order_acquire);
+
+            if (lowResPending && hadActiveProgressive)
+            {
+                notifyAsyncEpochIncrement();
+                state.currentLine = 0;
+                state.renderingStepSize = kInitialProgressiveStepSize;
+                state.isRendering = false;
+            }
+
+            bool lowResSuccessful = false;
             auto token = m_core->requestComputeToken();
             if (token.has_value())
             {
+                bool const wasSdfValid = m_core->isSdfValid();
                 m_core->renderLowResPreview();
-                m_lastLowResRenderTime = std::chrono::system_clock::now();
+                bool const isSdfValidNow = m_core->isSdfValid();
+                if (isSdfValidNow || wasSdfValid)
+                {
+                    m_lowResFeedbackPending.store(false, std::memory_order_release);
+                    m_lastLowResRenderTime = std::chrono::system_clock::now();
+                    lowResSuccessful = true;
+                }
+            }
+            if (!lowResSuccessful)
+            {
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
             }
             state.isRendering = false;
             m_asyncJobInFlight.store(false, std::memory_order_release);
@@ -1501,23 +1527,20 @@ namespace gladius::ui
         }
         else {}
 
-        if (!m_asyncJobInFlight.load(std::memory_order_acquire))
+        if (!m_asyncJobInFlight.load(std::memory_order_acquire) &&
+            !m_lowResFeedbackPending.load(std::memory_order_acquire))
         {
-            DebugText("SchedulingAsyncJob", 18);
             state.isRendering = true;
             if (!scheduleAsyncRenderJob(state))
             {
-                DebugText("ScheduleFailed", 14);
                 state.isRendering = false;
             }
             else
             {
-                DebugText("ScheduleSuccess", 15);
             }
         }
         else
         {
-            DebugText("JobAlreadyInFlight", 18);
         }
     }
 
@@ -1630,24 +1653,19 @@ namespace gladius::ui
 
         if (!m_asyncController || !m_asyncController->isRunning())
         {
-            DebugText("ControllerNotRunning", 19);
             return false;
         }
 
         auto const image = m_core->getResultImage();
         if (!image)
         {
-            DebugText("NoResultImage", 13);
             return false;
         }
 
         size_t const height = static_cast<size_t>(image->getHeight());
-        DebugValue(height);
-        DebugValue(state.currentLine);
 
         if (height == 0 || state.currentLine >= height)
         {
-            DebugText("InvalidHeight", 13);
             m_dirty = false;
             state.isRendering = false;
             return false;

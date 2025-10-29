@@ -687,12 +687,10 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::VerticalStack,
                                                            0.95F,
                                                            1.05F,
-                                                           1.0F,
                                                            180,
                                                            0.8F,
                                                            true,
                                                            2,
-                                                           true,
                                                            true,
                                                            true}},
             StrategyParam{"LayeredStack Classic", NodeLayoutEngine::LayoutStrategy{"LayeredStack Classic"}},
@@ -701,7 +699,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::HorizontalRow,
                                                            1.0F,
                                                            1.1F,
-                                                           1.0F,
                                                            120,
                                                            0.9F,
                                                            true,
@@ -713,7 +710,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::VerticalStack,
                                                            1.0F,  // Full nodeDistance (was 0.9F)
                                                            1.0F,  // Full layerSpacing (was 0.9F)
-                                                           1.0F,
                                                            140,
                                                            0.8F,
                                                            true,
@@ -725,7 +721,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::VerticalStack,
                                                            1.0F,  // Full nodeDistance (was 0.88F)
                                                            1.0F,  // Full layerSpacing (was 0.88F)
-                                                           1.0F,
                                                            150,
                                                            0.75F,
                                                            true,
@@ -737,7 +732,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::VerticalStack,
                                                            1.0F,   // Full nodeDistance (was 0.92F)
                                                            1.05F,  // More layer spacing (was 0.9F)
-                                                           1.0F,   // Full constant offset (was 0.95F)
                                                            135,
                                                            0.82F,
                                                            true,
@@ -749,7 +743,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::BalancedGrid,
                                                            1.0F,   // Full nodeDistance (was 0.9F)
                                                            0.95F,  // Slightly tighter layer spacing (was 0.85F)
-                                                           1.0F,   // Full constant offset (was 0.8F)
                                                            140,
                                                            0.85F,
                                                            true,
@@ -761,7 +754,6 @@ namespace
                                                            NodeLayoutEngine::GroupLayoutMode::VerticalStack,
                                                            1.0F,   // Full nodeDistance (was 0.95F)
                                                            1.05F,  // More layer spacing (was 1.0F)
-                                                           1.0F,
                                                            160,
                                                            0.7F,
                                                            true,

@@ -811,9 +811,6 @@ namespace gladius::ui
 
     void MainWindow::newModel()
     {
-        std::cout << "newModel() called: m_computeAvailable=" << m_computeAvailable 
-                  << ", m_doc=" << (m_doc ? "valid" : "nullptr") << std::endl;
-        
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -821,8 +818,6 @@ namespace gladius::ui
                 m_logger->addEvent({"New model is unavailable: compute/renderer disabled",
                                     events::Severity::Warning});
             }
-            std::cout << "newModel() FAILED: compute=" << m_computeAvailable 
-                      << ", doc=" << (m_doc ? "valid" : "null") << std::endl;
             return;
         }
         if (m_fileChanged)
@@ -1216,9 +1211,6 @@ namespace gladius::ui
 
     void MainWindow::open()
     {
-        std::cout << "open() called: m_computeAvailable=" << m_computeAvailable 
-                  << ", m_doc=" << (m_doc ? "valid" : "nullptr") << std::endl;
-        
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -1226,8 +1218,6 @@ namespace gladius::ui
                 m_logger->addEvent(
                   {"Open is unavailable: compute/renderer disabled", events::Severity::Warning});
             }
-            std::cout << "open() FAILED: compute=" << m_computeAvailable 
-                      << ", doc=" << (m_doc ? "valid" : "null") << std::endl;
             return;
         }
         if (m_fileChanged)

@@ -178,8 +178,7 @@ namespace gladius::ui
 
             if (!performAutoLayoutVariant(model, strategyConfig, strategy.groupMode))
             {
-                std::cout << "[LayoutCandidate] strategy=" << strategy.name
-                          << " status=skipped" << std::endl;
+                // Skipping strategy due to failed layout pass; no console logging in production
                 m_lastResults.push_back(result);
                 candidateSnapshots.emplace_back(PositionSnapshot{});
                 continue;
@@ -200,12 +199,7 @@ namespace gladius::ui
             // Capture positions for this candidate so we can restore the chosen one later
             candidateSnapshots.push_back(capturePositions(model));
 
-            std::cout << "[LayoutCandidate] strategy=" << strategy.name
-                      << " score=" << score << " crossings=" << metrics.edgeCrossings
-                      << " area=" << metrics.occupiedArea
-                      << " height=" << metrics.height
-                      << " nodeOverlaps=" << metrics.nodeOverlaps.size()
-                      << " groupOverlaps=" << metrics.groupOverlaps.size() << std::endl;
+
 
             // Selection of champion is performed after evaluating all candidates
         }
@@ -225,31 +219,18 @@ namespace gladius::ui
             bool const hasOverlap = !r.metrics.nodeOverlaps.empty() || !r.metrics.groupOverlaps.empty();
             if (hasOverlap)
             {
-                std::cout << "[ChampionSelection] pass=1 SKIP " << r.name 
-                          << " (nodeOverlaps=" << r.metrics.nodeOverlaps.size() 
-                          << " groupOverlaps=" << r.metrics.groupOverlaps.size() << ")" << std::endl;
                 continue;
             }
             if (r.score < chosenScore)
             {
-                std::cout << "[ChampionSelection] pass=1(no-overlap) candidate=" << r.name
-                          << " index=" << i << " score=" << r.score 
-                          << " (better than current=" << chosenScore << ")" << std::endl;
                 chosenScore = r.score;
                 chosenIndex = static_cast<int>(i);
-            }
-            else
-            {
-                std::cout << "[ChampionSelection] pass=1 consider " << r.name
-                          << " index=" << i << " score=" << r.score 
-                          << " (NOT better than current=" << chosenScore << ")" << std::endl;
             }
         }
 
         // Second pass: if all candidates overlap, pick best overall
         if (chosenIndex < 0)
         {
-            std::cout << "[ChampionSelection] pass=2(with-overlap) all candidates had overlaps" << std::endl;
             for (size_t i = 0; i < m_lastResults.size(); ++i)
             {
                 auto const & r = m_lastResults[i];
@@ -259,9 +240,6 @@ namespace gladius::ui
                 }
                 if (r.score < chosenScore)
                 {
-                    std::cout << "[ChampionSelection] pass=2 candidate=" << r.name
-                              << " index=" << i << " score=" << r.score 
-                              << " (better than current=" << chosenScore << ")" << std::endl;
                     chosenScore = r.score;
                     chosenIndex = static_cast<int>(i);
                 }
@@ -270,7 +248,6 @@ namespace gladius::ui
 
         if (chosenIndex < 0)
         {
-            std::cout << "[LayoutChampion] NONE - no valid candidates!" << std::endl;
             restorePositions(model, basePositions, true);
             model.markAsLayouted();
             return;
@@ -279,12 +256,6 @@ namespace gladius::ui
         // Restore the positions for the chosen candidate
         restorePositions(model, candidateSnapshots[static_cast<size_t>(chosenIndex)], true);
         m_lastChampion = m_lastResults[static_cast<size_t>(chosenIndex)];
-        std::cout << "[LayoutChampion] name=" << m_lastChampion->name
-                  << " index=" << chosenIndex
-                  << " score=" << m_lastChampion->score 
-                  << " crossings=" << m_lastChampion->metrics.edgeCrossings
-              << " area=" << m_lastChampion->metrics.occupiedArea
-              << " height=" << m_lastChampion->metrics.height << std::endl;
         model.markAsLayouted();
     }
 
@@ -1115,7 +1086,6 @@ namespace gladius::ui
     {
         if (passes <= 0 || depthMap.empty())
         {
-            std::cout << "[balanceLayers] Skipped: passes=" << passes << " depthMap.size()=" << depthMap.size() << std::endl;
             return;
         }
 

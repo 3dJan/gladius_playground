@@ -161,8 +161,6 @@ namespace gladius
         auto const & queue = m_core->getComputeContext()->GetQueue();
         cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
         bool const sdfEventValid = sdfEvent() != nullptr;
-        std::cout << "[Document::refreshWorker] precomputeSdfAsync returned "
-              << (sdfEventValid ? "valid event" : "no event") << std::endl;
 
         bool sdfUpdated = false;
         bool sdfUpdatedViaAsync = false;
@@ -170,51 +168,33 @@ namespace gladius
         // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
         if (sdfEventValid)
         {
-            std::cout << "[Document::refreshWorker] waiting for async SDF event" << std::endl;
             sdfEvent.wait();
-            std::cout << "[Document::refreshWorker] async SDF event completed" << std::endl;
             sdfUpdated = true;
             sdfUpdatedViaAsync = true;
         }
         else
         {
             // Fallback to synchronous computation if async launch failed
-            std::cout
-              << "[Document::refreshWorker] async launch failed, running synchronous fallback"
-              << std::endl;
             if (m_core->precomputeSdfForWholeBuildPlatform())
             {
-                std::cout << "[Document::refreshWorker] synchronous SDF completed" << std::endl;
                 sdfUpdated = true;
             }
             else
             {
-                std::cout << "[Document::refreshWorker] synchronous SDF failed" << std::endl;
             }
         }
 
         if (sdfUpdated)
         {
-            std::cout << "[Document::refreshWorker] marking SDF valid via "
-                      << (sdfUpdatedViaAsync ? "async" : "sync") << std::endl;
             m_core->setSdfValid(true);
             if (sdfUpdatedViaAsync)
             {
                 // Now that the SDF exists, update the bounding box serially (still off the UI thread)
-                std::cout << "[Document::refreshWorker] updating bounding box after async SDF"
-                          << std::endl;
                 m_core->updateBBox();
             }
         }
         else
         {
-            std::cout << "[Document::refreshWorker] SDF computation failed, invalidating"
-                      << std::endl;
-            std::cout << "  -> coreState: isModelUpToDate="
-                      << (m_core->getMeshResourceState()->isModelUpToDate() ? 1 : 0)
-                      << " slicerValid=" << (m_core->getSlicerProgram()->isValid() ? 1 : 0)
-                      << " sdfValid=" << (m_core->isSdfValid() ? 1 : 0)
-                      << std::endl;
             m_core->invalidatePreCompSdf("refreshWorkerFailure");
         }
 

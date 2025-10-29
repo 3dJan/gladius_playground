@@ -268,6 +268,7 @@ namespace gladius::ui
         std::atomic<bool> m_asyncBboxJobInFlight{false};
         std::atomic<bool> m_asyncBboxUpdatePending{false};  // Tracks if bbox needs update after current job
         std::atomic<bool> m_asyncSdfJobInFlight{false};
+        std::atomic<bool> m_lowResFeedbackPending{false};
         bool m_asyncInitialized{false};
         
         // Progressive rendering: reuse same buffer for all chunks in a frame
