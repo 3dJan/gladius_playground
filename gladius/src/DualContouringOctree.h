@@ -37,6 +37,7 @@ namespace gladius::dual_contouring
         };
         std::vector<HermiteSample> hermiteSamples{};
         Eigen::Vector3f vertexPosition{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f vertexNormal{Eigen::Vector3f::Zero()};
         float vertexResidual{0.0F};
         bool isLeaf{true};
         bool isIntersecting{false};
@@ -57,6 +58,7 @@ namespace gladius::dual_contouring
         size_t sdfResolution{64U};
         size_t maxDepth{4U};
         float isoValue{0.0F};
+        bool forceUniform{false};
     };
 
     class OctreeBuilder
@@ -66,7 +68,23 @@ namespace gladius::dual_contouring
                       BoundingBox const & targetBounds,
                       OctreeBuildConfig config);
 
+                OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
+                                            OctreeBuildConfig config,
+                                            size_t width,
+                                            size_t height,
+                                            size_t depth,
+                                            std::vector<float> values);
+
         [[nodiscard]] std::unique_ptr<OctreeNode> build(OctreeMetrics & metrics);
+
+                [[nodiscard]] Eigen::Vector3f const & gridMin() const;
+                [[nodiscard]] Eigen::Vector3f const & gridMax() const;
+                [[nodiscard]] Eigen::Vector3f const & gridSpacing() const;
+                [[nodiscard]] size_t gridWidth() const;
+                [[nodiscard]] size_t gridHeight() const;
+                [[nodiscard]] size_t gridDepth() const;
+                [[nodiscard]] float gridSample(Eigen::Vector3f const & position) const;
+                [[nodiscard]] float gridValueAt(size_t x, size_t y, size_t z) const;
 
       private:
         struct SdfGrid

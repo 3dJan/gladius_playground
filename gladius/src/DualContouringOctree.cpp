@@ -172,6 +172,43 @@ namespace gladius::dual_contouring
         resources->releasePreComputedSdf();
     }
 
+    OctreeBuilder::OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
+                                 OctreeBuildConfig config,
+                                 size_t width,
+                                 size_t height,
+                                 size_t depth,
+                                 std::vector<float> values)
+        : m_config(std::move(config))
+    {
+        if (width < 2U || height < 2U || depth < 2U)
+        {
+            throw std::invalid_argument("SDF grid dimensions must be at least 2 in each axis");
+        }
+
+        if (values.size() != width * height * depth)
+        {
+            throw std::invalid_argument("SDF grid value count does not match provided dimensions");
+        }
+
+        m_grid.min = targetBounds.min;
+        m_grid.max = targetBounds.max;
+        m_grid.width = width;
+        m_grid.height = height;
+        m_grid.depth = depth;
+        m_grid.values = std::move(values);
+
+        m_grid.spacing = Eigen::Vector3f{
+          (width > 1U) ? (m_grid.max.x() - m_grid.min.x()) / static_cast<float>(width - 1U) : 1.0F,
+          (height > 1U) ? (m_grid.max.y() - m_grid.min.y()) / static_cast<float>(height - 1U) : 1.0F,
+          (depth > 1U) ? (m_grid.max.z() - m_grid.min.z()) / static_cast<float>(depth - 1U) : 1.0F};
+        m_grid.spacing = m_grid.spacing.cwiseMax(Eigen::Vector3f::Constant(1e-4F));
+
+        m_rootBounds.min = m_grid.min;
+        m_rootBounds.max = m_grid.max;
+
+        m_config.sdfResolution = width;
+    }
+
     std::unique_ptr<OctreeNode> OctreeBuilder::build(OctreeMetrics & metrics)
     {
         metrics = {};
@@ -411,6 +448,28 @@ namespace gladius::dual_contouring
 
         node.vertexPosition = position;
         node.vertexResidual = residual;
+        Eigen::Vector3f normalSum = Eigen::Vector3f::Zero();
+        for (auto const & sample : node.hermiteSamples)
+        {
+            normalSum += sample.normal;
+        }
+
+        if (normalSum.squaredNorm() > 1e-8F)
+        {
+            node.vertexNormal = normalSum.normalized();
+        }
+        else
+        {
+            Eigen::Vector3f gradient = evaluateGradient(node.vertexPosition);
+            if (gradient.squaredNorm() > 1e-8F)
+            {
+                node.vertexNormal = gradient.normalized();
+            }
+            else
+            {
+                node.vertexNormal = Eigen::Vector3f{1.0F, 0.0F, 0.0F};
+            }
+        }
         node.hasVertex = true;
     }
 
@@ -462,8 +521,53 @@ namespace gladius::dual_contouring
             return false;
         }
 
+        if (m_config.forceUniform)
+        {
+            return true;
+        }
+
         auto const extent = node.bounds.extent();
         auto const minimumExtent = extent.minCoeff();
         return minimumExtent > 1e-3F;
+    }
+
+    Eigen::Vector3f const & OctreeBuilder::gridMin() const
+    {
+        return m_grid.min;
+    }
+
+    Eigen::Vector3f const & OctreeBuilder::gridMax() const
+    {
+        return m_grid.max;
+    }
+
+    Eigen::Vector3f const & OctreeBuilder::gridSpacing() const
+    {
+        return m_grid.spacing;
+    }
+
+    size_t OctreeBuilder::gridWidth() const
+    {
+        return m_grid.width;
+    }
+
+    size_t OctreeBuilder::gridHeight() const
+    {
+        return m_grid.height;
+    }
+
+    size_t OctreeBuilder::gridDepth() const
+    {
+        return m_grid.depth;
+    }
+
+    float OctreeBuilder::gridSample(Eigen::Vector3f const & position) const
+    {
+        return m_grid.sample(position);
+    }
+
+    float OctreeBuilder::gridValueAt(size_t x, size_t y, size_t z) const
+    {
+        return m_grid.valueAt(x, y, z);
     }
 }
