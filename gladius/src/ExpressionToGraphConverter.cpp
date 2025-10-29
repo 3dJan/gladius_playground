@@ -14,6 +14,7 @@
 #include <set>
 #include <stack>
 #include <stdexcept>
+#include <typeindex>
 
 namespace gladius
 {
@@ -23,7 +24,7 @@ namespace gladius
     std::map<std::string, ArgumentType> ExpressionToGraphConverter::s_beginNodeArguments;
 
     // Track the current variable context for Begin node port resolution
-    thread_local std::string ExpressionToGraphConverter::s_currentVariableContext;
+    thread_local std::vector<std::string> ExpressionToGraphConverter::s_variableContextStack;
 
     nodes::NodeId ExpressionToGraphConverter::convertExpressionToGraph(
       std::string const & expression,
@@ -36,6 +37,7 @@ namespace gladius
         s_componentMap.clear();
         s_vectorDecomposeNodes.clear();
         s_beginNodeArguments.clear();
+        s_variableContextStack.clear();
 
         // Check for function call with component access BEFORE parser validation
         // because muParser doesn't understand this syntax
@@ -390,7 +392,7 @@ namespace gladius
         if (varIt != variableNodes.end())
         {
             // Set the current variable context for Begin node port resolution
-            s_currentVariableContext = cleanExpr;
+            s_variableContextStack.push_back(cleanExpr);
             return varIt->second;
         }
 
@@ -768,11 +770,11 @@ namespace gladius
         // Check if this is a Begin node - if so, use the current variable context
         if (dynamic_cast<nodes::Begin *>(node) != nullptr)
         {
-            if (!s_currentVariableContext.empty())
+            if (!s_variableContextStack.empty())
             {
                 // Clear the context after use
-                std::string context = s_currentVariableContext;
-                s_currentVariableContext.clear();
+                std::string context = s_variableContextStack.back();
+                s_variableContextStack.pop_back();
                 return context; // Return the argument name as the port name
             }
             return nodes::FieldNames::Value; // Fallback
@@ -954,7 +956,7 @@ namespace gladius
             // For Begin nodes, set the context so getOutputPortName knows which argument to use
             if (isBeginNode)
             {
-                s_currentVariableContext = argName;
+                s_variableContextStack.push_back(argName);
             }
 
             if (!connectNodes(model,
@@ -1193,20 +1195,46 @@ namespace gladius
             }
         }
 
-        // Add the output parameter to the End node
-        if (output.type == ArgumentType::Scalar)
+        // Inspect the result node output type to determine the correct End node parameter
+        auto resultNodeOpt = model.getNode(resultNodeId);
+        if (!resultNodeOpt.has_value())
         {
-            nodes::VariantParameter parameter(float{0.0f});
-            model.addFunctionOutput(output.name, parameter);
+            return false;
         }
-        else if (output.type == ArgumentType::Vector)
+
+        nodes::NodeBase * resultNode = resultNodeOpt.value();
+        std::string resultPortName = getOutputPortName(model, resultNodeId);
+        nodes::Port * resultPort = resultNode->findOutputPort(resultPortName);
+        if (resultPort == nullptr)
+        {
+            return false;
+        }
+
+        ArgumentType actualType = ArgumentType::Scalar;
+        std::type_index const resultType = resultPort->getTypeIndex();
+        if (resultType == std::type_index(typeid(nodes::float3)))
+        {
+            actualType = ArgumentType::Vector;
+        }
+
+        ArgumentType parameterType = output.type;
+        if (parameterType != actualType)
+        {
+            parameterType = actualType;
+        }
+
+        if (parameterType == ArgumentType::Vector)
         {
             nodes::VariantParameter parameter(nodes::float3{0.0f, 0.0f, 0.0f});
             model.addFunctionOutput(output.name, parameter);
         }
+        else
+        {
+            nodes::VariantParameter parameter(float{0.0f});
+            model.addFunctionOutput(output.name, parameter);
+        }
 
         // Connect the result node to the End node's input parameter
-        std::string resultPortName = getOutputPortName(model, resultNodeId);
         return connectNodes(model, resultNodeId, resultPortName, endNode->getId(), output.name);
     }
 
