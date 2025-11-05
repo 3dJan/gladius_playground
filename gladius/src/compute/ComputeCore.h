@@ -536,6 +536,10 @@ namespace gladius
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// Get the program manager for direct access to specialized programs
+        [[nodiscard]] ProgramManager & getProgramManager();
+        [[nodiscard]] ProgramManager const & getProgramManager() const;
+
       private:
         bool updateBoundingBoxFast();
         void throwIfNoOpenGL() const;

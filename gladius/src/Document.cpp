@@ -17,6 +17,7 @@
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
+#include "io/DualContouringStlExporter.h"
 #include "io/ImporterVdb.h"
 #include "io/VdbImporter.h"
 #include "nodes/GraphFlattener.h"
@@ -572,19 +573,63 @@ namespace gladius
 
     void Document::exportAsStl(std::filesystem::path const & filename)
     {
+        exportAsStl(filename, io::StlExportOptions{});
+    }
+
+    void Document::exportAsStl(std::filesystem::path const & filename,
+                               io::StlExportOptions const & options)
+    {
         refreshModelBlocking();
 
-        vdb::MeshExporter exporter;
-        exporter.beginExport(filename, *m_core);
         auto logger = getSharedLogger();
-        while (exporter.advanceExport(*m_core))
+
+        switch (options.method)
         {
-            if (logger)
-                logger->addEvent(
-                  {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
-                   events::Severity::Info});
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+        {
+            vdb::MeshExporter exporter;
+            exporter.setQualityLevel(options.marchingCubesQualityLevel);
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core))
+            {
+                if (logger)
+                {
+                    logger->addEvent(
+                      {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
+                       events::Severity::Info});
+                }
+            }
+            exporter.finalizeExportSTL(*m_core);
+            break;
         }
-        exporter.finalizeExportSTL(*m_core);
+        case io::SurfaceExtractionMethod::DualContouring:
+        {
+            io::DualContouringOptions dualOptions = options.dualContouring;
+            io::DualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(dualOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core))
+            {
+            }
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(errorText.empty() ?
+                                         "Dual contouring STL export failed" : errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent({fmt::format("Dual contouring STL export completed: {}",
+                                              filename.string()),
+                                  events::Severity::Info});
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported surface extraction method");
+        }
     }
 
     void Document::markFileAsChanged()

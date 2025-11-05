@@ -49,18 +49,22 @@ namespace gladius
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         m_slicerProgram = std::make_unique<SlicerProgram>(m_ComputeContext, m_resources);
         m_optimizedRenderProgram = std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
+        m_dualContouringSamplingProgram =
+          std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
 
         // Propagate logger to programs so that CL diagnostics go to the event logger
         if (m_eventLogger)
         {
             m_slicerProgram->setLogger(m_eventLogger);
             m_optimizedRenderProgram->setLogger(m_eventLogger);
+            m_dualContouringSamplingProgram->setLogger(m_eventLogger);
         }
 
         // Set up binary caching
         auto cacheDir = std::filesystem::temp_directory_path() / "gladius" / "opencl_cache";
         m_slicerProgram->setCacheDirectory(cacheDir);
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
+        m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
 
         m_optimizedRenderProgram->buildKernelLib();
         recompileIfRequired();
@@ -245,6 +249,11 @@ namespace gladius
     RenderProgram * ProgramManager::getRenderProgram() const
     {
         return m_optimizedRenderProgram.get();
+    }
+
+    DualContouringSamplingProgram * ProgramManager::getDualContouringSamplingProgram() const
+    {
+        return m_dualContouringSamplingProgram.get();
     }
 
     events::SharedLogger ProgramManager::getSharedLogger() const

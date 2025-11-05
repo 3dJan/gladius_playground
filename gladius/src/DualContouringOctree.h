@@ -1,17 +1,25 @@
 #pragma once
 
+#include "DualContouringGpuSampling.h"
 #include "kernel/types.h"
 
 #include <Eigen/Core>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace gladius
 {
     class ComputeCore;
+}
+
+namespace gladius::dual_contouring
+{
+    class GpuSamplingSession;
 }
 
 namespace gladius::dual_contouring
@@ -51,6 +59,8 @@ namespace gladius::dual_contouring
         size_t nodeCount{0U};
         size_t leafCount{0U};
         size_t maxDepthReached{0U};
+        bool usedGpuSampling{false};      ///< Whether GPU sampling was used
+        size_t balancePassSubdivisions{0U}; ///< Nodes subdivided during balance pass
     };
 
     struct OctreeBuildConfig
@@ -59,6 +69,10 @@ namespace gladius::dual_contouring
         size_t maxDepth{4U};
         float isoValue{0.0F};
         bool forceUniform{false};
+        bool enableGpuSampling{false};         ///< Enable GPU-accelerated sampling (Phase 2)
+        bool enableCurvatureRefinement{false}; ///< Enable curvature-based adaptive refinement
+        float curvatureThreshold{0.5F};        ///< Gradient variation threshold for subdivision
+        bool enableBalancedRefinement{false};  ///< Enforce balanced octree (depth diff ≤ 1)
     };
 
     class OctreeBuilder
@@ -108,14 +122,23 @@ namespace gladius::dual_contouring
                                               std::uint8_t depth,
                                               OctreeMetrics & metrics);
         void evaluateCorners(OctreeNode & node) const;
+        void evaluateCornersGpu(OctreeNode & node) const;
                 void gatherHermiteSamples(OctreeNode & node) const;
+                void gatherHermiteSamplesGpu(OctreeNode & node) const;
                 void computeVertex(OctreeNode & node) const;
                 [[nodiscard]] Eigen::Vector3f evaluateGradient(Eigen::Vector3f const & position) const;
                 [[nodiscard]] Eigen::Vector3f clampToGrid(Eigen::Vector3f const & position) const;
         [[nodiscard]] bool shouldSubdivide(OctreeNode const & node, std::uint8_t depth) const;
+        
+        // Balanced refinement support
+        void enforceBalance(OctreeNode & node, OctreeMetrics & metrics);
+        [[nodiscard]] std::uint8_t getMaxNeighborDepth(OctreeNode const & node) const;
+        void subdivideForBalance(OctreeNode & node, std::uint8_t targetDepth, OctreeMetrics & metrics);
 
         SdfGrid m_grid{};
         OctreeBuildConfig m_config{};
         AxisAlignedBoundingBox m_rootBounds{};
+        ComputeCore * m_computeCore{nullptr}; ///< Optional ComputeCore for GPU sampling
+        std::unique_ptr<dual_contouring::GpuSamplingSession> m_gpuSession;
     };
 }

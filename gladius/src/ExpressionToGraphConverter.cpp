@@ -1102,81 +1102,38 @@ namespace gladius
     bool ExpressionToGraphConverter::validateOutputType(nodes::Model & model,
                                                         nodes::NodeId resultNodeId,
                                                         ArgumentType expectedType)
-    {
-        auto nodeOpt = model.getNode(resultNodeId);
-        if (!nodeOpt.has_value())
         {
-            return false; // Node not found
-        }
-
-        nodes::NodeBase * node = nodeOpt.value();
-        std::string nodeTypeName = node->name();
-
-        // Determine the type of the result node
-        bool isVectorResult = false;
-        bool isScalarResult = false;
-
-        // Check for vector-producing nodes
-        if (nodeTypeName.find("ConstantVector") != std::string::npos ||
-            nodeTypeName.find("VectorCompose") != std::string::npos)
-        {
-            isVectorResult = true;
-        }
-        // Check for scalar-producing nodes
-        else if (nodeTypeName.find("ConstantScalar") != std::string::npos ||
-                 nodeTypeName.find("DecomposeVector") != std::string::npos)
-        {
-            isScalarResult = true;
-        }
-        // Math operation nodes can produce either scalar or vector results
-        // depending on their inputs - for now, be permissive
-        else if (nodeTypeName.find("Addition") != std::string::npos ||
-                 nodeTypeName.find("Subtraction") != std::string::npos ||
-                 nodeTypeName.find("Multiplication") != std::string::npos ||
-                 nodeTypeName.find("Division") != std::string::npos ||
-                 nodeTypeName.find("Sine") != std::string::npos ||
-                 nodeTypeName.find("Cosine") != std::string::npos ||
-                 nodeTypeName.find("Tangent") != std::string::npos ||
-                 nodeTypeName.find("Exp") != std::string::npos ||
-                 nodeTypeName.find("Log") != std::string::npos ||
-                 nodeTypeName.find("Sqrt") != std::string::npos ||
-                 nodeTypeName.find("Arc") != std::string::npos ||
-                 nodeTypeName.find("Clamp") != std::string::npos ||
-                 nodeTypeName == "Input") // Begin node outputs can be scalar or vector
-        {
-            // For Begin node, check the actual argument type
-            if (nodeTypeName == "Input")
+            auto nodeOpt = model.getNode(resultNodeId);
+            if (!nodeOpt.has_value())
             {
-                // This is a Begin node, check if we have argument type information
-                // For now, we'll be more permissive and allow it
-                return true;
+                return false; // Node not found
             }
 
-            // For math operations, allow both scalar and vector outputs
-            // The actual behavior depends on the inputs - if inputs are vectors,
-            // the operation should be element-wise and produce vectors
-            isVectorResult = (expectedType == ArgumentType::Vector);
-            isScalarResult = (expectedType == ArgumentType::Scalar);
-        }
-        else
-        {
-            // For other unknown nodes, be permissive and allow the expected type
-            isVectorResult = (expectedType == ArgumentType::Vector);
-            isScalarResult = (expectedType == ArgumentType::Scalar);
-        }
+            nodes::NodeBase * node = nodeOpt.value();
+            std::string const outputPortName = getOutputPortName(model, resultNodeId);
+            nodes::Port * outputPort = node->findOutputPort(outputPortName);
+            if (outputPort == nullptr)
+            {
+                return false; // Unable to determine output port
+            }
 
-        // Validate type compatibility
-        if (expectedType == ArgumentType::Scalar && !isScalarResult)
-        {
-            return false; // Expected scalar but got vector
-        }
-        if (expectedType == ArgumentType::Vector && !isVectorResult)
-        {
-            return false; // Expected vector but got scalar
-        }
+            std::type_index const portType = outputPort->getTypeIndex();
+            ArgumentType actualType = ArgumentType::Scalar;
+            if (portType == std::type_index(typeid(nodes::float3)))
+            {
+                actualType = ArgumentType::Vector;
+            }
 
-        return true;
-    }
+            // If the caller explicitly expects a vector but the expression produces a scalar,
+            // treat this as an error. Otherwise allow the conversion and let downstream logic
+            // adapt the End node to the actual output type.
+            if (expectedType == ArgumentType::Vector && actualType != ArgumentType::Vector)
+            {
+                return false;
+            }
+
+            return true;
+        }
 
     bool ExpressionToGraphConverter::connectToEndNode(nodes::Model & model,
                                                       nodes::NodeId resultNodeId,

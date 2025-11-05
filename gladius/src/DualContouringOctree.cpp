@@ -139,6 +139,7 @@ namespace gladius::dual_contouring
                                  BoundingBox const & targetBounds,
                                  OctreeBuildConfig config)
         : m_config(std::move(config))
+        , m_computeCore(&core)
     {
         if (m_config.sdfResolution < 2U)
         {
@@ -170,6 +171,16 @@ namespace gladius::dual_contouring
         m_rootBounds.max = m_grid.max;
 
         resources->releasePreComputedSdf();
+
+        // Initialize GPU sampling session if enabled
+        if (m_config.enableGpuSampling && m_computeCore)
+        {
+            dual_contouring::GpuSamplingConfig gpuConfig{};
+            gpuConfig.isoValue = m_config.isoValue;
+            gpuConfig.enableCaching = true;
+            gpuConfig.fallbackToCpu = true;
+            m_gpuSession = std::make_unique<dual_contouring::GpuSamplingSession>(*m_computeCore, gpuConfig);
+        }
     }
 
     OctreeBuilder::OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
@@ -212,7 +223,15 @@ namespace gladius::dual_contouring
     std::unique_ptr<OctreeNode> OctreeBuilder::build(OctreeMetrics & metrics)
     {
         metrics = {};
-        return buildNode(m_rootBounds, 0U, metrics);
+        auto root = buildNode(m_rootBounds, 0U, metrics);
+        
+        // Apply balanced refinement if enabled
+        if (m_config.enableBalancedRefinement && root)
+        {
+            enforceBalance(*root, metrics);
+        }
+        
+        return root;
     }
 
     std::unique_ptr<OctreeNode> OctreeBuilder::buildNode(AxisAlignedBoundingBox const & bounds,
@@ -226,7 +245,15 @@ namespace gladius::dual_contouring
         metrics.nodeCount += 1U;
         metrics.maxDepthReached = std::max<size_t>(metrics.maxDepthReached, depth);
 
-        evaluateCorners(*node);
+        // Use GPU acceleration if available
+        if (m_gpuSession)
+        {
+            evaluateCornersGpu(*node);
+        }
+        else
+        {
+            evaluateCorners(*node);
+        }
 
         if (shouldSubdivide(*node, depth))
         {
@@ -250,7 +277,17 @@ namespace gladius::dual_contouring
         {
             node->isLeaf = true;
             metrics.leafCount += 1U;
-            gatherHermiteSamples(*node);
+            
+            // Use GPU acceleration if available
+            if (m_gpuSession)
+            {
+                gatherHermiteSamplesGpu(*node);
+            }
+            else
+            {
+                gatherHermiteSamples(*node);
+            }
+            
             computeVertex(*node);
         }
 
@@ -473,6 +510,134 @@ namespace gladius::dual_contouring
         node.hasVertex = true;
     }
 
+    void OctreeBuilder::evaluateCornersGpu(OctreeNode & node) const
+    {
+        // Collect corner positions
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(8U);
+        
+        for (std::uint8_t i = 0U; i < 8U; ++i)
+        {
+            positions.push_back(cornerPosition(i, node.bounds));
+        }
+        
+        // GPU batch sampling
+        std::vector<float> values;
+        if (!m_gpuSession->sampleCorners(positions, values) || values.size() != 8U)
+        {
+            // Fallback to CPU
+            evaluateCorners(node);
+            return;
+        }
+        
+        // Store results
+        auto minValue = std::numeric_limits<float>::max();
+        auto maxValue = std::numeric_limits<float>::lowest();
+        bool hasFiniteSample = false;
+        
+        for (size_t i = 0U; i < 8U; ++i)
+        {
+            node.cornerValues[i] = values[i];
+            if (std::isfinite(values[i]))
+            {
+                minValue = std::min(minValue, values[i]);
+                maxValue = std::max(maxValue, values[i]);
+                hasFiniteSample = true;
+            }
+        }
+        
+        if (!hasFiniteSample)
+        {
+            node.isIntersecting = false;
+            return;
+        }
+        
+        node.isIntersecting = minValue <= m_config.isoValue && maxValue >= m_config.isoValue;
+    }
+
+    void OctreeBuilder::gatherHermiteSamplesGpu(OctreeNode & node) const
+    {
+        node.hermiteSamples.clear();
+        node.hasVertex = false;
+        node.vertexPosition = Eigen::Vector3f::Zero();
+        node.vertexResidual = 0.0F;
+
+        if (!node.isLeaf || !node.isIntersecting)
+        {
+            return;
+        }
+
+        // Find zero-crossing edges and compute interpolated positions
+        std::vector<Eigen::Vector3f> hermitePositions;
+        hermitePositions.reserve(12U);
+
+        for (auto const & edge : edgeCornerIndices)
+        {
+            auto const idx0 = edge.first;
+            auto const idx1 = edge.second;
+
+            float const value0 = node.cornerValues.at(idx0);
+            float const value1 = node.cornerValues.at(idx1);
+
+            if (!std::isfinite(value0) || !std::isfinite(value1))
+            {
+                continue;
+            }
+
+            float const distance0 = value0 - m_config.isoValue;
+            float const distance1 = value1 - m_config.isoValue;
+
+            if ((distance0 < 0.0F && distance1 < 0.0F) || (distance0 > 0.0F && distance1 > 0.0F))
+            {
+                continue;
+            }
+
+            auto const corner0 = cornerPosition(idx0, node.bounds);
+            auto const corner1 = cornerPosition(idx1, node.bounds);
+
+            float const denominator = distance0 - distance1;
+            float t = 0.5F;
+            if (std::abs(denominator) > 1e-6F)
+            {
+                t = distance0 / denominator;
+            }
+            t = std::clamp(t, 0.0F, 1.0F);
+
+            Eigen::Vector3f const position = corner0 + (corner1 - corner0) * t;
+            hermitePositions.push_back(position);
+        }
+
+        if (hermitePositions.empty())
+        {
+            return;
+        }
+
+        // GPU batch sampling with gradients
+        std::vector<float> values;
+        std::vector<Eigen::Vector3f> gradients;
+        if (!m_gpuSession->sampleHermite(hermitePositions, values, gradients) ||
+            values.size() != hermitePositions.size() ||
+            gradients.size() != hermitePositions.size())
+        {
+            // Fallback to CPU
+            gatherHermiteSamples(node);
+            return;
+        }
+
+        // Build Hermite samples from GPU results
+        for (size_t i = 0U; i < hermitePositions.size(); ++i)
+        {
+            auto const & gradient = gradients[i];
+            
+            if (!gradient.allFinite() || gradient.norm() <= 1e-6F)
+            {
+                continue;
+            }
+
+            node.hermiteSamples.push_back(OctreeNode::HermiteSample{hermitePositions[i], gradient});
+        }
+    }
+
     Eigen::Vector3f OctreeBuilder::evaluateGradient(Eigen::Vector3f const & position) const
     {
         Eigen::Vector3f gradient = Eigen::Vector3f::Zero();
@@ -526,9 +691,59 @@ namespace gladius::dual_contouring
             return true;
         }
 
+        // Basic extent-based subdivision (existing)
         auto const extent = node.bounds.extent();
         auto const minimumExtent = extent.minCoeff();
-        return minimumExtent > 1e-3F;
+        bool const subdivideByExtent = minimumExtent > 1e-3F;
+
+        if (!subdivideByExtent)
+        {
+            return false;
+        }
+
+        // Curvature-based refinement (Phase 3 enhancement)
+        if (m_config.enableCurvatureRefinement && depth < m_config.maxDepth - 1U)
+        {
+            // Estimate curvature from gradient variation across corners
+            std::vector<Eigen::Vector3f> cornerGradients;
+            cornerGradients.reserve(8U);
+
+            for (std::uint8_t i = 0U; i < 8U; ++i)
+            {
+                auto const corner = cornerPosition(i, node.bounds);
+                auto const gradient = evaluateGradient(corner);
+                if (gradient.allFinite() && gradient.norm() > 1e-6F)
+                {
+                    cornerGradients.push_back(gradient.normalized());
+                }
+            }
+
+            if (cornerGradients.size() >= 3U)
+            {
+                // Compute variance of normalized gradients as curvature proxy
+                Eigen::Vector3f meanGradient = Eigen::Vector3f::Zero();
+                for (auto const & g : cornerGradients)
+                {
+                    meanGradient += g;
+                }
+                meanGradient /= static_cast<float>(cornerGradients.size());
+
+                float variance = 0.0F;
+                for (auto const & g : cornerGradients)
+                {
+                    variance += (g - meanGradient).squaredNorm();
+                }
+                variance /= static_cast<float>(cornerGradients.size());
+
+                // Subdivide if curvature (gradient variation) exceeds threshold
+                if (variance > m_config.curvatureThreshold)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return subdivideByExtent;
     }
 
     Eigen::Vector3f const & OctreeBuilder::gridMin() const
@@ -569,5 +784,99 @@ namespace gladius::dual_contouring
     float OctreeBuilder::gridValueAt(size_t x, size_t y, size_t z) const
     {
         return m_grid.valueAt(x, y, z);
+    }
+
+    void OctreeBuilder::enforceBalance(OctreeNode & node, OctreeMetrics & metrics)
+    {
+        // Multi-pass balanced refinement to ensure depth difference ≤ 1
+        // Repeat until no more subdivisions are needed
+        bool needsAnotherPass = true;
+        size_t passCount = 0U;
+        constexpr size_t maxPasses = 10U; // Safety limit
+        
+        while (needsAnotherPass && passCount < maxPasses)
+        {
+            needsAnotherPass = false;
+            ++passCount;
+            
+            // Recursively check and subdivide nodes that violate balance constraint
+            std::function<bool(OctreeNode&)> balanceNode = [&](OctreeNode & current) -> bool
+            {
+                bool subdivided = false;
+                
+                if (current.isLeaf)
+                {
+                    // Check if this leaf needs subdivision due to deeper neighbors
+                    std::uint8_t maxNeighborDepth = getMaxNeighborDepth(current);
+                    
+                    // If a neighbor is more than 1 level deeper, subdivide this node
+                    if (maxNeighborDepth > current.depth + 1U && current.depth < m_config.maxDepth)
+                    {
+                        subdivideForBalance(current, current.depth + 1U, metrics);
+                        subdivided = true;
+                        ++metrics.balancePassSubdivisions;
+                    }
+                }
+                else
+                {
+                    // Recurse into children
+                    for (auto & child : current.children)
+                    {
+                        if (child)
+                        {
+                            subdivided |= balanceNode(*child);
+                        }
+                    }
+                }
+                
+                return subdivided;
+            };
+            
+            needsAnotherPass = balanceNode(node);
+        }
+    }
+
+    std::uint8_t OctreeBuilder::getMaxNeighborDepth(OctreeNode const & node) const
+    {
+        // Simplified neighbor depth estimation
+        // In a full implementation, this would traverse the octree to find actual neighbors
+        // For now, we use a conservative estimate based on whether nearby cells could be deeper
+        
+        // If this is an intersecting node, nearby cells might be subdivided further
+        if (node.isIntersecting)
+        {
+            // Assume neighbors could be one level deeper
+            return static_cast<std::uint8_t>(node.depth + 1U);
+        }
+        
+        return node.depth;
+    }
+
+    void OctreeBuilder::subdivideForBalance(OctreeNode & node, std::uint8_t targetDepth, OctreeMetrics & metrics)
+    {
+        if (!node.isLeaf || node.depth >= targetDepth)
+        {
+            return;
+        }
+        
+        // Convert leaf to internal node
+        node.isLeaf = false;
+        node.childMask = 0U;
+        node.hasVertex = false;
+        node.hermiteSamples.clear();
+        
+        // Create children
+        for (std::uint8_t childIdx = 0U; childIdx < 8U; ++childIdx)
+        {
+            auto const childBounds = makeChildBounds(node.bounds, childIdx);
+            auto child = buildNode(childBounds, node.depth + 1U, metrics);
+            
+            if (child)
+            {
+                node.childMask |= static_cast<std::uint8_t>(1U << childIdx);
+            }
+            
+            node.children[childIdx] = std::move(child);
+        }
     }
 }

@@ -2,6 +2,7 @@
 
 #include <BitmapLayer.h>
 #include <ContourExtractor.h>
+#include <DualContouringSamplingProgram.h>
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
@@ -37,6 +38,8 @@ namespace gladius
         [[nodiscard]] SlicerProgram * getSlicerProgram() const;
 
         [[nodiscard]] RenderProgram * getRenderProgram() const;
+
+        [[nodiscard]] DualContouringSamplingProgram * getDualContouringSamplingProgram() const;
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
@@ -92,6 +95,8 @@ namespace gladius
         std::unique_ptr<SlicerProgram> m_slicerProgram;
 
         std::unique_ptr<RenderProgram> m_optimizedRenderProgram;
+
+        std::unique_ptr<DualContouringSamplingProgram> m_dualContouringSamplingProgram;
 
         bool m_isComputationTimeLoggingEnabled = false;
 

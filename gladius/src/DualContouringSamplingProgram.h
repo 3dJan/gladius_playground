@@ -1,0 +1,48 @@
+#pragma once
+
+#include "ProgramBase.h"
+#include "ResourceContext.h"
+
+#include <Eigen/Core>
+
+#include <vector>
+
+namespace gladius
+{
+    class Primitives;
+
+    /// OpenCL program for GPU-accelerated dual contouring sampling
+    class DualContouringSamplingProgram : public ProgramBase
+    {
+      public:
+        explicit DualContouringSamplingProgram(SharedComputeContext context,
+                                               SharedResources const & resources);
+
+        /// Sample SDF values at corner positions
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param isoValue ISO surface value
+        void sampleCorners(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          float isoValue);
+
+        /// Sample SDF values and gradients at Hermite positions
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param outGradients Output gradient vectors (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param isoValue ISO surface value
+        /// @param gradientEpsilon Finite difference step size for gradient
+        void sampleHermite(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          std::vector<Eigen::Vector3f> & outGradients,
+                          Primitives const & primitives,
+                          float isoValue,
+                          float gradientEpsilon = 0.001F);
+
+      private:
+        void ensureCompiled();
+    };
+}

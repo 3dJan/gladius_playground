@@ -6,6 +6,7 @@
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ResourceDependencyGraph.h"
+#include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
 #include "nodes/Model.h"
@@ -127,6 +128,8 @@ namespace gladius
         void refreshModelBlocking();
 
         void exportAsStl(std::filesystem::path const & filename);
+        void exportAsStl(std::filesystem::path const & filename,
+             io::StlExportOptions const & options);
 
         void markFileAsChanged();
         void invalidatePrimitiveData();

@@ -1,40 +1,291 @@
 #include "MeshExportDialog.h"
 
+#include "imgui.h"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <stdexcept>
+
 namespace gladius::ui
 {
+    namespace
+    {
+        constexpr std::array<char const *, 2> METHOD_LABELS{
+          "Layered marching cubes (OpenVDB)",
+          "Dual contouring (octree)"};
+
+        constexpr std::array<char const *, 4> QUALITY_LABELS{
+          "Draft (fast)",
+          "Balanced",
+          "High fidelity",
+          "Ultra"};
+
+        constexpr std::array<char const *, 4> DUAL_QUALITY_LABELS{
+          "Draft",
+          "Balanced",
+          "Fine",
+          "Ultra Fine"};
+    }
+
     void MeshExportDialog::beginExport(std::filesystem::path const & stlFilename,
                                        ComputeCore & core)
     {
+        resetState();
         m_visible = true;
         m_computeCore = &core;
-        m_exporter.setQualityLevel(1);
-        m_exporter.beginExport(stlFilename, core);
+        m_targetFile = stlFilename;
+    }
+
+    void MeshExportDialog::render(ComputeCore & core)
+    {
+        if (!m_visible)
+        {
+            return;
+        }
+
+        if (!m_exportInProgress)
+        {
+            renderConfiguration(core);
+            if (!m_exportInProgress)
+            {
+                return;
+            }
+        }
+
+        BaseExportDialog::render(core);
     }
 
     std::string MeshExportDialog::getWindowTitle() const
     {
-        return "Export in progress";
+        return m_exportInProgress ? "Exporting STL" : "Export STL";
     }
 
     std::string MeshExportDialog::getExportMessage() const
     {
-        return "Exporting to stl file";
+        switch (m_selectedMethod)
+        {
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+            return "Exporting STL using layered marching cubes";
+        case io::SurfaceExtractionMethod::DualContouring:
+            return "Exporting STL using dual contouring";
+        default:
+            return "Exporting STL";
+        }
     }
 
     io::IExporter & MeshExportDialog::getExporter()
     {
-        return m_exporter;
+        if (m_activeExporter == nullptr)
+        {
+            throw std::runtime_error("Exporter requested before export was started");
+        }
+        return *m_activeExporter;
     }
 
     void MeshExportDialog::finalizeExport()
     {
-        if (m_computeCore)
+        if (m_activeExporter == &m_layeredExporter && m_computeCore != nullptr)
         {
-            m_exporter.finalizeExportSTL(*m_computeCore);
+            m_layeredExporter.finalizeExportSTL(*m_computeCore);
+        }
+        else if (m_activeExporter == &m_dualExporter)
+        {
+            m_dualExporter.finalize();
         }
         else
         {
             BaseExportDialog::finalizeExport();
         }
+
+        resetState();
+        m_computeCore = nullptr;
+    }
+
+    void MeshExportDialog::onExportCancelled()
+    {
+        if (m_activeExporter == &m_layeredExporter)
+        {
+            m_layeredExporter.finalize();
+        }
+        else if (m_activeExporter == &m_dualExporter)
+        {
+            m_dualExporter.finalize();
+        }
+        resetState();
+    }
+
+    void MeshExportDialog::onExportCompleted()
+    {
+        BaseExportDialog::onExportCompleted();
+    }
+
+    void MeshExportDialog::renderConfiguration(ComputeCore & core)
+    {
+        if (!m_visible)
+        {
+            return;
+        }
+
+        if (ImGui::Begin(getWindowTitle().c_str(), &m_visible))
+        {
+            ImGui::TextUnformatted("Select surface extraction method for STL export.");
+
+            int methodIndex = static_cast<int>(m_selectedMethod);
+            if (ImGui::BeginCombo("Method", METHOD_LABELS.at(static_cast<std::size_t>(methodIndex))))
+            {
+                for (int i = 0; i < static_cast<int>(METHOD_LABELS.size()); ++i)
+                {
+                    bool const selected = (i == methodIndex);
+                    if (ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected))
+                    {
+                        methodIndex = i;
+                        m_selectedMethod = static_cast<io::SurfaceExtractionMethod>(i);
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            if (m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes)
+            {
+                int qualityIndex = static_cast<int>(m_marchingCubesQuality);
+                qualityIndex = std::clamp(qualityIndex, 0, static_cast<int>(QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo("Quality", QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                {
+                    for (int i = 0; i < static_cast<int>(QUALITY_LABELS.size()); ++i)
+                    {
+                        bool const selected = (i == qualityIndex);
+                        if (ImGui::Selectable(QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
+                        {
+                            qualityIndex = i;
+                            m_marchingCubesQuality = static_cast<std::size_t>(i);
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextWrapped("Uses OpenVDB volume-to-mesh extraction. Higher quality settings take more time and memory.");
+            }
+            else
+            {
+                int qualityIndex = static_cast<int>(m_dualQualityPreset);
+                qualityIndex = std::clamp(qualityIndex, 0, static_cast<int>(DUAL_QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo("Quality", DUAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                {
+                    for (int i = 0; i < static_cast<int>(DUAL_QUALITY_LABELS.size()); ++i)
+                    {
+                        bool const selected = (i == qualityIndex);
+                        if (ImGui::Selectable(DUAL_QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
+                        {
+                            qualityIndex = i;
+                            m_dualQualityPreset = static_cast<io::DualContouringQuality>(i);
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::Checkbox("Force uniform octree", &m_dualForceUniform);
+                if (m_dualForceUniform)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("all octree leaves will have the same size");
+                }
+                ImGui::TextWrapped("Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
+            }
+
+            if (!m_errorMessage.empty())
+            {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4{1.0F, 0.3F, 0.3F, 1.0F}, "%s", m_errorMessage.c_str());
+            }
+
+            if (ImGui::Button("Start export"))
+            {
+                try
+                {
+                    startExport(core);
+                }
+                catch (std::exception const & ex)
+                {
+                    m_errorMessage = ex.what();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+                resetState();
+                m_visible = false;
+            }
+        }
+        ImGui::End();
+
+        if (!m_visible)
+        {
+            resetState();
+        }
+    }
+
+    void MeshExportDialog::startExport(ComputeCore & core)
+    {
+        if (m_targetFile.empty())
+        {
+            throw std::runtime_error("No target filename specified for STL export");
+        }
+
+        switch (m_selectedMethod)
+        {
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+        {
+            std::size_t const quality = std::min<std::size_t>(m_marchingCubesQuality, QUALITY_LABELS.size() - 1);
+            m_layeredExporter.setQualityLevel(quality);
+            m_layeredExporter.beginExport(m_targetFile, core);
+            m_activeExporter = &m_layeredExporter;
+            break;
+        }
+        case io::SurfaceExtractionMethod::DualContouring:
+        {
+            io::DualContouringOptions options{};
+            options.qualityPreset = m_dualQualityPreset;
+            
+            // Apply preset to set all quality parameters (resolution, depth, curvature, etc.)
+            options.applyPreset();
+            
+            // Override with user selections
+            options.forceUniform = m_dualForceUniform;
+            
+            if (options.forceUniform && !std::has_single_bit(options.sdfResolution - 1U))
+            {
+                throw std::runtime_error(
+                  "Uniform dual contouring requires resolution - 1 to be a power of two");
+            }
+            m_dualExporter.setOptions(options);
+            m_dualExporter.beginExport(m_targetFile, core);
+            m_activeExporter = &m_dualExporter;
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported surface extraction method");
+        }
+
+        m_exportInProgress = true;
+    }
+
+    void MeshExportDialog::resetState()
+    {
+        m_activeExporter = nullptr;
+        m_exportInProgress = false;
+        m_errorMessage.clear();
+        m_targetFile.clear();
     }
 }

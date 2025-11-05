@@ -306,6 +306,16 @@ namespace gladius
         return m_autoUpdateBoundingBox;
     }
 
+    ProgramManager & ComputeCore::getProgramManager()
+    {
+        return m_programs;
+    }
+
+    ProgramManager const & ComputeCore::getProgramManager() const
+    {
+        return m_programs;
+    }
+
     void ComputeCore::generateContours(nodes::SliceParameter sliceParameter)
     {
         ProfileFunction;
