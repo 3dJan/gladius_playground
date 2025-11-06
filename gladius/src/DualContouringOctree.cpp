@@ -170,8 +170,6 @@ namespace gladius::dual_contouring
         m_rootBounds.min = m_grid.min;
         m_rootBounds.max = m_grid.max;
 
-        resources->releasePreComputedSdf();
-
         // Initialize GPU sampling session if enabled
         if (m_config.enableGpuSampling && m_computeCore)
         {
@@ -180,6 +178,23 @@ namespace gladius::dual_contouring
             gpuConfig.enableCaching = true;
             gpuConfig.fallbackToCpu = true;
             m_gpuSession = std::make_unique<dual_contouring::GpuSamplingSession>(*m_computeCore, gpuConfig);
+            
+            // Keep precomputed SDF in GPU memory for sampling session
+        }
+        else
+        {
+            // Release precomputed SDF if not using GPU sampling
+            resources->releasePreComputedSdf();
+        }
+    }
+
+    OctreeBuilder::~OctreeBuilder()
+    {
+        // Release precomputed SDF if GPU sampling was used
+        if (m_gpuSession && m_computeCore)
+        {
+            auto resources = m_computeCore->getResourceContext();
+            resources->releasePreComputedSdf();
         }
     }
 

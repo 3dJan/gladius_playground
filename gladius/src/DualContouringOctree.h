@@ -81,6 +81,8 @@ namespace gladius::dual_contouring
         OctreeBuilder(gladius::ComputeCore & core,
                       BoundingBox const & targetBounds,
                       OctreeBuildConfig config);
+        
+        ~OctreeBuilder();
 
                 OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
                                             OctreeBuildConfig config,

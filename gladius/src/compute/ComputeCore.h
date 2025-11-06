@@ -5,6 +5,7 @@
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
+#include <kernel/types.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>

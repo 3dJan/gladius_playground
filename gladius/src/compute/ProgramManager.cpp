@@ -51,6 +51,7 @@ namespace gladius
         m_optimizedRenderProgram = std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
         m_dualContouringSamplingProgram =
           std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
+        // m_hierarchicalDCProgram - TODO: Re-enable when implementation is complete
 
         // Propagate logger to programs so that CL diagnostics go to the event logger
         if (m_eventLogger)
@@ -58,6 +59,7 @@ namespace gladius
             m_slicerProgram->setLogger(m_eventLogger);
             m_optimizedRenderProgram->setLogger(m_eventLogger);
             m_dualContouringSamplingProgram->setLogger(m_eventLogger);
+            // m_hierarchicalDCProgram->setLogger(m_eventLogger);
         }
 
         // Set up binary caching
@@ -65,6 +67,7 @@ namespace gladius
         m_slicerProgram->setCacheDirectory(cacheDir);
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
         m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
+        // m_hierarchicalDCProgram->setCacheDirectory(cacheDir);
 
         m_optimizedRenderProgram->buildKernelLib();
         recompileIfRequired();
@@ -255,6 +258,12 @@ namespace gladius
     {
         return m_dualContouringSamplingProgram.get();
     }
+
+    // TODO: Re-enable when hierarchical DC implementation is complete
+    // HierarchicalDCProgram * ProgramManager::getHierarchicalDCProgram() const
+    // {
+    //     return m_hierarchicalDCProgram.get();
+    // }
 
     events::SharedLogger ProgramManager::getSharedLogger() const
     {

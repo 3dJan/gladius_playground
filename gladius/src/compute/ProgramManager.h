@@ -41,6 +41,7 @@ namespace gladius
 
         [[nodiscard]] DualContouringSamplingProgram * getDualContouringSamplingProgram() const;
 
+
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
         [[nodiscard]] ComputeContext & getComputeContext() const;
@@ -97,6 +98,7 @@ namespace gladius
         std::unique_ptr<RenderProgram> m_optimizedRenderProgram;
 
         std::unique_ptr<DualContouringSamplingProgram> m_dualContouringSamplingProgram;
+
 
         bool m_isComputationTimeLoggingEnabled = false;
 
