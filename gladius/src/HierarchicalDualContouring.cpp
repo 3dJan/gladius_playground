@@ -244,14 +244,85 @@ namespace gladius::hierarchical_dc
     void HierarchicalOctreeBuilder::detectIntersections(
       std::vector<std::size_t> const & nodeIndices)
     {
-        for (std::size_t nodeIdx : nodeIndices)
+        if (nodeIndices.empty())
         {
-            OctreeNode & node = m_nodes[nodeIdx];
-            node.isIntersecting = hasSignChange(node);
+            return;
+        }
 
-            if (node.isIntersecting && node.depth < m_config.initialDepth - 1U)
+        bool usedGpu = false;
+
+        if (m_config.enableGpuAcceleration)
+        {
+            auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
+            if (program != nullptr)
             {
-                node.needsRefinement = true;
+                try
+                {
+                    std::vector<float> packedCornerValues;
+                    packedCornerValues.reserve(nodeIndices.size() * 8U);
+
+                    for (std::size_t idx : nodeIndices)
+                    {
+                        OctreeNode const & node = m_nodes[idx];
+                        packedCornerValues.insert(packedCornerValues.end(),
+                                                  node.cornerValues.begin(),
+                                                  node.cornerValues.end());
+                    }
+
+                    std::vector<std::uint8_t> subdivisionFlags;
+                    program->detectIntersections(packedCornerValues, subdivisionFlags);
+
+                    if (subdivisionFlags.size() == nodeIndices.size())
+                    {
+                        for (std::size_t i = 0U; i < nodeIndices.size(); ++i)
+                        {
+                            std::size_t const nodeIdx = nodeIndices[i];
+                            OctreeNode & node = m_nodes[nodeIdx];
+
+                            bool const intersects = subdivisionFlags[i] != 0U;
+                            node.isIntersecting = intersects;
+                            if (intersects && node.depth < m_config.initialDepth - 1U)
+                            {
+                                node.needsRefinement = true;
+                            }
+                            else if (!intersects)
+                            {
+                                node.needsRefinement = false;
+                            }
+                        }
+                        usedGpu = true;
+                    }
+                    else
+                    {
+                        logError("detectIntersections GPU mismatch in flag count");
+                    }
+                }
+                catch (std::exception const & ex)
+                {
+                    logError("GPU intersection detection failed: " + std::string(ex.what()));
+                }
+            }
+            else
+            {
+                logError("HierarchicalDCProgram not available for intersection detection");
+            }
+        }
+
+        if (!usedGpu)
+        {
+            for (std::size_t nodeIdx : nodeIndices)
+            {
+                OctreeNode & node = m_nodes[nodeIdx];
+                node.isIntersecting = hasSignChange(node);
+
+                if (node.isIntersecting && node.depth < m_config.initialDepth - 1U)
+                {
+                    node.needsRefinement = true;
+                }
+                else if (!node.isIntersecting)
+                {
+                    node.needsRefinement = false;
+                }
             }
         }
     }

@@ -16,6 +16,8 @@ if(NOT ENABLE_OPENCL_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/ToCommandStreamVisitor_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Builder_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeOpenCL_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringOctree_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/MeshBaseline_tests.cpp"
   )
   message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring unit tests")
 endif()

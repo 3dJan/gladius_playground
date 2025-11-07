@@ -96,7 +96,7 @@ namespace gladius
             }
         }
 
-        // Debug: Check expression parsing
+        // Validate expression with the parser before building graph nodes
         bool parseResult = parser.parseExpression(expression);
         bool hasValid = parser.hasValidExpression();
 
@@ -121,7 +121,7 @@ namespace gladius
             // Use function arguments to create properly typed input nodes
             variableNodes = createArgumentNodes(arguments, model);
 
-            // Debug: Check if argument nodes were created
+            // Ensure argument nodes were created successfully
             if (variableNodes.empty())
             {
                 return 0;
@@ -139,7 +139,7 @@ namespace gladius
         // Parse the expression and build the graph
         nodes::NodeId result = parseAndBuildGraph(expression, model, variableNodes);
 
-        // Debug: Check if parseAndBuildGraph succeeded
+        // Ensure parseAndBuildGraph produced a valid node
         if (result == 0)
         {
             // parseAndBuildGraph failed
