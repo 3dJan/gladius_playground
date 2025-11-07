@@ -10,6 +10,7 @@
 #include <RenderProgram.h>
 #include <ResourceContext.h>
 #include <SlicerProgram.h>
+#include <compute/HierarchicalDCProgram.h>
 #include <compute/ParameterSignature.h>
 #include <compute/types.h>
 #include <nodes/BuildParameter.h>
@@ -40,6 +41,8 @@ namespace gladius
         [[nodiscard]] RenderProgram * getRenderProgram() const;
 
         [[nodiscard]] DualContouringSamplingProgram * getDualContouringSamplingProgram() const;
+
+        [[nodiscard]] HierarchicalDCProgram * getHierarchicalDCProgram() const;
 
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
@@ -98,6 +101,8 @@ namespace gladius
         std::unique_ptr<RenderProgram> m_optimizedRenderProgram;
 
         std::unique_ptr<DualContouringSamplingProgram> m_dualContouringSamplingProgram;
+
+        std::unique_ptr<HierarchicalDCProgram> m_hierarchicalDCProgram;
 
 
         bool m_isComputationTimeLoggingEnabled = false;
