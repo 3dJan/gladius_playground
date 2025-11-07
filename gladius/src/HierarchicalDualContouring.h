@@ -41,6 +41,7 @@ namespace gladius::hierarchical_dc
         bool enableGpuAcceleration{true};        ///< Use GPU for parallel evaluation
         bool enableCornerCaching{true};          ///< Cache corner values across nodes
         bool enableProgressiveRefinement{true};  ///< Multi-pass adaptive refinement
+        std::size_t cpuFallbackResolution{96U};  ///< Resolution of CPU SDF grid used as fallback
     };
 
     /// Quality presets for hierarchical dual contouring
@@ -150,6 +151,8 @@ namespace gladius::hierarchical_dc
                          std::vector<std::uint32_t> & outIndices);
 
       private:
+        struct CpuSampler;
+
         ComputeCore * m_core{nullptr};
         HierarchicalConfig m_config;
         ConstructionStats m_stats;
@@ -158,6 +161,7 @@ namespace gladius::hierarchical_dc
         std::vector<OctreeNode> m_nodes;   ///< All octree nodes (flat array)
         std::vector<OctreeLevel> m_levels; ///< Levels for breadth-first traversal
         BoundingBox m_rootBounds;
+        std::unique_ptr<CpuSampler> m_cpuSampler;
 
         // Phase 1: Coarse octree construction
         void buildInitialOctree();
@@ -186,8 +190,13 @@ namespace gladius::hierarchical_dc
         [[nodiscard]] std::vector<EdgeCrossing> gatherEdgeCrossings(
           std::vector<std::size_t> const & leafIndices) const;
         [[nodiscard]] std::vector<HermiteSample> computeHermiteSamples(
-                    std::vector<EdgeCrossing> const & crossings,
-                    std::vector<Eigen::Vector3f> const & refinedPositions) const;
+                std::vector<EdgeCrossing> const & crossings,
+                std::vector<Eigen::Vector3f> const & refinedPositions);
+
+        bool ensureCpuSampler();
+        float sampleSdfCpu(Eigen::Vector3f const & position) const;
+        Eigen::Vector3f sampleGradientCpu(Eigen::Vector3f const & position,
+                                          float epsilon) const;
 
         void logInfo(std::string const & message) const;
         void logError(std::string const & message) const;
