@@ -70,6 +70,7 @@ float4 sampleImageNearest4f(float3 uvw, float3 dimensions, int start, int3 tileS
 
 float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
 
+#ifdef ENABLE_VDB
 // VDB-backed sampling helpers (enabled when ENABLE_VDB is defined)
 float4
 sampleImageNearest4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
@@ -81,6 +82,7 @@ sampleImageLinear4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle,
 float vdbModel(float3 pos, int index, PAYLOAD_ARGS);
 float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS);
 float vdbValue(int3 coord, int index, PAYLOAD_ARGS);
+#endif // ENABLE_VDB
 
 float3 closestPointOnClyinder(float3 pos, float height, float radius);
 

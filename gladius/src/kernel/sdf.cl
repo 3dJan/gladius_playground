@@ -535,6 +535,8 @@ float meshPrimitive(float3 pos, int index, PAYLOAD_ARGS)
     return meshNode(pos, index, primitives, data);
 }
 
+#ifdef ENABLE_VDB
+
 float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[index];
@@ -716,6 +718,8 @@ float closestFaceDist(float3 pos,
     return sqrt(minDist);
 }
 
+#endif // ENABLE_VDB
+
 // #define TRI_EPSILON 1E-6f
 #define TRI_EPSILON 0.f
 bool faceBetweenCenterOfVoxelAndPos(float3 pos,
@@ -853,6 +857,8 @@ float4 sampleImageNearest4f(float3 uvw, float3 dimensions, int start, int3 tileS
     return color;
 }
 
+#ifdef ENABLE_VDB
+
 float4 sampleImageNearest4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS)
 {
     float4 color = (float4) (0.0f);
@@ -911,6 +917,8 @@ float4 sampleImageLinear4fvdb(float3 uvw, float3 dimensions, int start, int3 til
     color = (float4) (mix(c0, c1, relPos.z));
     return color;
 }
+
+#endif // ENABLE_VDB
 
 float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS)
 {

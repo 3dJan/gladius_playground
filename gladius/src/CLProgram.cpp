@@ -2,6 +2,7 @@
 #include "Profiling.h"
 #include "TimeMeasurement.h"
 #include "gpgpu.h"
+#include "NanoVdbPatch.h"
 #include <boost/functional/hash.hpp>
 #include <chrono>
 #include <cmrc/cmrc.hpp>
@@ -12,9 +13,12 @@
 #include <future>
 #include <iostream> // TODO: Remove if no other translation units rely on side-effects; kept temporarily for potential error output fallbacks
 #include <optional>
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <thread>
 
 #ifdef _WIN32
@@ -121,6 +125,99 @@ namespace gladius
             {
                 // Ignore logging failures
             }
+        }
+
+        inline std::string toLowerCopy(std::string value)
+        {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            return value;
+        }
+
+        inline std::optional<bool> readEnvFlag(char const * name)
+        {
+            if (char const * raw = std::getenv(name))
+            {
+                if (*raw == '\0')
+                {
+                    return true;
+                }
+
+                std::string normalized = toLowerCopy(std::string(raw));
+                if (normalized == "1" || normalized == "true" || normalized == "yes" ||
+                    normalized == "on")
+                {
+                    return true;
+                }
+                if (normalized == "0" || normalized == "false" || normalized == "no" ||
+                    normalized == "off")
+                {
+                    return false;
+                }
+
+                return true; // Any other non-empty value counts as enabling the flag.
+            }
+            return std::nullopt;
+        }
+
+        struct RusticlDetectionResult
+        {
+            bool isRusticl{false};
+            std::string description{};
+        };
+
+        inline RusticlDetectionResult detectRusticlDevice(cl::Device const & device)
+        {
+            RusticlDetectionResult result{};
+            try
+            {
+                std::string vendor = device.getInfo<CL_DEVICE_VENDOR>();
+                std::string name = device.getInfo<CL_DEVICE_NAME>();
+                std::string version = device.getInfo<CL_DEVICE_VERSION>();
+                std::string driver = device.getInfo<CL_DRIVER_VERSION>();
+
+                std::string platformVendor;
+                std::string platformName;
+                try
+                {
+                    cl::Platform platform = device.getInfo<CL_DEVICE_PLATFORM>();
+                    platformVendor = platform.getInfo<CL_PLATFORM_VENDOR>();
+                    platformName = platform.getInfo<CL_PLATFORM_NAME>();
+                }
+                catch (...)
+                {
+                    // Platform queries are best-effort.
+                }
+
+                std::ostringstream desc;
+                desc << "vendor=\"" << vendor << "\", name=\"" << name << "\", version=\""
+                     << version << "\", driver=\"" << driver << "\"";
+                if (!platformVendor.empty() || !platformName.empty())
+                {
+                    desc << ", platform=\"" << platformVendor;
+                    if (!platformVendor.empty() && !platformName.empty())
+                    {
+                        desc << " / ";
+                    }
+                    desc << platformName << "\"";
+                }
+                result.description = desc.str();
+
+                std::string combined = vendor + " " + name + " " + version + " " + driver + " " +
+                                       platformVendor + " " + platformName;
+                combined = toLowerCopy(std::move(combined));
+
+                if (combined.find("rusticl") != std::string::npos)
+                {
+                    result.isRusticl = true;
+                }
+            }
+            catch (...)
+            {
+                result.description = "rusticl detection failed";
+            }
+            return result;
         }
 
         // Print detailed program diagnostics for the current device
@@ -726,7 +823,104 @@ namespace gladius
             }
 
             auto file = fs.open(resourceFilename);
-            m_staticSources.emplace_back(std::string(file.begin(), file.end()));
+            std::string content(file.begin(), file.end());
+
+            if (filename == "CNanoVDB.h")
+            {
+                auto disableFlag = readEnvFlag("GLADIUS_OPENCL_DISABLE_NANOVDB_PATCH");
+                auto forceFlag = readEnvFlag("GLADIUS_OPENCL_FORCE_NANOVDB_PATCH");
+
+                bool const patchDisabled = disableFlag.value_or(false);
+                bool const patchForced = forceFlag.value_or(false);
+
+                if (patchDisabled && patchForced && m_logger)
+                {
+                    m_logger->logWarning(
+                      "NanoVDB rusticl patch: disable flag takes precedence over force flag.");
+                }
+
+                bool shouldPatch = false;
+                RusticlDetectionResult detection{};
+                bool detectionAttempted = false;
+
+                if (!patchDisabled)
+                {
+                    if (patchForced)
+                    {
+                        shouldPatch = true;
+                    }
+                    else if (m_ComputeContext && m_ComputeContext->isValid())
+                    {
+                        detectionAttempted = true;
+                        try
+                        {
+                            detection = detectRusticlDevice(m_ComputeContext->GetDevice());
+                        }
+                        catch (std::exception const & e)
+                        {
+                            detection.description = std::string("device query failed: ") + e.what();
+                        }
+
+                        if (m_logger)
+                        {
+                            std::string message =
+                              "NanoVDB rusticl detection: " +
+                              (detection.description.empty() ? std::string("<no description>")
+                                                             : detection.description);
+                            message += detection.isRusticl ? " [rusticl detected]"
+                                                           : " [non-rusticl]";
+                            m_logger->logInfo(message);
+                        }
+
+                        shouldPatch = detection.isRusticl;
+                    }
+
+                    if (shouldPatch)
+                    {
+                        auto patchResult = gladius::opencl::patchNanoVdbForRusticl(content);
+                        if (patchResult.modified)
+                        {
+                            content = std::move(patchResult.source);
+                            if (m_logger)
+                            {
+                                m_logger->logInfo(
+                                  "NanoVDB rusticl workaround applied to CNanoVDB.h");
+                                for (auto const & note : patchResult.diagnostics)
+                                {
+                                    m_logger->logInfo("  - " + note);
+                                }
+                            }
+                        }
+                        else if (m_logger)
+                        {
+                            m_logger->logWarning(
+                              "NanoVDB rusticl workaround requested but produced no changes.");
+                            for (auto const & note : patchResult.diagnostics)
+                            {
+                                m_logger->logWarning("  - " + note);
+                            }
+                        }
+                    }
+                    else if (patchForced && m_logger)
+                    {
+                        m_logger->logWarning(
+                          "GLADIUS_OPENCL_FORCE_NANOVDB_PATCH was set but patch application was skipped.");
+                    }
+                }
+                else if (m_logger)
+                {
+                    m_logger->logInfo(
+                      "NanoVDB rusticl workaround disabled via GLADIUS_OPENCL_DISABLE_NANOVDB_PATCH.");
+                }
+
+                if (!patchDisabled && !shouldPatch && detectionAttempted && m_logger)
+                {
+                    m_logger->logInfo(
+                      "NanoVDB rusticl workaround not required for current OpenCL device.");
+                }
+            }
+
+            m_staticSources.emplace_back(std::move(content));
         }
 
         // Update combined sources for compatibility

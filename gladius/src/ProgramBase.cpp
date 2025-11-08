@@ -17,6 +17,9 @@ namespace gladius
         {
             m_programFront->setLogger(m_logger);
         }
+
+        // Base source files that are always required for kernels
+        // CNanoVDB.h is conditionally added in the (re)compile methods when VDB is enabled
         m_sourceFiles = {"arguments.h",
                          "types.h",
                          "sdf.h",
@@ -68,13 +71,28 @@ namespace gladius
                 return;
             }
 
+            // Configure optional features (like VDB) and include headers accordingly
             if (m_enableVdb)
             {
                 m_programFront->addSymbol("ENABLE_VDB");
+                // Ensure CNanoVDB header is present when VDB is enabled
+                auto hasNano = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h") != m_sourceFiles.end();
+                if (!hasNano)
+                {
+                    // Insert before kernels to keep headers first
+                    auto insertPos = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
+                    m_sourceFiles.insert(insertPos, "CNanoVDB.h");
+                }
             }
             else
             {
                 m_programFront->removeSymbol("ENABLE_VDB");
+                // Remove CNanoVDB header when VDB is disabled to improve compatibility
+                auto it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h");
+                if (it != m_sourceFiles.end())
+                {
+                    m_sourceFiles.erase(it);
+                }
             }
 
             m_buildFinishedCallBack = [&]() { m_programSwapRequired = true; };
@@ -91,8 +109,8 @@ namespace gladius
 
                 swapProgramsIfNeeded();
 
-                m_programFront->buildFromSourceAndLinkWithLib(
-                  m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+                                m_programFront->buildFromSourceAndLinkWithLib(
+                                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
                 m_programSwapRequired = true;
 
                 // Mark as complete after blocking build
@@ -114,8 +132,8 @@ namespace gladius
                                                  std::memory_order_release);
                 };
 
-                m_programFront->buildFromSourceAndLinkWithLibNonBlocking(
-                  m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+                                m_programFront->buildFromSourceAndLinkWithLibNonBlocking(
+                                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
             }
         }
         catch (OpenCLError & e)
@@ -139,15 +157,26 @@ namespace gladius
         if (m_enableVdb)
         {
             m_programFront->addSymbol("ENABLE_VDB");
+            auto hasNano = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h") != m_sourceFiles.end();
+            if (!hasNano)
+            {
+                auto insertPos = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
+                m_sourceFiles.insert(insertPos, "CNanoVDB.h");
+            }
         }
         else
         {
             m_programFront->removeSymbol("ENABLE_VDB");
+            auto it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h");
+            if (it != m_sourceFiles.end())
+            {
+                m_sourceFiles.erase(it);
+            }
         }
 
-        m_programFront->clearSources();
-        m_programFront->buildFromSourceAndLinkWithLib(
-          m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+                m_programFront->clearSources();
+                m_programFront->buildFromSourceAndLinkWithLib(
+                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
         m_programSwapRequired = true;
         swapProgramsIfNeeded();
         m_isFirstBuild = false;
@@ -157,7 +186,26 @@ namespace gladius
     {
         ProfileFunction m_programFront->clearSources();
 
-        m_programFront->loadAndCompileLib(m_sourceFiles);
+        // Build the header list based on current VDB setting
+        auto sourceFiles = m_sourceFiles;
+        if (m_enableVdb)
+        {
+            if (std::find(sourceFiles.begin(), sourceFiles.end(), "CNanoVDB.h") == sourceFiles.end())
+            {
+                auto insertPos = std::find(sourceFiles.begin(), sourceFiles.end(), std::string("sdf.cl"));
+                sourceFiles.insert(insertPos, "CNanoVDB.h");
+            }
+        }
+        else
+        {
+            auto it = std::find(sourceFiles.begin(), sourceFiles.end(), "CNanoVDB.h");
+            if (it != sourceFiles.end())
+            {
+                sourceFiles.erase(it);
+            }
+        }
+
+        m_programFront->loadAndCompileLib(sourceFiles);
     }
 
     void ProgramBase::setOnProgramSwapCallBack(const std::function<void()> & callBack)

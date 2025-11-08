@@ -5,6 +5,8 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -85,6 +87,9 @@ namespace gladius
                extensions.rfind(suffixPattern) == extensions.length() - suffixPattern.length()) ||
               (extensions == fp64ExtensionName);
 
+            auto const imageSupport = device.getInfo<CL_DEVICE_IMAGE_SUPPORT>();
+            caps.imageSupport = (imageSupport == CL_TRUE);
+
             auto const deviceType = device.getInfo<CL_DEVICE_TYPE>();
             caps.cpu = (deviceType == CL_DEVICE_TYPE_CPU);
             caps.gpu = (deviceType == CL_DEVICE_TYPE_GPU);
@@ -93,6 +98,29 @@ namespace gladius
             auto const computeUnits = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
 
             auto const vendor = device.getInfo<CL_DEVICE_VENDOR>();
+            auto const deviceName = device.getInfo<CL_DEVICE_NAME>();
+            auto const driverVersion = device.getInfo<CL_DRIVER_VERSION>();
+
+            std::string platformVendor;
+            std::string platformName;
+            try
+            {
+                cl::Platform const platform = device.getInfo<CL_DEVICE_PLATFORM>();
+                platformVendor = platform.getInfo<CL_PLATFORM_VENDOR>();
+                platformName = platform.getInfo<CL_PLATFORM_NAME>();
+            }
+            catch (...)
+            {
+                // Platform queries are best effort; silently ignore failures.
+            }
+
+            std::string combinedIdentity = vendor + " " + deviceName + " " + driverVersion + " " +
+                                            platformVendor + " " + platformName;
+            std::transform(combinedIdentity.begin(),
+                           combinedIdentity.end(),
+                           combinedIdentity.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            caps.rusticl = (combinedIdentity.find("rusticl") != std::string::npos);
 
             // Safe vendor string comparison
             bool const isIntel = (!vendor.empty() && vendor.rfind("Intel", 0) == 0);
@@ -130,6 +158,7 @@ namespace gladius
             caps.cpu = false;
             caps.gpu = false;
             caps.performanceEstimation = 0.0;
+            caps.imageSupport = false;
         }
 
         return caps;
@@ -138,6 +167,7 @@ namespace gladius
     AcceleratorList queryAccelerators(std::ostream & logStream)
     {
         AcceleratorList candidates;
+        AcceleratorList fallbackCandidates;
 
         try
         {
@@ -167,7 +197,7 @@ namespace gladius
                         continue;
                     }
 
-                    for (auto & device : allDevices)
+                                        for (auto & device : allDevices)
                     {
                         try
                         {
@@ -184,17 +214,25 @@ namespace gladius
                             auto const extensions = device.getInfo<CL_DEVICE_EXTENSIONS>();
                             logStream << "Extensions:\n" << extensions << "\n";
 
-                            if (caps.fp64) // fp64 is required by nanovdb
-                            {
-                                auto accelerator =
-                                  Accelerator{device, allPlatforms[i], std::move(caps)};
-                                candidates.push_back(accelerator);
-                            }
-                            else
+                            if (!caps.imageSupport)
                             {
                                 logStream
-                                  << "\tSkipping device (no fp64 support required for nanovdb)\n";
+                                  << "\tSkipping device (no OpenCL image support detected)\n";
+                                continue;
                             }
+
+                                                        auto accelerator =
+                                                            Accelerator{device, allPlatforms[i], std::move(caps)};
+
+                                                        if (!accelerator.capabilities.fp64)
+                                                        {
+                                                                logStream << "\tDevice lacks fp64 support (required for NanoVDB); "
+                                                                                         "marking as fallback candidate.\n";
+                                                                fallbackCandidates.push_back(std::move(accelerator));
+                                                                continue;
+                                                        }
+
+                                                        candidates.push_back(std::move(accelerator));
                         }
                         catch (OpenCLDeviceQueryError const & e)
                         {
@@ -225,6 +263,13 @@ namespace gladius
         {
             throw OpenCLPlatformError("Failed to enumerate OpenCL platforms: " +
                                       std::string(e.what()));
+        }
+
+        if (candidates.empty() && !fallbackCandidates.empty())
+        {
+            logStream << "\nNo fp64-capable OpenCL devices found. Falling back to devices without "
+                         "fp64 support; NanoVDB features will be disabled.\n";
+            candidates = std::move(fallbackCandidates);
         }
 
         if (candidates.empty())
@@ -856,7 +901,7 @@ namespace gladius
 
             // Use a null stream to suppress output during initialization
             std::ostringstream nullStream;
-            auto accelerators = queryAccelerators(nullStream);
+            auto accelerators = queryAccelerators(std::cout);
 
             if (accelerators.empty())
             {
@@ -873,6 +918,7 @@ namespace gladius
 
             m_device = accelerators.front().device;
             defaultPlatform = accelerators.front().platform;
+            m_capabilities = accelerators.front().capabilities;
 
             if (m_outputGL == EnableGLOutput::disabled)
             {
@@ -1007,6 +1053,21 @@ namespace gladius
             // If any exception occurs (OpenCL not available, driver issues, etc.)
             return false;
         }
+    }
+
+    Capabilities const & ComputeContext::getCapabilities() const
+    {
+        return m_capabilities;
+    }
+
+    bool ComputeContext::supportsFp64() const
+    {
+        return m_capabilities.fp64;
+    }
+
+    bool ComputeContext::hasImageSupport() const
+    {
+        return m_capabilities.imageSupport;
     }
 
     OutputMethod ComputeContext::outputMethod() const
