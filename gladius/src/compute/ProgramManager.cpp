@@ -58,6 +58,37 @@ namespace gladius
                 m_hierarchicalDCProgram =
                     std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
 
+                                bool const hasFp64 = m_ComputeContext && m_ComputeContext->supportsFp64();
+                                bool const isRusticl =
+                                    m_ComputeContext && m_ComputeContext->getCapabilities().rusticl;
+
+                                // Enable NanoVDB support only when the selected device offers FP64 and is not
+                                // running via the rusticl driver path (which currently fails NanoVDB builds).
+                                m_enableVdb = hasFp64 && !isRusticl;
+
+                                if (!hasFp64 && m_eventLogger)
+                                {
+                                        m_eventLogger->logWarning(
+                                            "OpenCL device lacks fp64 support; NanoVDB features will be disabled.");
+                                }
+
+                                if (isRusticl && m_eventLogger)
+                                {
+                                        m_eventLogger->logWarning(
+                                            "OpenCL device reported as rusticl; disabling NanoVDB to avoid compiler"
+                                            " failures.");
+                                }
+                                if (!m_eventLogger)
+                                {
+                                        std::cerr << "ProgramManager::init hasFp64=" << hasFp64
+                                                            << " isRusticl=" << isRusticl << "\n";
+                                }
+
+                m_slicerProgram->setEnableVdb(m_enableVdb);
+                m_optimizedRenderProgram->setEnableVdb(m_enableVdb);
+                m_dualContouringSamplingProgram->setEnableVdb(m_enableVdb);
+                m_hierarchicalDCProgram->setEnableVdb(m_enableVdb);
+
         // Propagate logger to programs so that CL diagnostics go to the event logger
         if (m_eventLogger)
         {

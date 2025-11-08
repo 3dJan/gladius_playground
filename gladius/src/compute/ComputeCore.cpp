@@ -3,6 +3,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <limits>
@@ -346,6 +347,74 @@ namespace gladius
         return m_boundingBox; // Return a copy instead of a reference
     }
 
+    bool ComputeCore::isBoundingBoxMeaningful(BoundingBox const & box)
+    {
+        auto const values = std::array<float, 6>{box.min.x,
+                                                 box.min.y,
+                                                 box.min.z,
+                                                 box.max.x,
+                                                 box.max.y,
+                                                 box.max.z};
+
+        auto const finite =
+          std::all_of(values.begin(), values.end(), [](float value) { return std::isfinite(value); });
+
+        if (!finite)
+        {
+            return false;
+        }
+
+        bool const ordered = (box.min.x <= box.max.x) && (box.min.y <= box.max.y) &&
+                              (box.min.z <= box.max.z);
+
+        return ordered;
+    }
+
+    std::optional<BoundingBox> ComputeCore::computeBoundingBoxFromPrimitives() const
+    {
+        if (!m_primitives)
+        {
+            return std::nullopt;
+        }
+
+        auto const & primitiveMeta = m_primitives->primitives.getData();
+        if (primitiveMeta.empty())
+        {
+            return std::nullopt;
+        }
+
+        BoundingBox aggregated{};
+        bool anyValid = false;
+
+        for (auto const & meta : primitiveMeta)
+        {
+            BoundingBox const & candidate = meta.boundingBox;
+            if (!isBoundingBoxMeaningful(candidate))
+            {
+                continue;
+            }
+
+            aggregated.min.x = std::min(aggregated.min.x, candidate.min.x);
+            aggregated.min.y = std::min(aggregated.min.y, candidate.min.y);
+            aggregated.min.z = std::min(aggregated.min.z, candidate.min.z);
+            aggregated.min.w = std::min(aggregated.min.w, candidate.min.w);
+
+            aggregated.max.x = std::max(aggregated.max.x, candidate.max.x);
+            aggregated.max.y = std::max(aggregated.max.y, candidate.max.y);
+            aggregated.max.z = std::max(aggregated.max.z, candidate.max.z);
+            aggregated.max.w = std::max(aggregated.max.w, candidate.max.w);
+
+            anyValid = true;
+        }
+
+        if (!anyValid)
+        {
+            return std::nullopt;
+        }
+
+        return aggregated;
+    }
+
     void ComputeCore::updateClippingAreaWithPadding() const
     {
         ProfileFunction auto constexpr padding = 10.f;
@@ -390,10 +459,7 @@ namespace gladius
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
 
-        if (m_boundingBox && !std::isinf(m_boundingBox->min.x) &&
-            !std::isinf(m_boundingBox->max.x) && !std::isinf(m_boundingBox->min.y) &&
-            !std::isinf(m_boundingBox->max.y) && !std::isinf(m_boundingBox->min.z) &&
-            !std::isinf(m_boundingBox->max.z))
+        if (m_boundingBox && isBoundingBoxMeaningful(*m_boundingBox))
         {
             return true;
         }
@@ -512,12 +578,22 @@ namespace gladius
                                      : m_boundingBox->max.z;
         }
 
-        // if the bounding box values are not finite, use the build volume as bounding box
-        if (!std::isfinite(m_boundingBox->min.x) || !std::isfinite(m_boundingBox->max.x) ||
-            !std::isfinite(m_boundingBox->min.y) || !std::isfinite(m_boundingBox->max.y) ||
-            !std::isfinite(m_boundingBox->min.z) || !std::isfinite(m_boundingBox->max.z))
+        bool boundingBoxValid = isBoundingBoxMeaningful(*m_boundingBox);
+
+        if (!boundingBoxValid)
         {
-            m_boundingBox = BoundingBox{{0.f, 0.f, 0.f}, {400.f, 400.f, 400.f}};
+            if (auto primitiveBox = computeBoundingBoxFromPrimitives())
+            {
+                logMsg("updateBoundingBoxFast: using primitive metadata bounding box fallback");
+                m_boundingBox = std::move(*primitiveBox);
+                boundingBoxValid = isBoundingBoxMeaningful(*m_boundingBox);
+            }
+        }
+
+        if (!boundingBoxValid)
+        {
+            logMsg("updateBoundingBoxFast: falling back to default build volume bounding box");
+            m_boundingBox = BoundingBox{{0.f, 0.f, 0.f, 0.f}, {400.f, 400.f, 400.f, 0.f}};
         }
         LOG_LOCATION;
         return true;

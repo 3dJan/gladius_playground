@@ -19,8 +19,10 @@
 
 #include <compute/ProgramManager.h>
 
-#include <string_view>
+#include <array>
 #include <mutex>
+#include <optional>
+#include <string_view>
 
 namespace cl
 {
@@ -543,6 +545,8 @@ namespace gladius
 
       private:
         bool updateBoundingBoxFast();
+                [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
+                [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
