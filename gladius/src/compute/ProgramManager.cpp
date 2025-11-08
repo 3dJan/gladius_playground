@@ -45,49 +45,55 @@ namespace gladius
         init();
     }
 
-        void ProgramManager::init()
-        {
-                ProfileFunction;
+    void ProgramManager::init()
+    {
+        ProfileFunction;
 
-                std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-                m_slicerProgram = std::make_unique<SlicerProgram>(m_ComputeContext, m_resources);
-                m_optimizedRenderProgram =
-                    std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
-                m_dualContouringSamplingProgram =
-                    std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
-                m_hierarchicalDCProgram =
-                    std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        m_slicerProgram = std::make_unique<SlicerProgram>(m_ComputeContext, m_resources);
+        m_optimizedRenderProgram = std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
+        m_dualContouringSamplingProgram =
+          std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
+        m_hierarchicalDCProgram =
+          std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
 
-                                bool const hasFp64 = m_ComputeContext && m_ComputeContext->supportsFp64();
-                                bool const isRusticl =
-                                    m_ComputeContext && m_ComputeContext->getCapabilities().rusticl;
+                bool const hasFp64 = m_ComputeContext && m_ComputeContext->supportsFp64();
+                bool const isRusticl = m_ComputeContext && m_ComputeContext->getCapabilities().rusticl;
 
-                                // Enable NanoVDB support only when the selected device offers FP64 and is not
-                                // running via the rusticl driver path (which currently fails NanoVDB builds).
-                                m_enableVdb = hasFp64 && !isRusticl;
+                // Enable NanoVDB support only when the selected device offers FP64
+                m_enableVdb = hasFp64;
 
-                                if (!hasFp64 && m_eventLogger)
-                                {
-                                        m_eventLogger->logWarning(
-                                            "OpenCL device lacks fp64 support; NanoVDB features will be disabled.");
-                                }
+                if (!hasFp64)
+                {
+                        if (m_eventLogger)
+                        {
+                                m_eventLogger->logWarning(
+                                    "OpenCL device lacks fp64 support; NanoVDB features will be disabled.");
+                        }
+                        else
+                        {
+                                std::cerr
+                                    << "OpenCL device lacks fp64 support; NanoVDB features will be disabled.\n";
+                        }
+                }
+                else if (isRusticl)
+                {
+                        if (m_eventLogger)
+                        {
+                                m_eventLogger->logInfo(
+                                    "OpenCL device reported as rusticl; applying NanoVDB patch at runtime.");
+                        }
+                        else
+                        {
+                                std::cerr
+                                    << "OpenCL device reported as rusticl; applying NanoVDB patch at runtime.\n";
+                        }
+                }
 
-                                if (isRusticl && m_eventLogger)
-                                {
-                                        m_eventLogger->logWarning(
-                                            "OpenCL device reported as rusticl; disabling NanoVDB to avoid compiler"
-                                            " failures.");
-                                }
-                                if (!m_eventLogger)
-                                {
-                                        std::cerr << "ProgramManager::init hasFp64=" << hasFp64
-                                                            << " isRusticl=" << isRusticl << "\n";
-                                }
-
-                m_slicerProgram->setEnableVdb(m_enableVdb);
-                m_optimizedRenderProgram->setEnableVdb(m_enableVdb);
-                m_dualContouringSamplingProgram->setEnableVdb(m_enableVdb);
-                m_hierarchicalDCProgram->setEnableVdb(m_enableVdb);
+        m_slicerProgram->setEnableVdb(m_enableVdb);
+        m_optimizedRenderProgram->setEnableVdb(m_enableVdb);
+        m_dualContouringSamplingProgram->setEnableVdb(m_enableVdb);
+        m_hierarchicalDCProgram->setEnableVdb(m_enableVdb);
 
         // Propagate logger to programs so that CL diagnostics go to the event logger
         if (m_eventLogger)

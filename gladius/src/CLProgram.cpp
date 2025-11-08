@@ -831,7 +831,7 @@ namespace gladius
                 auto forceFlag = readEnvFlag("GLADIUS_OPENCL_FORCE_NANOVDB_PATCH");
 
                 bool const patchDisabled = disableFlag.value_or(false);
-                bool const patchForced = forceFlag.value_or(false);
+                bool const patchForced = forceFlag.value_or(true);
 
                 if (patchDisabled && patchForced && m_logger)
                 {
