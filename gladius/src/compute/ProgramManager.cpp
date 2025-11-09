@@ -21,6 +21,7 @@
 #include "Profiling.h"
 #include "exceptions.h"
 #include "ProgramManager.h"
+#include "ComputeContext.h"
 #include "RenderProgram.h"
 #include "ResourceContext.h"
 #include "SlicerProgram.h"
