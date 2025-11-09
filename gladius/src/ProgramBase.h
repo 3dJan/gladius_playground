@@ -64,7 +64,7 @@ namespace gladius
         std::string m_modelKernel;
         bool m_isFirstBuild = true;
 
-        bool m_enableVdb = true;
+        bool m_enableVdb = false;
 
         FileNames m_sourceFiles;
 

@@ -552,6 +552,7 @@ namespace gladius
 
         cl_int2 determineBufferSize(float2 pixelSize_mm) const;
         void reinitIfNecssary();
+        [[nodiscard]] bool requiresNanoVdbLocked() const;
 
         [[nodiscard]] int layerNumber() const;
 

@@ -605,6 +605,7 @@ namespace gladius
 
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
+        m_programs.setVdbRequired(requiresNanoVdbLocked());
         m_programs.recompileIfRequired();
         LOG_LOCATION;
     }
@@ -617,6 +618,12 @@ namespace gladius
 
     void ComputeCore::recompileBlockingNoLock()
     {
+        bool const requiresVdb = [&]() {
+            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+            return requiresNanoVdbLocked();
+        }();
+
+        m_programs.setVdbRequired(requiresVdb);
         m_programs.recompileBlockingNoLock();
     }
 
@@ -765,27 +772,27 @@ namespace gladius
         }
     }
 
-    bool ComputeCore::isVdbRequired() const
+    bool ComputeCore::requiresNanoVdbLocked() const
     {
-        ProfileFunction
-
-          std::lock_guard<std::recursive_mutex>
-            lock(m_computeMutex);
         if (!m_primitives)
         {
             return false;
         }
 
-        const auto metaDataIter =
-          std::find_if(std::begin(m_primitives->primitives.getData()),
-                       std::end(m_primitives->primitives.getData()),
-                       [](auto & metadata)
-                       {
-                           return (metadata.primitiveType == SDF_VDB) ||
-                                  (metadata.primitiveType == SDF_VDB_FACE_INDICES);
-                       });
+        auto const & metadataBuffer = m_primitives->primitives.getData();
+        return std::any_of(std::begin(metadataBuffer),
+                           std::end(metadataBuffer),
+                           [](auto const & metadata)
+                           {
+                               return (metadata.primitiveType == SDF_VDB) ||
+                                      (metadata.primitiveType == SDF_VDB_FACE_INDICES);
+                           });
+    }
 
-        return metaDataIter != std::end(m_primitives->primitives.getData());
+    bool ComputeCore::isVdbRequired() const
+    {
+        ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        return requiresNanoVdbLocked();
     }
 
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgress() const
@@ -895,6 +902,7 @@ namespace gladius
     void ComputeCore::compileSlicerProgramBlocking()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        m_programs.setVdbRequired(requiresNanoVdbLocked());
         m_programs.recompileBlockingNoLock();
 
         updateBBox();
@@ -1195,6 +1203,7 @@ namespace gladius
                     catch (...)
                     {
                     }
+                    m_programs.setVdbRequired(requiresNanoVdbLocked());
                     m_programs.recompileBlockingNoLock();
                     if (!m_programs.getSlicerState().isModelUpToDate())
                     {

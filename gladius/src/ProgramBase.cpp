@@ -26,7 +26,7 @@ namespace gladius
                          "sampler.h",
                          "rendering.h",
                          "sdf_generator.h",
-                         "CNanoVDB.h",
+                         //"CNanoVDB.h",
                          "sdf.cl",
                          "rendering.cl",
                          "sdf_generator.cl"};
