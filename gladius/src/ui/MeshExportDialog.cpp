@@ -11,9 +11,10 @@ namespace gladius::ui
 {
     namespace
     {
-        constexpr std::array<char const *, 2> METHOD_LABELS{
-          "Layered marching cubes (OpenVDB)",
-          "Dual contouring (octree)"};
+                constexpr std::array<char const *, 3> METHOD_LABELS{
+                    "Layered marching cubes (OpenVDB)",
+                    "Dual contouring (octree)",
+                    "Hierarchical dual contouring (adaptive)"};
 
         constexpr std::array<char const *, 4> QUALITY_LABELS{
           "Draft (fast)",
@@ -21,11 +22,18 @@ namespace gladius::ui
           "High fidelity",
           "Ultra"};
 
-        constexpr std::array<char const *, 4> DUAL_QUALITY_LABELS{
+                constexpr std::array<char const *, 4> DUAL_QUALITY_LABELS{
           "Draft",
           "Balanced",
           "Fine",
           "Ultra Fine"};
+
+                constexpr std::array<char const *, 5> HIERARCHICAL_QUALITY_LABELS{
+                    "Draft",
+                    "Balanced",
+                    "Fine",
+                    "Ultra Fine",
+                    "Custom"};
     }
 
     void MeshExportDialog::beginExport(std::filesystem::path const & stlFilename,
@@ -69,6 +77,8 @@ namespace gladius::ui
             return "Exporting STL using layered marching cubes";
         case io::SurfaceExtractionMethod::DualContouring:
             return "Exporting STL using dual contouring";
+        case io::SurfaceExtractionMethod::HierarchicalDualContouring:
+            return "Exporting STL using hierarchical dual contouring";
         default:
             return "Exporting STL";
         }
@@ -93,6 +103,10 @@ namespace gladius::ui
         {
             m_dualExporter.finalize();
         }
+        else if (m_activeExporter == &m_hierarchicalExporter)
+        {
+            m_hierarchicalExporter.finalize();
+        }
         else
         {
             BaseExportDialog::finalizeExport();
@@ -111,6 +125,10 @@ namespace gladius::ui
         else if (m_activeExporter == &m_dualExporter)
         {
             m_dualExporter.finalize();
+        }
+        else if (m_activeExporter == &m_hierarchicalExporter)
+        {
+            m_hierarchicalExporter.finalize();
         }
         resetState();
     }
@@ -153,8 +171,10 @@ namespace gladius::ui
             if (m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes)
             {
                 int qualityIndex = static_cast<int>(m_marchingCubesQuality);
-                qualityIndex = std::clamp(qualityIndex, 0, static_cast<int>(QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo("Quality", QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                qualityIndex =
+                  std::clamp(qualityIndex, 0, static_cast<int>(QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo("Quality",
+                                       QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
                 {
                     for (int i = 0; i < static_cast<int>(QUALITY_LABELS.size()); ++i)
                     {
@@ -171,13 +191,16 @@ namespace gladius::ui
                     }
                     ImGui::EndCombo();
                 }
-                ImGui::TextWrapped("Uses OpenVDB volume-to-mesh extraction. Higher quality settings take more time and memory.");
+                ImGui::TextWrapped(
+                  "Uses OpenVDB volume-to-mesh extraction. Higher quality settings take more time and memory.");
             }
-            else
+            else if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
             {
                 int qualityIndex = static_cast<int>(m_dualQualityPreset);
-                qualityIndex = std::clamp(qualityIndex, 0, static_cast<int>(DUAL_QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo("Quality", DUAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                qualityIndex =
+                  std::clamp(qualityIndex, 0, static_cast<int>(DUAL_QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo("Quality",
+                                       DUAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
                 {
                     for (int i = 0; i < static_cast<int>(DUAL_QUALITY_LABELS.size()); ++i)
                     {
@@ -201,7 +224,67 @@ namespace gladius::ui
                     ImGui::SameLine();
                     ImGui::TextDisabled("all octree leaves will have the same size");
                 }
-                ImGui::TextWrapped("Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
+                ImGui::TextWrapped(
+                  "Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
+            }
+            else if (m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring)
+            {
+                int qualityIndex = static_cast<int>(m_hierarchicalQualityPreset);
+                qualityIndex = std::clamp(
+                  qualityIndex, 0, static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo(
+                      "Quality",
+                      HIERARCHICAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                {
+                    for (int i = 0; i < static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()); ++i)
+                    {
+                        bool const selected = (i == qualityIndex);
+                        if (ImGui::Selectable(HIERARCHICAL_QUALITY_LABELS[static_cast<std::size_t>(i)],
+                                              selected))
+                        {
+                            qualityIndex = i;
+                            m_hierarchicalQualityPreset =
+                              static_cast<io::HierarchicalDualContouringQuality>(i);
+
+                            if (m_hierarchicalQualityPreset !=
+                                io::HierarchicalDualContouringQuality::Custom)
+                            {
+                                switch (m_hierarchicalQualityPreset)
+                                {
+                                case io::HierarchicalDualContouringQuality::Draft:
+                                    m_hierarchicalEnableProgressiveRefinement = false;
+                                    break;
+                                case io::HierarchicalDualContouringQuality::Balanced:
+                                case io::HierarchicalDualContouringQuality::Fine:
+                                case io::HierarchicalDualContouringQuality::UltraFine:
+                                    m_hierarchicalEnableProgressiveRefinement = true;
+                                    break;
+                                case io::HierarchicalDualContouringQuality::Custom:
+                                    break;
+                                }
+                            }
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::Checkbox("Enable GPU acceleration", &m_hierarchicalEnableGpu);
+                ImGui::Checkbox("Enable progressive refinement",
+                                &m_hierarchicalEnableProgressiveRefinement);
+
+                if (!m_hierarchicalEnableProgressiveRefinement)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("refinement passes will be skipped");
+                }
+
+                ImGui::TextWrapped(
+                  "Hierarchical dual contouring incrementally refines an adaptive octree. "
+                  "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
             }
 
             if (!m_errorMessage.empty())
@@ -272,6 +355,23 @@ namespace gladius::ui
             m_dualExporter.setOptions(options);
             m_dualExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_dualExporter;
+            break;
+        }
+        case io::SurfaceExtractionMethod::HierarchicalDualContouring:
+        {
+            io::HierarchicalDualContouringOptions options{};
+            options.qualityPreset = m_hierarchicalQualityPreset;
+            options.applyPreset();
+            options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
+            options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
+            if (!options.config.enableProgressiveRefinement)
+            {
+                options.config.refinementIterations = 0U;
+            }
+
+            m_hierarchicalExporter.setOptions(options);
+            m_hierarchicalExporter.beginExport(m_targetFile, core);
+            m_activeExporter = &m_hierarchicalExporter;
             break;
         }
         default:

@@ -94,9 +94,10 @@ namespace gladius
 
         [[nodiscard]] const cl::Device & GetDevice() const;
 
-        // Capabilities accessors (declared inline for header visibility; definitions in .cpp)
         [[nodiscard]] Capabilities const & getCapabilities() const;
+
         [[nodiscard]] bool supportsFp64() const;
+
         [[nodiscard]] bool hasImageSupport() const;
 
         // Logger injection
@@ -222,6 +223,7 @@ namespace gladius
         mutable std::mutex m_queuesMutex;
 
         cl::Device m_device;
+        Capabilities m_capabilities{};
 
         bool m_isValid = false;
         EnableGLOutput m_outputGL = EnableGLOutput::disabled;
@@ -236,9 +238,6 @@ namespace gladius
         // Device memory capabilities (queried at init)
         size_t m_deviceGlobalMemBytes{0};
         size_t m_deviceMaxAllocBytes{0};
-
-        // Cached device capabilities determined at initialization
-        Capabilities m_capabilities{};
 
         // Runtime accounting of allocated OpenCL buffer bytes via our factory
         std::atomic<size_t> m_trackedAllocatedBytes{0};

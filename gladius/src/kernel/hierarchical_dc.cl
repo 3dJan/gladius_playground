@@ -8,12 +8,7 @@ __kernel void evaluateOctreeLevel(
     __global const float* nodeBoundsMax,         // Input: max corners (x,y,z) per node
     __global float* cornerValues,                // Output: 8 SDF values per node
     const unsigned int nodeCount,                // Number of nodes at this level
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount,
+    PAYLOAD_ARGS,
     const float isoValue)
 {
     const int nodeId = get_global_id(0);
@@ -41,13 +36,7 @@ __kernel void evaluateOctreeLevel(
             (cornerIdx & 4) ? maxBounds.z : minBounds.z
         );
         
-        const float distance = evaluateSdf(corner,
-                                           transformationMatrices,
-                                           opcodes,
-                                           dataBuffer,
-                                           indexBuffer,
-                                           transformationMatrixCount,
-                                           opcodeCount);
+        const float distance = model(corner, PASS_PAYLOAD_ARGS).w;
         
         cornerValues[nodeId * 8 + cornerIdx] = distance - isoValue;
     }
@@ -102,13 +91,8 @@ __kernel void estimateCurvature(
     __global const float* leafCenters,           // Input: center positions (x,y,z) per leaf
     __global float* curvatureMetrics,            // Output: curvature estimate per leaf
     const unsigned int leafCount,
-    const float gradientEpsilon,
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount)
+    PAYLOAD_ARGS,
+    const float gradientEpsilon)
 {
     const int leafId = get_global_id(0);
     
@@ -136,24 +120,18 @@ __kernel void estimateCurvature(
     // Center gradient
     const float3 posXp = center + offsets[0];
     const float3 posXn = center + offsets[1];
-    const float sdfXp = evaluateSdf(posXp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfXn = evaluateSdf(posXn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfXp = model(posXp, PASS_PAYLOAD_ARGS).w;
+    const float sdfXn = model(posXn, PASS_PAYLOAD_ARGS).w;
     
     const float3 posYp = center + offsets[2];
     const float3 posYn = center + offsets[3];
-    const float sdfYp = evaluateSdf(posYp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfYn = evaluateSdf(posYn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfYp = model(posYp, PASS_PAYLOAD_ARGS).w;
+    const float sdfYn = model(posYn, PASS_PAYLOAD_ARGS).w;
     
     const float3 posZp = center + offsets[4];
     const float3 posZn = center + offsets[5];
-    const float sdfZp = evaluateSdf(posZp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfZn = evaluateSdf(posZn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfZp = model(posZp, PASS_PAYLOAD_ARGS).w;
+    const float sdfZn = model(posZn, PASS_PAYLOAD_ARGS).w;
     
     gradients[0] = (float3)(
         (sdfXp - sdfXn) / (2.0f * gradientEpsilon),
@@ -175,24 +153,18 @@ __kernel void estimateCurvature(
         
         const float3 nXp = neighborPos + (float3)(gradientEpsilon, 0.0f, 0.0f);
         const float3 nXn = neighborPos - (float3)(gradientEpsilon, 0.0f, 0.0f);
-        const float nSdfXp = evaluateSdf(nXp, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
-        const float nSdfXn = evaluateSdf(nXn, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
+        const float nSdfXp = model(nXp, PASS_PAYLOAD_ARGS).w;
+        const float nSdfXn = model(nXn, PASS_PAYLOAD_ARGS).w;
         
         const float3 nYp = neighborPos + (float3)(0.0f, gradientEpsilon, 0.0f);
         const float3 nYn = neighborPos - (float3)(0.0f, gradientEpsilon, 0.0f);
-        const float nSdfYp = evaluateSdf(nYp, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
-        const float nSdfYn = evaluateSdf(nYn, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
+        const float nSdfYp = model(nYp, PASS_PAYLOAD_ARGS).w;
+        const float nSdfYn = model(nYn, PASS_PAYLOAD_ARGS).w;
         
         const float3 nZp = neighborPos + (float3)(0.0f, 0.0f, gradientEpsilon);
         const float3 nZn = neighborPos - (float3)(0.0f, 0.0f, gradientEpsilon);
-        const float nSdfZp = evaluateSdf(nZp, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
-        const float nSdfZn = evaluateSdf(nZn, transformationMatrices, opcodes, dataBuffer,
-                                         indexBuffer, transformationMatrixCount, opcodeCount);
+        const float nSdfZp = model(nZp, PASS_PAYLOAD_ARGS).w;
+        const float nSdfZn = model(nZn, PASS_PAYLOAD_ARGS).w;
         
         gradients[i + 1] = (float3)(
             (nSdfXp - nSdfXn) / (2.0f * gradientEpsilon),
@@ -233,13 +205,8 @@ __kernel void batchGradients(
     __global const float4* positions,            // Input: sample positions
     __global float4* gradients,                  // Output: gradient vectors
     const unsigned int count,
-    const float gradientEpsilon,
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount)
+    PAYLOAD_ARGS,
+    const float gradientEpsilon)
 {
     const int gid = get_global_id(0);
     
@@ -254,26 +221,20 @@ __kernel void batchGradients(
     // X gradient
     const float3 posXp = worldPos + (float3)(gradientEpsilon, 0.0f, 0.0f);
     const float3 posXn = worldPos - (float3)(gradientEpsilon, 0.0f, 0.0f);
-    const float sdfXp = evaluateSdf(posXp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfXn = evaluateSdf(posXn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfXp = model(posXp, PASS_PAYLOAD_ARGS).w;
+    const float sdfXn = model(posXn, PASS_PAYLOAD_ARGS).w;
     
     // Y gradient
     const float3 posYp = worldPos + (float3)(0.0f, gradientEpsilon, 0.0f);
     const float3 posYn = worldPos - (float3)(0.0f, gradientEpsilon, 0.0f);
-    const float sdfYp = evaluateSdf(posYp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfYn = evaluateSdf(posYn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfYp = model(posYp, PASS_PAYLOAD_ARGS).w;
+    const float sdfYn = model(posYn, PASS_PAYLOAD_ARGS).w;
     
     // Z gradient
     const float3 posZp = worldPos + (float3)(0.0f, 0.0f, gradientEpsilon);
     const float3 posZn = worldPos - (float3)(0.0f, 0.0f, gradientEpsilon);
-    const float sdfZp = evaluateSdf(posZp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfZn = evaluateSdf(posZn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    const float sdfZp = model(posZp, PASS_PAYLOAD_ARGS).w;
+    const float sdfZn = model(posZn, PASS_PAYLOAD_ARGS).w;
     
     const float3 gradient = (float3)(
         (sdfXp - sdfXn) / (2.0f * gradientEpsilon),

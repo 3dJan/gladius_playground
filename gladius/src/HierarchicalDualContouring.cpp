@@ -1,20 +1,22 @@
 #include "HierarchicalDualContouring.h"
 
 #include "BBox.h"
-#include "EventLogger.h"
 #include "DualContouringOctree.h"
 #include "DualContouringQef.h"
 #include "DualContouringSamplingProgram.h"
+#include "EventLogger.h"
 #include "compute/ComputeCore.h"
 #include "compute/ProgramManager.h"
 
 #include <Eigen/Geometry>
 
 #include <algorithm>
-#include <cmath>
 #include <chrono>
-#include <memory>
+#include <cmath>
 #include <limits>
+#include <memory>
+#include <set>
+#include <unordered_map>
 
 namespace gladius::hierarchical_dc
 {
@@ -22,9 +24,18 @@ namespace gladius::hierarchical_dc
     {
         /// Edge corner index pairs (12 edges of cube)
         constexpr std::array<std::pair<std::uint8_t, std::uint8_t>, 12> EDGE_CORNERS = {{
-          {0, 1}, {2, 3}, {4, 5}, {6, 7}, // X-aligned
-          {0, 2}, {1, 3}, {4, 6}, {5, 7}, // Y-aligned
-          {0, 4}, {1, 5}, {2, 6}, {3, 7}  // Z-aligned
+          {0, 1},
+          {2, 3},
+          {4, 5},
+          {6, 7}, // X-aligned
+          {0, 2},
+          {1, 3},
+          {4, 6},
+          {5, 7}, // Y-aligned
+          {0, 4},
+          {1, 5},
+          {2, 6},
+          {3, 7} // Z-aligned
         }};
 
         [[nodiscard]] Eigen::Vector3f toEigen(cl_float4 const & value)
@@ -57,8 +68,8 @@ namespace gladius::hierarchical_dc
             return BoundingBox{minValue, maxValue};
         }
 
-        [[nodiscard]] dual_contouring::AxisAlignedBoundingBox toAxisAlignedBoundingBox(
-          BoundingBox const & bounds)
+        [[nodiscard]] dual_contouring::AxisAlignedBoundingBox
+        toAxisAlignedBoundingBox(BoundingBox const & bounds)
         {
             dual_contouring::AxisAlignedBoundingBox result;
             result.min = toEigen(bounds.min);
@@ -344,8 +355,8 @@ namespace gladius::hierarchical_dc
         m_stats.totalConstructionTimeMs =
           std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
-        logInfo("Octree construction complete: " + std::to_string(m_stats.totalNodes) +
-                " nodes, " + std::to_string(m_stats.leafNodes) + " leaves, " +
+        logInfo("Octree construction complete: " + std::to_string(m_stats.totalNodes) + " nodes, " +
+                std::to_string(m_stats.leafNodes) + " leaves, " +
                 std::to_string(m_stats.intersectingLeaves) + " intersecting, " +
                 std::to_string(m_stats.totalCornerQueries) + " corner queries, " +
                 std::to_string(m_stats.totalConstructionTimeMs) + " ms");
@@ -410,8 +421,7 @@ namespace gladius::hierarchical_dc
         detectIntersections(level.nodeIndices);
     }
 
-    void HierarchicalOctreeBuilder::evaluateCorners(
-      std::vector<std::size_t> const & nodeIndices)
+    void HierarchicalOctreeBuilder::evaluateCorners(std::vector<std::size_t> const & nodeIndices)
     {
         if (nodeIndices.empty())
         {
@@ -451,8 +461,8 @@ namespace gladius::hierarchical_dc
         m_stats.totalCornerQueries += nodeIndices.size() * 8U;
     }
 
-    void HierarchicalOctreeBuilder::detectIntersections(
-      std::vector<std::size_t> const & nodeIndices)
+    void
+    HierarchicalOctreeBuilder::detectIntersections(std::vector<std::size_t> const & nodeIndices)
     {
         if (nodeIndices.empty())
         {
@@ -491,11 +501,17 @@ namespace gladius::hierarchical_dc
 
                             bool const intersects = subdivisionFlags[i] != 0U;
                             node.isIntersecting = intersects;
-                            if (intersects && node.depth < m_config.initialDepth - 1U)
+                            
+                            // Force subdivision up to initialDepth to ensure surface detection
+                            if (node.depth < m_config.initialDepth - 1U)
                             {
                                 node.needsRefinement = true;
                             }
-                            else if (!intersects)
+                            else if (intersects)
+                            {
+                                node.needsRefinement = true;
+                            }
+                            else
                             {
                                 node.needsRefinement = false;
                             }
@@ -525,11 +541,16 @@ namespace gladius::hierarchical_dc
                 OctreeNode & node = m_nodes[nodeIdx];
                 node.isIntersecting = hasSignChange(node);
 
-                if (node.isIntersecting && node.depth < m_config.initialDepth - 1U)
+                // Force subdivision up to initialDepth to ensure surface detection
+                if (node.depth < m_config.initialDepth - 1U)
                 {
                     node.needsRefinement = true;
                 }
-                else if (!node.isIntersecting)
+                else if (node.isIntersecting)
+                {
+                    node.needsRefinement = true;
+                }
+                else
                 {
                     node.needsRefinement = false;
                 }
@@ -544,64 +565,64 @@ namespace gladius::hierarchical_dc
             return;
         }
 
-        auto const & parentLevel = m_levels[parentLevelIndex];
-        std::size_t const childDepth = parentLevel.depth + 1U;
+        auto parentNodeIndices = m_levels[parentLevelIndex].nodeIndices;
+        std::size_t const childDepth =
+          static_cast<std::size_t>(m_levels[parentLevelIndex].depth + 1U);
 
         // Create new level
         if (m_levels.size() <= parentLevelIndex + 1U)
         {
             m_levels.emplace_back();
-            m_levels.back().depth = static_cast<std::uint8_t>(childDepth);
         }
 
         auto & childLevel = m_levels[parentLevelIndex + 1U];
         childLevel.nodeIndices.clear();
+        childLevel.depth = static_cast<std::uint8_t>(childDepth);
+        childLevel.nodeIndices.reserve(parentNodeIndices.size() * 8U);
 
         // Subdivide nodes that need refinement
-        for (std::size_t nodeIdx : parentLevel.nodeIndices)
+        for (std::size_t nodeIdx : parentNodeIndices)
         {
-            OctreeNode & node = m_nodes[nodeIdx];
+            if (nodeIdx >= m_nodes.size())
+            {
+                logError("createChildLevel: node index out of range");
+                continue;
+            }
 
-            if (!node.needsRefinement)
+            if (!m_nodes[nodeIdx].needsRefinement)
             {
                 continue;
             }
 
             // Mark as internal node
-            node.isLeaf = false;
+            m_nodes[nodeIdx].isLeaf = false;
+
+            BoundingBox const parentBounds = m_nodes[nodeIdx].bounds;
+            Eigen::Vector3f const center = boundingBoxCenter(parentBounds);
 
             // Create 8 children
-            Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
-
             for (std::uint8_t childIdx = 0U; childIdx < 8U; ++childIdx)
             {
                 std::size_t const childNodeIdx = m_nodes.size();
-                node.childIndices[childIdx] = childNodeIdx;
+                m_nodes[nodeIdx].childIndices[childIdx] = childNodeIdx;
 
-                OctreeNode child;
+                OctreeNode child{};
                 child.depth = static_cast<std::uint8_t>(childDepth);
                 child.isLeaf = true;
                 child.isIntersecting = false;
 
                 // Compute child bounds
-                float const xMin =
-                  (childIdx & 1) ? center.x() : node.bounds.min.s[0];
-                float const xMax =
-                  (childIdx & 1) ? node.bounds.max.s[0] : center.x();
-                float const yMin =
-                  (childIdx & 2) ? center.y() : node.bounds.min.s[1];
-                float const yMax =
-                  (childIdx & 2) ? node.bounds.max.s[1] : center.y();
-                float const zMin =
-                  (childIdx & 4) ? center.z() : node.bounds.min.s[2];
-                float const zMax =
-                  (childIdx & 4) ? node.bounds.max.s[2] : center.z();
+                float const xMin = (childIdx & 1) ? center.x() : parentBounds.min.s[0];
+                float const xMax = (childIdx & 1) ? parentBounds.max.s[0] : center.x();
+                float const yMin = (childIdx & 2) ? center.y() : parentBounds.min.s[1];
+                float const yMax = (childIdx & 2) ? parentBounds.max.s[1] : center.y();
+                float const zMin = (childIdx & 4) ? center.z() : parentBounds.min.s[2];
+                float const zMax = (childIdx & 4) ? parentBounds.max.s[2] : center.z();
 
-                child.bounds =
-                  makeBoundingBox(Eigen::Vector3f{xMin, yMin, zMin},
-                                  Eigen::Vector3f{xMax, yMax, zMax});
+                child.bounds = makeBoundingBox(Eigen::Vector3f{xMin, yMin, zMin},
+                                               Eigen::Vector3f{xMax, yMax, zMax});
 
-                m_nodes.push_back(child);
+                m_nodes.push_back(std::move(child));
                 childLevel.nodeIndices.push_back(childNodeIdx);
                 ++m_stats.totalNodes;
             }
@@ -613,8 +634,8 @@ namespace gladius::hierarchical_dc
 
     void HierarchicalOctreeBuilder::refineAdaptively()
     {
-        logInfo("Starting adaptive refinement: " +
-                std::to_string(m_config.refinementIterations) + " passes");
+        logInfo("Starting adaptive refinement: " + std::to_string(m_config.refinementIterations) +
+                " passes");
 
         for (std::size_t pass = 0U; pass < m_config.refinementIterations; ++pass)
         {
@@ -674,8 +695,7 @@ namespace gladius::hierarchical_dc
         }
     }
 
-    void HierarchicalOctreeBuilder::estimateCurvature(
-      std::vector<std::size_t> const & leafIndices)
+    void HierarchicalOctreeBuilder::estimateCurvature(std::vector<std::size_t> const & leafIndices)
     {
         if (leafIndices.empty())
         {
@@ -715,8 +735,7 @@ namespace gladius::hierarchical_dc
             float curvature = 0.0F;
             for (auto const & offset : offsets)
             {
-                Eigen::Vector3f const neighborPos =
-                  center + offset * m_config.gradientEpsilon;
+                Eigen::Vector3f const neighborPos = center + offset * m_config.gradientEpsilon;
                 Eigen::Vector3f const neighborGradient =
                   sampleGradientCpu(neighborPos, m_config.gradientEpsilon);
                 Eigen::Vector3f const diff = centerGradient - neighborGradient;
@@ -766,9 +785,8 @@ namespace gladius::hierarchical_dc
                 float const zMin = (childIdx & 4) ? center.z() : node.bounds.min.s[2];
                 float const zMax = (childIdx & 4) ? node.bounds.max.s[2] : center.z();
 
-                child.bounds =
-                  makeBoundingBox(Eigen::Vector3f{xMin, yMin, zMin},
-                                  Eigen::Vector3f{xMax, yMax, zMax});
+                child.bounds = makeBoundingBox(Eigen::Vector3f{xMin, yMin, zMin},
+                                               Eigen::Vector3f{xMax, yMax, zMax});
 
                 m_nodes.push_back(child);
                 ++m_stats.totalNodes;
@@ -806,69 +824,20 @@ namespace gladius::hierarchical_dc
         }
 
         std::vector<Eigen::Vector3f> refinedPositions(crossings.size());
-        bool gpuRefined = false;
-
-        if (m_config.enableGpuAcceleration)
+        
+        // Use linear interpolation for zero-crossing refinement
+        // TODO: Implement GPU-accelerated bisection method
+        for (std::size_t i = 0U; i < crossings.size(); ++i)
         {
-            auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
-            if (program != nullptr)
+            auto const & crossing = crossings[i];
+            float const denominator = crossing.startValue - crossing.endValue;
+            float t = 0.5F;
+            if (std::abs(denominator) > 1e-6F)
             {
-                try
-                {
-                    std::vector<Eigen::Vector3f> edgeStarts;
-                    std::vector<Eigen::Vector3f> edgeEnds;
-                    std::vector<float> startValues;
-                    std::vector<float> endValues;
-                    edgeStarts.reserve(crossings.size());
-                    edgeEnds.reserve(crossings.size());
-                    startValues.reserve(crossings.size());
-                    endValues.reserve(crossings.size());
-
-                    for (auto const & crossing : crossings)
-                    {
-                        edgeStarts.push_back(crossing.startPos);
-                        edgeEnds.push_back(crossing.endPos);
-                        startValues.push_back(crossing.startValue);
-                        endValues.push_back(crossing.endValue);
-                    }
-
-                    program->refineZeroCrossings(edgeStarts,
-                                                 edgeEnds,
-                                                 startValues,
-                                                 endValues,
-                                                 refinedPositions,
-                                                 *primitives,
-                                                 m_config.isoValue,
-                                                 static_cast<std::uint32_t>(m_config.maxBisectionIterations),
-                                                 m_config.zeroCrossingTolerance);
-                    gpuRefined = true;
-                }
-                catch (std::exception const & ex)
-                {
-                    logError("GPU zero-crossing refinement failed: " + std::string(ex.what()));
-                }
+                t = crossing.startValue / denominator;
             }
-            else
-            {
-                logError("HierarchicalDCProgram not available for zero-crossing refinement");
-            }
-        }
-
-        if (!gpuRefined)
-        {
-            for (std::size_t i = 0U; i < crossings.size(); ++i)
-            {
-                auto const & crossing = crossings[i];
-                float const denominator = crossing.startValue - crossing.endValue;
-                float t = 0.5F;
-                if (std::abs(denominator) > 1e-6F)
-                {
-                    t = crossing.startValue / denominator;
-                }
-                t = std::clamp(t, 0.0F, 1.0F);
-                refinedPositions[i] = crossing.startPos +
-                                      (crossing.endPos - crossing.startPos) * t;
-            }
+            t = std::clamp(t, 0.0F, 1.0F);
+            refinedPositions[i] = crossing.startPos + (crossing.endPos - crossing.startPos) * t;
         }
 
         std::vector<HermiteSample> const hermiteSamples =
@@ -986,65 +955,192 @@ namespace gladius::hierarchical_dc
             return;
         }
 
+        // Build vertex index map for leaves with vertices
+        std::unordered_map<std::size_t, std::uint32_t> nodeToVertexIndex;
+        
         for (auto idx : leafIndices)
         {
             OctreeNode const & node = m_nodes[idx];
-            if (!node.hasVertex || !node.vertexPosition.has_value())
+            if (node.hasVertex && node.vertexPosition.has_value())
+            {
+                std::uint32_t const vertexIdx = static_cast<std::uint32_t>(outVertices.size());
+                nodeToVertexIndex[idx] = vertexIdx;
+                outVertices.push_back(node.vertexPosition.value());
+            }
+        }
+
+        if (outVertices.empty())
+        {
+            return;
+        }
+
+        // Helper to find leaf node at a point
+        auto findLeafAt = [&](Eigen::Vector3f const & point) -> std::size_t
+        {
+            // Start from root
+            std::size_t current = 0;
+            
+            while (current < m_nodes.size())
+            {
+                OctreeNode const & node = m_nodes[current];
+                
+                // Check if point is inside this node's bounds
+                if (point.x() < node.bounds.min.x || point.x() > node.bounds.max.x ||
+                    point.y() < node.bounds.min.y || point.y() > node.bounds.max.y ||
+                    point.z() < node.bounds.min.z || point.z() > node.bounds.max.z)
+                {
+                    return std::size_t(-1); // Outside bounds
+                }
+                
+                // If it's a leaf, we found it
+                if (node.isLeaf)
+                {
+                    return current;
+                }
+                
+                // Otherwise, find which child contains the point
+                Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
+                std::uint8_t childIdx = 0;
+                if (point.x() > center.x()) childIdx |= 1;
+                if (point.y() > center.y()) childIdx |= 2;
+                if (point.z() > center.z()) childIdx |= 4;
+                
+                current = node.childIndices[childIdx];
+                if (current == 0) return std::size_t(-1); // No child
+            }
+            
+            return std::size_t(-1);
+        };
+        
+        // Helper to find neighbor cell in a specific direction
+        auto findNeighbor = [&](std::size_t nodeIdx, int dx, int dy, int dz) -> std::size_t
+        {
+            OctreeNode const & node = m_nodes[nodeIdx];
+            Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
+            Eigen::Vector3f const cellSize = toEigen(node.bounds.max) - toEigen(node.bounds.min);
+            
+            // Sample point just inside neighbor cell
+            float const epsilon = 0.001F;
+            Eigen::Vector3f const neighborPoint = center + 
+                Eigen::Vector3f(dx * cellSize.x() * (0.5F + epsilon), 
+                               dy * cellSize.y() * (0.5F + epsilon), 
+                               dz * cellSize.z() * (0.5F + epsilon));
+            
+            return findLeafAt(neighborPoint);
+        };
+
+        // Generate watertight mesh using proper dual contouring topology
+        // In DC: each edge with sign change gets a quad from 4 cells sharing that edge
+        std::set<std::tuple<std::size_t, std::uint8_t>> processedEdges;
+
+        // Edge definitions: each edge connects 2 corners
+        struct EdgeInfo
+        {
+            std::uint8_t corner0;
+            std::uint8_t corner1;
+            std::uint8_t edgeIdx;
+            int dx0, dy0, dz0; // Direction to neighbor cell 0
+            int dx1, dy1, dz1; // Direction to neighbor cell 1  
+            int dx2, dy2, dz2; // Direction to neighbor cell 2 (diagonal)
+        };
+
+        // 12 edges of a cube
+        std::array<EdgeInfo, 12> const edges = {{
+            // X-aligned edges (4)
+            {0, 1, 0,  0, -1, -1,  0,  0, -1,  0, -1,  0},  // Bottom-back
+            {2, 3, 1,  0,  1, -1,  0,  0, -1,  0,  1,  0},  // Top-back
+            {4, 5, 2,  0, -1,  1,  0,  0,  1,  0, -1,  0},  // Bottom-front
+            {6, 7, 3,  0,  1,  1,  0,  0,  1,  0,  1,  0},  // Top-front
+            
+            // Y-aligned edges (4)
+            {0, 2, 4, -1,  0, -1,  0,  0, -1, -1,  0,  0},  // Left-back
+            {1, 3, 5,  1,  0, -1,  0,  0, -1,  1,  0,  0},  // Right-back
+            {4, 6, 6, -1,  0,  1,  0,  0,  1, -1,  0,  0},  // Left-front
+            {5, 7, 7,  1,  0,  1,  0,  0,  1,  1,  0,  0},  // Right-front
+            
+            // Z-aligned edges (4)
+            {0, 4, 8, -1, -1,  0,  0, -1,  0, -1,  0,  0},  // Left-bottom
+            {1, 5, 9,  1, -1,  0,  0, -1,  0,  1,  0,  0},  // Right-bottom
+            {2, 6,10, -1,  1,  0,  0,  1,  0, -1,  0,  0},  // Left-top
+            {3, 7,11,  1,  1,  0,  0,  1,  0,  1,  0,  0}   // Right-top
+        }};
+
+        for (auto idx : leafIndices)
+        {
+            OctreeNode const & node = m_nodes[idx];
+            if (!node.isIntersecting || !nodeToVertexIndex.count(idx))
             {
                 continue;
             }
 
-            Eigen::Vector3f normal = node.vertexNormal;
-            if (!normal.allFinite() || normal.squaredNorm() <= 1e-10F)
+            // Check each of the 12 edges
+            for (auto const & edge : edges)
             {
-                normal = Eigen::Vector3f::UnitX();
+                // Skip if already processed
+                if (processedEdges.count({idx, edge.edgeIdx}))
+                {
+                    continue;
+                }
+
+                // Check if this edge has a sign change
+                float const v0 = node.cornerValues[edge.corner0];
+                float const v1 = node.cornerValues[edge.corner1];
+                
+                if (v0 * v1 >= 0.0F)
+                {
+                    continue; // No zero crossing
+                }
+
+                // Find the 3 neighbor cells sharing this edge (total 4 cells including this one)
+                std::size_t const n0 = findNeighbor(idx, edge.dx0, edge.dy0, edge.dz0);
+                std::size_t const n1 = findNeighbor(idx, edge.dx1, edge.dy1, edge.dz1);
+                std::size_t const n2 = findNeighbor(idx, edge.dx2, edge.dy2, edge.dz2);
+
+                // Collect cells with vertices
+                std::vector<std::uint32_t> quadVerts;
+                quadVerts.reserve(4);
+                
+                if (nodeToVertexIndex.count(idx))
+                    quadVerts.push_back(nodeToVertexIndex[idx]);
+                
+                if (n0 != std::size_t(-1) && nodeToVertexIndex.count(n0))
+                    quadVerts.push_back(nodeToVertexIndex[n0]);
+                    
+                if (n2 != std::size_t(-1) && nodeToVertexIndex.count(n2))
+                    quadVerts.push_back(nodeToVertexIndex[n2]);
+                    
+                if (n1 != std::size_t(-1) && nodeToVertexIndex.count(n1))
+                    quadVerts.push_back(nodeToVertexIndex[n1]);
+
+                // Need at least 3 vertices to make a polygon
+                if (quadVerts.size() >= 3)
+                {
+                    if (quadVerts.size() == 3)
+                    {
+                        // Triangle
+                        outIndices.push_back(quadVerts[0]);
+                        outIndices.push_back(quadVerts[1]);
+                        outIndices.push_back(quadVerts[2]);
+                    }
+                    else
+                    {
+                        // Quad as 2 triangles
+                        outIndices.push_back(quadVerts[0]);
+                        outIndices.push_back(quadVerts[1]);
+                        outIndices.push_back(quadVerts[2]);
+                        
+                        outIndices.push_back(quadVerts[0]);
+                        outIndices.push_back(quadVerts[2]);
+                        outIndices.push_back(quadVerts[3]);
+                    }
+                }
+
+                processedEdges.insert({idx, edge.edgeIdx});
             }
-            normal.normalize();
-
-            Eigen::Vector3f tangent = normal.unitOrthogonal();
-            Eigen::Vector3f bitangent = normal.cross(tangent);
-            if (!bitangent.allFinite() || bitangent.squaredNorm() <= 1e-10F)
-            {
-                bitangent = normal.cross(Eigen::Vector3f::UnitY());
-            }
-            if (bitangent.squaredNorm() <= 1e-10F)
-            {
-                bitangent = normal.cross(Eigen::Vector3f::UnitZ());
-            }
-            if (bitangent.squaredNorm() <= 1e-10F)
-            {
-                bitangent = Eigen::Vector3f::UnitY();
-            }
-            tangent.normalize();
-            bitangent.normalize();
-
-            Eigen::Vector3f const extent = toEigen(node.bounds.max) - toEigen(node.bounds.min);
-            float const scale = 0.25F * std::max({extent.x(), extent.y(), extent.z(), 1e-4F});
-
-            Eigen::Vector3f const center = node.vertexPosition.value();
-            Eigen::Vector3f const v0 = center + tangent * scale;
-            Eigen::Vector3f const v1 = center - tangent * scale;
-            Eigen::Vector3f const v2 = center + bitangent * scale;
-            Eigen::Vector3f const v3 = center - bitangent * scale;
-
-            std::uint32_t const base = static_cast<std::uint32_t>(outVertices.size());
-            outVertices.push_back(v0);
-            outVertices.push_back(v2);
-            outVertices.push_back(v1);
-            outVertices.push_back(v3);
-
-            outIndices.push_back(base + 0U);
-            outIndices.push_back(base + 1U);
-            outIndices.push_back(base + 2U);
-
-            outIndices.push_back(base + 2U);
-            outIndices.push_back(base + 1U);
-            outIndices.push_back(base + 3U);
         }
     }
 
-    bool HierarchicalOctreeBuilder::evaluateCornersGPU(
-      std::vector<std::size_t> const & nodeIndices)
+    bool HierarchicalOctreeBuilder::evaluateCornersGPU(std::vector<std::size_t> const & nodeIndices)
     {
         if (nodeIndices.empty())
         {
@@ -1074,11 +1170,8 @@ namespace gladius::hierarchical_dc
             }
 
             std::vector<float> cornerValues;
-            program->evaluateOctreeLevel(boundsMin,
-                                         boundsMax,
-                                         cornerValues,
-                                         *m_core->getPrimitives(),
-                                         m_config.isoValue);
+            program->evaluateOctreeLevel(
+              boundsMin, boundsMax, cornerValues, *m_core->getPrimitives(), m_config.isoValue);
 
             for (std::size_t i = 0U; i < nodeIndices.size(); ++i)
             {
@@ -1101,8 +1194,8 @@ namespace gladius::hierarchical_dc
         }
     }
 
-    bool HierarchicalOctreeBuilder::estimateCurvatureGPU(
-      std::vector<std::size_t> const & leafIndices)
+    bool
+    HierarchicalOctreeBuilder::estimateCurvatureGPU(std::vector<std::size_t> const & leafIndices)
     {
         if (leafIndices.empty())
         {
@@ -1128,10 +1221,8 @@ namespace gladius::hierarchical_dc
             }
 
             std::vector<float> curvatureMetrics;
-            program->estimateCurvature(leafCenters,
-                                       curvatureMetrics,
-                                       *m_core->getPrimitives(),
-                                       m_config.gradientEpsilon);
+            program->estimateCurvature(
+              leafCenters, curvatureMetrics, *m_core->getPrimitives(), m_config.gradientEpsilon);
 
             for (std::size_t i = 0U; i < leafIndices.size(); ++i)
             {
@@ -1207,9 +1298,9 @@ namespace gladius::hierarchical_dc
         return crossings;
     }
 
-        std::vector<HermiteSample> HierarchicalOctreeBuilder::computeHermiteSamples(
-            std::vector<EdgeCrossing> const & crossings,
-            std::vector<Eigen::Vector3f> const & refinedPositions)
+    std::vector<HermiteSample> HierarchicalOctreeBuilder::computeHermiteSamples(
+      std::vector<EdgeCrossing> const & crossings,
+      std::vector<Eigen::Vector3f> const & refinedPositions)
     {
         std::vector<HermiteSample> samples;
         samples.reserve(crossings.size());
@@ -1239,8 +1330,8 @@ namespace gladius::hierarchical_dc
                     t = crossings[i].startValue / denominator;
                 }
                 t = std::clamp(t, 0.0F, 1.0F);
-                positions[i] = crossings[i].startPos +
-                               (crossings[i].endPos - crossings[i].startPos) * t;
+                positions[i] =
+                  crossings[i].startPos + (crossings[i].endPos - crossings[i].startPos) * t;
             }
         }
 
@@ -1250,8 +1341,7 @@ namespace gladius::hierarchical_dc
 
         if (m_config.enableGpuAcceleration)
         {
-            auto * samplingProgram =
-              m_core->getProgramManager().getDualContouringSamplingProgram();
+            auto * samplingProgram = m_core->getProgramManager().getDualContouringSamplingProgram();
             if (samplingProgram != nullptr)
             {
                 try
@@ -1262,8 +1352,8 @@ namespace gladius::hierarchical_dc
                                                    *primitives,
                                                    m_config.isoValue,
                                                    m_config.gradientEpsilon);
-                    gpuSampled = values.size() == positions.size() &&
-                                 gradients.size() == positions.size();
+                    gpuSampled =
+                      values.size() == positions.size() && gradients.size() == positions.size();
                 }
                 catch (std::exception const & ex)
                 {
@@ -1298,19 +1388,15 @@ namespace gladius::hierarchical_dc
                       m_core->getProgramManager().getDualContouringSamplingProgram();
                     if (samplingProgram != nullptr)
                     {
-                        samplingProgram->sampleCorners(positions,
-                                                       values,
-                                                       *primitives,
-                                                       m_config.isoValue);
+                        samplingProgram->sampleCorners(
+                          positions, values, *primitives, m_config.isoValue);
                     }
 
                     auto * dcProgram = m_core->getProgramManager().getHierarchicalDCProgram();
                     if (dcProgram != nullptr)
                     {
-                        dcProgram->batchGradients(positions,
-                                                  gradients,
-                                                  *primitives,
-                                                  m_config.gradientEpsilon);
+                        dcProgram->batchGradients(
+                          positions, gradients, *primitives, m_config.gradientEpsilon);
                     }
                 }
                 catch (std::exception const & ex)
@@ -1339,7 +1425,8 @@ namespace gladius::hierarchical_dc
             return false;
         }
 
-        std::size_t const targetResolution = std::max<std::size_t>(m_config.cpuFallbackResolution, 2U);
+        std::size_t const targetResolution =
+          std::max<std::size_t>(m_config.cpuFallbackResolution, 2U);
         BoundingBox const requestedBounds = m_rootBounds;
 
         if (!m_cpuSampler)
@@ -1347,8 +1434,7 @@ namespace gladius::hierarchical_dc
             m_cpuSampler = std::make_unique<CpuSampler>();
         }
 
-        if (m_cpuSampler->initialized &&
-            m_cpuSampler->resolution == targetResolution &&
+        if (m_cpuSampler->initialized && m_cpuSampler->resolution == targetResolution &&
             boundingBoxesApproximatelyEqual(m_cpuSampler->bounds, requestedBounds))
         {
             return true;

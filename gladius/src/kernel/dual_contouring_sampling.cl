@@ -121,14 +121,9 @@ __kernel void refineZeroCrossings(
     __global const float* endValues,     // Input: SDF at end
     __global float4* refinedPositions,   // Output: refined crossing positions
     const unsigned int count,            // Number of edges
+    PAYLOAD_ARGS,
     const unsigned int maxIterations,    // Max refinement iterations
     const float tolerance,               // Convergence tolerance
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount,
     const float isoValue)
 {
     const int gid = get_global_id(0);
@@ -156,13 +151,7 @@ __kernel void refineZeroCrossings(
         const float tClamped = clamp(t, 0.0f, 1.0f);
         
         const float3 mid = start + (end - start) * tClamped;
-        const float valueMid = evaluateSdf(mid,
-                                           transformationMatrices,
-                                           opcodes,
-                                           dataBuffer,
-                                           indexBuffer,
-                                           transformationMatrixCount,
-                                           opcodeCount) - isoValue;
+        const float valueMid = model(mid, PASS_PAYLOAD_ARGS).w - isoValue;
         
         // Update interval
         if (valueMid * valueStart < 0.0f)

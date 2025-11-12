@@ -11,7 +11,8 @@ namespace gladius
                                                                  SharedResources const & resources)
         : ProgramBase(std::move(context), resources)
     {
-        m_sourceFiles = {"kernel/sdf.cl", "kernel/dual_contouring_sampling.cl"};
+        // Add dual contouring sampling specific kernel (base class already has headers and sdf.cl)
+        m_sourceFiles.push_back("dual_contouring_sampling.cl");
     }
 
     void DualContouringSamplingProgram::ensureCompiled()

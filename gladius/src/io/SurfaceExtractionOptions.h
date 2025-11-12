@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../HierarchicalDualContouring.h"
+
 #include <cstddef>
 #include <optional>
 
@@ -8,7 +10,8 @@ namespace gladius::io
     enum class SurfaceExtractionMethod
     {
         LayeredMarchingCubes,
-        DualContouring
+        DualContouring,
+        HierarchicalDualContouring
     };
 
     /// Quality presets for dual contouring mesh generation
@@ -37,10 +40,23 @@ namespace gladius::io
         void applyPreset();
     };
 
+    using HierarchicalDualContouringQuality = hierarchical_dc::HierarchicalQuality;
+
+    struct HierarchicalDualContouringOptions
+    {
+        HierarchicalDualContouringQuality qualityPreset{
+          HierarchicalDualContouringQuality::Balanced};
+        hierarchical_dc::HierarchicalConfig config{};
+
+        /// Apply quality preset parameters
+        void applyPreset();
+    };
+
     struct StlExportOptions
     {
         SurfaceExtractionMethod method{SurfaceExtractionMethod::LayeredMarchingCubes};
         std::size_t marchingCubesQualityLevel{1U};
         DualContouringOptions dualContouring{};
+        HierarchicalDualContouringOptions hierarchicalDualContouring{};
     };
 }

@@ -38,4 +38,9 @@ namespace gladius::io
             break;
         }
     }
+
+    void HierarchicalDualContouringOptions::applyPreset()
+    {
+        hierarchical_dc::applyQualityPreset(config, qualityPreset);
+    }
 }

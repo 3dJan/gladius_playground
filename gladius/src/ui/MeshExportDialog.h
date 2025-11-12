@@ -1,6 +1,7 @@
 #pragma once
 #include "BaseExportDialog.h"
 #include "io/DualContouringStlExporter.h"
+#include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 
@@ -33,6 +34,7 @@ namespace gladius::ui
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
         io::DualContouringStlExporter m_dualExporter;
+        io::HierarchicalDualContouringStlExporter m_hierarchicalExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
         io::SurfaceExtractionMethod m_selectedMethod =
@@ -40,6 +42,10 @@ namespace gladius::ui
         std::size_t m_marchingCubesQuality = 1U;
         io::DualContouringQuality m_dualQualityPreset = io::DualContouringQuality::Balanced;
         bool m_dualForceUniform = false;
+        io::HierarchicalDualContouringQuality m_hierarchicalQualityPreset =
+          io::HierarchicalDualContouringQuality::Balanced;
+        bool m_hierarchicalEnableGpu = true;
+        bool m_hierarchicalEnableProgressiveRefinement = true;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };

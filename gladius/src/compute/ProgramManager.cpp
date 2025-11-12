@@ -160,6 +160,15 @@ namespace gladius
         {
             m_slicerProgram->setEnableVdb(m_isVdbActive);
             m_slicerProgram->setModelKernel(m_modelSource);
+            if (m_dualContouringSamplingProgram)
+            {
+                m_dualContouringSamplingProgram->setModelKernel(m_modelSource);
+            }
+            if (m_hierarchicalDCProgram)
+            {
+                m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+                m_hierarchicalDCProgram->recompileNonBlocking();
+            }
             m_slicerProgram->recompileNonBlocking();
             m_slicerState.signalCompilationStarted();
         }
@@ -175,6 +184,15 @@ namespace gladius
             LOG_LOCATION
             m_optimizedRenderProgram->setEnableVdb(m_isVdbActive);
             m_optimizedRenderProgram->setModelKernel(m_modelSource);
+            if (m_dualContouringSamplingProgram)
+            {
+                m_dualContouringSamplingProgram->setModelKernel(m_modelSource);
+            }
+            if (m_hierarchicalDCProgram)
+            {
+                m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+                m_hierarchicalDCProgram->recompileNonBlocking();
+            }
             m_optimizedRenderProgram->recompileNonBlocking();
             m_renderState.signalCompilationStarted();
         }
@@ -203,6 +221,13 @@ namespace gladius
         compileRenderProgram();
 
         compileSlicerProgram();
+        
+        // Also recompile hierarchical DC program when model changes
+        if (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isValid())
+        {
+            m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+            m_hierarchicalDCProgram->recompileNonBlocking();
+        }
     }
 
     void ProgramManager::recompileBlockingNoLock()
@@ -212,6 +237,15 @@ namespace gladius
 
         m_optimizedRenderProgram->setModelKernel(m_modelSource);
         m_slicerProgram->setModelKernel(m_modelSource);
+        if (m_dualContouringSamplingProgram)
+        {
+            m_dualContouringSamplingProgram->setModelKernel(m_modelSource);
+        }
+        if (m_hierarchicalDCProgram)
+        {
+            m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+            m_hierarchicalDCProgram->recompileBlocking();
+        }
 
         m_optimizedRenderProgram->recompileBlocking();
         m_slicerProgram->recompileBlocking();

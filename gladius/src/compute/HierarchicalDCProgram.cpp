@@ -10,11 +10,21 @@
 
 namespace gladius
 {
+
+#define PAYLOAD_ARGUMENTS                                                                          \
+    m_resoures->getBuildArea(), primitives.primitives.getBuffer(),                                 \
+      static_cast<cl_uint>(primitives.primitives.getSize()), primitives.data.getBuffer(),          \
+      static_cast<cl_uint>(primitives.data.getSize()), m_resoures->getRenderingSettings(),         \
+      m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
+      m_resoures->getCommandBuffer().getBuffer(),                                                  \
+      static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
+      m_resoures->getPreCompSdfBBox()
     HierarchicalDCProgram::HierarchicalDCProgram(SharedComputeContext context,
                                                  SharedResources const & resources)
         : ProgramBase(std::move(context), resources)
     {
-        m_sourceFiles = {"kernel/sdf.cl", "kernel/hierarchical_dc.cl"};
+        // Add hierarchical DC specific kernel (base class already has headers and sdf.cl)
+        m_sourceFiles.push_back("hierarchical_dc.cl");
     }
 
     void HierarchicalDCProgram::ensureCompiled()
@@ -93,16 +103,13 @@ namespace gladius
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
         m_programFront->run("evaluateOctreeLevel",
-                            cl::NDRange(nodeCount),
                             cl::NullRange,
+                            cl::NDRange(nodeCount),
                             minBoundsBuffer,
                             maxBoundsBuffer,
                             cornerValuesBuffer,
                             nodeCount,
-                            primitivesBuffer.getBuffer(),
-                            primitivesCount,
-                            dataBuffer.getBuffer(),
-                            dataCount,
+                            PAYLOAD_ARGUMENTS,
                             isoValue);
 
         m_ComputeContext->GetQueue().enqueueReadBuffer(cornerValuesBuffer,
@@ -144,8 +151,8 @@ namespace gladius
                                           outSubdivisionFlags.size() * sizeof(cl_uchar));
 
         m_programFront->run("detectIntersections",
-                            cl::NDRange(nodeCount),
                             cl::NullRange,
+                            cl::NDRange(nodeCount),
                             cornerValuesBuffer,
                             subdivisionFlagsBuffer,
                             nodeCount);
@@ -202,16 +209,13 @@ namespace gladius
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
         m_programFront->run("estimateCurvature",
-                            cl::NDRange(leafCount),
                             cl::NullRange,
+                            cl::NDRange(leafCount),
                             centersBuffer,
                             curvatureBuffer,
                             leafCount,
-                            gradientEpsilon,
-                            primitivesBuffer.getBuffer(),
-                            primitivesCount,
-                            dataBuffer.getBuffer(),
-                            dataCount);
+                            PAYLOAD_ARGUMENTS,
+                            gradientEpsilon);
 
         m_ComputeContext->GetQueue().enqueueReadBuffer(curvatureBuffer,
                                                        CL_TRUE,
@@ -262,16 +266,13 @@ namespace gladius
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
         m_programFront->run("batchGradients",
-                            cl::NDRange(count),
                             cl::NullRange,
+                            cl::NDRange(count),
                             positionBuffer,
                             gradientBuffer,
                             count,
-                            gradientEpsilon,
-                            primitivesBuffer.getBuffer(),
-                            primitivesCount,
-                            dataBuffer.getBuffer(),
-                            dataCount);
+                            PAYLOAD_ARGUMENTS,
+                            gradientEpsilon);
 
         std::vector<cl_float4> clGradients(positions.size());
 
@@ -364,20 +365,17 @@ namespace gladius
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
         m_programFront->run("refineZeroCrossings",
-                            cl::NDRange(count),
                             cl::NullRange,
+                            cl::NDRange(count),
                             startBuffer,
                             endBuffer,
                             startValueBuffer,
                             endValueBuffer,
                             refinedBuffer,
                             count,
+                            PAYLOAD_ARGUMENTS,
                             static_cast<cl_uint>(maxIterations),
                             tolerance,
-                            primitivesBuffer.getBuffer(),
-                            primitivesCount,
-                            dataBuffer.getBuffer(),
-                            dataCount,
                             isoValue);
 
         std::vector<cl_float4> clRefined(edgeStarts.size());
