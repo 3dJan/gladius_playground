@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 
 namespace gladius::hierarchical_dc
@@ -270,7 +271,7 @@ namespace gladius::hierarchical_dc
         {
         case HierarchicalQuality::Draft:
             config.initialDepth = 5U;
-            config.maxDepth = 5U;
+            config.maxDepth = 6U;
             config.refinementIterations = 0U;
             config.curvatureThreshold = 1.0F; // Effectively disable adaptive
             config.enableProgressiveRefinement = false;
@@ -289,7 +290,7 @@ namespace gladius::hierarchical_dc
         case HierarchicalQuality::Fine:
             config.initialDepth = 6U;
             config.maxDepth = 8U;
-            config.refinementIterations = 2U;
+            config.refinementIterations = 5U;
             config.curvatureThreshold = 0.25F;
             config.enableProgressiveRefinement = true;
             config.cpuFallbackResolution = 129U;
@@ -1317,21 +1318,31 @@ namespace gladius::hierarchical_dc
             return samples;
         }
 
-        // Compute adaptive epsilon based on smallest edge length for better numerical stability
+        // Compute adaptive epsilon using median edge length for robustness
+        // Using median instead of min prevents outliers from forcing too-small epsilon
         float adaptiveEpsilon = m_config.gradientEpsilon;
+        std::vector<float> edgeLengths;
+        
         if (!crossings.empty())
         {
-            float minEdgeLength = std::numeric_limits<float>::max();
+            edgeLengths.reserve(crossings.size());
             for (auto const & crossing : crossings)
             {
                 float const edgeLength = (crossing.endPos - crossing.startPos).norm();
-                minEdgeLength = std::min(minEdgeLength, edgeLength);
+                edgeLengths.push_back(edgeLength);
             }
-            // Use 1% of smallest edge length, clamped to reasonable range
-            // Larger epsilon = more stable gradients, smaller = more accurate
-            adaptiveEpsilon = std::clamp(minEdgeLength * 0.01F, 0.001F, 0.1F);
+            
+            // Use median edge length for epsilon calculation (more robust than min/max)
+            std::vector<float> sortedLengths = edgeLengths;
+            std::sort(sortedLengths.begin(), sortedLengths.end());
+            float const medianEdgeLength = sortedLengths[sortedLengths.size() / 2U];
+            
+            // Use slightly larger epsilon for better stability: 3-6% of median edge
+            float const epsilonScale = (medianEdgeLength < 0.1F) ? 0.06F : 0.03F;
+            adaptiveEpsilon = std::clamp(medianEdgeLength * epsilonScale, 0.0008F, 0.05F);
         }
 
+        // Use single sample at zero-crossing (refined position)
         std::vector<Eigen::Vector3f> positions = refinedPositions;
         if (positions.size() != crossings.size())
         {
@@ -1348,6 +1359,17 @@ namespace gladius::hierarchical_dc
                 positions[i] =
                   crossings[i].startPos + (crossings[i].endPos - crossings[i].startPos) * t;
             }
+        }
+        
+        // Debug: log epsilon selection for first batch
+        static bool loggedEpsilon = false;
+        if (!loggedEpsilon && !edgeLengths.empty())
+        {
+            loggedEpsilon = true;
+            std::ostringstream msg;
+            msg << "Adaptive epsilon: " << adaptiveEpsilon << " (median edge: " 
+                << edgeLengths[edgeLengths.size()/2] << ", samples: " << crossings.size() << ")";
+            logInfo(msg.str());
         }
 
         std::vector<float> values;
@@ -1430,8 +1452,9 @@ namespace gladius::hierarchical_dc
             sample.gradient = (i < gradients.size()) ? gradients[i] : Eigen::Vector3f::Zero();
             
             // Only accept samples with valid, non-degenerate gradients
+            // Relaxed threshold since GPU kernel now does more robust computation
             float const gradientMagnitude = sample.gradient.norm();
-            if (gradientMagnitude > 1e-5F && !std::isnan(gradientMagnitude) && !std::isinf(gradientMagnitude))
+            if (gradientMagnitude > 1e-6F && !std::isnan(gradientMagnitude) && !std::isinf(gradientMagnitude))
             {
                 // Ensure gradient is normalized
                 sample.gradient.normalize();

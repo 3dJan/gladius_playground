@@ -80,9 +80,11 @@ __kernel void sampleHermite(
     gradient.z = (sdfZp - sdfZn) / h2;
     
     // Check for degenerate gradient (numerical issues or flat region)
+    // Use squared length to avoid sqrt
     const float gradLengthSq = dot(gradient, gradient);
     
-    if (gradLengthSq > 1e-10f)
+    // More aggressive threshold for degeneracy detection
+    if (gradLengthSq > 1e-8f)
     {
         // Normalize the gradient
         const float gradLength = sqrt(gradLengthSq);
@@ -91,7 +93,8 @@ __kernel void sampleHermite(
     else
     {
         // Degenerate gradient - try wider spacing for finite difference
-        const float h_wide = h * 10.0f;
+        // Use 5× wider spacing instead of 10× for more accuracy
+        const float h_wide = h * 5.0f;
         const float h2_wide = 2.0f * h_wide;
         
         const float3 posXp_wide = worldPos + (float3)(h_wide, 0.0f, 0.0f);
@@ -113,7 +116,7 @@ __kernel void sampleHermite(
         gradient.z = (sdfZp_wide - sdfZn_wide) / h2_wide;
         
         const float gradLengthSq_wide = dot(gradient, gradient);
-        if (gradLengthSq_wide > 1e-10f)
+        if (gradLengthSq_wide > 1e-8f)
         {
             gradient /= sqrt(gradLengthSq_wide);
         }
