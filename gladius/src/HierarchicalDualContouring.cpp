@@ -1003,8 +1003,8 @@ namespace gladius::hierarchical_dc
                     // Prepare output buffer
                     outputBuffer.getData().resize(outVertices.size());
                     
-                    // Project to surface using GPU
-                    slicerProgram->movePointsToSurface(*primitives, inputBuffer, outputBuffer);
+                    // Project to surface using GPU (adoptVertexOfMeshToSurface for mesh refinement)
+                    slicerProgram->adoptVertexOfMeshToSurface(*primitives, inputBuffer, outputBuffer);
                     
                     // Copy projected vertices back
                     auto const & outputData = outputBuffer.getData();
