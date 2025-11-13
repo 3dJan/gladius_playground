@@ -41,6 +41,7 @@ namespace gladius::hierarchical_dc
         bool enableGpuAcceleration{true};        ///< Use GPU for parallel evaluation
         bool enableCornerCaching{true};          ///< Cache corner values across nodes
         bool enableProgressiveRefinement{true};  ///< Multi-pass adaptive refinement
+        bool projectVerticesToSurface{true};     ///< Project QEF vertices onto surface (post-processing)
         std::size_t cpuFallbackResolution{96U};  ///< Resolution of CPU SDF grid used as fallback
     };
 

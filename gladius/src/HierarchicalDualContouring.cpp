@@ -1,10 +1,12 @@
 #include "HierarchicalDualContouring.h"
 
 #include "BBox.h"
+#include "Buffer.h"
 #include "DualContouringOctree.h"
 #include "DualContouringQef.h"
 #include "DualContouringSamplingProgram.h"
 #include "EventLogger.h"
+#include "SlicerProgram.h"
 #include "compute/ComputeCore.h"
 #include "compute/ProgramManager.h"
 
@@ -973,6 +975,60 @@ namespace gladius::hierarchical_dc
         if (outVertices.empty())
         {
             return;
+        }
+
+        // Post-processing: project vertices onto surface for improved accuracy
+        if (m_config.projectVerticesToSurface && m_config.enableGpuAcceleration)
+        {
+            try
+            {
+                auto * slicerProgram = m_core->getProgramManager().getSlicerProgram();
+                auto primitives = m_core->getPrimitives();
+                
+                if (slicerProgram && primitives)
+                {
+                    // Create GPU buffers
+                    Buffer<cl_float4> inputBuffer(*m_core->getComputeContext());
+                    Buffer<cl_float4> outputBuffer(*m_core->getComputeContext());
+                    
+                    // Copy vertices to input buffer
+                    auto & inputData = inputBuffer.getData();
+                    inputData.resize(outVertices.size());
+                    for (std::size_t i = 0; i < outVertices.size(); ++i)
+                    {
+                        inputData[i] = {{outVertices[i].x(), outVertices[i].y(), outVertices[i].z(), 0.0F}};
+                    }
+                    inputBuffer.write();
+                    
+                    // Prepare output buffer
+                    outputBuffer.getData().resize(outVertices.size());
+                    
+                    // Project to surface using GPU
+                    slicerProgram->movePointsToSurface(*primitives, inputBuffer, outputBuffer);
+                    
+                    // Copy projected vertices back
+                    auto const & outputData = outputBuffer.getData();
+                    for (std::size_t i = 0; i < outVertices.size(); ++i)
+                    {
+                        auto const & projected = outputData[i];
+                        outVertices[i] = Eigen::Vector3f(projected.s[0], projected.s[1], projected.s[2]);
+                    }
+                    
+                    if (m_logger)
+                    {
+                        m_logger->logInfo("Projected " + std::to_string(outVertices.size()) + 
+                                        " vertices to surface");
+                    }
+                }
+            }
+            catch (std::exception const & e)
+            {
+                if (m_logger)
+                {
+                    m_logger->logWarning("Vertex projection failed: " + std::string(e.what()));
+                }
+                // Continue with unprojected vertices
+            }
         }
 
         // Helper to find leaf node at a point
