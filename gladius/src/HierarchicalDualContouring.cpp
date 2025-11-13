@@ -290,7 +290,7 @@ namespace gladius::hierarchical_dc
             break;
 
         case HierarchicalQuality::Fine:
-            config.initialDepth = 6U;
+            config.initialDepth = 7U;
             config.maxDepth = 8U;
             config.refinementIterations = 5U;
             config.curvatureThreshold = 0.25F;
@@ -301,7 +301,7 @@ namespace gladius::hierarchical_dc
         case HierarchicalQuality::UltraFine:
             config.initialDepth = 7U;
             config.maxDepth = 9U;
-            config.refinementIterations = 3U;
+            config.refinementIterations = 5U;
             config.curvatureThreshold = 0.15F;
             config.zeroCrossingTolerance = 1e-6F;
             config.enableProgressiveRefinement = true;

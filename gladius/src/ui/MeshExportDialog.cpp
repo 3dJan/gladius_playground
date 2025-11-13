@@ -282,6 +282,13 @@ namespace gladius::ui
                     ImGui::TextDisabled("refinement passes will be skipped");
                 }
 
+                ImGui::Checkbox("Project vertices to surface", &m_hierarchicalProjectToSurface);
+                if (m_hierarchicalProjectToSurface)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("GPU post-processing for smoother surfaces");
+                }
+
                 ImGui::TextWrapped(
                   "Hierarchical dual contouring incrementally refines an adaptive octree. "
                   "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
@@ -364,6 +371,7 @@ namespace gladius::ui
             options.applyPreset();
             options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
             options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
+            options.config.projectVerticesToSurface = m_hierarchicalProjectToSurface;
             if (!options.config.enableProgressiveRefinement)
             {
                 options.config.refinementIterations = 0U;

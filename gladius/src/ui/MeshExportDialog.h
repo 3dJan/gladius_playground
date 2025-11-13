@@ -46,6 +46,7 @@ namespace gladius::ui
           io::HierarchicalDualContouringQuality::Balanced;
         bool m_hierarchicalEnableGpu = true;
         bool m_hierarchicalEnableProgressiveRefinement = true;
+        bool m_hierarchicalProjectToSurface = true;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };
