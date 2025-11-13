@@ -7,12 +7,7 @@ __kernel void sampleCorners(
     __global const float4* positions,    // Input: array of (x,y,z,_) positions
     __global float* values,              // Output: SDF values at positions
     const unsigned int count,            // Number of positions to sample
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount,
+    PAYLOAD_ARGS,
     const float isoValue)
 {
     const int gid = get_global_id(0);
@@ -25,34 +20,23 @@ __kernel void sampleCorners(
     const float4 pos = positions[gid];
     const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
     
-    // Evaluate SDF at this position using the existing SDF evaluation logic
-    // This calls into the main SDF evaluation function that's already compiled
-    const float distance = evaluateSdf(worldPos, 
-                                       transformationMatrices,
-                                       opcodes,
-                                       dataBuffer,
-                                       indexBuffer,
-                                       transformationMatrixCount,
-                                       opcodeCount);
+    // Evaluate SDF at this position using the model function
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
     
     values[gid] = distance - isoValue;
 }
 
-// Hermite sampling kernel with gradient evaluation
-// Computes both SDF value and gradient at each position
+// Hermite data sampling kernel with gradient computation
+// Evaluates SDF and computes gradient (using central differences) at each position
 __kernel void sampleHermite(
     __global const float4* positions,    // Input: array of (x,y,z,_) positions
     __global float* values,              // Output: SDF values
-    __global float4* gradients,          // Output: gradient vectors (x,y,z,_)
+    __global float4* gradients,          // Output: normalized gradients (dx,dy,dz,_)
     const unsigned int count,            // Number of positions to sample
-    const float gradientEpsilon,         // Finite difference step size
-    __global const float16* transformationMatrices,
-    __global const uchar* opcodes,
-    __global const float* dataBuffer,
-    __global const uint* indexBuffer,
-    const uint transformationMatrixCount,
-    const uint opcodeCount,
-    const float isoValue)
+    PAYLOAD_ARGS,
+    const float isoValue,
+    const float epsilon)                 // Step size for gradient computation
 {
     const int gid = get_global_id(0);
     
@@ -64,50 +48,44 @@ __kernel void sampleHermite(
     const float4 pos = positions[gid];
     const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
     
-    // Evaluate SDF at center position
-    const float centerValue = evaluateSdf(worldPos,
-                                          transformationMatrices,
-                                          opcodes,
-                                          dataBuffer,
-                                          indexBuffer,
-                                          transformationMatrixCount,
-                                          opcodeCount);
+    // Compute SDF value at center position
+    const float4 centerResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = centerResult.w - isoValue;
+    values[gid] = distance;
     
-    values[gid] = centerValue - isoValue;
+    // Compute gradient using central differences (7-point stencil)
+    // Sample at 6 offset positions: +/- epsilon in each axis
+    const float3 posXp = worldPos + (float3)(epsilon, 0.0f, 0.0f);
+    const float3 posXn = worldPos - (float3)(epsilon, 0.0f, 0.0f);
+    const float3 posYp = worldPos + (float3)(0.0f, epsilon, 0.0f);
+    const float3 posYn = worldPos - (float3)(0.0f, epsilon, 0.0f);
+    const float3 posZp = worldPos + (float3)(0.0f, 0.0f, epsilon);
+    const float3 posZn = worldPos - (float3)(0.0f, 0.0f, epsilon);
     
-    // Compute gradient using central differences
-    const float3 epsilonVec = (float3)(gradientEpsilon, gradientEpsilon, gradientEpsilon);
+    const float sdfXp = model(posXp, PASS_PAYLOAD_ARGS).w;
+    const float sdfXn = model(posXn, PASS_PAYLOAD_ARGS).w;
+    const float sdfYp = model(posYp, PASS_PAYLOAD_ARGS).w;
+    const float sdfYn = model(posYn, PASS_PAYLOAD_ARGS).w;
+    const float sdfZp = model(posZp, PASS_PAYLOAD_ARGS).w;
+    const float sdfZn = model(posZn, PASS_PAYLOAD_ARGS).w;
     
-    // X gradient
-    const float3 posXp = worldPos + (float3)(epsilonVec.x, 0.0f, 0.0f);
-    const float3 posXn = worldPos - (float3)(epsilonVec.x, 0.0f, 0.0f);
-    const float sdfXp = evaluateSdf(posXp, transformationMatrices, opcodes, dataBuffer, 
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfXn = evaluateSdf(posXn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
+    // Central difference formula: (f(x+h) - f(x-h)) / 2h
+    float3 gradient;
+    gradient.x = (sdfXp - sdfXn) / (2.0f * epsilon);
+    gradient.y = (sdfYp - sdfYn) / (2.0f * epsilon);
+    gradient.z = (sdfZp - sdfZn) / (2.0f * epsilon);
     
-    // Y gradient
-    const float3 posYp = worldPos + (float3)(0.0f, epsilonVec.y, 0.0f);
-    const float3 posYn = worldPos - (float3)(0.0f, epsilonVec.y, 0.0f);
-    const float sdfYp = evaluateSdf(posYp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfYn = evaluateSdf(posYn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    
-    // Z gradient
-    const float3 posZp = worldPos + (float3)(0.0f, 0.0f, epsilonVec.z);
-    const float3 posZn = worldPos - (float3)(0.0f, 0.0f, epsilonVec.z);
-    const float sdfZp = evaluateSdf(posZp, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    const float sdfZn = evaluateSdf(posZn, transformationMatrices, opcodes, dataBuffer,
-                                    indexBuffer, transformationMatrixCount, opcodeCount);
-    
-    // Store gradient (normalized in host code if needed)
-    const float3 gradient = (float3)(
-        (sdfXp - sdfXn) / (2.0f * epsilonVec.x),
-        (sdfYp - sdfYn) / (2.0f * epsilonVec.y),
-        (sdfZp - sdfZn) / (2.0f * epsilonVec.z)
-    );
+    // Normalize the gradient
+    const float gradLength = length(gradient);
+    if (gradLength > 1e-7f)
+    {
+        gradient /= gradLength;
+    }
+    else
+    {
+        // Fallback for degenerate gradients
+        gradient = (float3)(0.0f, 1.0f, 0.0f);
+    }
     
     gradients[gid] = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);
 }

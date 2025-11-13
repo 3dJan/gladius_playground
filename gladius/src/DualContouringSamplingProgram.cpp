@@ -7,6 +7,16 @@
 
 namespace gladius
 {
+    // Match the payload structure from HierarchicalDCProgram
+    #define PAYLOAD_ARGUMENTS                                                                          \
+        m_resoures->getBuildArea(), primitives.primitives.getBuffer(),                                 \
+          static_cast<cl_uint>(primitives.primitives.getSize()), primitives.data.getBuffer(),          \
+          static_cast<cl_uint>(primitives.data.getSize()), m_resoures->getRenderingSettings(),         \
+          m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
+          m_resoures->getCommandBuffer().getBuffer(),                                                  \
+          static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
+          m_resoures->getPreCompSdfBBox()
+
     DualContouringSamplingProgram::DualContouringSamplingProgram(SharedComputeContext context,
                                                                  SharedResources const & resources)
         : ProgramBase(std::move(context), resources)
@@ -74,17 +84,14 @@ namespace gladius
         auto const primitivesCount = static_cast<cl_uint>(primitivesBuffer.getSize());
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
-        // Run kernel
+        // Run kernel with full payload
         m_programFront->run("sampleCorners",
-                           cl::NDRange(count),
                            cl::NullRange,
+                           cl::NDRange(count),
                            positionBuffer,
                            valueBuffer,
                            count,
-                           primitivesBuffer.getBuffer(),
-                           primitivesCount,
-                           dataBuffer.getBuffer(),
-                           dataCount,
+                           PAYLOAD_ARGUMENTS,
                            isoValue);
 
         // Read results
@@ -149,19 +156,17 @@ namespace gladius
         auto const dataCount = static_cast<cl_uint>(dataBuffer.getSize());
 
         // Run kernel
+        // Kernel signature: sampleHermite(positions, values, gradients, count, PAYLOAD_ARGS, isoValue, epsilon)
         m_programFront->run("sampleHermite",
-                           cl::NDRange(count),
                            cl::NullRange,
+                           cl::NDRange(count),
                            positionBuffer,
                            valueBuffer,
                            gradientBuffer,
                            count,
-                           gradientEpsilon,
-                           primitivesBuffer.getBuffer(),
-                           primitivesCount,
-                           dataBuffer.getBuffer(),
-                           dataCount,
-                           isoValue);
+                           PAYLOAD_ARGUMENTS,
+                           isoValue,
+                           gradientEpsilon);
 
         // Read results
         std::vector<cl_float4> clGradients(positions.size());

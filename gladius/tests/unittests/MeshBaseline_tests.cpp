@@ -55,7 +55,7 @@ namespace gladius_tests
                         static std::vector<BaselineCase> const cases = {
                             BaselineCase{"SimpleGyroid",
                                                      "testdata/SimpleGyroid.3mf",
-                                                     std::optional<size_t>{412548U},
+                                                     std::optional<size_t>{412640U},
                                                      std::optional<Eigen::Vector3f>{
                                                          Eigen::Vector3f{0.0036280744F, 0.0035416728F, 0.0034536633F}},
                                                      std::optional<Eigen::Vector3f>{
@@ -63,7 +63,7 @@ namespace gladius_tests
                                                      std::optional<double>{200.0}},
                             BaselineCase{"ImplicitGyroid",
                                                      "testdata/ImplicitGyroid.3mf",
-                                                     std::optional<size_t>{846476U},
+                                                     std::optional<size_t>{847288U},
                                                      std::optional<Eigen::Vector3f>{
                                                          Eigen::Vector3f{-7.6393428F, -1.9578172F, -0.000014071315F}},
                                                      std::optional<Eigen::Vector3f>{
@@ -71,7 +71,7 @@ namespace gladius_tests
                                                      std::optional<double>{350.0}},
                             BaselineCase{"SphereInACage",
                                                      "testdata/SphereInACage_small.3mf",
-                                                     std::optional<size_t>{62682U},
+                                                     std::optional<size_t>{62914U},
                                                      std::optional<Eigen::Vector3f>{
                                                          Eigen::Vector3f{79.721405F, 91.074524F, 45.0F}},
                                                      std::optional<Eigen::Vector3f>{
