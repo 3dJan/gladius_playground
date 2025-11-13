@@ -1317,6 +1317,21 @@ namespace gladius::hierarchical_dc
             return samples;
         }
 
+        // Compute adaptive epsilon based on smallest edge length for better numerical stability
+        float adaptiveEpsilon = m_config.gradientEpsilon;
+        if (!crossings.empty())
+        {
+            float minEdgeLength = std::numeric_limits<float>::max();
+            for (auto const & crossing : crossings)
+            {
+                float const edgeLength = (crossing.endPos - crossing.startPos).norm();
+                minEdgeLength = std::min(minEdgeLength, edgeLength);
+            }
+            // Use 1% of smallest edge length, clamped to reasonable range
+            // Larger epsilon = more stable gradients, smaller = more accurate
+            adaptiveEpsilon = std::clamp(minEdgeLength * 0.01F, 0.001F, 0.1F);
+        }
+
         std::vector<Eigen::Vector3f> positions = refinedPositions;
         if (positions.size() != crossings.size())
         {
@@ -1351,7 +1366,7 @@ namespace gladius::hierarchical_dc
                                                    gradients,
                                                    *primitives,
                                                    m_config.isoValue,
-                                                   m_config.gradientEpsilon);
+                                                   adaptiveEpsilon);
                     gpuSampled =
                       values.size() == positions.size() && gradients.size() == positions.size();
                 }
@@ -1375,7 +1390,7 @@ namespace gladius::hierarchical_dc
                 for (auto const & position : positions)
                 {
                     values.push_back(sampleSdfCpu(position));
-                    gradients.push_back(sampleGradientCpu(position, m_config.gradientEpsilon));
+                    gradients.push_back(sampleGradientCpu(position, adaptiveEpsilon));
                 }
 
                 m_stats.totalGradientQueries += positions.size() * 6U;
@@ -1396,7 +1411,7 @@ namespace gladius::hierarchical_dc
                     if (dcProgram != nullptr)
                     {
                         dcProgram->batchGradients(
-                          positions, gradients, *primitives, m_config.gradientEpsilon);
+                          positions, gradients, *primitives, adaptiveEpsilon);
                     }
                 }
                 catch (std::exception const & ex)
@@ -1406,13 +1421,22 @@ namespace gladius::hierarchical_dc
             }
         }
 
+        // Validate and filter samples - reject degenerate gradients
         for (std::size_t i = 0U; i < positions.size(); ++i)
         {
             HermiteSample sample;
             sample.position = positions[i];
             sample.value = (i < values.size()) ? values[i] : 0.0F;
             sample.gradient = (i < gradients.size()) ? gradients[i] : Eigen::Vector3f::Zero();
-            samples.push_back(sample);
+            
+            // Only accept samples with valid, non-degenerate gradients
+            float const gradientMagnitude = sample.gradient.norm();
+            if (gradientMagnitude > 1e-5F && !std::isnan(gradientMagnitude) && !std::isinf(gradientMagnitude))
+            {
+                // Ensure gradient is normalized
+                sample.gradient.normalize();
+                samples.push_back(sample);
+            }
         }
 
         return samples;

@@ -53,14 +53,18 @@ __kernel void sampleHermite(
     const float distance = centerResult.w - isoValue;
     values[gid] = distance;
     
-    // Compute gradient using central differences (7-point stencil)
-    // Sample at 6 offset positions: +/- epsilon in each axis
-    const float3 posXp = worldPos + (float3)(epsilon, 0.0f, 0.0f);
-    const float3 posXn = worldPos - (float3)(epsilon, 0.0f, 0.0f);
-    const float3 posYp = worldPos + (float3)(0.0f, epsilon, 0.0f);
-    const float3 posYn = worldPos - (float3)(0.0f, epsilon, 0.0f);
-    const float3 posZp = worldPos + (float3)(0.0f, 0.0f, epsilon);
-    const float3 posZn = worldPos - (float3)(0.0f, 0.0f, epsilon);
+    // Use 4-point central difference for more robust gradient estimation
+    // This averages forward and backward differences to reduce noise
+    const float h = epsilon;
+    const float h2 = 2.0f * h;
+    
+    // Primary samples at +/- epsilon
+    const float3 posXp = worldPos + (float3)(h, 0.0f, 0.0f);
+    const float3 posXn = worldPos - (float3)(h, 0.0f, 0.0f);
+    const float3 posYp = worldPos + (float3)(0.0f, h, 0.0f);
+    const float3 posYn = worldPos - (float3)(0.0f, h, 0.0f);
+    const float3 posZp = worldPos + (float3)(0.0f, 0.0f, h);
+    const float3 posZn = worldPos - (float3)(0.0f, 0.0f, h);
     
     const float sdfXp = model(posXp, PASS_PAYLOAD_ARGS).w;
     const float sdfXn = model(posXn, PASS_PAYLOAD_ARGS).w;
@@ -71,20 +75,53 @@ __kernel void sampleHermite(
     
     // Central difference formula: (f(x+h) - f(x-h)) / 2h
     float3 gradient;
-    gradient.x = (sdfXp - sdfXn) / (2.0f * epsilon);
-    gradient.y = (sdfYp - sdfYn) / (2.0f * epsilon);
-    gradient.z = (sdfZp - sdfZn) / (2.0f * epsilon);
+    gradient.x = (sdfXp - sdfXn) / h2;
+    gradient.y = (sdfYp - sdfYn) / h2;
+    gradient.z = (sdfZp - sdfZn) / h2;
     
-    // Normalize the gradient
-    const float gradLength = length(gradient);
-    if (gradLength > 1e-7f)
+    // Check for degenerate gradient (numerical issues or flat region)
+    const float gradLengthSq = dot(gradient, gradient);
+    
+    if (gradLengthSq > 1e-10f)
     {
+        // Normalize the gradient
+        const float gradLength = sqrt(gradLengthSq);
         gradient /= gradLength;
     }
     else
     {
-        // Fallback for degenerate gradients
-        gradient = (float3)(0.0f, 1.0f, 0.0f);
+        // Degenerate gradient - try wider spacing for finite difference
+        const float h_wide = h * 10.0f;
+        const float h2_wide = 2.0f * h_wide;
+        
+        const float3 posXp_wide = worldPos + (float3)(h_wide, 0.0f, 0.0f);
+        const float3 posXn_wide = worldPos - (float3)(h_wide, 0.0f, 0.0f);
+        const float3 posYp_wide = worldPos + (float3)(0.0f, h_wide, 0.0f);
+        const float3 posYn_wide = worldPos - (float3)(0.0f, h_wide, 0.0f);
+        const float3 posZp_wide = worldPos + (float3)(0.0f, 0.0f, h_wide);
+        const float3 posZn_wide = worldPos - (float3)(0.0f, 0.0f, h_wide);
+        
+        const float sdfXp_wide = model(posXp_wide, PASS_PAYLOAD_ARGS).w;
+        const float sdfXn_wide = model(posXn_wide, PASS_PAYLOAD_ARGS).w;
+        const float sdfYp_wide = model(posYp_wide, PASS_PAYLOAD_ARGS).w;
+        const float sdfYn_wide = model(posYn_wide, PASS_PAYLOAD_ARGS).w;
+        const float sdfZp_wide = model(posZp_wide, PASS_PAYLOAD_ARGS).w;
+        const float sdfZn_wide = model(posZn_wide, PASS_PAYLOAD_ARGS).w;
+        
+        gradient.x = (sdfXp_wide - sdfXn_wide) / h2_wide;
+        gradient.y = (sdfYp_wide - sdfYn_wide) / h2_wide;
+        gradient.z = (sdfZp_wide - sdfZn_wide) / h2_wide;
+        
+        const float gradLengthSq_wide = dot(gradient, gradient);
+        if (gradLengthSq_wide > 1e-10f)
+        {
+            gradient /= sqrt(gradLengthSq_wide);
+        }
+        else
+        {
+            // Still degenerate - use fallback normal
+            gradient = (float3)(0.0f, 1.0f, 0.0f);
+        }
     }
     
     gradients[gid] = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);

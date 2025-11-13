@@ -35,7 +35,7 @@ namespace gladius::hierarchical_dc
         std::size_t refinementIterations{2U};    ///< Number of adaptive refinement passes
         float curvatureThreshold{0.3F};          ///< Gradient variance threshold for subdivision
         float isoValue{0.0F};                    ///< ISO surface value
-        float gradientEpsilon{0.0001F};          ///< Finite difference step for gradients
+        float gradientEpsilon{0.001F};           ///< Finite difference step for gradients (adaptive, scaled by cell size)
         float zeroCrossingTolerance{1e-5F};      ///< Bisection convergence tolerance
         std::size_t maxBisectionIterations{10U}; ///< Max iterations for zero-crossing refinement
         bool enableGpuAcceleration{true};        ///< Use GPU for parallel evaluation
