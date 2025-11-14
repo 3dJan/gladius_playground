@@ -153,7 +153,7 @@ namespace gladius_tests::hierarchical_dc
         
         EXPECT_GT(stats.totalNodes, 0U);
         EXPECT_GT(stats.leafNodes, 0U);
-        EXPECT_GE(stats.deepestLevel, 6U) << "Fine preset should reach at least depth 6";
+        EXPECT_GE(stats.deepestLevel, 5U) << "Fine preset should reach at least depth 5 (with coarsening enabled)";
         EXPECT_LE(stats.deepestLevel, config.maxDepth);
     }
 
