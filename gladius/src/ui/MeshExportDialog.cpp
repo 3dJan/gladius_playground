@@ -289,6 +289,24 @@ namespace gladius::ui
                     ImGui::TextDisabled("GPU post-processing for smoother surfaces");
                 }
 
+                ImGui::Separator();
+                ImGui::Checkbox("Enable coarsening (experimental)", &m_hierarchicalEnableCoarsening);
+                if (m_hierarchicalEnableCoarsening)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("merge cells where safe to reduce triangles");
+                }
+
+                ImGui::BeginDisabled(!m_hierarchicalEnableCoarsening);
+                ImGui::InputFloat("Minimum feature size", &m_hierarchicalMinFeatureSize, 0.1F, 1.0F, "%.3f");
+                if (m_hierarchicalMinFeatureSize < 0.0F)
+                {
+                    m_hierarchicalMinFeatureSize = 0.0F;
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("world units; smaller features may be simplified");
+                ImGui::EndDisabled();
+
                 ImGui::TextWrapped(
                   "Hierarchical dual contouring incrementally refines an adaptive octree. "
                   "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
@@ -372,6 +390,8 @@ namespace gladius::ui
             options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
             options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
             options.config.projectVerticesToSurface = m_hierarchicalProjectToSurface;
+            options.config.enableCoarsening = m_hierarchicalEnableCoarsening;
+            options.config.minFeatureSize = m_hierarchicalMinFeatureSize;
             if (!options.config.enableProgressiveRefinement)
             {
                 options.config.refinementIterations = 0U;

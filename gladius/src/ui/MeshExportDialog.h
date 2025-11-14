@@ -47,6 +47,8 @@ namespace gladius::ui
         bool m_hierarchicalEnableGpu = true;
         bool m_hierarchicalEnableProgressiveRefinement = true;
         bool m_hierarchicalProjectToSurface = true;
+        bool m_hierarchicalEnableCoarsening = false;
+        float m_hierarchicalMinFeatureSize = 0.0F;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };

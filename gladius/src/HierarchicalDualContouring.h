@@ -23,6 +23,11 @@ namespace gladius
     }
 }
 
+namespace gladius::dual_contouring
+{
+    class QuadraticErrorFunction;
+}
+
 namespace gladius::hierarchical_dc
 {
     /**
@@ -43,6 +48,12 @@ namespace gladius::hierarchical_dc
         bool enableProgressiveRefinement{true};  ///< Multi-pass adaptive refinement
         bool projectVerticesToSurface{true};     ///< Project QEF vertices onto surface (post-processing)
         std::size_t cpuFallbackResolution{96U};  ///< Resolution of CPU SDF grid used as fallback
+        float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled
+        bool enableCoarsening{false};            ///< Enable bottom-up coarsening pass after fine sampling
+        float coarseningErrorFactor{0.25F};      ///< Relative error tolerance for merging (fraction of cell size)
+        float minWallThicknessFactor{2.0F};      ///< Multiplier for minFeatureSize when protecting thin walls
+        float maxNormalDeviationDegrees{25.0F};  ///< Max allowed normal deviation between merged cells
+        std::size_t maxNodes{10000000U};         ///< Safety limit on total nodes to prevent OOM (0 = unlimited)
     };
 
     /// Quality presets for hierarchical dual contouring
@@ -82,6 +93,8 @@ namespace gladius::hierarchical_dc
     {
         BoundingBox bounds;                        ///< Spatial extent of this node
         std::array<float, 8> cornerValues{};       ///< SDF values at 8 corners
+        std::uint8_t cornerSignMask{0U};           ///< Bitmask of positive corners (>0)
+        std::uint8_t cornerZeroMask{0U};           ///< Bitmask of zero-value corners
         std::uint8_t depth{0U};                    ///< Depth in octree (0 = root)
         bool isLeaf{true};                         ///< True if no children
         bool isIntersecting{false};                ///< True if surface crosses this node
@@ -161,8 +174,11 @@ namespace gladius::hierarchical_dc
 
         std::vector<OctreeNode> m_nodes;   ///< All octree nodes (flat array)
         std::vector<OctreeLevel> m_levels; ///< Levels for breadth-first traversal
+        std::vector<std::size_t> m_freeNodes; ///< Reusable node slots
+        std::size_t m_activeNodeCount{0U};
         BoundingBox m_rootBounds;
         std::unique_ptr<CpuSampler> m_cpuSampler;
+        bool m_cornerValuesReleased{false};
 
         // Phase 1: Coarse octree construction
         void buildInitialOctree();
@@ -176,9 +192,17 @@ namespace gladius::hierarchical_dc
         void estimateCurvature(std::vector<std::size_t> const & leafIndices);
         void subdivideMarkedLeaves();
 
+        // Optional Phase 2b: Bottom-up coarsening after fine sampling
+        void coarsenOctree();
+        bool tryCoarsenParent(std::size_t parentIndex,
+                      dual_contouring::QuadraticErrorFunction & qef);
+
         // Phase 3: High-precision finishing
         void refineZeroCrossings();
         void solveQEFVertices();
+        void releaseHermiteData();
+        void releaseCornerValues();
+        void compactNodes();
 
         // GPU acceleration methods
         bool evaluateCornersGPU(std::vector<std::size_t> const & nodeIndices);
@@ -187,17 +211,22 @@ namespace gladius::hierarchical_dc
         // Helper methods
         [[nodiscard]] Eigen::Vector3f cornerPosition(std::uint8_t cornerIndex,
                                                      BoundingBox const & bounds) const;
-        [[nodiscard]] bool hasSignChange(OctreeNode const & node) const;
-        [[nodiscard]] std::vector<EdgeCrossing> gatherEdgeCrossings(
-          std::vector<std::size_t> const & leafIndices) const;
-        [[nodiscard]] std::vector<HermiteSample> computeHermiteSamples(
-                std::vector<EdgeCrossing> const & crossings,
-                std::vector<Eigen::Vector3f> const & refinedPositions);
+                [[nodiscard]] bool hasSignChange(OctreeNode const & node) const;
+                void gatherEdgeCrossings(std::vector<std::size_t> const & leafIndices,
+                                                                 std::vector<EdgeCrossing> & out) const;
+                [[nodiscard]] std::vector<HermiteSample> computeHermiteSamples(
+                    std::vector<EdgeCrossing> const & crossings,
+                    std::vector<Eigen::Vector3f> const & refinedPositions);
+                [[nodiscard]] bool cornersHaveOppositeSigns(OctreeNode const & node,
+                                                                                                        std::uint8_t cornerA,
+                                                                                                        std::uint8_t cornerB) const;
 
         bool ensureCpuSampler();
         float sampleSdfCpu(Eigen::Vector3f const & position) const;
         Eigen::Vector3f sampleGradientCpu(Eigen::Vector3f const & position,
                                           float epsilon) const;
+        std::size_t allocateNode();
+        void releaseNode(std::size_t index);
 
         void logInfo(std::string const & message) const;
         void logError(std::string const & message) const;
