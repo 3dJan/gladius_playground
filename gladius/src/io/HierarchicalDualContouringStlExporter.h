@@ -50,6 +50,7 @@ namespace gladius::io
         void writeMeshToFile(ComputeCore & generator,
                              std::vector<Eigen::Vector3f> const & vertices,
                              std::vector<std::uint32_t> const & indices) const;
+        bool runAdmeshPostProcess(std::filesystem::path const & target) const;
 
         events::SharedLogger m_logger;
         HierarchicalDualContouringOptions m_options{};

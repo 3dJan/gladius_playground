@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace gladius
@@ -220,6 +221,21 @@ namespace gladius::hierarchical_dc
                 [[nodiscard]] bool cornersHaveOppositeSigns(OctreeNode const & node,
                                                                                                         std::uint8_t cornerA,
                                                                                                         std::uint8_t cornerB) const;
+                void buildVertexIndexMap(std::vector<std::size_t> const & leafIndices,
+                                                                 std::unordered_map<std::size_t, std::uint32_t> & nodeToVertexIndex,
+                                                                 std::vector<Eigen::Vector3f> & outVertices) const;
+                void projectVerticesIfRequested(std::vector<Eigen::Vector3f> & outVertices) const;
+                void emitTopologyFromEdges(
+                    std::vector<std::size_t> const & leafIndices,
+                    std::unordered_map<std::size_t, std::uint32_t> const & nodeToVertexIndex,
+                    std::vector<Eigen::Vector3f> const & vertices,
+                    std::vector<Eigen::Vector3f> const & vertexNormals,
+                    std::vector<std::uint32_t> & outIndices,
+                    bool canSampleSdf,
+                    bool outsideIsPositive,
+                    float normalProbeDistance) const;
+                [[nodiscard]] std::size_t findLeafAtPoint(Eigen::Vector3f const & point) const;
+                [[nodiscard]] std::size_t findNeighborCell(std::size_t nodeIdx, int dx, int dy, int dz) const;
 
         bool ensureCpuSampler();
         float sampleSdfCpu(Eigen::Vector3f const & position) const;

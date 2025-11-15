@@ -17,9 +17,12 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
+#include <tuple>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace gladius::hierarchical_dc
 {
@@ -1372,240 +1375,389 @@ namespace gladius::hierarchical_dc
             return;
         }
 
-        // Build vertex index map for leaves with vertices
         std::unordered_map<std::size_t, std::uint32_t> nodeToVertexIndex;
-        
-        for (auto idx : leafIndices)
-        {
-            OctreeNode const & node = m_nodes[idx];
-            if (node.hasVertex && node.vertexPosition.has_value())
-            {
-                std::uint32_t const vertexIdx = static_cast<std::uint32_t>(outVertices.size());
-                nodeToVertexIndex[idx] = vertexIdx;
-                outVertices.push_back(node.vertexPosition.value());
-            }
-        }
+        buildVertexIndexMap(leafIndices, nodeToVertexIndex, outVertices);
 
         if (outVertices.empty())
         {
             return;
         }
 
-        // Post-processing: project vertices onto surface for improved accuracy
-        if (m_config.projectVerticesToSurface && m_config.enableGpuAcceleration)
+        projectVerticesIfRequested(outVertices);
+
+        std::vector<Eigen::Vector3f> vertexNormals(outVertices.size(), Eigen::Vector3f::Zero());
+        for (auto const & entry : nodeToVertexIndex)
         {
-            try
+            std::size_t const nodeIdx = entry.first;
+            std::uint32_t const vertexIdx = entry.second;
+            if (vertexIdx >= vertexNormals.size())
             {
-                auto * slicerProgram = m_core->getProgramManager().getSlicerProgram();
-                auto primitives = m_core->getPrimitives();
-                
-                if (slicerProgram && primitives)
-                {
-                    // Create GPU buffers
-                    Buffer<cl_float4> inputBuffer(*m_core->getComputeContext());
-                    Buffer<cl_float4> outputBuffer(*m_core->getComputeContext());
-                    
-                    // Copy vertices to input buffer
-                    auto & inputData = inputBuffer.getData();
-                    inputData.resize(outVertices.size());
-                    for (std::size_t i = 0; i < outVertices.size(); ++i)
-                    {
-                        inputData[i] = {{outVertices[i].x(), outVertices[i].y(), outVertices[i].z(), 0.0F}};
-                    }
-                    inputBuffer.write();
-                    
-                    // Prepare output buffer
-                    outputBuffer.getData().resize(outVertices.size());
-                    
-                    // Project to surface using GPU (adoptVertexOfMeshToSurface for mesh refinement)
-                    slicerProgram->adoptVertexOfMeshToSurface(*primitives, inputBuffer, outputBuffer);
-                    
-                    // Copy projected vertices back
-                    auto const & outputData = outputBuffer.getData();
-                    for (std::size_t i = 0; i < outVertices.size(); ++i)
-                    {
-                        auto const & projected = outputData[i];
-                        outVertices[i] = Eigen::Vector3f(projected.s[0], projected.s[1], projected.s[2]);
-                    }
-                    
-                    if (m_logger)
-                    {
-                        m_logger->logInfo("Projected " + std::to_string(outVertices.size()) + 
-                                        " vertices to surface");
-                    }
-                }
+                continue;
             }
-            catch (std::exception const & e)
+
+            OctreeNode const & node = m_nodes[nodeIdx];
+            if (node.vertexNormal.squaredNorm() > 1e-12F)
             {
-                if (m_logger)
-                {
-                    m_logger->logWarning("Vertex projection failed: " + std::string(e.what()));
-                }
-                // Continue with unprojected vertices
+                vertexNormals[vertexIdx] = node.vertexNormal;
             }
         }
 
-        // Helper to find leaf node at a point
-        auto findLeafAt = [&](Eigen::Vector3f const & point) -> std::size_t
-        {
-            // Start from root
-            std::size_t current = 0;
-            
-            while (current < m_nodes.size())
-            {
-                OctreeNode const & node = m_nodes[current];
-                
-                // Check if point is inside this node's bounds
-                if (point.x() < node.bounds.min.x || point.x() > node.bounds.max.x ||
-                    point.y() < node.bounds.min.y || point.y() > node.bounds.max.y ||
-                    point.z() < node.bounds.min.z || point.z() > node.bounds.max.z)
-                {
-                    return std::size_t(-1); // Outside bounds
-                }
-                
-                // If it's a leaf, we found it
-                if (node.isLeaf)
-                {
-                    return current;
-                }
-                
-                // Otherwise, find which child contains the point
-                Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
-                std::uint8_t childIdx = 0;
-                if (point.x() > center.x()) childIdx |= 1;
-                if (point.y() > center.y()) childIdx |= 2;
-                if (point.z() > center.z()) childIdx |= 4;
-                
-                current = node.childIndices[childIdx];
-                if (current == 0) return std::size_t(-1); // No child
-            }
-            
-            return std::size_t(-1);
-        };
-        
-        // Helper to find neighbor cell in a specific direction
-        auto findNeighbor = [&](std::size_t nodeIdx, int dx, int dy, int dz) -> std::size_t
-        {
-            OctreeNode const & node = m_nodes[nodeIdx];
-            Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
-            Eigen::Vector3f const cellSize = toEigen(node.bounds.max) - toEigen(node.bounds.min);
-            
-            // Sample point just inside neighbor cell
-            float const epsilon = 0.001F;
-            Eigen::Vector3f const neighborPoint = center + 
-                Eigen::Vector3f(dx * cellSize.x() * (0.5F + epsilon), 
-                               dy * cellSize.y() * (0.5F + epsilon), 
-                               dz * cellSize.z() * (0.5F + epsilon));
-            
-            return findLeafAt(neighborPoint);
-        };
+        bool const canSampleSdf = ensureCpuSampler();
+        bool outsideIsPositive = true;
+        float normalProbeDistance = 0.0F;
 
-        // Generate watertight mesh using proper dual contouring topology
-        // In DC: each edge with sign change gets a quad from 4 cells sharing that edge
+        if (canSampleSdf)
+        {
+            Eigen::Vector3f const boundsMin = toEigen(m_rootBounds.min);
+            Eigen::Vector3f const boundsMax = toEigen(m_rootBounds.max);
+            Eigen::Vector3f const center = boundingBoxCenter(m_rootBounds);
+
+            std::size_t positiveVotes = 0U;
+            std::size_t negativeVotes = 0U;
+
+            auto samplePoint = [&](Eigen::Vector3f const & point)
+            {
+                float const value = sampleSdfCpu(point);
+                if (value >= 0.0F)
+                {
+                    ++positiveVotes;
+                }
+                else
+                {
+                    ++negativeVotes;
+                }
+            };
+
+            samplePoint(center);
+            for (int corner = 0; corner < 8; ++corner)
+            {
+                Eigen::Vector3f point{(corner & 1) ? boundsMax.x() : boundsMin.x(),
+                                      (corner & 2) ? boundsMax.y() : boundsMin.y(),
+                                      (corner & 4) ? boundsMax.z() : boundsMin.z()};
+                samplePoint(point);
+            }
+
+            outsideIsPositive = positiveVotes >= negativeVotes;
+            Eigen::Vector3f const diagonal = boundsMax - boundsMin;
+            normalProbeDistance = diagonal.norm() * 0.0025F;
+            normalProbeDistance = std::max(normalProbeDistance, 0.0005F);
+        }
+
+        emitTopologyFromEdges(leafIndices,
+                              nodeToVertexIndex,
+                              outVertices,
+                              vertexNormals,
+                              outIndices,
+                              canSampleSdf,
+                              outsideIsPositive,
+                              normalProbeDistance);
+    }
+
+    void HierarchicalOctreeBuilder::buildVertexIndexMap(
+        std::vector<std::size_t> const & leafIndices,
+        std::unordered_map<std::size_t, std::uint32_t> & nodeToVertexIndex,
+        std::vector<Eigen::Vector3f> & outVertices) const
+    {
+        nodeToVertexIndex.clear();
+        outVertices.reserve(outVertices.size() + leafIndices.size());
+
+        for (auto idx : leafIndices)
+        {
+            OctreeNode const & node = m_nodes[idx];
+            if (!node.hasVertex || !node.vertexPosition.has_value())
+            {
+                continue;
+            }
+
+            std::uint32_t const vertexIdx = static_cast<std::uint32_t>(outVertices.size());
+            nodeToVertexIndex[idx] = vertexIdx;
+            outVertices.push_back(node.vertexPosition.value());
+        }
+    }
+
+    void HierarchicalOctreeBuilder::projectVerticesIfRequested(std::vector<Eigen::Vector3f> & outVertices) const
+    {
+        if (!m_config.projectVerticesToSurface || !m_config.enableGpuAcceleration)
+        {
+            return;
+        }
+
+        try
+        {
+            auto * slicerProgram = m_core->getProgramManager().getSlicerProgram();
+            auto primitives = m_core->getPrimitives();
+
+            if (slicerProgram == nullptr || primitives == nullptr)
+            {
+                return;
+            }
+
+            Buffer<cl_float4> inputBuffer(*m_core->getComputeContext());
+            Buffer<cl_float4> outputBuffer(*m_core->getComputeContext());
+
+            auto & inputData = inputBuffer.getData();
+            inputData.resize(outVertices.size());
+            for (std::size_t i = 0; i < outVertices.size(); ++i)
+            {
+                inputData[i] = {{outVertices[i].x(), outVertices[i].y(), outVertices[i].z(), 0.0F}};
+            }
+            inputBuffer.write();
+
+            outputBuffer.getData().resize(outVertices.size());
+            slicerProgram->adoptVertexOfMeshToSurface(*primitives, inputBuffer, outputBuffer);
+
+            auto const & outputData = outputBuffer.getData();
+            for (std::size_t i = 0; i < outVertices.size(); ++i)
+            {
+                auto const & projected = outputData[i];
+                outVertices[i] = Eigen::Vector3f(projected.s[0], projected.s[1], projected.s[2]);
+            }
+
+            if (m_logger)
+            {
+                m_logger->logInfo("Projected " + std::to_string(outVertices.size()) +
+                                  " vertices to surface");
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->logWarning("Vertex projection failed: " + std::string(e.what()));
+            }
+        }
+    }
+
+    void HierarchicalOctreeBuilder::emitTopologyFromEdges(
+        std::vector<std::size_t> const & leafIndices,
+        std::unordered_map<std::size_t, std::uint32_t> const & nodeToVertexIndex,
+        std::vector<Eigen::Vector3f> const & vertices,
+        std::vector<Eigen::Vector3f> const & vertexNormals,
+        std::vector<std::uint32_t> & outIndices,
+        bool canSampleSdf,
+        bool outsideIsPositive,
+        float normalProbeDistance) const
+    {
         std::set<std::tuple<std::size_t, std::uint8_t>> processedEdges;
 
-        // Edge definitions: each edge connects 2 corners
         struct EdgeInfo
         {
             std::uint8_t corner0;
             std::uint8_t corner1;
             std::uint8_t edgeIdx;
-            int dx0, dy0, dz0; // Direction to neighbor cell 0
-            int dx1, dy1, dz1; // Direction to neighbor cell 1  
-            int dx2, dy2, dz2; // Direction to neighbor cell 2 (diagonal)
+            int dx0, dy0, dz0;
+            int dx1, dy1, dz1;
+            int dx2, dy2, dz2;
         };
 
-        // 12 edges of a cube
         std::array<EdgeInfo, 12> const edges = {{
-            // X-aligned edges (4)
-            {0, 1, 0,  0, -1, -1,  0,  0, -1,  0, -1,  0},  // Bottom-back
-            {2, 3, 1,  0,  1, -1,  0,  0, -1,  0,  1,  0},  // Top-back
-            {4, 5, 2,  0, -1,  1,  0,  0,  1,  0, -1,  0},  // Bottom-front
-            {6, 7, 3,  0,  1,  1,  0,  0,  1,  0,  1,  0},  // Top-front
-            
-            // Y-aligned edges (4)
-            {0, 2, 4, -1,  0, -1,  0,  0, -1, -1,  0,  0},  // Left-back
-            {1, 3, 5,  1,  0, -1,  0,  0, -1,  1,  0,  0},  // Right-back
-            {4, 6, 6, -1,  0,  1,  0,  0,  1, -1,  0,  0},  // Left-front
-            {5, 7, 7,  1,  0,  1,  0,  0,  1,  1,  0,  0},  // Right-front
-            
-            // Z-aligned edges (4)
-            {0, 4, 8, -1, -1,  0,  0, -1,  0, -1,  0,  0},  // Left-bottom
-            {1, 5, 9,  1, -1,  0,  0, -1,  0,  1,  0,  0},  // Right-bottom
-            {2, 6,10, -1,  1,  0,  0,  1,  0, -1,  0,  0},  // Left-top
-            {3, 7,11,  1,  1,  0,  0,  1,  0,  1,  0,  0}   // Right-top
-        }};
+            {0, 1, 0,  0, -1, -1,  0,  0, -1,  0, -1,  0},
+            {2, 3, 1,  0,  1, -1,  0,  0, -1,  0,  1,  0},
+            {4, 5, 2,  0, -1,  1,  0,  0,  1,  0, -1,  0},
+            {6, 7, 3,  0,  1,  1,  0,  0,  1,  0,  1,  0},
+            {0, 2, 4, -1,  0, -1,  0,  0, -1, -1,  0,  0},
+            {1, 3, 5,  1,  0, -1,  0,  0, -1,  1,  0,  0},
+            {4, 6, 6, -1,  0,  1,  0,  0,  1, -1,  0,  0},
+            {5, 7, 7,  1,  0,  1,  0,  0,  1,  1,  0,  0},
+            {0, 4, 8, -1, -1,  0,  0, -1,  0, -1,  0,  0},
+            {1, 5, 9,  1, -1,  0,  0, -1,  0,  1,  0,  0},
+            {2, 6,10, -1,  1,  0,  0,  1,  0, -1,  0,  0},
+            {3, 7,11,  1,  1,  0,  0,  1,  0,  1,  0,  0}}};
 
         for (auto idx : leafIndices)
         {
             OctreeNode const & node = m_nodes[idx];
-            if (!node.isIntersecting || !nodeToVertexIndex.count(idx))
+            if (!node.isIntersecting)
             {
                 continue;
             }
 
-            // Check each of the 12 edges
+            auto it = nodeToVertexIndex.find(idx);
+            if (it == nodeToVertexIndex.end())
+            {
+                continue;
+            }
+
             for (auto const & edge : edges)
             {
-                // Skip if already processed
-                if (processedEdges.count({idx, edge.edgeIdx}))
+                if (processedEdges.count({idx, edge.edgeIdx}) > 0)
                 {
                     continue;
                 }
 
-                // Check if this edge has a sign change
                 if (!cornersHaveOppositeSigns(node, edge.corner0, edge.corner1))
                 {
-                    continue; // No zero crossing
+                    continue;
                 }
 
-                // Find the 3 neighbor cells sharing this edge (total 4 cells including this one)
-                std::size_t const n0 = findNeighbor(idx, edge.dx0, edge.dy0, edge.dz0);
-                std::size_t const n1 = findNeighbor(idx, edge.dx1, edge.dy1, edge.dz1);
-                std::size_t const n2 = findNeighbor(idx, edge.dx2, edge.dy2, edge.dz2);
+                std::size_t const neighbor0 = findNeighborCell(idx, edge.dx0, edge.dy0, edge.dz0);
+                std::size_t const neighbor1 = findNeighborCell(idx, edge.dx1, edge.dy1, edge.dz1);
+                std::size_t const neighbor2 = findNeighborCell(idx, edge.dx2, edge.dy2, edge.dz2);
 
-                // Collect cells with vertices
-                std::vector<std::uint32_t> quadVerts;
-                quadVerts.reserve(4);
-                
-                if (nodeToVertexIndex.count(idx))
-                    quadVerts.push_back(nodeToVertexIndex[idx]);
-                
-                if (n0 != std::size_t(-1) && nodeToVertexIndex.count(n0))
-                    quadVerts.push_back(nodeToVertexIndex[n0]);
-                    
-                if (n2 != std::size_t(-1) && nodeToVertexIndex.count(n2))
-                    quadVerts.push_back(nodeToVertexIndex[n2]);
-                    
-                if (n1 != std::size_t(-1) && nodeToVertexIndex.count(n1))
-                    quadVerts.push_back(nodeToVertexIndex[n1]);
-
-                // Need at least 3 vertices to make a polygon
-                if (quadVerts.size() >= 3)
+                std::array<std::size_t, 4> cellIndices{idx, neighbor0, neighbor2, neighbor1};
+                std::array<std::optional<std::uint32_t>, 4> quadVertices;
+                for (std::size_t i = 0; i < cellIndices.size(); ++i)
                 {
-                    if (quadVerts.size() == 3)
+                    auto const cellIdx = cellIndices[i];
+                    if (cellIdx == std::size_t(-1))
                     {
-                        // Triangle
-                        outIndices.push_back(quadVerts[0]);
-                        outIndices.push_back(quadVerts[1]);
-                        outIndices.push_back(quadVerts[2]);
+                        continue;
+                    }
+
+                    auto const nodeIt = nodeToVertexIndex.find(cellIdx);
+                    if (nodeIt == nodeToVertexIndex.end())
+                    {
+                        continue;
+                    }
+
+                    quadVertices[i] = nodeIt->second;
+                }
+
+                std::vector<std::uint32_t> polygon;
+                polygon.reserve(4);
+                for (auto const & maybeIndex : quadVertices)
+                {
+                    if (maybeIndex.has_value())
+                    {
+                        polygon.push_back(maybeIndex.value());
+                    }
+                }
+
+                if (polygon.size() >= 3)
+                {
+                    auto emitTriangle = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c)
+                    {
+                        Eigen::Vector3f const & va = vertices[a];
+                        Eigen::Vector3f const & vb = vertices[b];
+                        Eigen::Vector3f const & vc = vertices[c];
+                        Eigen::Vector3f const faceNormal = (vb - va).cross(vc - va);
+
+                        bool useFaceNormal = faceNormal.squaredNorm() > 1e-12F;
+                        Eigen::Vector3f normalDirection = faceNormal;
+
+                        if (!useFaceNormal && vertexNormals[a].squaredNorm() > 0.0F)
+                        {
+                            normalDirection = vertexNormals[a];
+                            useFaceNormal = true;
+                        }
+
+                        bool shouldFlip = false;
+                        if (useFaceNormal)
+                        {
+                            Eigen::Vector3f const centroid = (va + vb + vc) / 3.0F;
+                            Eigen::Vector3f const direction = normalDirection.normalized();
+
+                            Eigen::Vector3f const outsideSample = centroid + direction * normalProbeDistance;
+                            Eigen::Vector3f const insideSample = centroid - direction * normalProbeDistance;
+
+                            float outsideValue = 0.0F;
+                            float insideValue = 0.0F;
+
+                            if (canSampleSdf)
+                            {
+                                outsideValue = sampleSdfCpu(outsideSample);
+                                insideValue = sampleSdfCpu(insideSample);
+                            }
+
+                            if (outsideIsPositive)
+                            {
+                                shouldFlip = outsideValue < insideValue;
+                            }
+                            else
+                            {
+                                shouldFlip = outsideValue > insideValue;
+                            }
+                        }
+
+                        if (shouldFlip)
+                        {
+                            outIndices.push_back(a);
+                            outIndices.push_back(c);
+                            outIndices.push_back(b);
+                        }
+                        else
+                        {
+                            outIndices.push_back(a);
+                            outIndices.push_back(b);
+                            outIndices.push_back(c);
+                        }
+                    };
+
+                    if (polygon.size() == 3)
+                    {
+                        emitTriangle(polygon[0], polygon[1], polygon[2]);
                     }
                     else
                     {
-                        // Quad as 2 triangles
-                        outIndices.push_back(quadVerts[0]);
-                        outIndices.push_back(quadVerts[1]);
-                        outIndices.push_back(quadVerts[2]);
-                        
-                        outIndices.push_back(quadVerts[0]);
-                        outIndices.push_back(quadVerts[2]);
-                        outIndices.push_back(quadVerts[3]);
+                        emitTriangle(polygon[0], polygon[1], polygon[2]);
+                        emitTriangle(polygon[0], polygon[2], polygon[3]);
                     }
                 }
 
                 processedEdges.insert({idx, edge.edgeIdx});
             }
         }
+    }
+
+    std::size_t HierarchicalOctreeBuilder::findLeafAtPoint(Eigen::Vector3f const & point) const
+    {
+        if (m_nodes.empty())
+        {
+            return std::size_t(-1);
+        }
+
+        std::size_t current = 0;
+        while (current < m_nodes.size())
+        {
+            OctreeNode const & node = m_nodes[current];
+
+            if (point.x() < node.bounds.min.x || point.x() > node.bounds.max.x ||
+                point.y() < node.bounds.min.y || point.y() > node.bounds.max.y ||
+                point.z() < node.bounds.min.z || point.z() > node.bounds.max.z)
+            {
+                return std::size_t(-1);
+            }
+
+            if (node.isLeaf)
+            {
+                return current;
+            }
+
+            Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
+            std::uint8_t childIdx = 0U;
+            if (point.x() > center.x()) childIdx |= 1U;
+            if (point.y() > center.y()) childIdx |= 2U;
+            if (point.z() > center.z()) childIdx |= 4U;
+
+            std::size_t const next = node.childIndices[childIdx];
+            if (next == 0U)
+            {
+                return std::size_t(-1);
+            }
+            current = next;
+        }
+
+        return std::size_t(-1);
+    }
+
+    std::size_t HierarchicalOctreeBuilder::findNeighborCell(std::size_t nodeIdx, int dx, int dy, int dz) const
+    {
+        if (nodeIdx >= m_nodes.size())
+        {
+            return std::size_t(-1);
+        }
+
+        OctreeNode const & node = m_nodes[nodeIdx];
+        Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
+        Eigen::Vector3f const cellSize = toEigen(node.bounds.max) - toEigen(node.bounds.min);
+
+        float const epsilon = 0.001F;
+        Eigen::Vector3f const offset(dx * cellSize.x() * (0.5F + epsilon),
+                                     dy * cellSize.y() * (0.5F + epsilon),
+                                     dz * cellSize.z() * (0.5F + epsilon));
+
+        Eigen::Vector3f const neighborPoint = center + offset;
+        return findLeafAtPoint(neighborPoint);
     }
 
     bool HierarchicalOctreeBuilder::evaluateCornersGPU(std::vector<std::size_t> const & nodeIndices)
