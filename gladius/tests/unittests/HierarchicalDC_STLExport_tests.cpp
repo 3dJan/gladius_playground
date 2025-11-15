@@ -540,10 +540,17 @@ namespace gladius_tests::hierarchical_dc_mesh
                                 io::HierarchicalDualContouringOptions options;
                                 options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
                                 options.applyPreset();
+                                options.config.projectVerticesToSurface = false; // Validate raw extraction
                                 options.config.enableGpuAcceleration = false; // Keep deterministic CPU path
 
                                 exportAndValidateWithAdmesh(bundle, options, "baseline_cpu", true);
                 }
+
+                struct AdmeshCleanupThresholds
+                {
+                                int maxFacetsRemoved;
+                                int maxFacetsAdded;
+                };
 
                 struct ExportScenario
                 {
@@ -552,6 +559,7 @@ namespace gladius_tests::hierarchical_dc_mesh
                                 bool enableGpuAcceleration;
                                 float minFeatureSize;
                     bool requireCleanAdmesh;
+                    std::optional<AdmeshCleanupThresholds> cleanupThresholds;
                 };
 
                 class HierarchicalDC_STL_CombinationTest : public HierarchicalDC_STL_Test,
@@ -574,6 +582,7 @@ namespace gladius_tests::hierarchical_dc_mesh
                                 io::HierarchicalDualContouringOptions options;
                                 options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
                                 options.applyPreset();
+                                options.config.projectVerticesToSurface = false; // Tests target core extractor
                                 options.config.enableGpuAcceleration = scenario.enableGpuAcceleration;
                                 options.config.enableCoarsening = scenario.enableCoarsening;
                                 options.config.minFeatureSize = scenario.minFeatureSize;
@@ -582,29 +591,96 @@ namespace gladius_tests::hierarchical_dc_mesh
                                 exportAndValidateWithAdmesh(
                                   bundle, options, scenario.name, scenario.requireCleanAdmesh, &metrics);
 
-                                if (!scenario.requireCleanAdmesh)
-                                {
-                                    std::ostringstream issueSummary;
-                                    issueSummary << scenario.name << " requires cleanup ("
-                                             << "degenerate facets=" << metrics.degenerateFacets
-                                             << ", facets removed=" << metrics.facetsRemoved
-                                             << ", facets added=" << metrics.facetsAdded
-                                             << ", normals fixed=" << metrics.normalsFixed
-                                             << ", backwards edges=" << metrics.backwardsEdges
-                                             << ")";
-                                    GTEST_SKIP() << issueSummary.str();
-                                }
+                                                                EXPECT_EQ(metrics.degenerateFacets, 0)
+                                                                    << scenario.name << ": degenerate facets detected ("
+                                                                    << metrics.degenerateFacets << ")";
+                                                                EXPECT_EQ(metrics.facetsReversed, 0)
+                                                                    << scenario.name << ": facets reversed detected ("
+                                                                    << metrics.facetsReversed << ")";
+                                                                EXPECT_EQ(metrics.backwardsEdges, 0)
+                                                                    << scenario.name << ": backwards edges detected ("
+                                                                    << metrics.backwardsEdges << ")";
+                                                                EXPECT_EQ(metrics.normalsFixed, 0)
+                                                                    << scenario.name << ": normals required fixing ("
+                                                                    << metrics.normalsFixed << ")";
+
+                                                                if (!scenario.requireCleanAdmesh)
+                                                                {
+                                                                        if (scenario.cleanupThresholds.has_value())
+                                                                        {
+                                                                                auto const & thresholds = scenario.cleanupThresholds.value();
+                                                                                EXPECT_LE(metrics.facetsRemoved, thresholds.maxFacetsRemoved)
+                                                                                    << scenario.name << ": facets removed exceed limit ("
+                                                                                    << metrics.facetsRemoved << " > "
+                                                                                    << thresholds.maxFacetsRemoved << ")";
+                                                                                EXPECT_LE(metrics.facetsAdded, thresholds.maxFacetsAdded)
+                                                                                    << scenario.name << ": facets added exceed limit ("
+                                                                                    << metrics.facetsAdded << " > "
+                                                                                    << thresholds.maxFacetsAdded << ")";
+                                                                                return;
+                                                                        }
+
+                                                                        std::ostringstream issueSummary;
+                                                                        issueSummary << scenario.name << " requires cleanup ("
+                                                                                         << "degenerate facets=" << metrics.degenerateFacets
+                                                                                         << ", facets removed=" << metrics.facetsRemoved
+                                                                                         << ", facets added=" << metrics.facetsAdded
+                                                                                         << ", normals fixed=" << metrics.normalsFixed
+                                                                                         << ", backwards edges=" << metrics.backwardsEdges
+                                                                                         << ")";
+                                                                        GTEST_SKIP() << issueSummary.str();
+                                                                }
                 }
 
                 constexpr ExportScenario kExportScenarios[] = {
-                                {"CPU_Default", false, false, 0.0F, true},
-                                {"CPU_Coarsening", true, false, 0.0F, false},
-                                {"CPU_MinFeature", false, false, 0.25F, false},
-                                {"CPU_MinFeature_Coarsening", true, false, 0.25F, false},
-                                {"GPU_Default", false, true, 0.0F, false},
-                                {"GPU_Coarsening", true, true, 0.0F, false},
-                                {"GPU_MinFeature", false, true, 0.25F, false},
-                                {"GPU_MinFeature_Coarsening", true, true, 0.25F, false},
+                                                                {"CPU_Default",
+                                                                 false,
+                                                                 false,
+                                                                 0.0F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{250, 250}},
+                                                                {"CPU_Coarsening",
+                                                                 true,
+                                                                 false,
+                                                                 0.0F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{250, 250}},
+                                                                {"CPU_MinFeature",
+                                                                 false,
+                                                                 false,
+                                                                 0.25F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{250, 250}},
+                                                                {"CPU_MinFeature_Coarsening",
+                                                                 true,
+                                                                 false,
+                                                                 0.25F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{250, 250}},
+                                                                {"GPU_Default",
+                                                                 false,
+                                                                 true,
+                                                                 0.0F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{150, 250}},
+                                                                {"GPU_Coarsening",
+                                                                 true,
+                                                                 true,
+                                                                 0.0F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{150, 250}},
+                                                                {"GPU_MinFeature",
+                                                                 false,
+                                                                 true,
+                                                                 0.25F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{150, 250}},
+                                                                {"GPU_MinFeature_Coarsening",
+                                                                 true,
+                                                                 true,
+                                                                 0.25F,
+                                                                 false,
+                                                                 AdmeshCleanupThresholds{150, 250}},
                 };
 
                 INSTANTIATE_TEST_SUITE_P(
