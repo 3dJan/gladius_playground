@@ -136,24 +136,6 @@ namespace gladius::hierarchical_dc
         }
     };
 
-    /// Diagnostics gathered while extracting a mesh from the octree
-    struct ExtractionDiagnostics
-    {
-        std::size_t totalEdgesEvaluated{0U};
-        std::size_t edgesSkippedNoSignChange{0U};
-        std::size_t edgesSkippedAlreadyProcessed{0U};
-        std::size_t quadsMissingVertices{0U};
-        std::size_t quadsWithDuplicateVertices{0U};
-        std::size_t trianglesEmitted{0U};
-        std::size_t degenerateIndexTriplets{0U};
-        std::size_t zeroAreaTrianglesRejected{0U};
-        std::size_t trianglesOrientedBySdf{0U};
-        std::size_t trianglesFlippedBySdf{0U};
-        std::size_t trianglesOrientedByVertexNormals{0U};
-        std::size_t trianglesOrientedByGradients{0U};
-        std::size_t trianglesDefaultOrientation{0U};
-    };
-
     /// Main hierarchical dual contouring builder
     class HierarchicalOctreeBuilder
     {
@@ -179,12 +161,6 @@ namespace gladius::hierarchical_dc
             return m_stats;
         }
 
-        /// Get diagnostics from the last call to extractMesh()
-        [[nodiscard]] ExtractionDiagnostics const & getExtractionDiagnostics() const
-        {
-            return m_extractionDiagnostics;
-        }
-
         /// Extract triangle mesh from octree
         void extractMesh(std::vector<Eigen::Vector3f> & outVertices,
                          std::vector<std::uint32_t> & outIndices);
@@ -204,7 +180,6 @@ namespace gladius::hierarchical_dc
         BoundingBox m_rootBounds;
         std::unique_ptr<CpuSampler> m_cpuSampler;
         bool m_cornerValuesReleased{false};
-        mutable ExtractionDiagnostics m_extractionDiagnostics;
 
         // Phase 1: Coarse octree construction
         void buildInitialOctree();

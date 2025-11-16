@@ -13,14 +13,13 @@
 #include <Eigen/Geometry>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
+#include <tuple>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,31 +43,6 @@ namespace gladius::hierarchical_dc
           {2, 6},
           {3, 7} // Z-aligned
         }};
-
-        struct QuadOwnerKey
-        {
-            std::array<std::size_t, 4> ids{};
-            std::uint8_t count{0U};
-
-            bool operator==(QuadOwnerKey const & other) const noexcept
-            {
-                return count == other.count && ids == other.ids;
-            }
-        };
-
-        struct QuadOwnerKeyHash
-        {
-            std::size_t operator()(QuadOwnerKey const & key) const noexcept
-            {
-                std::size_t hash = static_cast<std::size_t>(key.count);
-                for (std::size_t value : key.ids)
-                {
-                    hash ^= std::hash<std::size_t>{}(value + 0x9e3779b97f4a7c15ULL + (hash << 6U) +
-                                                       (hash >> 2U));
-                }
-                return hash;
-            }
-        };
 
         [[nodiscard]] Eigen::Vector3f toEigen(cl_float4 const & value)
         {
@@ -1395,8 +1369,6 @@ namespace gladius::hierarchical_dc
         outVertices.clear();
         outIndices.clear();
 
-        m_extractionDiagnostics = ExtractionDiagnostics{};
-
         std::vector<std::size_t> const leafIndices = getLeafIndices();
         if (leafIndices.empty())
         {
@@ -1479,31 +1451,6 @@ namespace gladius::hierarchical_dc
                               canSampleSdf,
                               outsideIsPositive,
                               normalProbeDistance);
-
-        bool const diagnosticsEnabled = std::getenv("GLADIUS_HDC_DIAGNOSTICS") != nullptr;
-        std::cerr << "[HDC Diagnostics flag] " << (diagnosticsEnabled ? "enabled" : "disabled")
-                  << '\n';
-        if (diagnosticsEnabled)
-        {
-            std::ostringstream diagnosticStream;
-            diagnosticStream << "[HDC Diagnostics] edges=" << m_extractionDiagnostics.totalEdgesEvaluated
-                              << ", sign_skipped=" << m_extractionDiagnostics.edgesSkippedNoSignChange
-                              << ", owner_skipped=" << m_extractionDiagnostics.edgesSkippedAlreadyProcessed
-                              << ", missing_quads=" << m_extractionDiagnostics.quadsMissingVertices
-                              << ", duplicate_quads=" << m_extractionDiagnostics.quadsWithDuplicateVertices
-                              << ", triangles=" << m_extractionDiagnostics.trianglesEmitted
-                              << ", degenerate_triplets=" << m_extractionDiagnostics.degenerateIndexTriplets
-                              << ", zero_area=" << m_extractionDiagnostics.zeroAreaTrianglesRejected
-                              << ", sdf_oriented=" << m_extractionDiagnostics.trianglesOrientedBySdf
-                              << ", sdf_flipped=" << m_extractionDiagnostics.trianglesFlippedBySdf
-                              << ", normal_oriented=" << m_extractionDiagnostics.trianglesOrientedByVertexNormals
-                              << ", gradient_oriented=" << m_extractionDiagnostics.trianglesOrientedByGradients
-                              << ", fallback_default=" << m_extractionDiagnostics.trianglesDefaultOrientation
-                              << ", outside_positive=" << (outsideIsPositive ? 1 : 0);
-
-            logInfo(diagnosticStream.str());
-            std::cerr << diagnosticStream.str() << '\n';
-        }
     }
 
     void HierarchicalOctreeBuilder::buildVertexIndexMap(
@@ -1591,11 +1538,7 @@ namespace gladius::hierarchical_dc
         bool outsideIsPositive,
         float normalProbeDistance) const
     {
-        ExtractionDiagnostics & diagnostics =
-            const_cast<ExtractionDiagnostics &>(m_extractionDiagnostics);
-
-        std::unordered_set<QuadOwnerKey, QuadOwnerKeyHash> processedQuads;
-        processedQuads.reserve(leafIndices.size() * 3U);
+        std::set<std::tuple<std::size_t, std::uint8_t>> processedEdges;
 
         struct EdgeInfo
         {
@@ -1637,11 +1580,13 @@ namespace gladius::hierarchical_dc
 
             for (auto const & edge : edges)
             {
-                ++diagnostics.totalEdgesEvaluated;
+                if (processedEdges.count({idx, edge.edgeIdx}) > 0)
+                {
+                    continue;
+                }
 
                 if (!cornersHaveOppositeSigns(node, edge.corner0, edge.corner1))
                 {
-                    ++diagnostics.edgesSkippedNoSignChange;
                     continue;
                 }
 
@@ -1651,8 +1596,6 @@ namespace gladius::hierarchical_dc
 
                 std::array<std::size_t, 4> cellIndices{idx, neighbor0, neighbor2, neighbor1};
                 std::array<std::optional<std::uint32_t>, 4> quadVertices;
-                bool hasDuplicateVertex = false;
-
                 for (std::size_t i = 0; i < cellIndices.size(); ++i)
                 {
                     auto const cellIdx = cellIndices[i];
@@ -1661,23 +1604,13 @@ namespace gladius::hierarchical_dc
                         continue;
                     }
 
-                    auto const nodeItLocal = nodeToVertexIndex.find(cellIdx);
-                    if (nodeItLocal == nodeToVertexIndex.end())
+                    auto const nodeIt = nodeToVertexIndex.find(cellIdx);
+                    if (nodeIt == nodeToVertexIndex.end())
                     {
                         continue;
                     }
 
-                    std::uint32_t const vertexIdx = nodeItLocal->second;
-                    for (std::size_t test = 0U; test < i; ++test)
-                    {
-                        if (quadVertices[test].has_value() && quadVertices[test].value() == vertexIdx)
-                        {
-                            hasDuplicateVertex = true;
-                            break;
-                        }
-                    }
-
-                    quadVertices[i] = vertexIdx;
+                    quadVertices[i] = nodeIt->second;
                 }
 
                 std::vector<std::uint32_t> polygon;
@@ -1690,243 +1623,81 @@ namespace gladius::hierarchical_dc
                     }
                 }
 
-                if (polygon.size() < 3)
+                if (polygon.size() >= 3)
                 {
-                    ++diagnostics.quadsMissingVertices;
-                    continue;
-                }
-
-                if (hasDuplicateVertex)
-                {
-                    ++diagnostics.quadsWithDuplicateVertices;
-                    continue;
-                }
-
-                QuadOwnerKey ownerKey;
-                ownerKey.ids.fill(std::numeric_limits<std::size_t>::max());
-                std::size_t ownerCount = 0U;
-                for (std::size_t i = 0; i < cellIndices.size(); ++i)
-                {
-                    std::size_t const cellIdx = cellIndices[i];
-                    if (!quadVertices[i].has_value() || cellIdx == std::size_t(-1))
+                    auto emitTriangle = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c)
                     {
-                        continue;
-                    }
+                        Eigen::Vector3f const & va = vertices[a];
+                        Eigen::Vector3f const & vb = vertices[b];
+                        Eigen::Vector3f const & vc = vertices[c];
+                        Eigen::Vector3f const faceNormal = (vb - va).cross(vc - va);
 
-                    ownerKey.ids[ownerCount++] = cellIdx;
-                }
+                        bool useFaceNormal = faceNormal.squaredNorm() > 1e-12F;
+                        Eigen::Vector3f normalDirection = faceNormal;
 
-                if (ownerCount < 3U)
-                {
-                    ++diagnostics.quadsMissingVertices;
-                    continue;
-                }
+                        if (!useFaceNormal && vertexNormals[a].squaredNorm() > 0.0F)
+                        {
+                            normalDirection = vertexNormals[a];
+                            useFaceNormal = true;
+                        }
 
-                std::sort(ownerKey.ids.begin(), ownerKey.ids.begin() + ownerCount);
-                ownerKey.count = static_cast<std::uint8_t>(ownerCount);
+                        bool shouldFlip = false;
+                        if (useFaceNormal)
+                        {
+                            Eigen::Vector3f const centroid = (va + vb + vc) / 3.0F;
+                            Eigen::Vector3f const direction = normalDirection.normalized();
 
-                if (!processedQuads.insert(ownerKey).second)
-                {
-                    ++diagnostics.edgesSkippedAlreadyProcessed;
-                    continue;
-                }
+                            Eigen::Vector3f const outsideSample = centroid + direction * normalProbeDistance;
+                            Eigen::Vector3f const insideSample = centroid - direction * normalProbeDistance;
 
-                auto emitTriangle = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c)
-                {
-                    if (a == b || b == c || c == a)
-                    {
-                        ++diagnostics.degenerateIndexTriplets;
-                        return;
-                    }
+                            float outsideValue = 0.0F;
+                            float insideValue = 0.0F;
 
-                    Eigen::Vector3f const & va = vertices[a];
-                    Eigen::Vector3f const & vb = vertices[b];
-                    Eigen::Vector3f const & vc = vertices[c];
-                    Eigen::Vector3f const faceNormal = (vb - va).cross(vc - va);
-                    float const areaSquared = faceNormal.squaredNorm();
-                    if (areaSquared <= 1e-12F)
-                    {
-                        ++diagnostics.zeroAreaTrianglesRejected;
-                        return;
-                    }
+                            if (canSampleSdf)
+                            {
+                                outsideValue = sampleSdfCpu(outsideSample);
+                                insideValue = sampleSdfCpu(insideSample);
+                            }
 
-                    Eigen::Vector3f const direction = faceNormal.normalized();
-                    Eigen::Vector3f const centroid = (va + vb + vc) / 3.0F;
-                    float const avgEdge = ((vb - va).norm() + (vc - vb).norm() + (va - vc).norm()) / 3.0F;
-                    float const localProbeDistance = std::max(normalProbeDistance, avgEdge * 0.05F);
+                            if (outsideIsPositive)
+                            {
+                                shouldFlip = outsideValue < insideValue;
+                            }
+                            else
+                            {
+                                shouldFlip = outsideValue > insideValue;
+                            }
+                        }
 
-                    auto const matchesOutsideSign = [&](float value) -> bool
-                    {
-                        return outsideIsPositive ? (value >= 0.0F) : (value <= 0.0F);
+                        if (shouldFlip)
+                        {
+                            outIndices.push_back(a);
+                            outIndices.push_back(c);
+                            outIndices.push_back(b);
+                        }
+                        else
+                        {
+                            outIndices.push_back(a);
+                            outIndices.push_back(b);
+                            outIndices.push_back(c);
+                        }
                     };
 
-                    auto const decideBySdf = [&]() -> std::optional<bool>
+                    if (polygon.size() == 3)
                     {
-                        if (!canSampleSdf || localProbeDistance <= 0.0F)
-                        {
-                            return std::nullopt;
-                        }
-
-                        float probeDistance = std::max(localProbeDistance, 1e-4F);
-                        float const maxProbeDistance = std::max(probeDistance * 16.0F, probeDistance + 0.01F);
-
-                        for (int attempt = 0; attempt < 5; ++attempt)
-                        {
-                            Eigen::Vector3f const outsideSample = centroid + direction * probeDistance;
-                            Eigen::Vector3f const insideSample = centroid - direction * probeDistance;
-                            float const outsideValue = sampleSdfCpu(outsideSample);
-                            float const insideValue = sampleSdfCpu(insideSample);
-
-                            bool const outsideLooksOutside = matchesOutsideSign(outsideValue);
-                            bool const insideLooksOutside = matchesOutsideSign(insideValue);
-
-                            if (outsideLooksOutside && !insideLooksOutside)
-                            {
-                                ++diagnostics.trianglesOrientedBySdf;
-                                return false;
-                            }
-
-                            if (!outsideLooksOutside && insideLooksOutside)
-                            {
-                                ++diagnostics.trianglesOrientedBySdf;
-                                ++diagnostics.trianglesFlippedBySdf;
-                                return true;
-                            }
-
-                            probeDistance *= 2.0F;
-                            if (probeDistance > maxProbeDistance)
-                            {
-                                break;
-                            }
-                        }
-
-                        return std::nullopt;
-                    };
-
-                    auto const decideByVertexNormals = [&]() -> std::optional<bool>
-                    {
-                        float bestAlignment = 0.0F;
-                        bool bestFlip = false;
-                        bool foundNormal = false;
-
-                        auto considerVertex = [&](std::uint32_t index)
-                        {
-                            if (index >= vertexNormals.size())
-                            {
-                                return;
-                            }
-
-                            Eigen::Vector3f const & normal = vertexNormals[index];
-                            float const magnitude = normal.squaredNorm();
-                            if (magnitude <= 1e-12F)
-                            {
-                                return;
-                            }
-
-                            Eigen::Vector3f const unitNormal = normal.normalized();
-                            float const dot = unitNormal.dot(direction);
-                            float const alignment = std::fabs(dot);
-                            if (alignment > bestAlignment)
-                            {
-                                bestAlignment = alignment;
-                                bestFlip = dot < 0.0F;
-                                foundNormal = true;
-                            }
-                        };
-
-                        considerVertex(a);
-                        considerVertex(b);
-                        considerVertex(c);
-
-                        if (foundNormal)
-                        {
-                            ++diagnostics.trianglesOrientedByVertexNormals;
-                            return bestFlip;
-                        }
-
-                        return std::nullopt;
-                    };
-
-                    auto const decideByGradient = [&]() -> std::optional<bool>
-                    {
-                        if (!canSampleSdf)
-                        {
-                            return std::nullopt;
-                        }
-
-                        float const gradientProbe = std::max(localProbeDistance * 0.5F, 1e-4F);
-                        Eigen::Vector3f gradient = sampleGradientCpu(centroid, gradientProbe);
-                        if (gradient.squaredNorm() <= 1e-10F)
-                        {
-                            return std::nullopt;
-                        }
-
-                        Eigen::Vector3f const gradientDir = gradient.normalized();
-                        float const dot = gradientDir.dot(direction);
-                        if (std::fabs(dot) <= 1e-6F)
-                        {
-                            return std::nullopt;
-                        }
-
-                        return dot < 0.0F;
-                    };
-
-                    bool shouldFlip = false;
-                    bool usedGradientDecision = false;
-
-                    if (auto const sdfDecision = decideBySdf())
-                    {
-                        shouldFlip = sdfDecision.value();
-                    }
-                    else if (auto const normalDecision = decideByVertexNormals())
-                    {
-                        shouldFlip = normalDecision.value();
-                    }
-                    else if (auto const gradientDecision = decideByGradient())
-                    {
-                        shouldFlip = gradientDecision.value();
-                        usedGradientDecision = true;
+                        emitTriangle(polygon[0], polygon[1], polygon[2]);
                     }
                     else
                     {
-                        ++diagnostics.trianglesDefaultOrientation;
+                        emitTriangle(polygon[0], polygon[1], polygon[2]);
+                        emitTriangle(polygon[0], polygon[2], polygon[3]);
                     }
-
-                    if (usedGradientDecision)
-                    {
-                        ++diagnostics.trianglesOrientedByGradients;
-                    }
-
-                    if (shouldFlip)
-                    {
-                        outIndices.push_back(a);
-                        outIndices.push_back(c);
-                        outIndices.push_back(b);
-                    }
-                    else
-                    {
-                        outIndices.push_back(a);
-                        outIndices.push_back(b);
-                        outIndices.push_back(c);
-                    }
-
-                    ++diagnostics.trianglesEmitted;
-                };
-
-                if (polygon.size() == 3)
-                {
-                    emitTriangle(polygon[0], polygon[1], polygon[2]);
-                }
-                else
-                {
-                    emitTriangle(polygon[0], polygon[1], polygon[2]);
-                    emitTriangle(polygon[0], polygon[2], polygon[3]);
                 }
 
+                processedEdges.insert({idx, edge.edgeIdx});
             }
         }
     }
-
 
     std::size_t HierarchicalOctreeBuilder::findLeafAtPoint(Eigen::Vector3f const & point) const
     {
