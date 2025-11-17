@@ -288,6 +288,7 @@ namespace gladius::ui
                                          ShortcutCombo const & defaultShortcut,
                                          ShortcutAction::ActionCallback callback)
     {
+        std::unique_lock lock(m_mutex);
         // Check if action with this ID already exists
         auto it = std::find_if(m_actions.begin(),
                                m_actions.end(),
@@ -318,95 +319,132 @@ namespace gladius::ui
 
     void ShortcutManager::processInput(ShortcutContext activeContext)
     {
-        for (auto const & action : m_actions)
+        std::vector<std::shared_ptr<ShortcutAction>> actionsToExecute;
         {
-            // Only process actions that are in the global context or the active context
-            if (action->getContext() != ShortcutContext::Global &&
-                action->getContext() != activeContext)
+            std::shared_lock lock(m_mutex);
+            for (auto const & action : m_actions)
             {
-                continue;
+                if (!action)
+                {
+                    continue;
+                }
+
+                if (action->getContext() != ShortcutContext::Global &&
+                    action->getContext() != activeContext)
+                {
+                    continue;
+                }
+
+                ShortcutCombo shortcut;
+                if (auto shortcutIt = m_shortcuts.find(action->getId());
+                    shortcutIt != m_shortcuts.end())
+                {
+                    shortcut = shortcutIt->second;
+                }
+                else if (auto defaultIt = m_defaultShortcuts.find(action->getId());
+                         defaultIt != m_defaultShortcuts.end())
+                {
+                    shortcut = defaultIt->second;
+                }
+
+                if (!shortcut.isEmpty() && shortcut.isPressed())
+                {
+                    actionsToExecute.push_back(action);
+                }
             }
+        }
 
-            // Get the shortcut for this action
-            auto shortcut = getShortcut(action->getId());
-
-            // Check if the shortcut is pressed
-            if (!shortcut.isEmpty() && shortcut.isPressed())
+        for (auto const & action : actionsToExecute)
+        {
+            if (action)
             {
-                // Execute the action
                 action->execute();
             }
         }
     }
 
+    std::vector<std::shared_ptr<ShortcutAction>> ShortcutManager::getActions() const
+    {
+        std::shared_lock lock(m_mutex);
+        return m_actions;
+    }
+
     ShortcutCombo ShortcutManager::getShortcut(std::string const & actionId) const
     {
-        if (m_shortcuts.contains(actionId))
+        std::shared_lock lock(m_mutex);
+
+        if (auto it = m_shortcuts.find(actionId); it != m_shortcuts.end())
         {
-            return m_shortcuts.at(actionId);
+            return it->second;
         }
 
-        // If no custom shortcut is set, check if there's a default
-        if (m_defaultShortcuts.contains(actionId))
+        if (auto it = m_defaultShortcuts.find(actionId); it != m_defaultShortcuts.end())
         {
-            return m_defaultShortcuts.at(actionId);
+            return it->second;
         }
 
-        // No shortcut found
         return ShortcutCombo();
     }
 
     bool ShortcutManager::setShortcut(std::string const & actionId, ShortcutCombo const & combo)
     {
-        // Check if action exists
-        auto it =
-          std::find_if(m_actions.begin(),
-                       m_actions.end(),
-                       [&actionId](auto const & action) { return action->getId() == actionId; });
-
-        if (it == m_actions.end())
         {
-            // Action not found
-            return false;
+            std::unique_lock lock(m_mutex);
+            auto it = std::find_if(m_actions.begin(),
+                                   m_actions.end(),
+                                   [&actionId](auto const & action)
+                                   {
+                                       return action->getId() == actionId;
+                                   });
+
+            if (it == m_actions.end())
+            {
+                return false;
+            }
+
+            m_shortcuts[actionId] = combo;
         }
 
-        // Update the shortcut
-        m_shortcuts[actionId] = combo;
-
-        // Save the updated shortcuts
         saveShortcuts();
-
         return true;
     }
 
     bool ShortcutManager::resetShortcutToDefault(std::string const & actionId)
     {
-        // Check if action exists
-        auto it =
-          std::find_if(m_actions.begin(),
-                       m_actions.end(),
-                       [&actionId](auto const & action) { return action->getId() == actionId; });
-
-        if (it == m_actions.end())
         {
-            // Action not found
-            return false;
+            std::unique_lock lock(m_mutex);
+            auto it = std::find_if(m_actions.begin(),
+                                   m_actions.end(),
+                                   [&actionId](auto const & action)
+                                   {
+                                       return action->getId() == actionId;
+                                   });
+
+            if (it == m_actions.end())
+            {
+                return false;
+            }
+
+            auto defaultIt = m_defaultShortcuts.find(actionId);
+            if (defaultIt == m_defaultShortcuts.end())
+            {
+                return false;
+            }
+
+            m_shortcuts[actionId] = defaultIt->second;
         }
 
-        // If there's a default shortcut, restore it
-        if (m_defaultShortcuts.contains(actionId))
-        {
-            m_shortcuts[actionId] = m_defaultShortcuts[actionId];
-            saveShortcuts();
-            return true;
-        }
-
-        return false;
+        saveShortcuts();
+        return true;
     }
 
     void ShortcutManager::resetAllShortcutsToDefault()
     {
-        m_shortcuts = m_defaultShortcuts;
+        {
+            std::unique_lock lock(m_mutex);
+            m_shortcuts = m_defaultShortcuts;
+        }
+
         saveShortcuts();
     }
 
@@ -418,10 +456,14 @@ namespace gladius::ui
             return;
         }
 
-        // Convert shortcuts to strings for storage
-        nlohmann::json shortcutsJson = nlohmann::json::object();
+        std::unordered_map<std::string, ShortcutCombo> shortcutsSnapshot;
+        {
+            std::shared_lock lock(m_mutex);
+            shortcutsSnapshot = m_shortcuts;
+        }
 
-        for (auto const & [id, combo] : m_shortcuts)
+        nlohmann::json shortcutsJson = nlohmann::json::object();
+        for (auto const & [id, combo] : shortcutsSnapshot)
         {
             shortcutsJson[id] = combo.toString();
         }
@@ -439,20 +481,18 @@ namespace gladius::ui
             return;
         }
 
-        // Clear existing shortcuts
-        m_shortcuts.clear();
-
-        // Load from config
-        nlohmann::json shortcutsJson = m_configManager->getValue<nlohmann::json>(
+        auto shortcutsJson = m_configManager->getValue<nlohmann::json>(
           "shortcuts", "mappings", nlohmann::json::object());
 
-        // Parse shortcuts from strings
+        std::unordered_map<std::string, ShortcutCombo> loadedShortcuts;
         for (auto it = shortcutsJson.begin(); it != shortcutsJson.end(); ++it)
         {
-            std::string id = it.key();
-            std::string comboStr = it.value().get<std::string>();
+            loadedShortcuts[it.key()] = ShortcutCombo::fromString(it.value().get<std::string>());
+        }
 
-            m_shortcuts[id] = ShortcutCombo::fromString(comboStr);
+        {
+            std::unique_lock lock(m_mutex);
+            m_shortcuts = std::move(loadedShortcuts);
         }
     }
 

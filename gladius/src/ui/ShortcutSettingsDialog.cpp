@@ -36,6 +36,16 @@ namespace gladius::ui
             return;
         }
 
+        if (!m_shortcutManager)
+        {
+            if (ImGui::Begin("Keyboard Shortcuts", &m_visible, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                ImGui::TextUnformatted("Shortcut manager is not available.");
+            }
+            ImGui::End();
+            return;
+        }
+
         constexpr ImGuiWindowFlags windowFlags = ImGuiWindowFlags_AlwaysAutoResize;
 
         if (!ImGui::Begin("Keyboard Shortcuts", &m_visible, windowFlags))
@@ -150,6 +160,11 @@ namespace gladius::ui
 
     void ShortcutSettingsDialog::renderContextSection(ShortcutContext context)
     {
+        if (!m_shortcutManager)
+        {
+            return;
+        }
+
         // Get actions for this context
         std::vector<std::shared_ptr<ShortcutAction>> contextActions;
         for (auto const & action : m_shortcutManager->getActions())
