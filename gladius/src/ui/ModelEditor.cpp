@@ -41,6 +41,126 @@
 namespace gladius::ui
 {
     using namespace nodes;
+
+    std::vector<ModelEditor::LayoutStrategyDescriptor> ModelEditor::layoutStrategyDescriptors()
+    {
+        using Descriptor = LayoutStrategyDescriptor;
+        using Choice = LayoutStrategyChoice;
+
+        return {Descriptor{Choice::OptimizedLayeredMedian, "OptimizedLayered Median"},
+                Descriptor{Choice::BalancedGridCompact, "BalancedGrid Compact"},
+                Descriptor{Choice::MedianSweepTightY, "MedianSweep TightY"},
+                Descriptor{Choice::LayeredStackClassic, "LayeredStack Classic"},
+                Descriptor{Choice::LayeredRowSweep, "LayeredRow Sweep"},
+                Descriptor{Choice::ForceRefinedHybrid, "ForceRefined Hybrid"}};
+    }
+
+    const char * ModelEditor::layoutStrategyLabel(LayoutStrategyChoice choice)
+    {
+        switch (choice)
+        {
+            case LayoutStrategyChoice::Auto:
+                return "Auto (tournament)";
+            case LayoutStrategyChoice::OptimizedLayeredMedian:
+                return "OptimizedLayered Median";
+            case LayoutStrategyChoice::BalancedGridCompact:
+                return "BalancedGrid Compact";
+            case LayoutStrategyChoice::MedianSweepTightY:
+                return "MedianSweep TightY";
+            case LayoutStrategyChoice::LayeredStackClassic:
+                return "LayeredStack Classic";
+            case LayoutStrategyChoice::LayeredRowSweep:
+                return "LayeredRow Sweep";
+            case LayoutStrategyChoice::ForceRefinedHybrid:
+                return "ForceRefined Hybrid";
+        }
+
+        return "Unknown";
+    }
+
+    NodeLayoutEngine::LayoutStrategy
+    ModelEditor::makeLayoutStrategy(LayoutStrategyChoice choice)
+    {
+        switch (choice)
+        {
+            case LayoutStrategyChoice::OptimizedLayeredMedian:
+            {
+                return NodeLayoutEngine::LayoutStrategy{"OptimizedLayered Median",
+                                                        NodeLayoutEngine::GroupLayoutMode::VerticalStack,
+                                                        0.95F,  // nodeDistanceScale
+                                                        1.05F,  // layerSpacingScale
+                                                        180,    // maxOptimizationIterations
+                                                        0.8F,   // convergenceScale
+                                                        true,   // enableExtraRelaxation
+                                                        2,      // extraRelaxationPasses
+                                                        true,   // enableGroupCompaction
+                                                        true};  // alignToOrigin
+            }
+            case LayoutStrategyChoice::BalancedGridCompact:
+            {
+                return NodeLayoutEngine::LayoutStrategy{"BalancedGrid Compact",
+                                                        NodeLayoutEngine::GroupLayoutMode::BalancedGrid,
+                                                        1.0F,   // nodeDistanceScale
+                                                        0.95F,  // layerSpacingScale
+                                                        140,    // maxOptimizationIterations
+                                                        0.85F,  // convergenceScale
+                                                        true,   // enableExtraRelaxation
+                                                        2,      // extraRelaxationPasses
+                                                        true,   // enableGroupCompaction
+                                                        true};  // alignToOrigin
+            }
+            case LayoutStrategyChoice::MedianSweepTightY:
+            {
+                return NodeLayoutEngine::LayoutStrategy{"MedianSweep TightY",
+                                                        NodeLayoutEngine::GroupLayoutMode::VerticalStack,
+                                                        1.0F,   // nodeDistanceScale
+                                                        1.0F,   // layerSpacingScale
+                                                        140,    // maxOptimizationIterations
+                                                        0.8F,   // convergenceScale
+                                                        true,   // enableExtraRelaxation
+                                                        3,      // extraRelaxationPasses
+                                                        true,   // enableGroupCompaction
+                                                        true};  // alignToOrigin
+            }
+            case LayoutStrategyChoice::LayeredStackClassic:
+            {
+                NodeLayoutEngine::LayoutStrategy strategy{};
+                strategy.name = "LayeredStack Classic";
+                return strategy;
+            }
+            case LayoutStrategyChoice::LayeredRowSweep:
+            {
+                return NodeLayoutEngine::LayoutStrategy{"LayeredRow Sweep",
+                                                        NodeLayoutEngine::GroupLayoutMode::HorizontalRow,
+                                                        1.0F,   // nodeDistanceScale
+                                                        1.1F,   // layerSpacingScale
+                                                        120,    // maxOptimizationIterations
+                                                        0.9F,   // convergenceScale
+                                                        true,   // enableExtraRelaxation
+                                                        1,      // extraRelaxationPasses
+                                                        true,   // enableGroupCompaction
+                                                        true};  // alignToOrigin
+            }
+            case LayoutStrategyChoice::ForceRefinedHybrid:
+            {
+                return NodeLayoutEngine::LayoutStrategy{"ForceRefined Hybrid",
+                                                        NodeLayoutEngine::GroupLayoutMode::VerticalStack,
+                                                        1.0F,   // nodeDistanceScale
+                                                        1.05F,  // layerSpacingScale
+                                                        160,    // maxOptimizationIterations
+                                                        0.7F,   // convergenceScale
+                                                        true,   // enableExtraRelaxation
+                                                        3,      // extraRelaxationPasses
+                                                        true,   // enableGroupCompaction
+                                                        true};  // alignToOrigin
+            }
+            case LayoutStrategyChoice::Auto:
+                break;
+        }
+
+        return NodeLayoutEngine::LayoutStrategy{"Unknown"};
+    }
+
     ModelEditor::ModelEditor()
     {
         m_editorContext = ed::CreateEditor();
@@ -908,6 +1028,52 @@ namespace gladius::ui
                             }
                         }
                     }
+
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted("Layout:");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+                    auto const * currentLayoutLabel = layoutStrategyLabel(m_selectedLayoutStrategy);
+                    if (ImGui::BeginCombo("##LayoutStrategySelector", currentLayoutLabel))
+                    {
+                        bool const isAutoSelected =
+                          m_selectedLayoutStrategy == LayoutStrategyChoice::Auto;
+                        if (ImGui::Selectable(layoutStrategyLabel(LayoutStrategyChoice::Auto),
+                                              isAutoSelected))
+                        {
+                            m_selectedLayoutStrategy = LayoutStrategyChoice::Auto;
+                        }
+                        if (isAutoSelected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+
+                        for (auto const & descriptor : layoutStrategyDescriptors())
+                        {
+                            bool const isSelected =
+                              m_selectedLayoutStrategy == descriptor.choice;
+                            if (ImGui::Selectable(descriptor.displayName, isSelected))
+                            {
+                                m_selectedLayoutStrategy = descriptor.choice;
+                            }
+                            if (isSelected)
+                            {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted("Choose the auto layout algorithm.");
+                        ImGui::Separator();
+                        ImGui::TextUnformatted(
+                          "Auto runs the tournament and applies the winning strategy.");
+                        ImGui::EndTooltip();
+                    }
+
+                    ImGui::SameLine();
 
                     if (ImGui::MenuItem("Autolayout"))
                     {
@@ -1845,8 +2011,59 @@ namespace gladius::ui
         gladius::ui::NodeLayoutEngine layoutEngine;
         gladius::ui::NodeLayoutEngine::LayoutConfig config;
         config.nodeDistance = m_nodeDistance;
-        config.layerSpacing = m_nodeDistance * 1.5f;
+        // Use a proportional layer spacing; strategies can scale further.
+        config.layerSpacing = std::max(m_nodeDistance * 2.0f, m_nodeDistance);
         config.groupPadding = m_nodeDistance * 0.5f;
+
+        layoutEngine.setNodeSizeProvider([](nodes::NodeId nodeId) {
+            auto constexpr fallback = ImVec2(500.0F, 400.0F);
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return fallback;
+            }
+
+            auto size = ed::GetNodeSize(nodeId);
+            if (size.x <= 0.0f || size.y <= 0.0f)
+            {
+                return fallback;
+            }
+
+            return size;
+        });
+
+        layoutEngine.setNodePositionWriter([](nodes::NodeId nodeId, ImVec2 const & position) {
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return;
+            }
+
+            ed::SetNodePosition(nodeId, position);
+        });
+
+        std::vector<NodeLayoutEngine::LayoutStrategy> strategies;
+
+        if (m_selectedLayoutStrategy == LayoutStrategyChoice::Auto)
+        {
+            auto const descriptors = layoutStrategyDescriptors();
+            strategies.reserve(descriptors.size());
+            for (auto const & descriptor : descriptors)
+            {
+                strategies.emplace_back(makeLayoutStrategy(descriptor.choice));
+            }
+        }
+        else
+        {
+            strategies.emplace_back(makeLayoutStrategy(m_selectedLayoutStrategy));
+        }
+
+        if (strategies.empty())
+        {
+            return;
+        }
+
+        layoutEngine.setStrategies(std::move(strategies));
 
         layoutEngine.performAutoLayout(*currentModel(), config);
 

@@ -10,14 +10,17 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <iostream>
 
 #include <fmt/core.h>
+#include <fmt/format.h>
 #include <lodepng.h>
 
 #include "CliReader.h"
 #include "ComputeCore.h"
 #include "Contour.h"
 #include "Mesh.h"
+#include "ParameterSignature.h"
 #include "Profiling.h"
 #include "RenderProgram.h"
 #include "ResourceContext.h"
@@ -260,9 +263,19 @@ namespace gladius
         }
 
         paramBuf.write();
-        invalidatePreCompSdf();
+        invalidatePreCompSdf("updateParameterBlocking");
         LOG_LOCATION
         return true;
+    }
+
+    bool ComputeCore::isParameterSignatureCompatible(nodes::Assembly const & assembly) const
+    {
+        return m_programs.isParameterSignatureCompatible(assembly);
+    }
+
+    ParameterSignature const & ComputeCore::getCompiledParameterSignature() const
+    {
+        return m_programs.getCompiledParameterSignature();
     }
 
     void ComputeCore::setPreCompSdfSize(size_t size)
@@ -327,9 +340,9 @@ namespace gladius
     {
         ProfileFunction auto constexpr padding = 10.f;
         cl_float4 const newClippingArea{m_boundingBox->min.x - padding,
-                                         m_boundingBox->min.y - padding,
-                                         m_boundingBox->max.x + padding,
-                                         m_boundingBox->max.y + padding};
+                                        m_boundingBox->min.y - padding,
+                                        m_boundingBox->max.x + padding,
+                                        m_boundingBox->max.y + padding};
 
         if (isValidClippingArea(newClippingArea))
         {
@@ -496,7 +509,7 @@ namespace gladius
         {
             m_boundingBox = BoundingBox{{0.f, 0.f, 0.f}, {400.f, 400.f, 400.f}};
         }
-        LOG_LOCATION
+        LOG_LOCATION;
         return true;
     }
 
@@ -507,7 +520,13 @@ namespace gladius
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
         m_programs.recompileIfRequired();
-        LOG_LOCATION
+        LOG_LOCATION;
+    }
+
+    bool ComputeCore::isCompilationInProgress() const
+    {
+        return m_programs.getRenderProgram()->isCompilationInProgress() ||
+               m_programs.getSlicerProgram()->isCompilationInProgress();
     }
 
     void ComputeCore::recompileBlockingNoLock()
@@ -690,9 +709,7 @@ namespace gladius
 
     bool ComputeCore::updateBBox()
     {
-        ProfileFunction
-
-          return updateBoundingBoxFast();
+        return updateBoundingBoxFast();
     }
 
     void ComputeCore::updateBBoxOrThrow()
@@ -723,7 +740,7 @@ namespace gladius
         }
 
         m_boundingBox.reset();
-        invalidatePreCompSdf();
+        invalidatePreCompSdf("refreshProgram");
         if (m_codeGenerator == CodeGenerator::CommandStream)
         {
             std::stringstream modelKernel;
@@ -756,6 +773,14 @@ namespace gladius
 
             m_programs.setModelSource(optimizedKernel.str());
         }
+
+        // Capture parameter signature after code generation for fast-path validation
+        if (assembly)
+        {
+            auto const signature = ParameterSignature::compute(*assembly);
+            m_programs.setCompiledParameterSignature(signature);
+            logMsg(fmt::format("Captured parameter signature: {}", signature.toString()));
+        }
     }
 
     void ComputeCore::tryRefreshProgramProtected(nodes::SharedAssembly assembly)
@@ -765,11 +790,20 @@ namespace gladius
     }
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
+        if (!m_meshResourceState)
+        {
+            return false;
+        }
         if (!m_meshResourceState->isModelUpToDate())
         {
             return false;
         }
-        return (!getBestRenderProgram()->isCompilationInProgress());
+        auto renderProgram = getBestRenderProgram();
+        if (!renderProgram)
+        {
+            return false;
+        }
+        return (!renderProgram->isCompilationInProgress());
     }
 
     void ComputeCore::compileSlicerProgramBlocking()
@@ -803,6 +837,11 @@ namespace gladius
             throw std::runtime_error("logger is missing");
         }
         return *m_eventLogger;
+    }
+
+    std::string ComputeCore::getProgramStateSummary() const
+    {
+        return m_programs.getDebugStateSummary();
     }
 
     cl_int2 ComputeCore::determineBufferSize(float2 pixelSize_mm) const
@@ -845,25 +884,33 @@ namespace gladius
     {
         ProfileFunction
 
-          if (!m_programs.getSlicerState().isModelUpToDate())
+                    logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: begin");
+
+        if (!m_programs.getSlicerState().isModelUpToDate())
         {
             recompileIfRequired();
+                        logMsg(fmt::format(
+                            "ComputeCore::precomputeSdfForWholeBuildPlatform: post-recompile state {}",
+                            m_programs.getDebugStateSummary()));
             return false;
         }
 
         if (!m_programs.getSlicerProgram()->isValid())
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: slicer program invalid");
             return false;
         }
 
         if (m_precompSdfIsValid)
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: SDF already valid");
             return true;
         }
         updateBBox();
 
         if (!m_boundingBox.has_value())
         {
+                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: no bounding box available");
             return false;
         }
 
@@ -884,6 +931,7 @@ namespace gladius
         m_resources->setPreCompSdfBBox(prevCompSdfBBox);
         m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, prevCompSdfBBox);
         m_precompSdfIsValid = true;
+        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: completed successfully");
         return true;
     }
 
@@ -897,6 +945,114 @@ namespace gladius
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(boundingBox);
         m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, boundingBox);
+    }
+
+    cl::Event ComputeCore::precomputeSdfAsync(cl::CommandQueue const & queue)
+    {
+        ProfileFunction;
+
+        // No mutex lock for async operation - caller must ensure thread safety
+        // Validate preconditions
+        if (!m_programs.getSlicerState().isModelUpToDate())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: model not up to date, requesting recompilation");
+            recompileIfRequired();
+
+            if (!m_programs.getSlicerState().isModelUpToDate())
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after recompilation");
+                return cl::Event{};
+            }
+            else
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: model marked up to date after recompilation");
+            }
+        }
+
+        if (!m_programs.getSlicerProgram()->isValid())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: slicer program invalid, requesting recompilation");
+            recompileIfRequired();
+
+            if (!m_programs.getSlicerProgram()->isValid())
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: slicer program remained invalid");
+                return cl::Event{};
+            }
+            else
+            {
+                logMsg("ComputeCore::precomputeSdfAsync: slicer program became valid after recompilation");
+            }
+        }
+
+        if (m_precompSdfIsValid)
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: SDF already valid, skipping");
+            return cl::Event{};
+        }
+
+        // Update bounding box (fast operation, synchronous)
+        if (!updateBBox())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: updateBBox failed");
+            return cl::Event{};
+        }
+
+        if (!m_boundingBox.has_value())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: no bounding box available, skipping");
+            return cl::Event{};
+        }
+
+        auto const & bbox = m_boundingBox.value();
+        logMsg(fmt::format(
+          "ComputeCore::precomputeSdfAsync: using bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f})",
+          bbox.min.x,
+          bbox.min.y,
+          bbox.min.z,
+          bbox.max.x,
+          bbox.max.y,
+          bbox.max.z));
+
+        // Expand bounding box with margin
+        auto const margin = 10.f;
+        auto sdfBBox = m_boundingBox.value();
+        sdfBBox.min.x -= margin;
+        sdfBBox.min.y -= margin;
+        sdfBBox.min.z -= margin;
+        sdfBBox.max.x += margin;
+        sdfBBox.max.y += margin;
+        sdfBBox.max.z += margin;
+
+        // Allocate SDF buffer
+        m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
+        m_resources->setPreCompSdfBBox(sdfBBox);
+
+                logMsg(fmt::format(
+                    "ComputeCore::precomputeSdfAsync: launching kernel with bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f}) size={}",
+                    sdfBBox.min.x,
+                    sdfBBox.min.y,
+                    sdfBBox.min.z,
+                    sdfBBox.max.x,
+                    sdfBBox.max.y,
+                    sdfBBox.max.z,
+                    m_preCompSdfSize));
+
+        // Launch async SDF kernel
+        cl::Event sdfEvent =
+          m_programs.getSlicerProgram()->precomputeSdfAsync(*m_primitives, sdfBBox, queue);
+
+        if (sdfEvent())
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: SDF kernel enqueued successfully");
+            // Note: m_precompSdfIsValid will be set by caller after event.wait()
+        }
+        else
+        {
+            logMsg("ComputeCore::precomputeSdfAsync: failed to enqueue SDF kernel");
+        }
+
+        return sdfEvent;
     }
 
     bool ComputeCore::prepareImageRendering()
@@ -1228,8 +1384,62 @@ namespace gladius
 
         m_resultImage->invalidateContent();
 
+        // Bind to update GL texture with new rendering
+        m_resultImage->bind();
+        m_resultImage->unbind();
+
         LOG_LOCATION
         return true;
+    }
+
+    bool ComputeCore::renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
+                                             size_t startLine,
+                                             size_t endLine,
+                                             ImageRGBA & targetImage,
+                                             cl::Event * completionEvent)
+    {
+        ProfileFunction
+
+          // This method is designed to be called from worker threads
+          // It does NOT require GL context and does NOT call GL functions
+
+          if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        // Don't call throwIfNoOpenGL() - we don't need GL for pure compute!
+        recompileIfRequired();
+
+        if (getBestRenderProgram()->isCompilationInProgress())
+        {
+            LOG_LOCATION
+            return false;
+        }
+
+        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+
+        // Render directly to the target CL image buffer (no GL involved)
+        cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
+          commandQueue, *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
+
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        if (completionEvent != nullptr)
+        {
+            *completionEvent = renderEvent;
+        }
+
+        if (renderEvent())
+        {
+            commandQueue.flush();
+            LOG_LOCATION
+            return true;
+        }
+
+        LOG_LOCATION
+        return false;
     }
 
     void ComputeCore::renderLowResPreview() const
@@ -1247,7 +1457,7 @@ namespace gladius
 
         if (!m_precompSdfIsValid)
         {
-            LOG_LOCATION
+            LOG_LOCATION;
             return;
         }
 
@@ -1262,12 +1472,27 @@ namespace gladius
         getBestRenderProgram()->resample(
           *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
         m_resultImage->invalidateContent();
-        LOG_LOCATION
+
+        // Ensure GL texture is updated (especially important for readpixel mode)
+        m_resultImage->bind();
+        m_resultImage->unbind();
     }
 
-    void ComputeCore::invalidatePreCompSdf()
+    void ComputeCore::invalidatePreCompSdf(std::string_view reason)
     {
+        std::string const reasonStr = reason.empty() ? std::string{} : std::string(reason);
+
         m_precompSdfIsValid = false;
+    }
+
+    void ComputeCore::setSdfValid(bool valid)
+    {
+        m_precompSdfIsValid = valid;
+    }
+
+    bool ComputeCore::isSdfValid() const
+    {
+        return m_precompSdfIsValid;
     }
 
     events::SharedLogger ComputeCore::getSharedLogger() const
@@ -1417,9 +1642,13 @@ namespace gladius
     }
     void ComputeCore::applyCamera(ui::OrbitalCamera const & camera)
     {
-        getResourceContext()->setEyePosition(camera.getEyePosition());
-        getResourceContext()->setModelViewPerspectiveMat(
-          camera.computeModelViewPerspectiveMatrix());
+        auto resources = getResourceContext();
+        if (!resources)
+        {
+            return;
+        }
+        resources->setEyePosition(camera.getEyePosition());
+        resources->setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
     }
 
     void ComputeCore::injectSmoothingKernel(std::string const & kernel)

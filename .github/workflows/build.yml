@@ -12,9 +12,15 @@ on:
   workflow_dispatch:
   workflow_call:  # Allow this workflow to be called by other workflows
 
+permissions:
+  packages: write  # Required for vcpkg binary caching with GitHub Packages
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    
+    env:
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite"
 
     strategy:
       # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
@@ -89,6 +95,75 @@ jobs:
       run: ./bootstrap-vcpkg.bat
       working-directory: ${{ github.workspace }}/vcpkg
 
+    - name: Install mono for NuGet (Linux)
+      if: runner.os != 'Windows'
+      run: sudo apt-get install -y mono-complete
+
+    - name: Install buildcache (Linux)
+      if: runner.os != 'Windows'
+      run: |
+        wget https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-linux.tar.gz
+        tar -xzf buildcache-linux.tar.gz
+        sudo cp buildcache/bin/buildcache /usr/local/bin/
+        buildcache --version
+
+    - name: Install buildcache (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/mbitsnbites/buildcache/releases/download/v0.28.1/buildcache-windows.zip" -OutFile "buildcache.zip"
+        Expand-Archive -Path "buildcache.zip" -DestinationPath "buildcache" -Force
+        Copy-Item -Path "buildcache\buildcache\bin\buildcache.exe" -Destination "C:\Windows\System32\buildcache.exe" -Force
+        buildcache --version
+
+    - name: Cache buildcache (Linux)
+      if: runner.os != 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ~/.buildcache
+        key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
+        restore-keys: |
+          buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-
+
+    - name: Cache buildcache (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\buildcache
+        key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
+        restore-keys: |
+          buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-
+
+    - name: Setup NuGet authentication for vcpkg binary caching (Linux)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        mono `${{ github.workspace }}/vcpkg/vcpkg fetch nuget | tail -n 1` \
+          sources add \
+          -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+          -StorePasswordInClearText \
+          -Name GitHubPackages \
+          -UserName "${{ github.repository_owner }}" \
+          -Password "${{ secrets.GITHUB_TOKEN }}"
+        mono `${{ github.workspace }}/vcpkg/vcpkg fetch nuget | tail -n 1` \
+          setapikey "${{ secrets.GITHUB_TOKEN }}" \
+          -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+    - name: Setup NuGet authentication for vcpkg binary caching (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & "$(${{ github.workspace }}/vcpkg/vcpkg fetch nuget)" `
+          sources add `
+          -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" `
+          -StorePasswordInClearText `
+          -Name GitHubPackages `
+          -UserName "${{ github.repository_owner }}" `
+          -Password "${{ secrets.GITHUB_TOKEN }}"
+        & "$(${{ github.workspace }}/vcpkg/vcpkg fetch nuget)" `
+          setapikey "${{ secrets.GITHUB_TOKEN }}" `
+          -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
       id: strings
@@ -104,6 +179,7 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DUSE_CACHE=ON
         -G Ninja
         -S ${{ github.workspace }}/gladius
       env:

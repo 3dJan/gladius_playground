@@ -80,6 +80,10 @@ namespace gladius
 
         [[nodiscard]] const cl::CommandQueue & GetQueue();
 
+        /// @brief Create a new OpenCL command queue for the current context
+        /// @return A new command queue
+        cl::CommandQueue createQueue() const;
+
         [[nodiscard]] bool isValid() const;
 
         [[nodiscard]] const cl::Device & GetDevice() const;
@@ -196,7 +200,6 @@ namespace gladius
         void checkMemoryLayoutConflicts(const std::string & operationName) const;
 
       private:
-        cl::CommandQueue createQueue() const;
         void initContext();
         void queryDeviceMemoryCaps();
         bool tryQueryVendorFreeMem(size_t & freeBytesOut) const; // best-effort

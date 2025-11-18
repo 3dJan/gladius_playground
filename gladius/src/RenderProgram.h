@@ -5,6 +5,12 @@
 #include "ProgramBase.h"
 #include "ResourceContext.h"
 
+namespace cl
+{
+    class CommandQueue;
+    class Event;
+}
+
 namespace gladius
 {
     class RenderProgram : public ProgramBase
@@ -17,6 +23,20 @@ namespace gladius
                          cl_float z_mm,
                          size_t startHeight,
                          size_t endHeight);
+
+  void renderScene(cl::CommandQueue const & queue,
+       const Primitives & lines,
+       ImageRGBA & targetImage,
+       cl_float z_mm,
+       size_t startHeight,
+       size_t endHeight);
+
+  [[nodiscard]] cl::Event renderSceneAsync(cl::CommandQueue const & queue,
+             const Primitives & lines,
+             ImageRGBA & targetImage,
+             cl_float z_mm,
+             size_t startHeight,
+             size_t endHeight);
 
         void resample(ImageRGBA & sourceImage,
                       ImageRGBA & targetImage,

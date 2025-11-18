@@ -9,6 +9,7 @@
 #include <RenderProgram.h>
 #include <ResourceContext.h>
 #include <SlicerProgram.h>
+#include <compute/ParameterSignature.h>
 #include <compute/types.h>
 #include <nodes/BuildParameter.h>
 #include <nodes/Model.h>
@@ -64,6 +65,15 @@ namespace gladius
         ModelState const & getSlicerState();
         ModelState const & getRendererState();
 
+        /// Get the parameter signature from the last successful compilation
+        [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
+
+        /// Set the parameter signature after successful compilation
+        void setCompiledParameterSignature(ParameterSignature signature);
+
+        /// Check if a given assembly's parameter structure matches the compiled signature
+        [[nodiscard]] bool isParameterSignatureCompatible(nodes::Assembly const & assembly) const;
+
       private:
         void compileSlicerProgram();
         void compileRenderProgram();
@@ -97,5 +107,10 @@ namespace gladius
 
         mutable std::mutex m_modelSourceMutex;
         std::string m_modelSource;
+
+        /// Parameter signature from last successful compilation
+        /// Used to detect when fast-path parameter updates are possible
+        mutable std::mutex m_parameterSignatureMutex;
+        ParameterSignature m_compiledParameterSignature;
     };
 }

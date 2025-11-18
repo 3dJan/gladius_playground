@@ -136,6 +136,7 @@ namespace gladius::ui
         void showSaveBeforeFileOperationPopUp();
         void logViewer();
         void renderStatusBar();
+        void renderComputeErrorModal();
 
         void refreshModel();
 

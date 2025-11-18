@@ -300,6 +300,11 @@ namespace gladius::nodes
             return m_value;
         }
 
+        [[nodiscard]] auto Value() const -> T const &
+        {
+            return m_value;
+        }
+
         void setInputFromPort(Port & port) override
         {
             Source newSource;

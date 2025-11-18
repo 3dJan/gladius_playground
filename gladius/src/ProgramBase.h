@@ -36,6 +36,18 @@ namespace gladius
         void setCacheEnabled(bool enabled);
         [[nodiscard]] bool isCacheEnabled() const;
 
+        /**
+         * @brief Get current compilation progress (0.0 = not started/idle, 1.0 = complete).
+         * @return Progress value between 0.0 and 1.0
+         */
+        [[nodiscard]] float getCompilationProgress() const noexcept;
+
+        /**
+         * @brief Check if the last compilation succeeded.
+         * @return true if compilation completed successfully, false if failed or in progress
+         */
+        [[nodiscard]] bool compilationSucceeded() const noexcept;
+
       protected:
         void swapProgramsIfNeeded();
         static void noOp()
@@ -57,5 +69,9 @@ namespace gladius
         FileNames m_sourceFiles;
 
         events::SharedLogger m_logger{};
+
+        // Compilation progress tracking
+        std::atomic<float> m_compilationProgress{0.0f};  // 0.0 = idle, 1.0 = complete
+        std::atomic<bool> m_compilationSucceeded{false};
     };
 }
