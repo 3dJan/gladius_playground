@@ -1603,7 +1603,7 @@ namespace gladius::nodes
               RuleType::Default,
               InputTypeMap{{FieldNames::A, ParameterTypeIndex::Float3},
                            {FieldNames::B, ParameterTypeIndex::Float3}},
-              OutputTypeMap{{FieldNames::Vector, ParameterTypeIndex::Float3}}};
+              OutputTypeMap{{FieldNames::Result, ParameterTypeIndex::Float3}}};
 
             m_typeRules = {vectorToVector};
             applyTypeRule(m_typeRules.front());
