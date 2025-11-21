@@ -2,6 +2,7 @@
 #include "BaseExportDialog.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
+#include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 
@@ -35,6 +36,7 @@ namespace gladius::ui
         vdb::MeshExporter m_layeredExporter;
         io::DualContouringStlExporter m_dualExporter;
         io::HierarchicalDualContouringStlExporter m_hierarchicalExporter;
+        io::ManifoldDualContouringStlExporter m_manifoldExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
         io::SurfaceExtractionMethod m_selectedMethod =
@@ -49,6 +51,13 @@ namespace gladius::ui
         bool m_hierarchicalProjectToSurface = true;
         bool m_hierarchicalEnableCoarsening = false;
         float m_hierarchicalMinFeatureSize = 0.0F;
+        io::ManifoldDualContouringQuality m_manifoldQualityPreset =
+          io::ManifoldDualContouringQuality::Balanced;
+        bool m_manifoldEnableGpu = true;
+        bool m_manifoldAllowCpuFallback = true;
+        bool m_manifoldEnableCaching = true;
+        float m_manifoldIsoValue = 0.0F;
+        std::size_t m_manifoldMaxDepth = 7U;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };

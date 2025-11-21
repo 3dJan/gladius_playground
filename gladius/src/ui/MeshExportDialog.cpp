@@ -11,10 +11,11 @@ namespace gladius::ui
 {
     namespace
     {
-                constexpr std::array<char const *, 3> METHOD_LABELS{
+                constexpr std::array<char const *, 4> METHOD_LABELS{
                     "Layered marching cubes (OpenVDB)",
                     "Dual contouring (octree)",
-                    "Hierarchical dual contouring (adaptive)"};
+                    "Hierarchical dual contouring (adaptive)",
+                    "Manifold dual contouring (GPU beta)"};
 
         constexpr std::array<char const *, 4> QUALITY_LABELS{
           "Draft (fast)",
@@ -29,6 +30,13 @@ namespace gladius::ui
           "Ultra Fine"};
 
                 constexpr std::array<char const *, 5> HIERARCHICAL_QUALITY_LABELS{
+                    "Draft",
+                    "Balanced",
+                    "Fine",
+                    "Ultra Fine",
+                    "Custom"};
+
+                constexpr std::array<char const *, 5> MANIFOLD_QUALITY_LABELS{
                     "Draft",
                     "Balanced",
                     "Fine",
@@ -79,6 +87,8 @@ namespace gladius::ui
             return "Exporting STL using dual contouring";
         case io::SurfaceExtractionMethod::HierarchicalDualContouring:
             return "Exporting STL using hierarchical dual contouring";
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+            return "Exporting STL using manifold dual contouring";
         default:
             return "Exporting STL";
         }
@@ -107,6 +117,10 @@ namespace gladius::ui
         {
             m_hierarchicalExporter.finalize();
         }
+        else if (m_activeExporter == &m_manifoldExporter)
+        {
+            m_manifoldExporter.finalize();
+        }
         else
         {
             BaseExportDialog::finalizeExport();
@@ -129,6 +143,10 @@ namespace gladius::ui
         else if (m_activeExporter == &m_hierarchicalExporter)
         {
             m_hierarchicalExporter.finalize();
+        }
+        else if (m_activeExporter == &m_manifoldExporter)
+        {
+            m_manifoldExporter.finalize();
         }
         resetState();
     }
@@ -311,6 +329,51 @@ namespace gladius::ui
                   "Hierarchical dual contouring incrementally refines an adaptive octree. "
                   "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
             }
+            else if (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring)
+            {
+                int qualityIndex = static_cast<int>(m_manifoldQualityPreset);
+                qualityIndex = std::clamp(
+                  qualityIndex, 0, static_cast<int>(MANIFOLD_QUALITY_LABELS.size()) - 1);
+                if (ImGui::BeginCombo("Quality",
+                                       MANIFOLD_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+                {
+                    for (int i = 0; i < static_cast<int>(MANIFOLD_QUALITY_LABELS.size()); ++i)
+                    {
+                        bool const selected = (i == qualityIndex);
+                        if (ImGui::Selectable(MANIFOLD_QUALITY_LABELS[static_cast<std::size_t>(i)],
+                                              selected))
+                        {
+                            qualityIndex = i;
+                            m_manifoldQualityPreset =
+                              static_cast<io::ManifoldDualContouringQuality>(i);
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::Checkbox("Enable GPU acceleration", &m_manifoldEnableGpu);
+                ImGui::Checkbox("Allow CPU fallback", &m_manifoldAllowCpuFallback);
+                ImGui::Checkbox("Enable Morton caching", &m_manifoldEnableCaching);
+
+                ImGui::InputFloat("ISO value", &m_manifoldIsoValue, 0.01F, 0.1F, "%.4f");
+
+                int depthInput = static_cast<int>(m_manifoldMaxDepth);
+                if (ImGui::InputInt("Maximum depth", &depthInput))
+                {
+                    depthInput = std::max(depthInput, 1);
+                    m_manifoldMaxDepth = static_cast<std::size_t>(depthInput);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("higher values capture more detail");
+
+                ImGui::TextWrapped(
+                  "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
+                  "while the kernels are under active development.");
+            }
 
             if (!m_errorMessage.empty())
             {
@@ -400,6 +463,29 @@ namespace gladius::ui
             m_hierarchicalExporter.setOptions(options);
             m_hierarchicalExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_hierarchicalExporter;
+            break;
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            io::ManifoldDualContouringOptions options{};
+            options.qualityPreset = m_manifoldQualityPreset;
+            options.applyPreset();
+            options.enableGpu = m_manifoldEnableGpu;
+            options.enableCpuFallback = m_manifoldAllowCpuFallback;
+            options.enableCaching = m_manifoldEnableCaching;
+            options.isoValue = m_manifoldIsoValue;
+            if (m_manifoldMaxDepth > 0U)
+            {
+                options.maxDepth = m_manifoldMaxDepth;
+                if (options.initialDepth > options.maxDepth)
+                {
+                    options.initialDepth = options.maxDepth;
+                }
+            }
+
+            m_manifoldExporter.setOptions(options);
+            m_manifoldExporter.beginExport(m_targetFile, core);
+            m_activeExporter = &m_manifoldExporter;
             break;
         }
         default:
