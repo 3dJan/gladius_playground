@@ -11,7 +11,8 @@ namespace gladius::io
     {
         LayeredMarchingCubes,
         DualContouring,
-        HierarchicalDualContouring
+        HierarchicalDualContouring,
+        ManifoldDualContouring
     };
 
     /// Quality presets for dual contouring mesh generation
@@ -52,11 +53,35 @@ namespace gladius::io
         void applyPreset();
     };
 
+    enum class ManifoldDualContouringQuality
+    {
+        Draft,
+        Balanced,
+        Fine,
+        UltraFine,
+        Custom
+    };
+
+    struct ManifoldDualContouringOptions
+    {
+        ManifoldDualContouringQuality qualityPreset{
+          ManifoldDualContouringQuality::Balanced};
+        std::size_t initialDepth{5U};
+        std::size_t maxDepth{7U};
+        bool enableGpu{true};
+        bool enableCpuFallback{true};
+        bool enableCaching{true};
+        float isoValue{0.0F};
+
+        void applyPreset();
+    };
+
     struct StlExportOptions
     {
         SurfaceExtractionMethod method{SurfaceExtractionMethod::LayeredMarchingCubes};
         std::size_t marchingCubesQualityLevel{1U};
         DualContouringOptions dualContouring{};
         HierarchicalDualContouringOptions hierarchicalDualContouring{};
+        ManifoldDualContouringOptions manifoldDualContouring{};
     };
 }

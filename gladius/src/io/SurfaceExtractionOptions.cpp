@@ -43,4 +43,38 @@ namespace gladius::io
     {
         hierarchical_dc::applyQualityPreset(config, qualityPreset);
     }
+
+    void ManifoldDualContouringOptions::applyPreset()
+    {
+        switch (qualityPreset)
+        {
+        case ManifoldDualContouringQuality::Draft:
+            initialDepth = 4U;
+            maxDepth = 6U;
+            enableCaching = false;
+            break;
+        case ManifoldDualContouringQuality::Balanced:
+            initialDepth = 5U;
+            maxDepth = 7U;
+            enableCaching = true;
+            break;
+        case ManifoldDualContouringQuality::Fine:
+            initialDepth = 6U;
+            maxDepth = 8U;
+            enableCaching = true;
+            break;
+        case ManifoldDualContouringQuality::UltraFine:
+            initialDepth = 7U;
+            maxDepth = 9U;
+            enableCaching = true;
+            break;
+        case ManifoldDualContouringQuality::Custom:
+            break;
+        }
+
+        if (initialDepth > maxDepth)
+        {
+            initialDepth = maxDepth;
+        }
+    }
 }
