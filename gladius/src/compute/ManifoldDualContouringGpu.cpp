@@ -1,12 +1,42 @@
 #include "ManifoldDualContouringGpu.h"
+
 #include <iostream>
 
 namespace gladius::compute
 {
-    ManifoldDualContouringGpu::ManifoldDualContouringGpu(ComputeCore& core)
+    namespace
+    {
+        struct GpuVertex
+        {
+            cl_float4 position;
+            cl_float4 normal;
+        };
+
+        struct OctreeNode
+        {
+            cl_ulong mortonCode;
+            cl_uint edgeMask;
+            cl_uint internalMask;
+            cl_uint vertexStartIndex;
+            cl_uchar vertexCount;
+            cl_uchar padding[3];
+        };
+        static_assert(sizeof(OctreeNode) == 24, "OctreeNode size mismatch");
+    }
+
+    ManifoldDualContouringGpu::ManifoldDualContouringGpu(ComputeCore & core)
         : m_core(core)
     {
         loadKernels();
+    }
+
+    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig config)
+    {
+        if (config.initialDepth > config.maxDepth)
+        {
+            config.initialDepth = config.maxDepth;
+        }
+        m_config = config;
     }
 
     void ManifoldDualContouringGpu::loadKernels()
@@ -16,7 +46,7 @@ namespace gladius::compute
         
         // Assuming the file is in the resource path or current directory
         // The build system should ensure this file is available to the runtime
-        std::vector<std::string> sources = {"kernel/manifold_dual_contouring.cl"};
+        std::vector<std::string> sources = {"manifold_dual_contouring.cl"};
         
         BuildCallBack callback = []() {
             // Compilation finished
@@ -32,7 +62,13 @@ namespace gladius::compute
 
     void ManifoldDualContouringGpu::generateMesh()
     {
-        if (!m_program || !m_program->isValid()) {
+        m_mesh.positions.clear();
+        m_mesh.normals.clear();
+        m_mesh.indices.clear();
+        m_lastVertexCount = 0U;
+
+        if (!m_program || !m_program->isValid())
+        {
             std::cerr << "Program not valid, cannot generate mesh" << std::endl;
             return;
         }
@@ -48,21 +84,12 @@ namespace gladius::compute
         // In a real implementation, this would be a compute kernel that builds the octree
         // from the SDF.
         
-        struct OctreeNode
-        {
-            cl_ulong mortonCode;
-            cl_uint edgeMask;
-            cl_uint internalMask;
-            cl_uint vertexStartIndex;
-            cl_uchar vertexCount;
-            cl_uchar padding[3];
-        };
-        static_assert(sizeof(OctreeNode) == 24, "OctreeNode size mismatch");
-
         auto context = m_core.getComputeContext();
         size_t numNodes = 1000; // Example size
         size_t nodeSize = sizeof(OctreeNode); 
         
+        std::cout << "Constructing Octree. Node size: " << nodeSize << ", Num nodes: " << numNodes << std::endl;
+
         m_octreeBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * nodeSize);
         
         // Initialize with zeros or test data if needed
@@ -84,8 +111,8 @@ namespace gladius::compute
         cl::NDRange local(64); 
         
         try {
-            m_program->run(queue, "count_vertices", cl::NullRange, global, local, 
-                *m_octreeBuffer, *m_countBuffer, (int)numNodes);
+            m_program->run(queue, "count_vertices", cl::NullRange, global, 
+                *m_octreeBuffer, *m_countBuffer);
         } catch (std::exception& e) {
             std::cerr << "Error running count_vertices: " << e.what() << std::endl;
             return;
@@ -113,6 +140,8 @@ namespace gladius::compute
         if (totalVertices == 0) {
             return;
         }
+
+        m_lastVertexCount = static_cast<std::size_t>(totalVertices);
         
         m_offsetBuffer = context->createBufferChecked(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
             numNodes * sizeof(int), offsets.data());
@@ -122,10 +151,43 @@ namespace gladius::compute
         m_vertexBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, totalVertices * 32); 
         
         try {
-            m_program->run(queue, "emit_vertices", cl::NullRange, global, local,
+            m_program->run(queue, "emit_vertices", cl::NullRange, global,
                 *m_octreeBuffer, *m_offsetBuffer, *m_vertexBuffer, (int)numNodes);
-        } catch (std::exception& e) {
+            std::vector<GpuVertex> hostVertices(static_cast<std::size_t>(totalVertices));
+            queue.enqueueReadBuffer(*m_vertexBuffer,
+                                    CL_TRUE,
+                                    0,
+                                    hostVertices.size() * sizeof(GpuVertex),
+                                    hostVertices.data());
+
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.positions.reserve(hostVertices.size());
+            m_mesh.normals.reserve(hostVertices.size());
+
+            for (auto const & vertex : hostVertices)
+            {
+                m_mesh.positions.emplace_back(vertex.position.s[0],
+                                              vertex.position.s[1],
+                                              vertex.position.s[2]);
+                Eigen::Vector3f normal(vertex.normal.s[0], vertex.normal.s[1], vertex.normal.s[2]);
+                if (normal.squaredNorm() > 1e-12F)
+                {
+                    normal.normalize();
+                }
+                else
+                {
+                    normal = Eigen::Vector3f{0.0F, 1.0F, 0.0F};
+                }
+                m_mesh.normals.emplace_back(normal);
+            }
+        }
+        catch (std::exception const & e)
+        {
             std::cerr << "Error running emit_vertices: " << e.what() << std::endl;
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_lastVertexCount = 0U;
         }
     }
 
@@ -133,5 +195,6 @@ namespace gladius::compute
     {
         // Placeholder for index generation
         // This would follow a similar pattern: count indices per cell/edge, scan, emit.
+        m_mesh.indices.clear();
     }
 }
