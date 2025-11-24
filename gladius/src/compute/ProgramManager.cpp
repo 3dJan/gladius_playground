@@ -59,6 +59,8 @@ namespace gladius
           std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
         m_hierarchicalDCProgram =
           std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
+        m_manifoldDualContouringProgram =
+          std::make_unique<compute::ManifoldDualContouringProgram>(m_ComputeContext, m_resources);
 
         bool const hasFp64 = m_ComputeContext && m_ComputeContext->supportsFp64();
         bool const isRusticl = m_ComputeContext && m_ComputeContext->getCapabilities().rusticl;
@@ -113,6 +115,7 @@ namespace gladius
             m_optimizedRenderProgram->setLogger(m_eventLogger);
             m_dualContouringSamplingProgram->setLogger(m_eventLogger);
             m_hierarchicalDCProgram->setLogger(m_eventLogger);
+            m_manifoldDualContouringProgram->setLogger(m_eventLogger);
         }
 
         // Set up binary caching
@@ -121,6 +124,7 @@ namespace gladius
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
         m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
         m_hierarchicalDCProgram->setCacheDirectory(cacheDir);
+        m_manifoldDualContouringProgram->setCacheDirectory(cacheDir);
 
         m_optimizedRenderProgram->buildKernelLib();
         recompileIfRequired();
@@ -169,6 +173,11 @@ namespace gladius
                 m_hierarchicalDCProgram->setModelKernel(m_modelSource);
                 m_hierarchicalDCProgram->recompileNonBlocking();
             }
+            if (m_manifoldDualContouringProgram)
+            {
+                m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+                m_manifoldDualContouringProgram->recompileNonBlocking();
+            }
             m_slicerProgram->recompileNonBlocking();
             m_slicerState.signalCompilationStarted();
         }
@@ -192,6 +201,11 @@ namespace gladius
             {
                 m_hierarchicalDCProgram->setModelKernel(m_modelSource);
                 m_hierarchicalDCProgram->recompileNonBlocking();
+            }
+            if (m_manifoldDualContouringProgram)
+            {
+                m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+                m_manifoldDualContouringProgram->recompileNonBlocking();
             }
             m_optimizedRenderProgram->recompileNonBlocking();
             m_renderState.signalCompilationStarted();
@@ -228,6 +242,11 @@ namespace gladius
             m_hierarchicalDCProgram->setModelKernel(m_modelSource);
             m_hierarchicalDCProgram->recompileNonBlocking();
         }
+        if (m_manifoldDualContouringProgram)
+        {
+            m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+            m_manifoldDualContouringProgram->recompileNonBlocking();
+        }
     }
 
     void ProgramManager::recompileBlockingNoLock()
@@ -245,6 +264,11 @@ namespace gladius
         {
             m_hierarchicalDCProgram->setModelKernel(m_modelSource);
             m_hierarchicalDCProgram->recompileBlocking();
+        }
+        if (m_manifoldDualContouringProgram)
+        {
+            m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+            m_manifoldDualContouringProgram->recompileBlocking();
         }
 
         m_optimizedRenderProgram->recompileBlocking();
@@ -394,6 +418,7 @@ namespace gladius
         applyState(m_optimizedRenderProgram);
         applyState(m_dualContouringSamplingProgram);
         applyState(m_hierarchicalDCProgram);
+        applyState(m_manifoldDualContouringProgram);
     }
 
     void ProgramManager::reinitIfNecssary()
@@ -432,6 +457,11 @@ namespace gladius
         return m_hierarchicalDCProgram.get();
     }
 
+    compute::ManifoldDualContouringProgram * ProgramManager::getManifoldDualContouringProgram() const
+    {
+        return m_manifoldDualContouringProgram.get();
+    }
+
     events::SharedLogger ProgramManager::getSharedLogger() const
     {
         return m_eventLogger;
@@ -465,6 +495,12 @@ namespace gladius
     {
         std::lock_guard<std::mutex> lock(m_modelSourceMutex);
         return !m_modelSource.empty();
+    }
+
+    std::string ProgramManager::getModelSource() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_modelSource;
     }
 
     std::string ProgramManager::getDebugStateSummary() const

@@ -2,6 +2,7 @@
 
 #include "BBox.h"
 #include "Buffer.h"
+#include "DualContouringGpuSampling.h"
 #include "DualContouringOctree.h"
 #include "DualContouringQef.h"
 #include "DualContouringSamplingProgram.h"
@@ -355,6 +356,30 @@ namespace gladius::hierarchical_dc
             m_cpuSampler->reset();
         }
 
+        if (m_config.enableGpuAcceleration)
+        {
+            try
+            {
+                dual_contouring::GpuSamplingConfig gpuConfig;
+                gpuConfig.isoValue = m_config.isoValue;
+                gpuConfig.gradientEpsilon = m_config.gradientEpsilon;
+                gpuConfig.cornerBatchSize = m_config.gpuCornerBatchSize;
+                gpuConfig.hermiteBatchSize = m_config.gpuHermiteBatchSize;
+                gpuConfig.enableCaching = m_config.gpuEnableCaching;
+                gpuConfig.fallbackToCpu = m_config.gpuFallbackToCpu;
+                m_gpuSampler = std::make_unique<dual_contouring::GpuSamplingSession>(*m_core, gpuConfig);
+            }
+            catch (std::exception const & ex)
+            {
+                logError("Failed to initialize GPU sampling session: " + std::string(ex.what()));
+                m_gpuSampler.reset();
+            }
+        }
+        else
+        {
+            m_gpuSampler.reset();
+        }
+
         logInfo("Starting hierarchical dual contouring octree construction");
 
         // Phase 1: Build coarse octree (breadth-first, level-by-level)
@@ -385,6 +410,14 @@ namespace gladius::hierarchical_dc
 
         // Release Hermite samples after vertex solving to reduce peak memory.
         releaseHermiteData();
+
+                std::size_t deepestNodeDepth = m_stats.deepestLevel;
+                for (auto const & node : m_nodes)
+                {
+                        deepestNodeDepth =
+                            std::max(deepestNodeDepth, static_cast<std::size_t>(node.depth));
+                }
+                m_stats.deepestLevel = deepestNodeDepth;
 
         auto const endTime = std::chrono::high_resolution_clock::now();
         m_stats.totalConstructionTimeMs =
@@ -472,6 +505,21 @@ namespace gladius::hierarchical_dc
 
         OctreeNode & parent = m_nodes[parentIndex];
         std::array<std::size_t, 8> const children = parent.childIndices;
+
+        std::size_t const childDepth = static_cast<std::size_t>(parent.depth) + 1U;
+        if (m_config.preserveAdaptiveDepthDuringCoarsening)
+        {
+            std::size_t guardDepth = (m_config.initialDepth == std::numeric_limits<std::size_t>::max())
+                                       ? m_config.initialDepth
+                                       : m_config.initialDepth + 1U;
+            guardDepth = std::max<std::size_t>(guardDepth, 1U);
+            guardDepth = std::min<std::size_t>(guardDepth, m_config.maxDepth);
+
+            if (guardDepth > 0U && childDepth >= guardDepth)
+            {
+                return false;
+            }
+        }
 
         for (auto childIdx : children)
         {
@@ -1767,6 +1815,79 @@ namespace gladius::hierarchical_dc
             return true;
         }
 
+        auto const startTime = std::chrono::high_resolution_clock::now();
+
+        auto const attemptSamplingSession = [&]() -> bool
+        {
+            if (!m_gpuSampler)
+            {
+                return false;
+            }
+
+            std::size_t const cornerCount = nodeIndices.size() * 8U;
+            if (cornerCount == 0U)
+            {
+                return true;
+            }
+
+            m_cornerSamplePositions.resize(cornerCount);
+            for (std::size_t nodeIdx = 0U; nodeIdx < nodeIndices.size(); ++nodeIdx)
+            {
+                OctreeNode const & node = m_nodes[nodeIndices[nodeIdx]];
+                for (std::uint8_t corner = 0U; corner < 8U; ++corner)
+                {
+                    m_cornerSamplePositions[nodeIdx * 8U + corner] = cornerPosition(corner, node.bounds);
+                }
+            }
+
+            if (!m_gpuSampler->sampleCorners(m_cornerSamplePositions, m_cornerSampleValues))
+            {
+                return false;
+            }
+
+            if (m_cornerSampleValues.size() != cornerCount)
+            {
+                logError("GpuSamplingSession returned unexpected corner sample count");
+                return false;
+            }
+
+            for (std::size_t nodeIdx = 0U; nodeIdx < nodeIndices.size(); ++nodeIdx)
+            {
+                std::size_t const idx = nodeIndices[nodeIdx];
+                OctreeNode & node = m_nodes[idx];
+                std::uint8_t mask = 0U;
+                std::uint8_t zeroMask = 0U;
+
+                for (std::uint8_t corner = 0U; corner < 8U; ++corner)
+                {
+                    float const value = m_cornerSampleValues[nodeIdx * 8U + corner];
+                    node.cornerValues[corner] = value;
+                    if (value > 0.0F)
+                    {
+                        mask |= static_cast<std::uint8_t>(1U << corner);
+                    }
+                    else if (value == 0.0F)
+                    {
+                        zeroMask |= static_cast<std::uint8_t>(1U << corner);
+                    }
+                }
+
+                node.cornerSignMask = mask;
+                node.cornerZeroMask = zeroMask;
+            }
+
+            m_stats.totalCornerQueries += cornerCount;
+            return true;
+        };
+
+        if (attemptSamplingSession())
+        {
+            auto const endTime = std::chrono::high_resolution_clock::now();
+            m_stats.gpuTimeMs +=
+              std::chrono::duration<double, std::milli>(endTime - startTime).count();
+            return true;
+        }
+
         try
         {
             auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
@@ -1776,7 +1897,6 @@ namespace gladius::hierarchical_dc
                 return false;
             }
 
-            // Prepare bounds arrays
             std::vector<Eigen::Vector3f> boundsMin;
             std::vector<Eigen::Vector3f> boundsMax;
             boundsMin.reserve(nodeIndices.size());
@@ -1818,6 +1938,9 @@ namespace gladius::hierarchical_dc
             }
 
             m_stats.totalCornerQueries += nodeIndices.size() * 8U;
+            auto const endTime = std::chrono::high_resolution_clock::now();
+            m_stats.gpuTimeMs +=
+              std::chrono::duration<double, std::milli>(endTime - startTime).count();
             return true;
         }
         catch (std::exception const & ex)
@@ -1832,6 +1955,126 @@ namespace gladius::hierarchical_dc
     {
         if (leafIndices.empty())
         {
+            return true;
+        }
+
+        auto const startTime = std::chrono::high_resolution_clock::now();
+
+        auto const attemptSamplingSession = [&]() -> bool
+        {
+            if (!m_gpuSampler)
+            {
+                return false;
+            }
+
+            std::size_t const probesPerLeaf = 7U; // center + six axial offsets
+            std::size_t const gradientsToCompute = leafIndices.size() * probesPerLeaf;
+            if (gradientsToCompute == 0U)
+            {
+                return true;
+            }
+
+            std::array<Eigen::Vector3f, 6> const neighborOffsets = {Eigen::Vector3f{1.0F, 0.0F, 0.0F},
+                                                                     Eigen::Vector3f{-1.0F, 0.0F, 0.0F},
+                                                                     Eigen::Vector3f{0.0F, 1.0F, 0.0F},
+                                                                     Eigen::Vector3f{0.0F, -1.0F, 0.0F},
+                                                                     Eigen::Vector3f{0.0F, 0.0F, 1.0F},
+                                                                     Eigen::Vector3f{0.0F, 0.0F, -1.0F}};
+            std::array<Eigen::Vector3f, 3> const axisDirections = {Eigen::Vector3f{1.0F, 0.0F, 0.0F},
+                                                                  Eigen::Vector3f{0.0F, 1.0F, 0.0F},
+                                                                  Eigen::Vector3f{0.0F, 0.0F, 1.0F}};
+
+            float const probeOffset = m_config.gradientEpsilon;
+            float const safeEpsilon = std::max(m_config.gradientEpsilon, 1e-4F);
+            float const denom = 2.0F * safeEpsilon;
+
+            std::size_t const samplesPerGradient = axisDirections.size() * 2U;
+            std::size_t const totalSamples = gradientsToCompute * samplesPerGradient;
+
+            m_curvatureSamplePositions.resize(totalSamples);
+            std::size_t sampleWriteIndex = 0U;
+
+            auto appendSamplesForPosition = [&](Eigen::Vector3f const & position)
+            {
+                for (auto const & axis : axisDirections)
+                {
+                    m_curvatureSamplePositions[sampleWriteIndex++] = position + axis * safeEpsilon;
+                    m_curvatureSamplePositions[sampleWriteIndex++] = position - axis * safeEpsilon;
+                }
+            };
+
+            for (std::size_t leafIdx = 0U; leafIdx < leafIndices.size(); ++leafIdx)
+            {
+                OctreeNode const & node = m_nodes[leafIndices[leafIdx]];
+                Eigen::Vector3f const center = boundingBoxCenter(node.bounds);
+                appendSamplesForPosition(center);
+
+                for (auto const & neighborOffset : neighborOffsets)
+                {
+                    Eigen::Vector3f const neighborPos = center + neighborOffset * probeOffset;
+                    appendSamplesForPosition(neighborPos);
+                }
+            }
+
+            if (!m_gpuSampler->sampleCorners(m_curvatureSamplePositions, m_curvatureSampleValues))
+            {
+                return false;
+            }
+
+            if (m_curvatureSampleValues.size() != totalSamples)
+            {
+                logError("GpuSamplingSession returned unexpected curvature sample count");
+                return false;
+            }
+
+            m_curvatureSampleGradients.resize(gradientsToCompute);
+            std::size_t sampleReadIndex = 0U;
+            std::size_t gradientWriteIndex = 0U;
+
+            auto computeGradientFromSamples = [&]() -> Eigen::Vector3f
+            {
+                float const xp = m_curvatureSampleValues[sampleReadIndex++];
+                float const xn = m_curvatureSampleValues[sampleReadIndex++];
+                float const yp = m_curvatureSampleValues[sampleReadIndex++];
+                float const yn = m_curvatureSampleValues[sampleReadIndex++];
+                float const zp = m_curvatureSampleValues[sampleReadIndex++];
+                float const zn = m_curvatureSampleValues[sampleReadIndex++];
+
+                Eigen::Vector3f gradient;
+                gradient.x() = (xp - xn) / denom;
+                gradient.y() = (yp - yn) / denom;
+                gradient.z() = (zp - zn) / denom;
+                return gradient;
+            };
+
+            for (std::size_t leafIdx = 0U; leafIdx < leafIndices.size(); ++leafIdx)
+            {
+                OctreeNode & node = m_nodes[leafIndices[leafIdx]];
+                Eigen::Vector3f const centerGradient = computeGradientFromSamples();
+                m_curvatureSampleGradients[gradientWriteIndex++] = centerGradient;
+
+                float curvature = 0.0F;
+                std::array<Eigen::Vector3f, neighborOffsets.size()> neighborGradients;
+                for (std::size_t neighborIdx = 0U; neighborIdx < neighborOffsets.size(); ++neighborIdx)
+                {
+                    neighborGradients[neighborIdx] = computeGradientFromSamples();
+                    m_curvatureSampleGradients[gradientWriteIndex++] = neighborGradients[neighborIdx];
+                    Eigen::Vector3f const diff = centerGradient - neighborGradients[neighborIdx];
+                    curvature += diff.squaredNorm();
+                }
+
+                node.curvatureMetric = curvature / static_cast<float>(neighborOffsets.size());
+            }
+
+            m_stats.totalGradientQueries += leafIndices.size() * 42U; // 7 positions × 6 samples
+            return true;
+        };
+
+        if (attemptSamplingSession())
+        {
+            auto const endTime = std::chrono::high_resolution_clock::now();
+            m_stats.gpuTimeMs +=
+              std::chrono::duration<double, std::milli>(endTime - startTime).count();
             return true;
         }
 
@@ -1865,6 +2108,9 @@ namespace gladius::hierarchical_dc
             }
 
             m_stats.totalGradientQueries += leafIndices.size() * 42U; // 7 positions × 6 samples
+            auto const endTime = std::chrono::high_resolution_clock::now();
+            m_stats.gpuTimeMs +=
+              std::chrono::duration<double, std::milli>(endTime - startTime).count();
             return true;
         }
         catch (std::exception const & ex)
@@ -2127,26 +2373,30 @@ namespace gladius::hierarchical_dc
         std::vector<Eigen::Vector3f> gradients;
         bool gpuSampled = false;
 
-        if (m_config.enableGpuAcceleration)
+        if (m_config.enableGpuAcceleration && m_gpuSampler)
         {
-            auto * samplingProgram = m_core->getProgramManager().getDualContouringSamplingProgram();
-            if (samplingProgram != nullptr)
+            auto const gpuStart = std::chrono::high_resolution_clock::now();
+            try
             {
-                try
-                {
-                    samplingProgram->sampleHermite(positions,
-                                                   values,
-                                                   gradients,
-                                                   *primitives,
-                                                   m_config.isoValue,
-                                                   adaptiveEpsilon);
-                    gpuSampled =
-                      values.size() == positions.size() && gradients.size() == positions.size();
-                }
-                catch (std::exception const & ex)
-                {
-                    logError("Hermite sampling failed: " + std::string(ex.what()));
-                }
+                gpuSampled = m_gpuSampler->sampleHermite(positions,
+                                                         values,
+                                                         gradients,
+                                                         adaptiveEpsilon) &&
+                              values.size() == positions.size() &&
+                              gradients.size() == positions.size();
+            }
+            catch (std::exception const & ex)
+            {
+                logError("GpuSamplingSession Hermite sampling failed: " + std::string(ex.what()));
+                gpuSampled = false;
+            }
+
+            if (gpuSampled)
+            {
+                auto const gpuEnd = std::chrono::high_resolution_clock::now();
+                m_stats.gpuTimeMs +=
+                  std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
+                m_stats.totalGradientQueries += positions.size() * 6U;
             }
         }
 
@@ -2185,6 +2435,11 @@ namespace gladius::hierarchical_dc
                     {
                         dcProgram->batchGradients(
                           positions, gradients, *primitives, adaptiveEpsilon);
+                    }
+
+                    if (gradients.size() == positions.size())
+                    {
+                        m_stats.totalGradientQueries += positions.size() * 6U;
                     }
                 }
                 catch (std::exception const & ex)

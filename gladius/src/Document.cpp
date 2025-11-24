@@ -19,6 +19,7 @@
 #include "io/3mf/Writer3mf.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
+#include "io/ManifoldDualContouringStlExporter.h"
 #include "io/ImporterVdb.h"
 #include "io/VdbImporter.h"
 #include "nodes/GraphFlattener.h"
@@ -652,6 +653,33 @@ namespace gladius
                 logger->addEvent({fmt::format(
                                       "Hierarchical dual contouring STL export completed: {}",
                                       filename.string()),
+                                  events::Severity::Info});
+            }
+            break;
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            io::ManifoldDualContouringOptions manifoldOptions =
+              options.manifoldDualContouring;
+            io::ManifoldDualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(manifoldOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core))
+            {
+            }
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(errorText.empty() ?
+                                         "Manifold dual contouring STL export failed" :
+                                         errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent({fmt::format("Manifold dual contouring STL export completed: {}",
+                                              filename.string()),
                                   events::Severity::Info});
             }
             break;

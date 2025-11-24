@@ -236,7 +236,8 @@ namespace gladius::dual_contouring
 
     bool GpuSamplingSession::sampleHermite(std::vector<Eigen::Vector3f> const & positions,
                                            std::vector<float> & outValues,
-                                           std::vector<Eigen::Vector3f> & outGradients)
+                                           std::vector<Eigen::Vector3f> & outGradients,
+                                           float epsilonOverride)
     {
         if (positions.empty())
         {
@@ -252,6 +253,8 @@ namespace gladius::dual_contouring
 
         outValues.resize(positions.size());
         outGradients.resize(positions.size());
+
+        float const epsilon = (epsilonOverride > 0.0F) ? epsilonOverride : m_config.gradientEpsilon;
 
         try
         {
@@ -314,7 +317,7 @@ namespace gladius::dual_contouring
                                   batchGradients,
                                   *m_core->getPrimitives(),
                                   m_config.isoValue,
-                                  m_config.gradientEpsilon);
+                                  epsilon);
 
             // Populate output and cache
             for (std::size_t i = 0U; i < uncachedIndices.size(); ++i)

@@ -4,6 +4,7 @@
 #include "../ComputeContext.h"
 #include "../types.h"
 #include "ComputeCore.h"
+#include "ManifoldDualContouringProgram.h"
 
 #include <Eigen/Core>
 
@@ -15,12 +16,13 @@ namespace gladius::compute
 {
     struct ManifoldDualContouringConfig
     {
-        std::size_t initialDepth{5U};
-        std::size_t maxDepth{7U};
+        std::size_t initialDepth{5U};            ///< Initial octree depth (determines starting cell size: rootSize / 2^initialDepth)
+        std::size_t maxDepth{7U};                ///< Maximum subdivision depth
         bool enableGpu{true};
         bool enableCpuFallback{true};
         bool enableCaching{true};
         float isoValue{0.0F};
+        float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled. Controls subdivision threshold
     };
 
     struct ManifoldDualContouringMesh
@@ -45,7 +47,7 @@ namespace gladius::compute
 
       private:
         ComputeCore & m_core;
-        std::unique_ptr<CLProgram> m_program;
+        ManifoldDualContouringProgram * m_program{nullptr}; // Not owned - managed by ProgramManager
 
         // Buffers
         std::unique_ptr<cl::Buffer> m_octreeBuffer;
@@ -57,6 +59,7 @@ namespace gladius::compute
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
         std::size_t m_lastVertexCount{0U};
+        std::size_t m_octreeNodeCount{0U};
 
         void loadKernels();
         void constructOctree();

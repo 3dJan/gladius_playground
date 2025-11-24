@@ -11,6 +11,7 @@
 #include <ResourceContext.h>
 #include <SlicerProgram.h>
 #include <compute/HierarchicalDCProgram.h>
+#include <compute/ManifoldDualContouringProgram.h>
 #include <compute/ParameterSignature.h>
 #include <compute/types.h>
 #include <nodes/BuildParameter.h>
@@ -45,6 +46,7 @@ namespace gladius
 
         [[nodiscard]] HierarchicalDCProgram * getHierarchicalDCProgram() const;
 
+        [[nodiscard]] compute::ManifoldDualContouringProgram * getManifoldDualContouringProgram() const;
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
@@ -73,6 +75,7 @@ namespace gladius
 
         /// Debug helpers for headless diagnostics
         [[nodiscard]] bool hasModelSource() const;
+        [[nodiscard]] std::string getModelSource() const;
         [[nodiscard]] std::string getDebugStateSummary() const;
 
         ModelState const & getSlicerState();
@@ -112,6 +115,7 @@ namespace gladius
 
         std::unique_ptr<HierarchicalDCProgram> m_hierarchicalDCProgram;
 
+        std::unique_ptr<compute::ManifoldDualContouringProgram> m_manifoldDualContouringProgram;
 
         bool m_isComputationTimeLoggingEnabled = false;
 

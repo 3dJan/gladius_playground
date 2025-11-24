@@ -71,8 +71,9 @@ namespace gladius::dual_contouring
         /// Sample SDF values and gradients at Hermite positions
         /// Returns false if GPU sampling fails and CPU fallback should be used
         [[nodiscard]] bool sampleHermite(std::vector<Eigen::Vector3f> const & positions,
-                                         std::vector<float> & outValues,
-                                         std::vector<Eigen::Vector3f> & outGradients);
+                         std::vector<float> & outValues,
+                         std::vector<Eigen::Vector3f> & outGradients,
+                         float epsilonOverride = -1.0F);
 
         /// Get accumulated statistics
         [[nodiscard]] GpuSamplingStats const & getStats() const

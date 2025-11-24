@@ -27,6 +27,7 @@ namespace gladius
 namespace gladius::dual_contouring
 {
     class QuadraticErrorFunction;
+    class GpuSamplingSession;
 }
 
 namespace gladius::hierarchical_dc
@@ -45,6 +46,10 @@ namespace gladius::hierarchical_dc
         float zeroCrossingTolerance{1e-5F};      ///< Bisection convergence tolerance
         std::size_t maxBisectionIterations{10U}; ///< Max iterations for zero-crossing refinement
         bool enableGpuAcceleration{true};        ///< Use GPU for parallel evaluation
+        std::size_t gpuCornerBatchSize{8192U};   ///< Preferred GPU corner batch size
+        std::size_t gpuHermiteBatchSize{16384U}; ///< Preferred GPU Hermite batch size
+        bool gpuEnableCaching{true};             ///< Enable GPU-side Morton cache
+        bool gpuFallbackToCpu{true};             ///< Allow CPU fallback if GPU sampling fails
         bool enableCornerCaching{true};          ///< Cache corner values across nodes
         bool enableProgressiveRefinement{true};  ///< Multi-pass adaptive refinement
         bool projectVerticesToSurface{true};     ///< Project QEF vertices onto surface (post-processing)
@@ -54,6 +59,7 @@ namespace gladius::hierarchical_dc
         float coarseningErrorFactor{0.25F};      ///< Relative error tolerance for merging (fraction of cell size)
         float minWallThicknessFactor{2.0F};      ///< Multiplier for minFeatureSize when protecting thin walls
         float maxNormalDeviationDegrees{25.0F};  ///< Max allowed normal deviation between merged cells
+        bool preserveAdaptiveDepthDuringCoarsening{true}; ///< Keep the first adaptive depth layer intact when merging
         std::size_t maxNodes{10000000U};         ///< Safety limit on total nodes to prevent OOM (0 = unlimited)
     };
 
@@ -179,7 +185,13 @@ namespace gladius::hierarchical_dc
         std::size_t m_activeNodeCount{0U};
         BoundingBox m_rootBounds;
         std::unique_ptr<CpuSampler> m_cpuSampler;
+        std::unique_ptr<dual_contouring::GpuSamplingSession> m_gpuSampler;
         bool m_cornerValuesReleased{false};
+        std::vector<Eigen::Vector3f> m_cornerSamplePositions;
+        std::vector<float> m_cornerSampleValues;
+        std::vector<Eigen::Vector3f> m_curvatureSamplePositions;
+        std::vector<float> m_curvatureSampleValues;
+        std::vector<Eigen::Vector3f> m_curvatureSampleGradients;
 
         // Phase 1: Coarse octree construction
         void buildInitialOctree();

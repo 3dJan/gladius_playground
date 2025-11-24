@@ -1,0 +1,70 @@
+#pragma once
+
+#include "../ProgramBase.h"
+#include "../types.h"
+
+#include <Eigen/Core>
+#include <memory>
+#include <vector>
+
+namespace gladius
+{
+    class ComputeCore;
+}
+
+namespace gladius::compute
+{
+    struct ManifoldDualContouringConfig;
+    
+    /// Octree node structure matching OpenCL kernel
+    struct OctreeNode
+    {
+        cl_ulong mortonCode;
+        cl_uint edgeMask;
+        cl_uint internalMask;
+        cl_uint vertexStartIndex;
+        cl_uchar vertexCount;
+        cl_uchar padding[3];
+    };
+    static_assert(sizeof(OctreeNode) == 24, "OctreeNode size mismatch");
+    
+    /// GPU program for Manifold Dual Contouring mesh generation
+    class ManifoldDualContouringProgram : public ProgramBase
+    {
+      public:
+        ManifoldDualContouringProgram(SharedComputeContext context,
+                                      SharedResources const & resources);
+        
+        /// Build octree by iteratively subdividing cells containing surface
+        void constructOctree(
+            std::unique_ptr<cl::Buffer> & octreeBuffer,
+            std::size_t & nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            float rootSize,
+            std::uint32_t maxDepth,
+            Primitives const & primitives,
+            float isoValue);
+            
+        /// Count vertices per octree node
+        void countVertices(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer & countBuffer,
+            std::size_t nodeCount);
+            
+        /// Generate vertices using QEF solver
+        void generateVertices(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer const & offsetBuffer,
+            cl::Buffer & vertexBuffer,
+            std::size_t nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            float rootSize,
+            Primitives const & primitives,
+            float isoValue);
+            
+      private:
+        void ensureCompiled();
+    };
+}
