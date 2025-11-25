@@ -339,8 +339,8 @@ __kernel void construct_octree_level(
             
             OctreeNode child;
             child.mortonCode = childMorton;
-            child.edgeMask = 0; // Will be computed later
-            child.internalMask = 0;
+            child.edgeMask = 0; // Will be computed below
+            child.internalMask = signMask; // Store which corners are inside (negative SDF)
             child.vertexStartIndex = 0;
             child.vertexCount = 0;
             child.depth = (uchar)min((uint)255, currentDepth + 1U);
@@ -520,6 +520,7 @@ __kernel void count_quads(
 
 /// Emit indices for quads (second pass after prefix sum)
 /// Must use the same edges as count_quads (6, 5, 10)
+/// Winding order is determined by the sign of corner 7 (the max corner)
 __kernel void emit_indices(
     __global const OctreeNode* nodes,
     __global const int* vertexOffsets,
@@ -540,7 +541,10 @@ __kernel void emit_indices(
     
     int writeOffset = indexOffsets[id];
     
-    // Edge 6: X-axis at (y=max, z=max)
+    // Corner 7 is at (1,1,1), bit 7 in internalMask
+    bool corner7Inside = (node.internalMask & (1 << 7)) != 0;
+    
+    // Edge 6: X-axis at (y=max, z=max), corners 7-6: (1,1,1)-(0,1,1)
     // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
     if (node.edgeMask & (1 << 6))
     {
@@ -561,21 +565,37 @@ __kernel void emit_indices(
                 uint v2 = (uint)vertexOffsets[nIdx2];
                 uint v3 = (uint)vertexOffsets[nIdx3];
                 
-                // Emit 2 triangles for quad: v0-v1-v2 and v1-v3-v2
-                outputIndices[writeOffset + 0] = v0;
-                outputIndices[writeOffset + 1] = v1;
-                outputIndices[writeOffset + 2] = v2;
-                
-                outputIndices[writeOffset + 3] = v1;
-                outputIndices[writeOffset + 4] = v3;
-                outputIndices[writeOffset + 5] = v2;
+                // Emit 2 triangles for quad
+                // Winding depends on whether corner 7 is inside
+                if (corner7Inside)
+                {
+                    // Corner 7 inside: wind CCW when viewed from +X
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v2;
+                    outputIndices[writeOffset + 2] = v1;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v2;
+                    outputIndices[writeOffset + 5] = v3;
+                }
+                else
+                {
+                    // Corner 7 outside: wind CW when viewed from +X
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v1;
+                    outputIndices[writeOffset + 2] = v2;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v3;
+                    outputIndices[writeOffset + 5] = v2;
+                }
                 
                 writeOffset += 6;
             }
         }
     }
     
-    // Edge 5: Y-axis at (x=max, z=max)
+    // Edge 5: Y-axis at (x=max, z=max), corners 5-7: (1,0,1)-(1,1,1)
     // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
     if (node.edgeMask & (1 << 5))
     {
@@ -596,20 +616,33 @@ __kernel void emit_indices(
                 uint v2 = (uint)vertexOffsets[nIdx2];
                 uint v3 = (uint)vertexOffsets[nIdx3];
                 
-                outputIndices[writeOffset + 0] = v0;
-                outputIndices[writeOffset + 1] = v1;
-                outputIndices[writeOffset + 2] = v2;
-                
-                outputIndices[writeOffset + 3] = v1;
-                outputIndices[writeOffset + 4] = v3;
-                outputIndices[writeOffset + 5] = v2;
+                if (corner7Inside)
+                {
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v2;
+                    outputIndices[writeOffset + 2] = v1;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v2;
+                    outputIndices[writeOffset + 5] = v3;
+                }
+                else
+                {
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v1;
+                    outputIndices[writeOffset + 2] = v2;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v3;
+                    outputIndices[writeOffset + 5] = v2;
+                }
                 
                 writeOffset += 6;
             }
         }
     }
     
-    // Edge 10: Z-axis at (x=max, y=max)
+    // Edge 10: Z-axis at (x=max, y=max), corners 3-7: (1,1,0)-(1,1,1)
     // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
     if (node.edgeMask & (1 << 10))
     {
@@ -630,13 +663,26 @@ __kernel void emit_indices(
                 uint v2 = (uint)vertexOffsets[nIdx2];
                 uint v3 = (uint)vertexOffsets[nIdx3];
                 
-                outputIndices[writeOffset + 0] = v0;
-                outputIndices[writeOffset + 1] = v1;
-                outputIndices[writeOffset + 2] = v2;
-                
-                outputIndices[writeOffset + 3] = v1;
-                outputIndices[writeOffset + 4] = v3;
-                outputIndices[writeOffset + 5] = v2;
+                if (corner7Inside)
+                {
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v2;
+                    outputIndices[writeOffset + 2] = v1;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v2;
+                    outputIndices[writeOffset + 5] = v3;
+                }
+                else
+                {
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v1;
+                    outputIndices[writeOffset + 2] = v2;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v3;
+                    outputIndices[writeOffset + 5] = v2;
+                }
                 
                 writeOffset += 6;
             }
