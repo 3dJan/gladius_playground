@@ -56,6 +56,7 @@ namespace gladius::compute
                 Eigen::Vector3f m_cachedBboxMin{Eigen::Vector3f::Zero()};
                 Eigen::Vector3f m_cachedBboxMax{Eigen::Vector3f::Zero()};
                 Eigen::Vector3f m_cachedBboxSize{Eigen::Vector3f::Zero()};
+                std::optional<BoundingBox> m_cachedBoundingBox;
                 std::uint32_t m_octreeDepth{0U};
                 std::uint32_t m_gridResolution{1U};
 
@@ -66,11 +67,11 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> m_countBuffer;
         std::unique_ptr<cl::Buffer> m_offsetBuffer;
 
-                // CPU copies for topology reconstruction
-                std::vector<OctreeNode> m_cpuOctreeNodes;
-                std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
-                std::vector<int> m_cpuVertexOffsets;
-                std::vector<int> m_cpuVertexCounts;
+            // CPU copies for topology reconstruction
+            std::vector<OctreeNode> m_cpuOctreeNodes;
+            std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
+            std::vector<int> m_cpuVertexOffsets;
+            std::vector<int> m_cpuVertexCounts;
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
@@ -81,11 +82,6 @@ namespace gladius::compute
         void constructOctree();
         void generateVertices();
         void generateIndices();
-
-                // Helper utilities
-                void refreshCpuOctreeCache();
-                [[nodiscard]] std::size_t findNeighborIndex(std::size_t nodeIdx, int dx, int dy, int dz) const;
-                [[nodiscard]] std::optional<std::uint32_t> vertexIndexForNode(std::size_t nodeIdx) const;
-                void emitTrianglesForPolygon(std::vector<std::uint32_t> const & polygon);
-    };
-}
+        void refreshCpuOctreeCache();
+        };
+    }

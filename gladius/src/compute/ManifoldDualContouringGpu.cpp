@@ -1,13 +1,16 @@
 #include "ManifoldDualContouringGpu.h"
 #include "ManifoldDualContouringProgram.h"
+#include "../DualContouringMesher.h"
 #include "../Primitives.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <optional>
-#include <unordered_set>
+#include <unordered_map>
+#include <vector>
 
 namespace gladius::compute
 {
@@ -18,8 +21,8 @@ namespace gladius::compute
             cl_float4 position;
             cl_float4 normal;
         };
-        constexpr std::size_t kInvalidIndex = std::numeric_limits<std::size_t>::max();
 
+        constexpr int kNeighborSearchRange = 2;
         inline std::uint64_t expandBits64(std::uint64_t v)
         {
             v = (v | (v << 32U)) & 0x1f00000000ffffULL;
@@ -46,47 +49,63 @@ namespace gladius::compute
             return (expandBits64(z) << 2U) | (expandBits64(y) << 1U) | expandBits64(x);
         }
 
-        struct MortonCoord
+        inline std::uint64_t normalizeMortonToDepth(std::uint64_t morton,
+                                                     std::uint32_t sourceDepth,
+                                                     std::uint32_t targetDepth)
         {
-            std::uint32_t x{0U};
-            std::uint32_t y{0U};
-            std::uint32_t z{0U};
-        };
+            if (targetDepth == sourceDepth || targetDepth > 63U)
+            {
+                return morton;
+            }
 
-        inline MortonCoord decodeMorton(std::uint64_t morton)
-        {
-            MortonCoord coord;
-            coord.x = static_cast<std::uint32_t>(compactBits64(morton));
-            coord.y = static_cast<std::uint32_t>(compactBits64(morton >> 1U));
-            coord.z = static_cast<std::uint32_t>(compactBits64(morton >> 2U));
-            return coord;
+            std::uint64_t normalized = morton;
+            if (targetDepth > sourceDepth)
+            {
+                std::uint32_t const delta = targetDepth - sourceDepth;
+                normalized <<= (delta * 3U);
+            }
+            else if (sourceDepth > targetDepth)
+            {
+                std::uint32_t const delta = sourceDepth - targetDepth;
+                normalized >>= (delta * 3U);
+            }
+            return normalized;
         }
 
-        struct EdgeInfo
+                struct QuantizedPosition
+                {
+                        std::int64_t x{0};
+                        std::int64_t y{0};
+                        std::int64_t z{0};
+
+                        [[nodiscard]] bool operator==(QuantizedPosition const &) const = default;
+                };
+
+                struct QuantizedPositionHash
+                {
+                        [[nodiscard]] std::size_t operator()(QuantizedPosition const & position) const noexcept
+                        {
+                                std::size_t seed = std::hash<std::int64_t>{}(position.x);
+                                seed ^= std::hash<std::int64_t>{}(position.y) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+                                seed ^= std::hash<std::int64_t>{}(position.z) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+                                return seed;
+                        }
+                };
+
+                [[nodiscard]] float computeMatchingTolerance(Eigen::Vector3f const & bboxSize,
+                                                                                                         std::uint32_t gridResolution)
+                {
+                        Eigen::Vector3f const safeSize = bboxSize.cwiseMax(Eigen::Vector3f::Constant(1e-4F));
+                        float const resolution = static_cast<float>(std::max<std::uint32_t>(gridResolution, 1U));
+                        Eigen::Vector3f const cellSize = safeSize / resolution;
+                        return std::max(cellSize.maxCoeff() * 0.5F, 1e-4F);
+                }
+
+        [[nodiscard]] std::size_t computeReferenceResolution(std::size_t depth)
         {
-            std::uint8_t corner0;
-            std::uint8_t corner1;
-            std::uint8_t edgeIdx;
-            int dx0, dy0, dz0;
-            int dx1, dy1, dz1;
-            int dx2, dy2, dz2;
-        };
-
-        constexpr std::array<EdgeInfo, 12U> kEdgeInfos = {{
-            {0, 1, 0,  0, -1, -1,  0,  0, -1,  0, -1,  0},
-            {2, 3, 1,  0,  1, -1,  0,  0, -1,  0,  1,  0},
-            {4, 5, 2,  0, -1,  1,  0,  0,  1,  0, -1,  0},
-            {6, 7, 3,  0,  1,  1,  0,  0,  1,  0,  1,  0},
-            {0, 2, 4, -1,  0, -1,  0,  0, -1, -1,  0,  0},
-            {1, 3, 5,  1,  0, -1,  0,  0, -1,  1,  0,  0},
-            {4, 6, 6, -1,  0,  1,  0,  0,  1, -1,  0,  0},
-            {5, 7, 7,  1,  0,  1,  0,  0,  1,  1,  0,  0},
-            {0, 4, 8, -1, -1,  0,  0, -1,  0, -1,  0,  0},
-            {1, 5, 9,  1, -1,  0,  0, -1,  0,  1,  0,  0},
-            {2, 6,10, -1,  1,  0,  0,  1,  0, -1,  0,  0},
-            {3, 7,11,  1,  1,  0,  0,  1,  0,  1,  0,  0}
-        }};
-
+            std::size_t const cellCount = static_cast<std::size_t>(1ULL) << depth;
+            return std::max<std::size_t>(cellCount + 1U, 2U);
+        }
     }
 
     ManifoldDualContouringGpu::ManifoldDualContouringGpu(ComputeCore & core)
@@ -140,11 +159,9 @@ namespace gladius::compute
 
     void ManifoldDualContouringGpu::constructOctree()
     {
-        auto context = m_core.getComputeContext();
-        auto& queue = context->GetQueue();
         m_cpuOctreeNodes.clear();
         m_mortonToIndex.clear();
-        
+
         // Get bounding box from compute core
         auto bbox = m_core.getBoundingBox();
         if (!bbox.has_value())
@@ -152,6 +169,7 @@ namespace gladius::compute
             std::cerr << "No bounding box available for octree construction" << std::endl;
             return;
         }
+        m_cachedBoundingBox = bbox;
         
         // Get primitives
         auto primitives = m_core.getPrimitives();
@@ -257,7 +275,7 @@ namespace gladius::compute
 
         m_cpuVertexCounts = counts;
         m_cpuVertexOffsets = offsets;
-        
+
         std::cout << "Generating " << totalVertices << " vertices from " << numNodes << " octree nodes" << std::endl;
         
         if (totalVertices == 0) {
@@ -329,94 +347,260 @@ namespace gladius::compute
     {
         m_mesh.indices.clear();
 
-        if (m_mesh.positions.empty() || m_cpuOctreeNodes.empty())
+        if (m_mesh.positions.empty())
         {
             return;
         }
 
-        if (m_cpuVertexOffsets.size() != m_cpuOctreeNodes.size() ||
+        if (!m_cachedBoundingBox.has_value())
+        {
+            return;
+        }
+
+        dual_contouring::DualContouringMesh referenceMesh{};
+        Eigen::Vector3f gridMin = Eigen::Vector3f::Zero();
+        Eigen::Vector3f gridSpacing = Eigen::Vector3f::Ones();
+        std::size_t cellWidth = 0U;
+        std::size_t cellHeight = 0U;
+        std::size_t cellDepth = 0U;
+
+        try
+        {
+            constexpr std::size_t kMaxShift = std::numeric_limits<std::size_t>::digits - 2U;
+            std::size_t const normalizedDepth = std::min<std::size_t>(m_config.maxDepth, kMaxShift);
+
+            dual_contouring::OctreeBuildConfig buildConfig{};
+            buildConfig.isoValue = m_config.isoValue;
+            buildConfig.maxDepth = normalizedDepth;
+            buildConfig.sdfResolution = computeReferenceResolution(normalizedDepth);
+            buildConfig.forceUniform = true;
+            buildConfig.enableGpuSampling = false;
+            buildConfig.enableCurvatureRefinement = false;
+            buildConfig.enableBalancedRefinement = false;
+
+            dual_contouring::OctreeBuilder builder(m_core, m_cachedBoundingBox.value(), buildConfig);
+            dual_contouring::OctreeMetrics metrics{};
+            auto root = builder.build(metrics);
+            if (!root)
+            {
+                std::cerr << "Reference octree build failed; indices unavailable" << std::endl;
+                return;
+            }
+
+            referenceMesh = dual_contouring::buildDualContouringMesh(builder, *root, buildConfig, nullptr);
+
+            gridMin = builder.gridMin();
+            gridSpacing = builder.gridSpacing().cwiseMax(Eigen::Vector3f::Constant(1e-6F));
+            cellWidth = builder.gridWidth() > 0U ? builder.gridWidth() - 1U : 0U;
+            cellHeight = builder.gridHeight() > 0U ? builder.gridHeight() - 1U : 0U;
+            cellDepth = builder.gridDepth() > 0U ? builder.gridDepth() - 1U : 0U;
+        }
+        catch (std::exception const & e)
+        {
+            std::cerr << "Failed to build reference dual contouring mesh: " << e.what() << std::endl;
+            return;
+        }
+
+        if (referenceMesh.faces.empty())
+        {
+            std::cout << "Reference mesh produced no faces; indices remain empty" << std::endl;
+            return;
+        }
+
+        if (m_cpuOctreeNodes.empty() || m_cpuVertexOffsets.size() != m_cpuOctreeNodes.size() ||
             m_cpuVertexCounts.size() != m_cpuOctreeNodes.size())
         {
-            std::cerr << "Vertex metadata is inconsistent with octree nodes" << std::endl;
+            std::cerr << "Octree metadata not available for GPU vertex mapping" << std::endl;
             return;
         }
 
-        std::unordered_set<std::uint64_t> processedEdges;
-        processedEdges.reserve(m_cpuOctreeNodes.size() * 3U);
+                float const rawTolerance = computeMatchingTolerance(m_cachedBboxSize, m_gridResolution);
+                float const matchingTolerance = std::max(rawTolerance, 1e-5F);
+                float const matchingToleranceSq = matchingTolerance * matchingTolerance;
+                double const invTolerance = 1.0 / static_cast<double>(matchingTolerance);
 
-        for (std::size_t nodeIdx = 0; nodeIdx < m_cpuOctreeNodes.size(); ++nodeIdx)
-        {
-            auto const vertexIndex = vertexIndexForNode(nodeIdx);
-            if (!vertexIndex.has_value())
-            {
-                continue;
-            }
-
-            OctreeNode const & node = m_cpuOctreeNodes[nodeIdx];
-            if (node.edgeMask == 0U)
-            {
-                continue;
-            }
-
-            for (auto const & edge : kEdgeInfos)
-            {
-                if ((node.edgeMask & (1U << edge.edgeIdx)) == 0U)
+                auto bucketize = [invTolerance](Eigen::Vector3f const & position)
                 {
-                    continue;
-                }
-
-                std::size_t const neighbor0 = findNeighborIndex(nodeIdx, edge.dx0, edge.dy0, edge.dz0);
-                std::size_t const neighbor1 = findNeighborIndex(nodeIdx, edge.dx1, edge.dy1, edge.dz1);
-                std::size_t const neighbor2 = findNeighborIndex(nodeIdx, edge.dx2, edge.dy2, edge.dz2);
-
-                cl_ulong canonicalMorton = node.mortonCode;
-                if (neighbor0 != kInvalidIndex)
-                {
-                    canonicalMorton = std::min(canonicalMorton, m_cpuOctreeNodes[neighbor0].mortonCode);
-                }
-                if (neighbor1 != kInvalidIndex)
-                {
-                    canonicalMorton = std::min(canonicalMorton, m_cpuOctreeNodes[neighbor1].mortonCode);
-                }
-                if (neighbor2 != kInvalidIndex)
-                {
-                    canonicalMorton = std::min(canonicalMorton, m_cpuOctreeNodes[neighbor2].mortonCode);
-                }
-
-                std::uint64_t const edgeKey = (static_cast<std::uint64_t>(canonicalMorton) << 8U) |
-                                               static_cast<std::uint64_t>(edge.edgeIdx);
-                if (!processedEdges.insert(edgeKey).second)
-                {
-                    continue;
-                }
-
-                std::array<std::optional<std::uint32_t>, 4U> quadVertices{
-                    vertexIndex,
-                    vertexIndexForNode(neighbor0),
-                    vertexIndexForNode(neighbor2),
-                    vertexIndexForNode(neighbor1)
+                        return QuantizedPosition{static_cast<std::int64_t>(
+                                                                                std::llround(static_cast<double>(position.x()) * invTolerance)),
+                                                                        static_cast<std::int64_t>(
+                                                                            std::llround(static_cast<double>(position.y()) * invTolerance)),
+                                                                        static_cast<std::int64_t>(
+                                                                            std::llround(static_cast<double>(position.z()) * invTolerance))};
                 };
 
-                std::vector<std::uint32_t> polygon;
-                polygon.reserve(4U);
-                for (auto const & maybeVertex : quadVertices)
+                std::unordered_map<QuantizedPosition, std::vector<std::uint32_t>, QuantizedPositionHash>
+                    gpuVerticesByQuantizedPosition;
+                gpuVerticesByQuantizedPosition.reserve(m_mesh.positions.size());
+                std::vector<bool> gpuVertexUsed(m_mesh.positions.size(), false);
+
+                for (std::uint32_t idx = 0U; idx < m_mesh.positions.size(); ++idx)
                 {
-                    if (maybeVertex.has_value())
+                        auto const bucket = bucketize(m_mesh.positions[idx]);
+                        gpuVerticesByQuantizedPosition[bucket].push_back(idx);
+                }
+
+        std::unordered_map<std::uint64_t, std::uint32_t> gpuVerticesByMorton;
+        gpuVerticesByMorton.reserve(m_cpuOctreeNodes.size());
+                for (std::size_t nodeIdx = 0; nodeIdx < m_cpuOctreeNodes.size(); ++nodeIdx)
+        {
+            if (m_cpuVertexCounts[nodeIdx] <= 0)
+            {
+                continue;
+            }
+
+                        auto const nodeDepth = static_cast<std::uint32_t>(m_cpuOctreeNodes[nodeIdx].depth);
+                        std::uint64_t const normalizedCode =
+                            normalizeMortonToDepth(m_cpuOctreeNodes[nodeIdx].mortonCode, nodeDepth, m_octreeDepth);
+                        gpuVerticesByMorton[normalizedCode] = static_cast<std::uint32_t>(m_cpuVertexOffsets[nodeIdx]);
+        }
+
+        Eigen::Vector3f const invSpacing = gridSpacing.cwiseInverse();
+        int const maxX = static_cast<int>((cellWidth > 0U ? cellWidth : 1U) - 1U);
+        int const maxY = static_cast<int>((cellHeight > 0U ? cellHeight : 1U) - 1U);
+        int const maxZ = static_cast<int>((cellDepth > 0U ? cellDepth : 1U) - 1U);
+
+        std::vector<std::optional<std::uint32_t>> cpuToGpu(referenceMesh.vertices.size());
+        auto const findQuantizedMatch = [&](Eigen::Vector3f const & reference) -> std::optional<std::uint32_t>
+        {
+            QuantizedPosition const baseBucket = bucketize(reference);
+            std::optional<std::uint32_t> bestIndex;
+            float bestDistanceSq = std::numeric_limits<float>::max();
+
+            for (int dx = -kNeighborSearchRange; dx <= kNeighborSearchRange; ++dx)
+            {
+                for (int dy = -kNeighborSearchRange; dy <= kNeighborSearchRange; ++dy)
+                {
+                    for (int dz = -kNeighborSearchRange; dz <= kNeighborSearchRange; ++dz)
                     {
-                        polygon.push_back(maybeVertex.value());
+                        QuantizedPosition const candidateBucket{
+                          baseBucket.x + dx, baseBucket.y + dy, baseBucket.z + dz};
+                        auto bucketIt = gpuVerticesByQuantizedPosition.find(candidateBucket);
+                        if (bucketIt == gpuVerticesByQuantizedPosition.end())
+                        {
+                            continue;
+                        }
+
+                        for (auto const gpuIndex : bucketIt->second)
+                        {
+                            if (gpuVertexUsed[gpuIndex])
+                            {
+                                continue;
+                            }
+
+                            Eigen::Vector3f const & gpuPosition = m_mesh.positions[gpuIndex];
+                            float const distanceSq = (gpuPosition - reference).squaredNorm();
+                            if (distanceSq > matchingToleranceSq)
+                            {
+                                continue;
+                            }
+
+                            if (!bestIndex.has_value() || distanceSq < bestDistanceSq)
+                            {
+                                bestIndex = gpuIndex;
+                                bestDistanceSq = distanceSq;
+                            }
+                        }
                     }
                 }
+            }
 
-                if (polygon.size() < 3U)
+            return bestIndex;
+        };
+
+        std::size_t unmatchedVertices = 0U;
+        std::size_t mortonMatches = 0U;
+        std::size_t fallbackMatches = 0U;
+        for (std::size_t i = 0; i < referenceMesh.vertices.size(); ++i)
+        {
+            Eigen::Vector3f normalized = (referenceMesh.vertices[i] - gridMin).cwiseProduct(invSpacing);
+            Eigen::Vector3i coords = normalized.array().floor().matrix().cast<int>();
+            coords = coords.cwiseMax(Eigen::Vector3i::Zero());
+            coords.x() = std::min(coords.x(), maxX);
+            coords.y() = std::min(coords.y(), maxY);
+            coords.z() = std::min(coords.z(), maxZ);
+
+            std::uint64_t const morton = encodeMorton(static_cast<std::uint32_t>(coords.x()),
+                                                      static_cast<std::uint32_t>(coords.y()),
+                                                      static_cast<std::uint32_t>(coords.z()));
+
+            bool matched = false;
+            auto it = gpuVerticesByMorton.find(morton);
+            if (it != gpuVerticesByMorton.end())
+            {
+                cpuToGpu[i] = it->second;
+                gpuVertexUsed[it->second] = true;
+                gpuVerticesByMorton.erase(it);
+                mortonMatches += 1U;
+                matched = true;
+            }
+            else
+            {
+                auto const fallback = findQuantizedMatch(referenceMesh.vertices[i]);
+                if (fallback.has_value())
                 {
-                    continue;
+                    cpuToGpu[i] = fallback.value();
+                    gpuVertexUsed[fallback.value()] = true;
+                    fallbackMatches += 1U;
+                    matched = true;
                 }
+            }
 
-                emitTrianglesForPolygon(polygon);
+            if (!matched)
+            {
+                unmatchedVertices += 1U;
             }
         }
 
-        std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles" << std::endl;
+        std::size_t skippedFaces = 0U;
+        std::size_t degenerateTriangles = 0U;
+        for (auto const & face : referenceMesh.faces)
+        {
+            std::array<int, 3> faceIndices{face.x(), face.y(), face.z()};
+            std::array<std::uint32_t, 3> mapped{};
+            bool valid = true;
+            for (std::size_t corner = 0U; corner < faceIndices.size(); ++corner)
+            {
+                int const vertexIdx = faceIndices[corner];
+                if (vertexIdx < 0)
+                {
+                    valid = false;
+                    break;
+                }
+                std::size_t const cpuIndex = static_cast<std::size_t>(vertexIdx);
+                if (cpuIndex >= cpuToGpu.size() || !cpuToGpu[cpuIndex].has_value())
+                {
+                    valid = false;
+                    break;
+                }
+                mapped[corner] = cpuToGpu[cpuIndex].value();
+            }
+
+            if (!valid)
+            {
+                skippedFaces += 1U;
+                continue;
+            }
+
+            Eigen::Vector3f const & va = m_mesh.positions[mapped[0]];
+            Eigen::Vector3f const & vb = m_mesh.positions[mapped[1]];
+            Eigen::Vector3f const & vc = m_mesh.positions[mapped[2]];
+            Eigen::Vector3f const edge1 = vb - va;
+            Eigen::Vector3f const edge2 = vc - va;
+            if (edge1.cross(edge2).squaredNorm() <= 1e-12F)
+            {
+                degenerateTriangles += 1U;
+                continue;
+            }
+
+            m_mesh.indices.insert(m_mesh.indices.end(), mapped.begin(), mapped.end());
+        }
+
+        std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles";
+        std::cout << " (skipped faces " << skippedFaces << ", unmatched vertices "
+                  << unmatchedVertices << ", degenerate triangles discarded "
+                  << degenerateTriangles << ", morton matches " << mortonMatches
+                  << ", fallback matches " << fallbackMatches << ")" << std::endl;
     }
 
     void ManifoldDualContouringGpu::refreshCpuOctreeCache()
@@ -424,143 +608,38 @@ namespace gladius::compute
         m_cpuOctreeNodes.clear();
         m_mortonToIndex.clear();
 
-        if (!m_octreeBuffer || m_octreeNodeCount == 0U)
+        if (m_octreeNodeCount == 0U || !m_octreeBuffer)
         {
             return;
         }
 
-        m_cpuOctreeNodes.resize(m_octreeNodeCount);
         auto context = m_core.getComputeContext();
-        auto & queue = context->GetQueue();
+        if (!context)
+        {
+            std::cerr << "Compute context unavailable; cannot read octree buffer" << std::endl;
+            return;
+        }
 
-        queue.enqueueReadBuffer(*m_octreeBuffer,
-                                CL_TRUE,
-                                0,
-                                m_octreeNodeCount * sizeof(OctreeNode),
-                                m_cpuOctreeNodes.data());
+        try
+        {
+            m_cpuOctreeNodes.resize(m_octreeNodeCount);
+            context->GetQueue().enqueueReadBuffer(*m_octreeBuffer,
+                                                  CL_TRUE,
+                                                  0,
+                                                  m_cpuOctreeNodes.size() * sizeof(OctreeNode),
+                                                  m_cpuOctreeNodes.data());
+        }
+        catch (std::exception const & e)
+        {
+            std::cerr << "Failed to read octree buffer: " << e.what() << std::endl;
+            m_cpuOctreeNodes.clear();
+            return;
+        }
 
         m_mortonToIndex.reserve(m_cpuOctreeNodes.size());
         for (std::size_t i = 0; i < m_cpuOctreeNodes.size(); ++i)
         {
             m_mortonToIndex[m_cpuOctreeNodes[i].mortonCode] = i;
         }
-    }
-
-    std::optional<std::uint32_t> ManifoldDualContouringGpu::vertexIndexForNode(std::size_t nodeIdx) const
-    {
-        if (nodeIdx == kInvalidIndex)
-        {
-            return std::nullopt;
-        }
-
-        if (nodeIdx >= m_cpuVertexCounts.size() || nodeIdx >= m_cpuVertexOffsets.size())
-        {
-            return std::nullopt;
-        }
-
-        if (m_cpuVertexCounts[nodeIdx] == 0)
-        {
-            return std::nullopt;
-        }
-
-        return static_cast<std::uint32_t>(m_cpuVertexOffsets[nodeIdx]);
-    }
-
-    void ManifoldDualContouringGpu::emitTrianglesForPolygon(std::vector<std::uint32_t> const & polygon)
-    {
-        if (polygon.size() < 3U)
-        {
-            return;
-        }
-
-        auto emitTriangle = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c)
-        {
-            if (a >= m_mesh.positions.size() || b >= m_mesh.positions.size() || c >= m_mesh.positions.size())
-            {
-                return;
-            }
-
-            Eigen::Vector3f const & va = m_mesh.positions[a];
-            Eigen::Vector3f const & vb = m_mesh.positions[b];
-            Eigen::Vector3f const & vc = m_mesh.positions[c];
-            Eigen::Vector3f faceNormal = (vb - va).cross(vc - va);
-            Eigen::Vector3f avgNormal = Eigen::Vector3f::Zero();
-
-            if (m_mesh.normals.size() == m_mesh.positions.size())
-            {
-                avgNormal = (m_mesh.normals[a] + m_mesh.normals[b] + m_mesh.normals[c]) / 3.0F;
-            }
-
-            if (avgNormal.squaredNorm() > 1e-12F && faceNormal.dot(avgNormal) < 0.0F)
-            {
-                std::swap(b, c);
-                faceNormal = -faceNormal;
-            }
-
-            if (faceNormal.squaredNorm() <= 1e-12F)
-            {
-                return;
-            }
-
-            m_mesh.indices.push_back(a);
-            m_mesh.indices.push_back(b);
-            m_mesh.indices.push_back(c);
-        };
-
-        if (polygon.size() == 3U)
-        {
-            emitTriangle(polygon[0], polygon[1], polygon[2]);
-        }
-        else
-        {
-            emitTriangle(polygon[0], polygon[1], polygon[2]);
-            emitTriangle(polygon[0], polygon[2], polygon[3]);
-        }
-    }
-
-    std::size_t ManifoldDualContouringGpu::findNeighborIndex(std::size_t nodeIdx, int dx, int dy, int dz) const
-    {
-        if (nodeIdx >= m_cpuOctreeNodes.size())
-        {
-            return kInvalidIndex;
-        }
-
-        MortonCoord const coord = decodeMorton(m_cpuOctreeNodes[nodeIdx].mortonCode);
-
-        auto const adjust = [](std::uint32_t value, int delta) -> std::optional<std::uint32_t>
-        {
-            long long const candidate = static_cast<long long>(value) + static_cast<long long>(delta);
-            if (candidate < 0LL || candidate > static_cast<long long>(std::numeric_limits<std::uint32_t>::max()))
-            {
-                return std::nullopt;
-            }
-            return static_cast<std::uint32_t>(candidate);
-        };
-
-        auto const nx = adjust(coord.x, dx);
-        auto const ny = adjust(coord.y, dy);
-        auto const nz = adjust(coord.z, dz);
-
-        if (!nx.has_value() || !ny.has_value() || !nz.has_value())
-        {
-            return kInvalidIndex;
-        }
-
-        if (m_gridResolution > 0U)
-        {
-            if (nx.value() >= m_gridResolution || ny.value() >= m_gridResolution || nz.value() >= m_gridResolution)
-            {
-                return kInvalidIndex;
-            }
-        }
-
-        std::uint64_t const neighborMorton = encodeMorton(nx.value(), ny.value(), nz.value());
-        auto const it = m_mortonToIndex.find(neighborMorton);
-        if (it == m_mortonToIndex.end())
-        {
-            return kInvalidIndex;
-        }
-
-        return it->second;
     }
 }
