@@ -24,7 +24,8 @@ namespace gladius::compute
         cl_uint internalMask;
         cl_uint vertexStartIndex;
         cl_uchar vertexCount;
-        cl_uchar padding[3];
+        cl_uchar depth;
+        cl_uchar padding[2];
     };
     static_assert(sizeof(OctreeNode) == 24, "OctreeNode size mismatch");
     
@@ -41,7 +42,7 @@ namespace gladius::compute
             std::size_t & nodeCount,
             Eigen::Vector3f const & bboxMin,
             Eigen::Vector3f const & bboxMax,
-            float rootSize,
+            std::uint32_t initialDepth,
             std::uint32_t maxDepth,
             Primitives const & primitives,
             float isoValue);
@@ -60,7 +61,6 @@ namespace gladius::compute
             std::size_t nodeCount,
             Eigen::Vector3f const & bboxMin,
             Eigen::Vector3f const & bboxMax,
-            float rootSize,
             Primitives const & primitives,
             float isoValue);
             

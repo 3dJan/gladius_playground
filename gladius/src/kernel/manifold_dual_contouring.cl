@@ -6,7 +6,8 @@ typedef struct __attribute__((packed))
     uint internalMask;
     uint vertexStartIndex;
     uchar vertexCount;
-    uchar padding[3];
+    uchar depth;
+    uchar padding[2];
 } OctreeNode;
 
 typedef struct __attribute__((packed))
@@ -55,36 +56,12 @@ ulong3 decodeMorton3(ulong m)
     return (ulong3)(x, y, z);
 }
 
-/// Get the depth level from a Morton code (number of subdivisions)
-uint getMortonDepth(ulong mortonCode)
+/// Get the per-axis cell extents at a given depth
+float3 getCellExtent(float3 bboxMin, float3 bboxMax, uint depth)
 {
-    // Find the highest set bit and divide by 3 (since we use 3 bits per level)
-    uint depth = 0;
-    ulong temp = mortonCode;
-    while (temp > 0) {
-        temp >>= 3;
-        depth++;
-    }
-    return depth > 0 ? depth - 1 : 0;
-}
-
-/// Get the cell size at a given depth
-float getCellSize(float rootSize, uint depth)
-{
-    return rootSize / (float)(1 << depth);
-}
-
-/// Convert Morton code to world-space position (cell center)
-float3 mortonToWorldPos(ulong mortonCode, float3 bboxMin, float rootSize)
-{
-    ulong3 coords = decodeMorton3(mortonCode);
-    uint depth = getMortonDepth(mortonCode);
-    float cellSize = getCellSize(rootSize, depth);
-    
-    // Cell corner position
-    float3 pos = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellSize;
-    // Return cell center
-    return pos + cellSize * 0.5f;
+    float3 extent = bboxMax - bboxMin;
+    float scale = 1.0f / (float)(1u << depth);
+    return extent * scale;
 }
 
 // Kernel to count vertices per cell
@@ -207,7 +184,6 @@ __kernel void emit_vertices(
     const int numNodes,
     const float3 bboxMin,
     const float3 bboxMax,
-    const float rootSize,
     PAYLOAD_ARGS,
     const float isoValue)
 {
@@ -222,11 +198,11 @@ __kernel void emit_vertices(
     
     // Get cell bounds
     ulong3 coords = decodeMorton3(node.mortonCode);
-    uint depth = getMortonDepth(node.mortonCode);
-    float cellSize = getCellSize(rootSize, depth);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
     
-    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellSize;
-    float3 cellMax = cellMin + cellSize;
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    float3 cellMax = cellMin + cellExtent;
     float3 cellCenter = (cellMin + cellMax) * 0.5f;
     
     // Sample SDF at 8 corners
@@ -236,7 +212,7 @@ __kernel void emit_vertices(
         int cy = (corner >> 1) & 1;
         int cz = (corner >> 2) & 1;
         
-        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellSize;
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
         float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
         cornerValues[corner] = sdfResult.w - isoValue;
     }
@@ -263,8 +239,8 @@ __kernel void emit_vertices(
         int cx0 = (c0 >> 0) & 1, cy0 = (c0 >> 1) & 1, cz0 = (c0 >> 2) & 1;
         int cx1 = (c1 >> 0) & 1, cy1 = (c1 >> 1) & 1, cz1 = (c1 >> 2) & 1;
         
-        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellSize;
-        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellSize;
+        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellExtent;
+        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellExtent;
         
         // Find intersection point
         float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
@@ -295,9 +271,9 @@ __kernel void construct_octree_level(
     const int numInputNodes,
     const float3 bboxMin,
     const float3 bboxMax,
-    const float rootSize,
     const uint currentDepth,
     const uint maxDepth,
+    const uint initialDepth,
     PAYLOAD_ARGS,
     const float isoValue)
 {
@@ -311,11 +287,11 @@ __kernel void construct_octree_level(
     
     // Get parent cell bounds
     ulong3 parentCoords = decodeMorton3(parent.mortonCode);
-    float cellSize = getCellSize(rootSize, currentDepth);
-    float3 parentMin = bboxMin + (float3)((float)parentCoords.x, (float)parentCoords.y, (float)parentCoords.z) * cellSize;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, currentDepth);
+    float3 parentMin = bboxMin + (float3)((float)parentCoords.x, (float)parentCoords.y, (float)parentCoords.z) * cellExtent;
     
     // Subdivide into 8 children
-    float childSize = cellSize * 0.5f;
+    float3 childExtent = cellExtent * 0.5f;
     
     for (int childIdx = 0; childIdx < 8; childIdx++) {
         // Compute child offset (0-7 maps to 3D grid)
@@ -329,8 +305,8 @@ __kernel void construct_octree_level(
         
         ulong childMorton = encodeMorton3(childX, childY, childZ);
         
-        float3 childMin = parentMin + (float3)((float)dx, (float)dy, (float)dz) * childSize;
-        float3 childMax = childMin + childSize;
+        float3 childMin = parentMin + (float3)((float)dx, (float)dy, (float)dz) * childExtent;
+        float3 childMax = childMin + childExtent;
         
         // Sample SDF at 8 corners of child cell using model evaluation
         float cornerValues[8];
@@ -341,7 +317,7 @@ __kernel void construct_octree_level(
             int cy = (corner >> 1) & 1;
             int cz = (corner >> 2) & 1;
             
-            float3 cornerPos = childMin + (float3)((float)cx, (float)cy, (float)cz) * childSize;
+            float3 cornerPos = childMin + (float3)((float)cx, (float)cy, (float)cz) * childExtent;
             
             // Evaluate SDF using the model function
             float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
@@ -353,10 +329,12 @@ __kernel void construct_octree_level(
             }
         }
         
-        // Check if child contains surface (sign changes)
-        // If all corners have same sign, no surface intersection
-        if (signMask != 0 && signMask != 0xFF) {
-            // Child contains surface, add to output
+        bool const containsSurface = (signMask != 0) && (signMask != 0xFF);
+        bool const forceSubdivision = currentDepth < initialDepth;
+
+        // Check if child contains surface (sign changes) or needs forced subdivision
+        if (forceSubdivision || containsSurface) {
+            // Child contains surface or is part of forced refinement, add to output
             int outputIdx = atomic_inc(outputCount);
             
             OctreeNode child;
@@ -365,6 +343,9 @@ __kernel void construct_octree_level(
             child.internalMask = 0;
             child.vertexStartIndex = 0;
             child.vertexCount = 0;
+            child.depth = (uchar)min((uint)255, currentDepth + 1U);
+            child.padding[0] = 0;
+            child.padding[1] = 0;
             
             // Compute edge mask (which of 12 edges cross surface)
             // Edge numbering: 0-3 bottom face (X,Y,X,Y), 4-7 top face, 8-11 vertical
@@ -374,13 +355,15 @@ __kernel void construct_octree_level(
                 {0,4}, {1,5}, {3,7}, {2,6}   // Vertical edges
             };
             
-            for (int e = 0; e < 12; e++) {
-                int c0 = edgeCorners[e][0];
-                int c1 = edgeCorners[e][1];
-                
-                // Check for sign change
-                if ((cornerValues[c0] < 0.0f) != (cornerValues[c1] < 0.0f)) {
-                    child.edgeMask |= (1 << e);
+            if (containsSurface) {
+                for (int e = 0; e < 12; e++) {
+                    int c0 = edgeCorners[e][0];
+                    int c1 = edgeCorners[e][1];
+                    
+                    // Check for sign change
+                    if ((cornerValues[c0] < 0.0f) != (cornerValues[c1] < 0.0f)) {
+                        child.edgeMask |= (1 << e);
+                    }
                 }
             }
             
@@ -397,8 +380,7 @@ __kernel void emit_indices(
     __global uint* outputIndices,
     __global int* indexCount,
     const int numNodes,
-    const float3 bboxMin,
-    const float rootSize)
+    const float3 bboxMin)
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
@@ -418,7 +400,7 @@ __kernel void emit_indices(
     // Face numbering: 0=X-, 1=X+, 2=Y-, 3=Y+, 4=Z-, 5=Z+
     
     ulong3 coords = decodeMorton3(node.mortonCode);
-    uint depth = getMortonDepth(node.mortonCode);
+    uint depth = node.depth;
     
     // Get this cell's vertex index
     int v0 = vertexOffsets[id];

@@ -7,7 +7,8 @@ typedef struct __attribute__((packed))
     uint internalMask;
     uint vertexStartIndex;
     uchar vertexCount;
-    uchar padding[3];
+    uchar depth;
+    uchar padding[2];
 } OctreeNode;
 
 typedef struct __attribute__((packed))

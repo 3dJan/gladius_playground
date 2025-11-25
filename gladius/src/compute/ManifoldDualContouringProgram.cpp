@@ -44,7 +44,7 @@ namespace gladius::compute
         std::size_t & nodeCount,
         Eigen::Vector3f const & bboxMin,
         Eigen::Vector3f const & bboxMax,
-        float rootSize,
+        std::uint32_t initialDepth,
         std::uint32_t maxDepth,
         Primitives const & primitives,
         float isoValue)
@@ -59,6 +59,9 @@ namespace gladius::compute
         rootNodes[0].internalMask = 0;
         rootNodes[0].vertexStartIndex = 0;
         rootNodes[0].vertexCount = 0;
+        rootNodes[0].depth = 0;
+        rootNodes[0].padding[0] = 0;
+        rootNodes[0].padding[1] = 0;
 
         auto currentBuffer = std::make_unique<cl::Buffer>(
             m_ComputeContext->GetContext(),
@@ -100,9 +103,9 @@ namespace gladius::compute
                                static_cast<int>(currentNodeCount),
                                clBboxMin,
                                clBboxMax,
-                               rootSize,
                                depth,
                                maxDepth,
+                               initialDepth,
                                PAYLOAD_ARGUMENTS,
                                isoValue);
 
@@ -146,7 +149,6 @@ namespace gladius::compute
         std::size_t nodeCount,
         Eigen::Vector3f const & bboxMin,
         Eigen::Vector3f const & bboxMax,
-        float rootSize,
         Primitives const & primitives,
         float isoValue)
     {
@@ -167,7 +169,6 @@ namespace gladius::compute
                            static_cast<int>(nodeCount),
                            clBboxMin,
                            clBboxMax,
-                           rootSize,
                            PAYLOAD_ARGUMENTS,
                            isoValue);
     }
