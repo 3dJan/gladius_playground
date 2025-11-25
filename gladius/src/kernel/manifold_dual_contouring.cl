@@ -372,15 +372,161 @@ __kernel void construct_octree_level(
     }
 }
 
-// Kernel to emit indices (triangles/quads)
-// Generate mesh topology by connecting vertices from adjacent cells
-__kernel void emit_indices(
-    __global OctreeNode* nodes,
-    __global int* vertexOffsets,
-    __global uint* outputIndices,
-    __global int* indexCount,
+// ============================================================================
+// GPU-Based Watertight Index Generation
+// ============================================================================
+//
+// Strategy for watertightness:
+// 1. Each edge with a sign change generates exactly one quad (2 triangles)
+// 2. A quad is formed by 4 cells sharing that edge
+// 3. To avoid duplicates, only the cell with the smallest Morton code among
+//    the 4 neighbors "owns" the edge and emits the quad
+// 4. Cells are sorted by Morton code, enabling binary search for neighbors
+//
+// For uniform grids (all cells at same depth):
+// - Edge 0 (X-axis at min Y, min Z) shared by: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
+// - Edge 3 (Y-axis at min X, min Z) shared by: (x,y,z), (x-1,y,z), (x,y,z-1), (x-1,y,z-1)
+// - Edge 8 (Z-axis at min X, min Y) shared by: (x,y,z), (x-1,y,z), (x,y-1,z), (x-1,y-1,z)
+// ============================================================================
+
+/// Binary search to find a node by Morton code (for uniform-depth octrees)
+/// Returns the index of the node, or -1 if not found
+int findNodeByMorton(__global const OctreeNode* nodes, int numNodes, ulong targetMorton)
+{
+    int left = 0;
+    int right = numNodes - 1;
+    
+    while (left <= right)
+    {
+        int mid = (left + right) / 2;
+        ulong midMorton = nodes[mid].mortonCode;
+        
+        if (midMorton == targetMorton)
+        {
+            return mid;
+        }
+        else if (midMorton < targetMorton)
+        {
+            left = mid + 1;
+        }
+        else
+        {
+            right = mid - 1;
+        }
+    }
+    
+    return -1;
+}
+
+/// Count quads per cell (first pass for prefix sum)
+/// We use edges at the MAX corner (6, 5, 10) because for these edges,
+/// the current cell has the smallest Morton code among the 4 cells sharing it.
+/// This is because the neighbors are at +Y, +Z, or both, which have larger Morton codes.
+///
+/// Edge ownership rule: emit a quad if:
+/// 1. The edge crosses the surface (edgeMask bit set)
+/// 2. All 4 cells around this edge exist (have surface)
+__kernel void count_quads(
+    __global const OctreeNode* nodes,
+    __global int* quadCounts,
     const int numNodes,
-    const float3 bboxMin)
+    const uint maxCoord)  // Maximum valid coordinate (2^depth - 1)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+    
+    OctreeNode node = nodes[id];
+    
+    // Skip cells without surface
+    if (node.edgeMask == 0)
+    {
+        quadCounts[id] = 0;
+        return;
+    }
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    
+    int count = 0;
+    
+    // Edge 6: X-axis at (y=max, z=max), corners 7-6: (1,1,1)-(0,1,1)
+    // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
+    // Current cell has smallest Morton code since neighbors have larger y and/or z
+    if (node.edgeMask & (1 << 6))
+    {
+        // Check if neighbors exist within grid bounds
+        if (coords.y < maxCoord && coords.z < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x, coords.y + 1, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            // All 3 neighbors must exist (contain surface)
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                count++;
+            }
+        }
+    }
+    
+    // Edge 5: Y-axis at (x=max, z=max), corners 5-7: (1,0,1)-(1,1,1)
+    // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
+    if (node.edgeMask & (1 << 5))
+    {
+        if (coords.x < maxCoord && coords.z < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                count++;
+            }
+        }
+    }
+    
+    // Edge 10: Z-axis at (x=max, y=max), corners 3-7: (1,1,0)-(1,1,1)
+    // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
+    if (node.edgeMask & (1 << 10))
+    {
+        if (coords.x < maxCoord && coords.y < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y + 1, coords.z);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                count++;
+            }
+        }
+    }
+    
+    // Each quad = 2 triangles = 6 indices
+    quadCounts[id] = count * 6;
+}
+
+/// Emit indices for quads (second pass after prefix sum)
+/// Must use the same edges as count_quads (6, 5, 10)
+__kernel void emit_indices(
+    __global const OctreeNode* nodes,
+    __global const int* vertexOffsets,
+    __global const int* indexOffsets,
+    __global uint* outputIndices,
+    const int numNodes,
+    const uint maxCoord)
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
@@ -390,31 +536,110 @@ __kernel void emit_indices(
     // Skip cells without surface
     if (node.edgeMask == 0) return;
     
-    // For each face of the cell, check if we need to emit a quad
-    // A face generates a quad if:
-    // 1. The face is on the boundary of the octree, OR
-    // 2. The adjacent cell across this face has a different size (T-junction handling)
-    // 3. Both cells have vertices
-    
-    // Simplified approach: emit quads for faces with surface-crossing edges
-    // Face numbering: 0=X-, 1=X+, 2=Y-, 3=Y+, 4=Z-, 5=Z+
-    
     ulong3 coords = decodeMorton3(node.mortonCode);
-    uint depth = node.depth;
     
-    // Get this cell's vertex index
-    int v0 = vertexOffsets[id];
+    int writeOffset = indexOffsets[id];
     
-    // TODO: For each face, find the neighbor cell and its vertex
-    // Then emit a quad (2 triangles) connecting the 4 vertices
-    // This requires a neighbor-finding function in the octree
+    // Edge 6: X-axis at (y=max, z=max)
+    // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
+    if (node.edgeMask & (1 << 6))
+    {
+        if (coords.y < maxCoord && coords.z < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x, coords.y + 1, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                uint v0 = (uint)vertexOffsets[id];
+                uint v1 = (uint)vertexOffsets[nIdx1];
+                uint v2 = (uint)vertexOffsets[nIdx2];
+                uint v3 = (uint)vertexOffsets[nIdx3];
+                
+                // Emit 2 triangles for quad: v0-v1-v2 and v1-v3-v2
+                outputIndices[writeOffset + 0] = v0;
+                outputIndices[writeOffset + 1] = v1;
+                outputIndices[writeOffset + 2] = v2;
+                
+                outputIndices[writeOffset + 3] = v1;
+                outputIndices[writeOffset + 4] = v3;
+                outputIndices[writeOffset + 5] = v2;
+                
+                writeOffset += 6;
+            }
+        }
+    }
     
-    // Placeholder: just reserve space for potential indices
-    // In a complete implementation, we'd:
-    // 1. For each of 6 faces, check the 4 edges
-    // 2. Find the 4 neighboring cells sharing those edges
-    // 3. Get their vertex indices
-    // 4. Emit 6 indices (2 triangles) forming a quad
+    // Edge 5: Y-axis at (x=max, z=max)
+    // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
+    if (node.edgeMask & (1 << 5))
+    {
+        if (coords.x < maxCoord && coords.z < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                uint v0 = (uint)vertexOffsets[id];
+                uint v1 = (uint)vertexOffsets[nIdx1];
+                uint v2 = (uint)vertexOffsets[nIdx2];
+                uint v3 = (uint)vertexOffsets[nIdx3];
+                
+                outputIndices[writeOffset + 0] = v0;
+                outputIndices[writeOffset + 1] = v1;
+                outputIndices[writeOffset + 2] = v2;
+                
+                outputIndices[writeOffset + 3] = v1;
+                outputIndices[writeOffset + 4] = v3;
+                outputIndices[writeOffset + 5] = v2;
+                
+                writeOffset += 6;
+            }
+        }
+    }
     
-    // For now, do nothing (indices will be empty)
+    // Edge 10: Z-axis at (x=max, y=max)
+    // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
+    if (node.edgeMask & (1 << 10))
+    {
+        if (coords.x < maxCoord && coords.y < maxCoord)
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y + 1, coords.z);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                uint v0 = (uint)vertexOffsets[id];
+                uint v1 = (uint)vertexOffsets[nIdx1];
+                uint v2 = (uint)vertexOffsets[nIdx2];
+                uint v3 = (uint)vertexOffsets[nIdx3];
+                
+                outputIndices[writeOffset + 0] = v0;
+                outputIndices[writeOffset + 1] = v1;
+                outputIndices[writeOffset + 2] = v2;
+                
+                outputIndices[writeOffset + 3] = v1;
+                outputIndices[writeOffset + 4] = v3;
+                outputIndices[writeOffset + 5] = v2;
+                
+                writeOffset += 6;
+            }
+        }
+    }
 }

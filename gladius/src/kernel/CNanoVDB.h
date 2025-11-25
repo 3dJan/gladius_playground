@@ -12,6 +12,13 @@
 #define CNANOVDB_DATA_ALIGNMENT 32
 #define CNANOVDB_ALIGNMENT_PADDING(x, n) (-(x) & ((n) - 1))
 
+#if defined(__OPENCL_VERSION__)
+#define CNANOVDB_DECLARE_PADDING(name, byteCount, scalarType)
+#else
+#define CNANOVDB_DECLARE_PADDING(name, byteCount, scalarType)                                     \
+    scalarType name[(byteCount) / sizeof(scalarType)]
+#endif
+
 #if defined(_MSC_VER) && !defined(__OPENCL_VERSION__)
 #define CNANOVDB_ALIGNED_STRUCT(ALIGN) __declspec(align(ALIGN)) struct
 #else
@@ -274,13 +281,14 @@ typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
     uint32_t mSemantic;     // semantic meaning of the data.
     uint32_t mDataClass;    // 4 bytes
     uint32_t mDataType;     // 4 bytes
-    char mName[256];
-#ifndef __OPENCL_VERSION__
-    uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(int64_t) + sizeof(uint64_t) +
-                                                   2 * sizeof(uint32_t) + 2 * sizeof(uint32_t) +
-                                                   256 * sizeof(char),
-                                                 CNANOVDB_DATA_ALIGNMENT)];
-#endif
+        char mName[256];
+        CNANOVDB_DECLARE_PADDING(_reserved,
+                                                         CNANOVDB_ALIGNMENT_PADDING(sizeof(int64_t) + sizeof(uint64_t) +
+                                                                                                                     2 * sizeof(uint32_t) +
+                                                                                                                     2 * sizeof(uint32_t) +
+                                                                                                                     256 * sizeof(char),
+                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
+                                                         uint8_t);
 } cnanovdb_gridblindmetadata;
 
 typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
@@ -300,13 +308,13 @@ typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
     uint32_t mGridClass;           // 4B.
     uint32_t mGridType;            // 4B.
     uint64_t mBlindMetadataOffset; // 8B. offset of GridBlindMetaData structures.
-    int32_t mBlindMetadataCount;   // 4B. count of GridBlindMetaData structures.
-#ifndef __OPENCL_VERSION__
-    uint32_t _reserved[CNANOVDB_ALIGNMENT_PADDING(8 + 8 + 4 + 4 + 4 + 4 + 8 + 256 + 24 + 24 +
-                                                    sizeof(cnanovdb_map) + 24 + 4 + 4 + 8 + 4,
-                                                  CNANOVDB_DATA_ALIGNMENT) /
-                       4];
-#endif
+        int32_t mBlindMetadataCount;   // 4B. count of GridBlindMetaData structures.
+        CNANOVDB_DECLARE_PADDING(_reserved,
+                                                         CNANOVDB_ALIGNMENT_PADDING(8 + 8 + 4 + 4 + 4 + 4 + 8 + 256 + 24 +
+                                                                                                                     24 + sizeof(cnanovdb_map) + 24 + 4 +
+                                                                                                                     4 + 8 + 4,
+                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
+                                                         uint32_t);
 } cnanovdb_griddata;
 
 static void cnanovdb_griddata_worldToIndex(cnanovdb_Vec3F* dst,
@@ -350,13 +358,14 @@ typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
 {
     uint64_t mNodeOffset[ROOT_LEVEL + 1];
     uint32_t mNodeCount[ROOT_LEVEL];
-    uint32_t mTileCount[ROOT_LEVEL];
-    uint64_t mVoxelCount;
-#ifndef __OPENCL_VERSION__
-    uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(4 * sizeof(uint64_t) + (3 + 3) * sizeof(uint32_t) +
-                                                   sizeof(uint64_t),
-                                                 CNANOVDB_DATA_ALIGNMENT)];
-#endif
+        uint32_t mTileCount[ROOT_LEVEL];
+        uint64_t mVoxelCount;
+        CNANOVDB_DECLARE_PADDING(_reserved,
+                                                         CNANOVDB_ALIGNMENT_PADDING(4 * sizeof(uint64_t) +
+                                                                                                                     (3 + 3) * sizeof(uint32_t) +
+                                                                                                                     sizeof(uint64_t),
+                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
+                                                         uint8_t);
 } cnanovdb_treedata;
 
 static const CNANOVDB_GLOBAL cnanovdb_treedata*
@@ -662,11 +671,11 @@ static void cnanovdb_readaccessor_insert(cnanovdb_readaccessor* RESTRICT acc,
         int64_t child;                                                                             \
         uint32_t state;                                                                            \
         VALUETYPE value;                                                                           \
-#ifndef __OPENCL_VERSION__                                                                          \
-        uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(KEYSIZE) + sizeof(VALUETYPE) +         \
-                                                       sizeof(int64_t) + sizeof(uint32_t),         \
-                                                     CNANOVDB_DATA_ALIGNMENT)];                    \
-#endif                                                                                             \
+        CNANOVDB_DECLARE_PADDING(_reserved,                                                        \
+                     CNANOVDB_ALIGNMENT_PADDING(sizeof(KEYSIZE) + sizeof(VALUETYPE) +  \
+                                   sizeof(int64_t) + sizeof(uint32_t),     \
+                                 CNANOVDB_DATA_ALIGNMENT),                 \
+                     uint8_t);                                                         \
     } cnanovdb_rootdata_tile##SUFFIX;                                                              \
                                                                                                    \
     typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)                                       \
@@ -675,14 +684,14 @@ static void cnanovdb_readaccessor_insert(cnanovdb_readaccessor* RESTRICT acc,
         uint32_t mTableSize;                                                                       \
         VALUETYPE mBackground;                                                                     \
         VALUETYPE mMinimum, mMaximum;                                                              \
-        STATSTYPE mAverage, mStdDevi;                                                              \
-#ifndef __OPENCL_VERSION__                                                                          \
-        uint32_t                                                                                   \
-          _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(cnanovdb_coord) * 2 + sizeof(uint32_t) +     \
-                                                 sizeof(VALUETYPE) * 3 + sizeof(STATSTYPE) * 2,    \
-                                               CNANOVDB_DATA_ALIGNMENT) /                          \
-                    4];                                                                            \
-#endif                                                                                             \
+                STATSTYPE mAverage, mStdDevi;                                                              \
+                CNANOVDB_DECLARE_PADDING(_reserved,                                                        \
+                                                                 CNANOVDB_ALIGNMENT_PADDING(sizeof(cnanovdb_coord) * 2 +          \
+                                                                                                                     sizeof(uint32_t) +                     \
+                                                                                                                     sizeof(VALUETYPE) * 3 +                \
+                                                                                                                     sizeof(STATSTYPE) * 2,                 \
+                                                                                                                 CNANOVDB_DATA_ALIGNMENT),                \
+                                                                 uint32_t);                                                        \
     } cnanovdb_rootdata##SUFFIX;                                                                   \
                                                                                                    \
     static const CNANOVDB_GLOBAL cnanovdb_rootdata##SUFFIX* cnanovdb_treedata_root##SUFFIX(        \

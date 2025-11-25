@@ -63,6 +63,27 @@ namespace gladius::compute
             Eigen::Vector3f const & bboxMax,
             Primitives const & primitives,
             float isoValue);
+
+        /// Count quads (for index allocation via prefix sum)
+        void countQuads(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer & quadCountBuffer,
+            std::size_t nodeCount,
+            std::uint32_t maxCoord);
+
+        /// Generate triangle indices using watertight quad generation
+        void generateIndices(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer const & vertexOffsetBuffer,
+            cl::Buffer const & indexOffsetBuffer,
+            cl::Buffer & indexBuffer,
+            std::size_t nodeCount,
+            std::uint32_t maxCoord);
+
+        /// Sort octree nodes by Morton code (required for neighbor lookup)
+        void sortOctreeByMorton(
+            std::unique_ptr<cl::Buffer> & octreeBuffer,
+            std::size_t nodeCount);
             
       private:
         void ensureCompiled();

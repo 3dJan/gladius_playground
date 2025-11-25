@@ -172,4 +172,71 @@ namespace gladius::compute
                            PAYLOAD_ARGUMENTS,
                            isoValue);
     }
+
+    void ManifoldDualContouringProgram::countQuads(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer & quadCountBuffer,
+        std::size_t nodeCount,
+        std::uint32_t maxCoord)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("count_quads",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           quadCountBuffer,
+                           static_cast<int>(nodeCount),
+                           static_cast<cl_uint>(maxCoord));
+    }
+
+    void ManifoldDualContouringProgram::generateIndices(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer const & vertexOffsetBuffer,
+        cl::Buffer const & indexOffsetBuffer,
+        cl::Buffer & indexBuffer,
+        std::size_t nodeCount,
+        std::uint32_t maxCoord)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("emit_indices",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           vertexOffsetBuffer,
+                           indexOffsetBuffer,
+                           indexBuffer,
+                           static_cast<int>(nodeCount),
+                           static_cast<cl_uint>(maxCoord));
+    }
+
+    void ManifoldDualContouringProgram::sortOctreeByMorton(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t nodeCount)
+    {
+        if (nodeCount <= 1)
+        {
+            return;
+        }
+
+        // Read octree to CPU, sort by Morton code, write back
+        // For production, consider GPU-based radix sort
+        std::vector<OctreeNode> nodes(nodeCount);
+        m_ComputeContext->GetQueue().enqueueReadBuffer(
+            *octreeBuffer, CL_TRUE, 0, nodeCount * sizeof(OctreeNode), nodes.data());
+
+        std::sort(nodes.begin(), nodes.end(),
+                  [](OctreeNode const & a, OctreeNode const & b)
+                  { return a.mortonCode < b.mortonCode; });
+
+        m_ComputeContext->GetQueue().enqueueWriteBuffer(
+            *octreeBuffer, CL_TRUE, 0, nodeCount * sizeof(OctreeNode), nodes.data());
+    }
 }

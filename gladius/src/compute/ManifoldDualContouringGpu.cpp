@@ -1,15 +1,11 @@
 #include "ManifoldDualContouringGpu.h"
 #include "ManifoldDualContouringProgram.h"
-#include "../DualContouringMesher.h"
 #include "../Primitives.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
-#include <optional>
-#include <unordered_map>
 #include <vector>
 
 namespace gladius::compute
@@ -21,91 +17,6 @@ namespace gladius::compute
             cl_float4 position;
             cl_float4 normal;
         };
-
-        constexpr int kNeighborSearchRange = 2;
-        inline std::uint64_t expandBits64(std::uint64_t v)
-        {
-            v = (v | (v << 32U)) & 0x1f00000000ffffULL;
-            v = (v | (v << 16U)) & 0x1f0000ff0000ffULL;
-            v = (v | (v << 8U)) & 0x100f00f00f00f00FULL;
-            v = (v | (v << 4U)) & 0x10c30c30c30c30c3ULL;
-            v = (v | (v << 2U)) & 0x1249249249249249ULL;
-            return v;
-        }
-
-        inline std::uint64_t compactBits64(std::uint64_t v)
-        {
-            v &= 0x1249249249249249ULL;
-            v = (v | (v >> 2U)) & 0x10c30c30c30c30c3ULL;
-            v = (v | (v >> 4U)) & 0x100f00f00f00f00FULL;
-            v = (v | (v >> 8U)) & 0x1f0000ff0000ffULL;
-            v = (v | (v >> 16U)) & 0x1f00000000ffffULL;
-            v = (v | (v >> 32U)) & 0x1fffffULL;
-            return v;
-        }
-
-        inline std::uint64_t encodeMorton(std::uint32_t x, std::uint32_t y, std::uint32_t z)
-        {
-            return (expandBits64(z) << 2U) | (expandBits64(y) << 1U) | expandBits64(x);
-        }
-
-        inline std::uint64_t normalizeMortonToDepth(std::uint64_t morton,
-                                                     std::uint32_t sourceDepth,
-                                                     std::uint32_t targetDepth)
-        {
-            if (targetDepth == sourceDepth || targetDepth > 63U)
-            {
-                return morton;
-            }
-
-            std::uint64_t normalized = morton;
-            if (targetDepth > sourceDepth)
-            {
-                std::uint32_t const delta = targetDepth - sourceDepth;
-                normalized <<= (delta * 3U);
-            }
-            else if (sourceDepth > targetDepth)
-            {
-                std::uint32_t const delta = sourceDepth - targetDepth;
-                normalized >>= (delta * 3U);
-            }
-            return normalized;
-        }
-
-                struct QuantizedPosition
-                {
-                        std::int64_t x{0};
-                        std::int64_t y{0};
-                        std::int64_t z{0};
-
-                        [[nodiscard]] bool operator==(QuantizedPosition const &) const = default;
-                };
-
-                struct QuantizedPositionHash
-                {
-                        [[nodiscard]] std::size_t operator()(QuantizedPosition const & position) const noexcept
-                        {
-                                std::size_t seed = std::hash<std::int64_t>{}(position.x);
-                                seed ^= std::hash<std::int64_t>{}(position.y) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-                                seed ^= std::hash<std::int64_t>{}(position.z) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-                                return seed;
-                        }
-                };
-
-                [[nodiscard]] float computeMatchingTolerance(Eigen::Vector3f const & bboxSize,
-                                                                                                         std::uint32_t gridResolution)
-                {
-                        Eigen::Vector3f const safeSize = bboxSize.cwiseMax(Eigen::Vector3f::Constant(1e-4F));
-                        float const resolution = static_cast<float>(std::max<std::uint32_t>(gridResolution, 1U));
-                        Eigen::Vector3f const cellSize = safeSize / resolution;
-                        return std::max(cellSize.maxCoeff() * 0.5F, 1e-4F);
-                }
-
-        [[nodiscard]] std::size_t computeReferenceResolution(std::size_t depth)
-        {
-            std::size_t const cellCount = static_cast<std::size_t>(1ULL) << depth;
-            return std::max<std::size_t>(cellCount + 1U, 2U);
-        }
     }
 
     ManifoldDualContouringGpu::ManifoldDualContouringGpu(ComputeCore & core)
@@ -352,255 +263,74 @@ namespace gladius::compute
             return;
         }
 
-        if (!m_cachedBoundingBox.has_value())
+        if (m_octreeNodeCount == 0U || !m_octreeBuffer)
         {
+            std::cerr << "No octree data available for index generation" << std::endl;
             return;
         }
 
-        dual_contouring::DualContouringMesh referenceMesh{};
-        Eigen::Vector3f gridMin = Eigen::Vector3f::Zero();
-        Eigen::Vector3f gridSpacing = Eigen::Vector3f::Ones();
-        std::size_t cellWidth = 0U;
-        std::size_t cellHeight = 0U;
-        std::size_t cellDepth = 0U;
+        auto context = m_core.getComputeContext();
+        if (!context)
+        {
+            std::cerr << "Compute context unavailable" << std::endl;
+            return;
+        }
+
+        auto & queue = context->GetQueue();
+        std::size_t const numNodes = m_octreeNodeCount;
 
         try
         {
-            constexpr std::size_t kMaxShift = std::numeric_limits<std::size_t>::digits - 2U;
-            std::size_t const normalizedDepth = std::min<std::size_t>(m_config.maxDepth, kMaxShift);
+            // 1. Sort octree by Morton code (required for neighbor lookup)
+            m_program->sortOctreeByMorton(m_octreeBuffer, numNodes);
 
-            dual_contouring::OctreeBuildConfig buildConfig{};
-            buildConfig.isoValue = m_config.isoValue;
-            buildConfig.maxDepth = normalizedDepth;
-            buildConfig.sdfResolution = computeReferenceResolution(normalizedDepth);
-            buildConfig.forceUniform = true;
-            buildConfig.enableGpuSampling = false;
-            buildConfig.enableCurvatureRefinement = false;
-            buildConfig.enableBalancedRefinement = false;
+            // Calculate maxCoord for bounds checking in kernels (2^depth - 1)
+            std::uint32_t const maxCoord = m_gridResolution - 1U;
 
-            dual_contouring::OctreeBuilder builder(m_core, m_cachedBoundingBox.value(), buildConfig);
-            dual_contouring::OctreeMetrics metrics{};
-            auto root = builder.build(metrics);
-            if (!root)
+            // 2. Count quads per cell
+            auto quadCountBuffer =
+                context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
+            m_program->countQuads(*m_octreeBuffer, *quadCountBuffer, numNodes, maxCoord);
+
+            // 3. CPU-side prefix sum for index offsets
+            std::vector<int> quadCounts(numNodes);
+            queue.enqueueReadBuffer(*quadCountBuffer, CL_TRUE, 0, numNodes * sizeof(int), quadCounts.data());
+
+            std::vector<int> indexOffsets(numNodes);
+            int totalIndices = 0;
+            for (std::size_t i = 0U; i < numNodes; ++i)
             {
-                std::cerr << "Reference octree build failed; indices unavailable" << std::endl;
+                indexOffsets[i] = totalIndices;
+                totalIndices += quadCounts[i];
+            }
+
+            if (totalIndices == 0)
+            {
                 return;
             }
 
-            referenceMesh = dual_contouring::buildDualContouringMesh(builder, *root, buildConfig, nullptr);
+            auto indexOffsetBuffer = context->createBufferChecked(
+                CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, numNodes * sizeof(int), indexOffsets.data());
 
-            gridMin = builder.gridMin();
-            gridSpacing = builder.gridSpacing().cwiseMax(Eigen::Vector3f::Constant(1e-6F));
-            cellWidth = builder.gridWidth() > 0U ? builder.gridWidth() - 1U : 0U;
-            cellHeight = builder.gridHeight() > 0U ? builder.gridHeight() - 1U : 0U;
-            cellDepth = builder.gridDepth() > 0U ? builder.gridDepth() - 1U : 0U;
+            // 4. Allocate index buffer and emit indices
+            m_indexBuffer =
+                context->createBufferChecked(CL_MEM_READ_WRITE, totalIndices * sizeof(std::uint32_t));
+
+            m_program->generateIndices(
+                *m_octreeBuffer, *m_offsetBuffer, *indexOffsetBuffer, *m_indexBuffer, numNodes, maxCoord);
+
+            // 5. Read back indices
+            m_mesh.indices.resize(static_cast<std::size_t>(totalIndices));
+            queue.enqueueReadBuffer(
+                *m_indexBuffer, CL_TRUE, 0, totalIndices * sizeof(std::uint32_t), m_mesh.indices.data());
+
+            std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles via GPU" << std::endl;
         }
         catch (std::exception const & e)
         {
-            std::cerr << "Failed to build reference dual contouring mesh: " << e.what() << std::endl;
-            return;
+            std::cerr << "GPU index generation failed: " << e.what() << std::endl;
+            m_mesh.indices.clear();
         }
-
-        if (referenceMesh.faces.empty())
-        {
-            std::cout << "Reference mesh produced no faces; indices remain empty" << std::endl;
-            return;
-        }
-
-        if (m_cpuOctreeNodes.empty() || m_cpuVertexOffsets.size() != m_cpuOctreeNodes.size() ||
-            m_cpuVertexCounts.size() != m_cpuOctreeNodes.size())
-        {
-            std::cerr << "Octree metadata not available for GPU vertex mapping" << std::endl;
-            return;
-        }
-
-                float const rawTolerance = computeMatchingTolerance(m_cachedBboxSize, m_gridResolution);
-                float const matchingTolerance = std::max(rawTolerance, 1e-5F);
-                float const matchingToleranceSq = matchingTolerance * matchingTolerance;
-                double const invTolerance = 1.0 / static_cast<double>(matchingTolerance);
-
-                auto bucketize = [invTolerance](Eigen::Vector3f const & position)
-                {
-                        return QuantizedPosition{static_cast<std::int64_t>(
-                                                                                std::llround(static_cast<double>(position.x()) * invTolerance)),
-                                                                        static_cast<std::int64_t>(
-                                                                            std::llround(static_cast<double>(position.y()) * invTolerance)),
-                                                                        static_cast<std::int64_t>(
-                                                                            std::llround(static_cast<double>(position.z()) * invTolerance))};
-                };
-
-                std::unordered_map<QuantizedPosition, std::vector<std::uint32_t>, QuantizedPositionHash>
-                    gpuVerticesByQuantizedPosition;
-                gpuVerticesByQuantizedPosition.reserve(m_mesh.positions.size());
-                std::vector<bool> gpuVertexUsed(m_mesh.positions.size(), false);
-
-                for (std::uint32_t idx = 0U; idx < m_mesh.positions.size(); ++idx)
-                {
-                        auto const bucket = bucketize(m_mesh.positions[idx]);
-                        gpuVerticesByQuantizedPosition[bucket].push_back(idx);
-                }
-
-        std::unordered_map<std::uint64_t, std::uint32_t> gpuVerticesByMorton;
-        gpuVerticesByMorton.reserve(m_cpuOctreeNodes.size());
-                for (std::size_t nodeIdx = 0; nodeIdx < m_cpuOctreeNodes.size(); ++nodeIdx)
-        {
-            if (m_cpuVertexCounts[nodeIdx] <= 0)
-            {
-                continue;
-            }
-
-                        auto const nodeDepth = static_cast<std::uint32_t>(m_cpuOctreeNodes[nodeIdx].depth);
-                        std::uint64_t const normalizedCode =
-                            normalizeMortonToDepth(m_cpuOctreeNodes[nodeIdx].mortonCode, nodeDepth, m_octreeDepth);
-                        gpuVerticesByMorton[normalizedCode] = static_cast<std::uint32_t>(m_cpuVertexOffsets[nodeIdx]);
-        }
-
-        Eigen::Vector3f const invSpacing = gridSpacing.cwiseInverse();
-        int const maxX = static_cast<int>((cellWidth > 0U ? cellWidth : 1U) - 1U);
-        int const maxY = static_cast<int>((cellHeight > 0U ? cellHeight : 1U) - 1U);
-        int const maxZ = static_cast<int>((cellDepth > 0U ? cellDepth : 1U) - 1U);
-
-        std::vector<std::optional<std::uint32_t>> cpuToGpu(referenceMesh.vertices.size());
-        auto const findQuantizedMatch = [&](Eigen::Vector3f const & reference) -> std::optional<std::uint32_t>
-        {
-            QuantizedPosition const baseBucket = bucketize(reference);
-            std::optional<std::uint32_t> bestIndex;
-            float bestDistanceSq = std::numeric_limits<float>::max();
-
-            for (int dx = -kNeighborSearchRange; dx <= kNeighborSearchRange; ++dx)
-            {
-                for (int dy = -kNeighborSearchRange; dy <= kNeighborSearchRange; ++dy)
-                {
-                    for (int dz = -kNeighborSearchRange; dz <= kNeighborSearchRange; ++dz)
-                    {
-                        QuantizedPosition const candidateBucket{
-                          baseBucket.x + dx, baseBucket.y + dy, baseBucket.z + dz};
-                        auto bucketIt = gpuVerticesByQuantizedPosition.find(candidateBucket);
-                        if (bucketIt == gpuVerticesByQuantizedPosition.end())
-                        {
-                            continue;
-                        }
-
-                        for (auto const gpuIndex : bucketIt->second)
-                        {
-                            if (gpuVertexUsed[gpuIndex])
-                            {
-                                continue;
-                            }
-
-                            Eigen::Vector3f const & gpuPosition = m_mesh.positions[gpuIndex];
-                            float const distanceSq = (gpuPosition - reference).squaredNorm();
-                            if (distanceSq > matchingToleranceSq)
-                            {
-                                continue;
-                            }
-
-                            if (!bestIndex.has_value() || distanceSq < bestDistanceSq)
-                            {
-                                bestIndex = gpuIndex;
-                                bestDistanceSq = distanceSq;
-                            }
-                        }
-                    }
-                }
-            }
-
-            return bestIndex;
-        };
-
-        std::size_t unmatchedVertices = 0U;
-        std::size_t mortonMatches = 0U;
-        std::size_t fallbackMatches = 0U;
-        for (std::size_t i = 0; i < referenceMesh.vertices.size(); ++i)
-        {
-            Eigen::Vector3f normalized = (referenceMesh.vertices[i] - gridMin).cwiseProduct(invSpacing);
-            Eigen::Vector3i coords = normalized.array().floor().matrix().cast<int>();
-            coords = coords.cwiseMax(Eigen::Vector3i::Zero());
-            coords.x() = std::min(coords.x(), maxX);
-            coords.y() = std::min(coords.y(), maxY);
-            coords.z() = std::min(coords.z(), maxZ);
-
-            std::uint64_t const morton = encodeMorton(static_cast<std::uint32_t>(coords.x()),
-                                                      static_cast<std::uint32_t>(coords.y()),
-                                                      static_cast<std::uint32_t>(coords.z()));
-
-            bool matched = false;
-            auto it = gpuVerticesByMorton.find(morton);
-            if (it != gpuVerticesByMorton.end())
-            {
-                cpuToGpu[i] = it->second;
-                gpuVertexUsed[it->second] = true;
-                gpuVerticesByMorton.erase(it);
-                mortonMatches += 1U;
-                matched = true;
-            }
-            else
-            {
-                auto const fallback = findQuantizedMatch(referenceMesh.vertices[i]);
-                if (fallback.has_value())
-                {
-                    cpuToGpu[i] = fallback.value();
-                    gpuVertexUsed[fallback.value()] = true;
-                    fallbackMatches += 1U;
-                    matched = true;
-                }
-            }
-
-            if (!matched)
-            {
-                unmatchedVertices += 1U;
-            }
-        }
-
-        std::size_t skippedFaces = 0U;
-        std::size_t degenerateTriangles = 0U;
-        for (auto const & face : referenceMesh.faces)
-        {
-            std::array<int, 3> faceIndices{face.x(), face.y(), face.z()};
-            std::array<std::uint32_t, 3> mapped{};
-            bool valid = true;
-            for (std::size_t corner = 0U; corner < faceIndices.size(); ++corner)
-            {
-                int const vertexIdx = faceIndices[corner];
-                if (vertexIdx < 0)
-                {
-                    valid = false;
-                    break;
-                }
-                std::size_t const cpuIndex = static_cast<std::size_t>(vertexIdx);
-                if (cpuIndex >= cpuToGpu.size() || !cpuToGpu[cpuIndex].has_value())
-                {
-                    valid = false;
-                    break;
-                }
-                mapped[corner] = cpuToGpu[cpuIndex].value();
-            }
-
-            if (!valid)
-            {
-                skippedFaces += 1U;
-                continue;
-            }
-
-            Eigen::Vector3f const & va = m_mesh.positions[mapped[0]];
-            Eigen::Vector3f const & vb = m_mesh.positions[mapped[1]];
-            Eigen::Vector3f const & vc = m_mesh.positions[mapped[2]];
-            Eigen::Vector3f const edge1 = vb - va;
-            Eigen::Vector3f const edge2 = vc - va;
-            if (edge1.cross(edge2).squaredNorm() <= 1e-12F)
-            {
-                degenerateTriangles += 1U;
-                continue;
-            }
-
-            m_mesh.indices.insert(m_mesh.indices.end(), mapped.begin(), mapped.end());
-        }
-
-        std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles";
-        std::cout << " (skipped faces " << skippedFaces << ", unmatched vertices "
-                  << unmatchedVertices << ", degenerate triangles discarded "
-                  << degenerateTriangles << ", morton matches " << mortonMatches
-                  << ", fallback matches " << fallbackMatches << ")" << std::endl;
     }
 
     void ManifoldDualContouringGpu::refreshCpuOctreeCache()
