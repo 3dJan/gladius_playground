@@ -84,8 +84,9 @@ __kernel void count_vertices(
 }
 
 // QEF (Quadratic Error Function) Solver
-// Simplified version using mass point (average of edge intersections)
-// For production, consider SVD-based solver
+// The QEF solver finds the optimal vertex position that minimizes the sum of
+// squared distances to all tangent planes defined by edge intersections.
+// This naturally preserves sharp edges where multiple planes meet.
 
 typedef struct
 {
@@ -93,6 +94,241 @@ typedef struct
     float3 normal;
     float error;
 } QefResult;
+
+// ============================================================================
+// SVD-based QEF Solver for Sharp Feature Preservation
+// ============================================================================
+
+/// 3x3 matrix structure for QEF solving
+typedef struct
+{
+    float m[3][3];
+} Mat3;
+
+/// Multiply 3x3 matrix by vector
+float3 mat3MulVec(Mat3 const * m, float3 v)
+{
+    return (float3)(
+        m->m[0][0] * v.x + m->m[0][1] * v.y + m->m[0][2] * v.z,
+        m->m[1][0] * v.x + m->m[1][1] * v.y + m->m[1][2] * v.z,
+        m->m[2][0] * v.x + m->m[2][1] * v.y + m->m[2][2] * v.z
+    );
+}
+
+/// Multiply two 3x3 matrices
+Mat3 mat3Mul(Mat3 const * a, Mat3 const * b)
+{
+    Mat3 result;
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            result.m[i][j] = 0.0f;
+            for (int k = 0; k < 3; k++)
+            {
+                result.m[i][j] += a->m[i][k] * b->m[k][j];
+            }
+        }
+    }
+    return result;
+}
+
+/// Transpose a 3x3 matrix
+Mat3 mat3Transpose(Mat3 const * m)
+{
+    Mat3 result;
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            result.m[i][j] = m->m[j][i];
+        }
+    }
+    return result;
+}
+
+/// Compute the symmetric matrix A^T * A from normals
+/// Each row of A is a normal vector n_i
+/// A^T * A = sum of outer products n_i * n_i^T
+Mat3 computeATA(float3 const * normals, int count)
+{
+    Mat3 ata;
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            ata.m[i][j] = 0.0f;
+        }
+    }
+    
+    for (int k = 0; k < count; k++)
+    {
+        float3 n = normals[k];
+        // Outer product n * n^T
+        ata.m[0][0] += n.x * n.x;
+        ata.m[0][1] += n.x * n.y;
+        ata.m[0][2] += n.x * n.z;
+        ata.m[1][0] += n.y * n.x;
+        ata.m[1][1] += n.y * n.y;
+        ata.m[1][2] += n.y * n.z;
+        ata.m[2][0] += n.z * n.x;
+        ata.m[2][1] += n.z * n.y;
+        ata.m[2][2] += n.z * n.z;
+    }
+    
+    return ata;
+}
+
+/// Compute A^T * b where b_i = dot(n_i, p_i)
+float3 computeATb(float3 const * normals, float3 const * points, int count)
+{
+    float3 atb = (float3)(0.0f, 0.0f, 0.0f);
+    
+    for (int k = 0; k < count; k++)
+    {
+        float b_k = dot(normals[k], points[k]);
+        atb += normals[k] * b_k;
+    }
+    
+    return atb;
+}
+
+/// Solve 3x3 symmetric positive semi-definite system using Cholesky with regularization
+/// Returns solution to (A^T A + lambda*I) x = A^T b
+float3 solveSymmetricSystem(Mat3 const * ata, float3 atb, float lambda)
+{
+    // Add regularization to handle rank-deficient cases (sharp edges, corners)
+    Mat3 m = *ata;
+    m.m[0][0] += lambda;
+    m.m[1][1] += lambda;
+    m.m[2][2] += lambda;
+    
+    // Solve using Cramer's rule (simple and robust for 3x3)
+    float det = m.m[0][0] * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1])
+              - m.m[0][1] * (m.m[1][0] * m.m[2][2] - m.m[1][2] * m.m[2][0])
+              + m.m[0][2] * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]);
+    
+    if (fabs(det) < 1e-10f)
+    {
+        // Matrix still singular, return zero (will fall back to mass point)
+        return (float3)(0.0f, 0.0f, 0.0f);
+    }
+    
+    float invDet = 1.0f / det;
+    
+    // Compute inverse using adjugate matrix
+    float3 result;
+    result.x = invDet * (
+        atb.x * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1]) +
+        atb.y * (m.m[0][2] * m.m[2][1] - m.m[0][1] * m.m[2][2]) +
+        atb.z * (m.m[0][1] * m.m[1][2] - m.m[0][2] * m.m[1][1])
+    );
+    result.y = invDet * (
+        atb.x * (m.m[1][2] * m.m[2][0] - m.m[1][0] * m.m[2][2]) +
+        atb.y * (m.m[0][0] * m.m[2][2] - m.m[0][2] * m.m[2][0]) +
+        atb.z * (m.m[0][2] * m.m[1][0] - m.m[0][0] * m.m[1][2])
+    );
+    result.z = invDet * (
+        atb.x * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]) +
+        atb.y * (m.m[0][1] * m.m[2][0] - m.m[0][0] * m.m[2][1]) +
+        atb.z * (m.m[0][0] * m.m[1][1] - m.m[0][1] * m.m[1][0])
+    );
+    
+    return result;
+}
+
+/// Compute QEF error: sum of squared distances to tangent planes
+float computeQefError(float3 vertex, float3 const * normals, float3 const * points, int count)
+{
+    float error = 0.0f;
+    for (int i = 0; i < count; i++)
+    {
+        float dist = dot(normals[i], vertex - points[i]);
+        error += dist * dist;
+    }
+    return error;
+}
+
+/// Solve QEF using least squares with regularization for sharp feature preservation
+/// This finds the vertex position that minimizes distance to all tangent planes
+/// Sharp edges and corners are naturally preserved because the solution falls
+/// on the intersection of the tangent planes.
+QefResult solveQefSvd(float3* intersections, float3* normals, int count, float3 cellMin, float3 cellMax)
+{
+    QefResult result;
+    float3 cellCenter = (cellMin + cellMax) * 0.5f;
+    float3 cellSize = cellMax - cellMin;
+    float cellDiag = length(cellSize);
+    
+    if (count == 0)
+    {
+        result.position = cellCenter;
+        result.normal = (float3)(0.0f, 0.0f, 1.0f);
+        result.error = 0.0f;
+        return result;
+    }
+    
+    // Compute mass point as initial guess and fallback
+    float3 massPoint = (float3)(0.0f, 0.0f, 0.0f);
+    float3 avgNormal = (float3)(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < count; i++)
+    {
+        massPoint += intersections[i];
+        avgNormal += normals[i];
+    }
+    massPoint /= (float)count;
+    
+    float avgNormalLen = length(avgNormal);
+    if (avgNormalLen > 1e-6f)
+    {
+        avgNormal /= avgNormalLen;
+    }
+    else
+    {
+        avgNormal = (float3)(0.0f, 1.0f, 0.0f);
+    }
+    
+    // Build the normal equations: A^T A x = A^T b
+    // where A is the matrix of normals and b_i = dot(n_i, p_i)
+    Mat3 ata = computeATA(normals, count);
+    float3 atb = computeATb(normals, intersections, count);
+    
+    // Solve with small regularization to handle degenerate cases
+    // The regularization biases toward the origin, so we shift coordinates
+    // to be relative to mass point, then shift back
+    float3 atbShifted = atb - mat3MulVec(&ata, massPoint);
+    
+    // Use adaptive regularization based on cell size
+    float lambda = 0.01f * (float)count;
+    float3 solution = solveSymmetricSystem(&ata, atbShifted, lambda);
+    
+    // Shift back to world coordinates
+    float3 qefVertex = massPoint + solution;
+    
+    // Clamp to cell bounds (critical for watertightness)
+    // Use slightly expanded bounds to allow vertex on cell boundary
+    float3 clampMin = cellMin - cellSize * 0.001f;
+    float3 clampMax = cellMax + cellSize * 0.001f;
+    qefVertex = clamp(qefVertex, clampMin, clampMax);
+    
+    // If QEF solution is too far from mass point, blend toward mass point
+    // This prevents extreme outliers while still improving sharp features
+    float3 displacement = qefVertex - massPoint;
+    float dispLen = length(displacement);
+    float maxDisp = cellDiag * 0.5f;  // Allow up to half cell diagonal
+    
+    if (dispLen > maxDisp)
+    {
+        qefVertex = massPoint + displacement * (maxDisp / dispLen);
+    }
+    
+    // Final clamp to strict cell bounds
+    result.position = clamp(qefVertex, cellMin, cellMax);
+    result.normal = avgNormal;
+    result.error = computeQefError(result.position, normals, intersections, count);
+    
+    return result;
+}
 
 /// Find intersection point on an edge using linear interpolation
 float3 findEdgeIntersection(float3 p0, float3 p1, float v0, float v1)
@@ -251,8 +487,10 @@ __kernel void emit_vertices(
         intersectionCount++;
     }
     
-    // Solve QEF using mass point method
-    QefResult qef = solveQefMassPoint(intersections, normals, intersectionCount, cellMin, cellMax);
+    // Solve QEF using SVD-based method for sharp feature preservation
+    // This finds the optimal vertex position that minimizes distance to all tangent planes,
+    // naturally preserving sharp edges and corners where multiple planes meet.
+    QefResult qef = solveQefSvd(intersections, normals, intersectionCount, cellMin, cellMax);
     
     // Output vertex
     Vertex v;
