@@ -39,6 +39,28 @@ namespace gladius::nodes
         };
     }
 
+    TypeRules multiplicationDivisionRules()
+    {
+        // Start with standard same-type rules
+        TypeRules rules = operatorFunctionRules();
+
+        // Add scalar-vector mixed rules (scalar multiplication/division of vectors)
+        TypeRule scalar_vector = {RuleType::Vector,
+                                  InputTypeMap{{FieldNames::A, ParameterTypeIndex::Float},
+                                               {FieldNames::B, ParameterTypeIndex::Float3}},
+                                  OutputTypeMap{{FieldNames::Result, ParameterTypeIndex::Float3}}};
+
+        TypeRule vector_scalar = {RuleType::Vector,
+                                  InputTypeMap{{FieldNames::A, ParameterTypeIndex::Float3},
+                                               {FieldNames::B, ParameterTypeIndex::Float}},
+                                  OutputTypeMap{{FieldNames::Result, ParameterTypeIndex::Float3}}};
+
+        rules.push_back(scalar_vector);
+        rules.push_back(vector_scalar);
+
+        return rules;
+    }
+
     TypeRules functionRules()
     {
         TypeRule scalar = {RuleType::Scalar,

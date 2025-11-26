@@ -527,29 +527,30 @@ namespace gladius::dual_contouring
 
     void OctreeBuilder::evaluateCornersGpu(OctreeNode & node) const
     {
-        // Collect corner positions
+        // Collect corner positions plus center for GPU sampling
         std::vector<Eigen::Vector3f> positions;
-        positions.reserve(8U);
-        
+        positions.reserve(9U);
+
         for (std::uint8_t i = 0U; i < 8U; ++i)
         {
             positions.push_back(cornerPosition(i, node.bounds));
         }
-        
+        positions.push_back(node.bounds.center());
+
         // GPU batch sampling
         std::vector<float> values;
-        if (!m_gpuSession->sampleCorners(positions, values) || values.size() != 8U)
+        if (!m_gpuSession->sampleCorners(positions, values) || values.size() != 9U)
         {
             // Fallback to CPU
             evaluateCorners(node);
             return;
         }
-        
-        // Store results
+
+        // Store corner results
         auto minValue = std::numeric_limits<float>::max();
         auto maxValue = std::numeric_limits<float>::lowest();
         bool hasFiniteSample = false;
-        
+
         for (size_t i = 0U; i < 8U; ++i)
         {
             node.cornerValues[i] = values[i];
@@ -560,13 +561,79 @@ namespace gladius::dual_contouring
                 hasFiniteSample = true;
             }
         }
-        
+
+        // Also consider center value
+        if (std::isfinite(values[8]))
+        {
+            minValue = std::min(minValue, values[8]);
+            maxValue = std::max(maxValue, values[8]);
+            hasFiniteSample = true;
+        }
+
+        // Also sample internal SDF grid points (matching CPU behavior)
+        // This ensures we don't miss intersections that occur within the node interior
+        auto const gridExtent = m_grid.max - m_grid.min;
+        auto const safeExtent = gridExtent.cwiseMax(Eigen::Vector3f::Constant(1e-6F));
+
+        auto normalize = [&](Eigen::Vector3f const & position)
+        {
+            Eigen::Vector3f normalized = (position - m_grid.min).cwiseQuotient(safeExtent);
+            normalized = normalized.cwiseMax(Eigen::Vector3f::Zero());
+            normalized = normalized.cwiseMin(Eigen::Vector3f::Ones());
+            return normalized;
+        };
+
+        auto const normalizedMin = normalize(node.bounds.min);
+        auto const normalizedMax = normalize(node.bounds.max);
+
+        auto const toIndex = [](float value, size_t upper)
+        {
+            auto const scaled = value * static_cast<float>(upper);
+            auto const floored = static_cast<size_t>(std::floor(scaled));
+            auto const ceiled = static_cast<size_t>(std::ceil(scaled));
+            return std::pair<size_t, size_t>{std::min(floored, upper), std::min(ceiled, upper)};
+        };
+
+        auto const [minIndexX, maxIndexX] = toIndex(normalizedMin.x(), m_grid.width - 1U);
+        auto const [minIndexY, maxIndexY] = toIndex(normalizedMin.y(), m_grid.height - 1U);
+        auto const [minIndexZ, maxIndexZ] = toIndex(normalizedMin.z(), m_grid.depth - 1U);
+
+        auto const [maxRangeX, maxRangeXCeil] = toIndex(normalizedMax.x(), m_grid.width - 1U);
+        auto const [maxRangeY, maxRangeYCeil] = toIndex(normalizedMax.y(), m_grid.height - 1U);
+        auto const [maxRangeZ, maxRangeZCeil] = toIndex(normalizedMax.z(), m_grid.depth - 1U);
+
+        size_t const rangeMinX = std::min(minIndexX, maxRangeX);
+        size_t const rangeMinY = std::min(minIndexY, maxRangeY);
+        size_t const rangeMinZ = std::min(minIndexZ, maxRangeZ);
+        size_t const rangeMaxX = std::max(maxIndexX, maxRangeXCeil);
+        size_t const rangeMaxY = std::max(maxIndexY, maxRangeYCeil);
+        size_t const rangeMaxZ = std::max(maxIndexZ, maxRangeZCeil);
+
+        for (size_t z = rangeMinZ; z <= rangeMaxZ; ++z)
+        {
+            for (size_t y = rangeMinY; y <= rangeMaxY; ++y)
+            {
+                for (size_t x = rangeMinX; x <= rangeMaxX; ++x)
+                {
+                    auto const value = m_grid.valueAt(x, y, z);
+                    if (!std::isfinite(value))
+                    {
+                        continue;
+                    }
+
+                    minValue = std::min(minValue, value);
+                    maxValue = std::max(maxValue, value);
+                    hasFiniteSample = true;
+                }
+            }
+        }
+
         if (!hasFiniteSample)
         {
             node.isIntersecting = false;
             return;
         }
-        
+
         node.isIntersecting = minValue <= m_config.isoValue && maxValue >= m_config.isoValue;
     }
 
