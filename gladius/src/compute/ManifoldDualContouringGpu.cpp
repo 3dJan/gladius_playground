@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -892,16 +893,64 @@ namespace gladius::compute
             return;
         }
 
-        // Calculate voxel size for automatic edge length threshold
-        float minEdgeLength = m_config.simplificationMinEdgeLength;
-        if (minEdgeLength <= 0.0F && m_cachedBoundingBox.has_value())
+        // Calculate base voxel size for edge length threshold
+        float baseEdgeLength = m_config.simplificationMinEdgeLength;
+        if (baseEdgeLength <= 0.0F && m_cachedBoundingBox.has_value())
         {
-            // Default to half voxel size at current octree depth
             Eigen::Vector3f const extent = m_cachedBboxMax - m_cachedBboxMin;
             float const voxelSize = extent.maxCoeff() / static_cast<float>(m_gridResolution);
-            minEdgeLength = voxelSize * 0.5F;
+            baseEdgeLength = voxelSize * 0.5F * m_config.simplificationAggressiveness;
         }
 
+        std::size_t totalCollapsed = 0U;
+        std::size_t const maxPasses = m_config.simplificationPasses;
+        
+        // Multi-pass simplification - each pass can collapse more edges
+        for (std::size_t pass = 0U; pass < maxPasses; ++pass)
+        {
+            // Increase edge length threshold slightly each pass
+            float const passMultiplier = 1.0F + static_cast<float>(pass) * 0.25F;
+            float const minEdgeLength = baseEdgeLength * passMultiplier;
+            
+            // Slightly relax the flat threshold in later passes
+            float const flatThreshold = m_config.simplificationFlatThreshold - 
+                                        static_cast<float>(pass) * 0.05F;
+            
+            std::size_t const passCollapsed = simplifyMeshPass(minEdgeLength, flatThreshold);
+            totalCollapsed += passCollapsed;
+            
+            if (passCollapsed == 0U)
+            {
+                // No more edges to collapse
+                break;
+            }
+            
+            std::cout << "  Pass " << (pass + 1) << ": collapsed " << passCollapsed << " edges" << std::endl;
+        }
+
+        if (totalCollapsed == 0U)
+        {
+            std::cout << "No edges could be collapsed" << std::endl;
+            return;
+        }
+
+        std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const finalVertices = m_mesh.positions.size();
+        
+        float const reductionPercent = 100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
+                                       static_cast<float>(initialTriangles);
+        
+        std::cout << "Mesh simplification complete:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
+                  << " (removed " << (initialTriangles - finalTriangles) 
+                  << ", " << std::fixed << std::setprecision(1) << reductionPercent << "%)" << std::endl;
+        std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
+                  << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
+        std::cout << "  Total edges collapsed: " << totalCollapsed << std::endl;
+    }
+    
+    std::size_t ManifoldDualContouringGpu::simplifyMeshPass(float minEdgeLength, float flatThreshold)
+    {
         // Build edge-to-triangles adjacency
         struct Edge
         {
@@ -950,12 +999,12 @@ namespace gladius::compute
             edgeTriangles[Edge{i2, i0}].push_back(t);
         }
 
-        // Collect candidate edges for collapse (only internal edges with exactly 2 triangles)
+        // Collect candidate edges for collapse
         struct CollapseCandidate
         {
             Edge edge;
             float length;
-            float normalDot;
+            float error; // Combined metric: length + curvature penalty
         };
         std::vector<CollapseCandidate> candidates;
         
@@ -983,33 +1032,34 @@ namespace gladius::compute
             float const normalDot = n0.dot(n1);
             
             // Only consider edges in relatively flat regions
-            if (normalDot >= m_config.simplificationFlatThreshold)
+            if (normalDot >= flatThreshold)
             {
-                candidates.push_back({edge, length, normalDot});
+                // Error metric: shorter edges with more similar normals are better
+                float const curvaturePenalty = 1.0F - normalDot;
+                float const error = length * (1.0F + curvaturePenalty * 10.0F);
+                candidates.push_back({edge, length, error});
             }
         }
         
         if (candidates.empty())
         {
-            std::cout << "No simplification candidates found" << std::endl;
-            return;
+            return 0U;
         }
 
-        // Sort candidates by length (shortest first)
+        // Sort candidates by error metric (lowest error first)
         std::sort(candidates.begin(), candidates.end(),
                   [](CollapseCandidate const & a, CollapseCandidate const & b)
                   {
-                      return a.length < b.length;
+                      return a.error < b.error;
                   });
 
-        // Track which vertices have been collapsed (vertex -> replacement vertex)
+        // Track which vertices have been collapsed
         std::vector<std::uint32_t> vertexRemap(m_mesh.positions.size());
         std::iota(vertexRemap.begin(), vertexRemap.end(), 0U);
         
-        // Track which vertices have been touched (to avoid cascading collapses)
+        // Track which vertices have been touched this pass
         std::vector<bool> vertexTouched(m_mesh.positions.size(), false);
         
-        // Helper to get the final vertex after all remaps
         auto getFinalVertex = [&vertexRemap](std::uint32_t v) -> std::uint32_t
         {
             while (vertexRemap[v] != v)
@@ -1021,36 +1071,33 @@ namespace gladius::compute
 
         std::size_t collapsedCount = 0U;
 
-        // Perform edge collapses
         for (auto const & candidate : candidates)
         {
             std::uint32_t const v0 = getFinalVertex(candidate.edge.v0);
             std::uint32_t const v1 = getFinalVertex(candidate.edge.v1);
             
-            // Skip if already collapsed into same vertex
             if (v0 == v1)
             {
                 continue;
             }
             
-            // Skip if either vertex was already touched (avoid cascading collapses)
             if (vertexTouched[v0] || vertexTouched[v1])
             {
                 continue;
             }
 
-            // Check SDF error at midpoint
             Eigen::Vector3f const & p0 = m_mesh.positions[v0];
             Eigen::Vector3f const & p1 = m_mesh.positions[v1];
             Eigen::Vector3f const midpoint = (p0 + p1) * 0.5F;
             
+            // Check SDF error at midpoint
             float const sdfError = std::abs(evaluateSdf(midpoint));
             if (sdfError > m_config.simplificationMaxError)
             {
                 continue;
             }
 
-            // Check for triangle inversions after collapse
+            // Check for triangle inversions
             bool wouldInvert = false;
             
             auto checkTrianglesForInversion = [&](std::uint32_t vertex) -> bool
@@ -1064,13 +1111,11 @@ namespace gladius::compute
                         getFinalVertex(m_mesh.indices[baseIdx + 2U])
                     };
                     
-                    // Skip already-degenerate triangles
                     if (triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[2] == triVerts[0])
                     {
                         continue;
                     }
                     
-                    // Skip triangles that contain both v0 and v1 (they will become degenerate)
                     bool const hasV0 = (triVerts[0] == v0 || triVerts[1] == v0 || triVerts[2] == v0);
                     bool const hasV1 = (triVerts[0] == v1 || triVerts[1] == v1 || triVerts[2] == v1);
                     if (hasV0 && hasV1)
@@ -1120,15 +1165,13 @@ namespace gladius::compute
                 continue;
             }
 
-            // Perform the collapse: v1 -> v0
+            // Perform the collapse
             vertexRemap[v1] = v0;
             vertexTouched[v0] = true;
             vertexTouched[v1] = true;
             
-            // Update the position of v0 to the midpoint
             m_mesh.positions[v0] = midpoint;
             
-            // Average the normals
             Eigen::Vector3f avgNormal = (m_mesh.normals[v0] + m_mesh.normals[v1]).normalized();
             m_mesh.normals[v0] = avgNormal;
             
@@ -1137,11 +1180,10 @@ namespace gladius::compute
 
         if (collapsedCount == 0U)
         {
-            std::cout << "No edges could be collapsed" << std::endl;
-            return;
+            return 0U;
         }
 
-        // Rebuild index buffer with collapsed vertices
+        // Rebuild index buffer
         std::vector<std::uint32_t> newIndices;
         newIndices.reserve(m_mesh.indices.size());
         
@@ -1152,7 +1194,6 @@ namespace gladius::compute
             std::uint32_t const i1 = getFinalVertex(m_mesh.indices[baseIdx + 1U]);
             std::uint32_t const i2 = getFinalVertex(m_mesh.indices[baseIdx + 2U]);
             
-            // Skip degenerate triangles
             if (i0 != i1 && i1 != i2 && i2 != i0)
             {
                 newIndices.push_back(i0);
@@ -1163,7 +1204,7 @@ namespace gladius::compute
 
         m_mesh.indices = std::move(newIndices);
 
-        // Compact vertex buffer (remove unused vertices)
+        // Compact vertex buffer
         std::vector<bool> vertexUsed(m_mesh.positions.size(), false);
         for (auto idx : m_mesh.indices)
         {
@@ -1190,7 +1231,6 @@ namespace gladius::compute
             }
         }
 
-        // Remap indices to new vertex buffer
         for (auto & idx : m_mesh.indices)
         {
             idx = newVertexIndices[idx];
@@ -1199,15 +1239,7 @@ namespace gladius::compute
         m_mesh.positions = std::move(newPositions);
         m_mesh.normals = std::move(newNormals);
 
-        std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
-        std::size_t const finalVertices = m_mesh.positions.size();
-        
-        std::cout << "Mesh simplification complete:" << std::endl;
-        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
-                  << " (removed " << (initialTriangles - finalTriangles) << ")" << std::endl;
-        std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
-                  << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
-        std::cout << "  Edges collapsed: " << collapsedCount << std::endl;
+        return collapsedCount;
     }
 }
 

@@ -38,6 +38,8 @@ namespace gladius::compute
         float simplificationMaxError{0.01F};        ///< Maximum SDF deviation allowed for edge collapse (world units)
         float simplificationMinEdgeLength{0.0F};    ///< Minimum edge length to preserve (0 = auto based on voxel size)
         float simplificationFlatThreshold{0.95F};   ///< Cosine threshold for coplanar normals (0.95 ≈ 18°)
+        std::size_t simplificationPasses{3U};       ///< Number of simplification passes (more = more reduction)
+        float simplificationAggressiveness{1.0F};   ///< Edge length multiplier (higher = more aggressive)
     };
 
     struct ManifoldDualContouringMesh
@@ -103,6 +105,7 @@ namespace gladius::compute
         
         // Mesh simplification
         void simplifyMesh();
+        [[nodiscard]] std::size_t simplifyMeshPass(float minEdgeLength, float flatThreshold);
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;
     };
     }
