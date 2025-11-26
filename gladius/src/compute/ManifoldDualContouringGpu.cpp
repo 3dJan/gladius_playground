@@ -165,11 +165,12 @@ namespace gladius::compute
         Eigen::Vector3f bboxMin = m_cachedBboxMin;
         Eigen::Vector3f bboxMax = m_cachedBboxMax;
         
-        // 1. Count vertices
+        // 1. Count vertices (1-4 per cell based on normal clustering)
         m_countBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
         
         try {
-            m_program->countVertices(*m_octreeBuffer, *m_countBuffer, numNodes);
+            m_program->countVertices(*m_octreeBuffer, *m_countBuffer, numNodes,
+                                    bboxMin, bboxMax, *primitives, m_config.isoValue);
         } catch (std::exception& e) {
             std::cerr << "Error running count_vertices: " << e.what() << std::endl;
             return;
@@ -193,7 +194,6 @@ namespace gladius::compute
             totalVertices += counts[i];
         }
 
-        m_cpuVertexCounts = counts;
         m_cpuVertexOffsets = offsets;
 
         std::cout << "Generating " << totalVertices << " vertices from " << numNodes << " octree nodes" << std::endl;
@@ -208,8 +208,7 @@ namespace gladius::compute
         m_offsetBuffer = context->createBufferChecked(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
             numNodes * sizeof(int), offsets.data());
             
-        // 3. Emit Vertices
-        // Vertex struct is float4 position + float4 normal = 32 bytes
+        // Allocate vertex buffer (float4 position + float4 normal = 32 bytes)
         m_vertexBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, totalVertices * 32); 
         
         try {
@@ -326,7 +325,8 @@ namespace gladius::compute
                 context->createBufferChecked(CL_MEM_READ_WRITE, totalIndices * sizeof(std::uint32_t));
 
             m_program->generateIndices(
-                *m_octreeBuffer, *m_offsetBuffer, *indexOffsetBuffer, *m_indexBuffer, numNodes, maxCoord);
+                *m_octreeBuffer, *m_offsetBuffer, *indexOffsetBuffer,
+                *m_indexBuffer, numNodes, maxCoord);
 
             // 5. Read back indices
             m_mesh.indices.resize(static_cast<std::size_t>(totalIndices));

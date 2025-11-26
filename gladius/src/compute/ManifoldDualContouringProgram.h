@@ -19,13 +19,11 @@ namespace gladius::compute
     /// Octree node structure matching OpenCL kernel
     struct OctreeNode
     {
-        cl_ulong mortonCode;
-        cl_uint edgeMask;
-        cl_uint internalMask;
-        cl_uint vertexStartIndex;
-        cl_uchar vertexCount;
-        cl_uchar depth;
-        cl_uchar padding[2];
+        cl_ulong mortonCode;      ///< Z-order space-filling curve position
+        cl_uint edgeMask;         ///< Bit mask indicating which of 12 edges cross the surface
+        cl_uint internalMask;     ///< Bit mask for which of 8 corners are inside the surface
+        cl_uchar depth;           ///< Octree depth level (0 = root)
+        cl_uchar padding[7];      ///< Padding for 24-byte alignment
     };
     static_assert(sizeof(OctreeNode) == 24, "OctreeNode size mismatch");
     
@@ -47,13 +45,17 @@ namespace gladius::compute
             Primitives const & primitives,
             float isoValue);
             
-        /// Count vertices per octree node
+        /// Count vertices per octree node (1 per cell with surface crossing)
         void countVertices(
             cl::Buffer const & octreeBuffer,
             cl::Buffer & countBuffer,
-            std::size_t nodeCount);
+            std::size_t nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            Primitives const & primitives,
+            float isoValue);
             
-        /// Generate vertices using QEF solver
+        /// Generate vertices using SVD-based QEF solver (1 per cell)
         void generateVertices(
             cl::Buffer const & octreeBuffer,
             cl::Buffer const & offsetBuffer,

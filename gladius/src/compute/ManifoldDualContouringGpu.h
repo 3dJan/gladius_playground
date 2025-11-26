@@ -71,7 +71,6 @@ namespace gladius::compute
             std::vector<OctreeNode> m_cpuOctreeNodes;
             std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
             std::vector<int> m_cpuVertexOffsets;
-            std::vector<int> m_cpuVertexCounts;
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};

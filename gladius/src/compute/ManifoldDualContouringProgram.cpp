@@ -57,11 +57,8 @@ namespace gladius::compute
         rootNodes[0].mortonCode = 0; // Root node at depth 0, position (0,0,0)
         rootNodes[0].edgeMask = 0xFFF;
         rootNodes[0].internalMask = 0;
-        rootNodes[0].vertexStartIndex = 0;
-        rootNodes[0].vertexCount = 0;
         rootNodes[0].depth = 0;
-        rootNodes[0].padding[0] = 0;
-        rootNodes[0].padding[1] = 0;
+        std::memset(rootNodes[0].padding, 0, sizeof(rootNodes[0].padding));
 
         auto currentBuffer = std::make_unique<cl::Buffer>(
             m_ComputeContext->GetContext(),
@@ -127,10 +124,17 @@ namespace gladius::compute
     void ManifoldDualContouringProgram::countVertices(
         cl::Buffer const & octreeBuffer,
         cl::Buffer & countBuffer,
-        std::size_t nodeCount)
+        std::size_t nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        float isoValue)
     {
         ensureCompiled();
         swapProgramsIfNeeded();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
 
         cl::NDRange global(nodeCount);
 
@@ -139,7 +143,11 @@ namespace gladius::compute
                            global,
                            octreeBuffer,
                            countBuffer,
-                           static_cast<int>(nodeCount));
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           isoValue);
     }
 
     void ManifoldDualContouringProgram::generateVertices(
