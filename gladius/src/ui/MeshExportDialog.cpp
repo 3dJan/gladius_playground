@@ -370,6 +370,32 @@ namespace gladius::ui
                 ImGui::SameLine();
                 ImGui::TextDisabled("higher values capture more detail");
 
+                ImGui::Separator();
+                ImGui::Text("Sharp Feature Post-Processing");
+                
+                ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
+                if (m_manifoldEnableSharpFeaturePostProcess)
+                {
+                    ImGui::Indent();
+                    
+                    ImGui::SliderFloat("Angle threshold", 
+                                       &m_manifoldSharpFeatureAngleThreshold, 
+                                       0.0F, 1.0F, 
+                                       "cos(angle) = %.2f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("lower = more sensitive (0.5 = ~60°)");
+                    
+                    int subdivIters = static_cast<int>(m_manifoldSubdivisionIterations);
+                    if (ImGui::SliderInt("Subdivision iterations", &subdivIters, 1, 3))
+                    {
+                        m_manifoldSubdivisionIterations = static_cast<std::size_t>(subdivIters);
+                    }
+                    
+                    ImGui::Checkbox("Project to surface", &m_manifoldProjectToSurface);
+                    
+                    ImGui::Unindent();
+                }
+
                 ImGui::TextWrapped(
                   "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
                   "while the kernels are under active development.");
@@ -482,6 +508,11 @@ namespace gladius::ui
                     options.initialDepth = options.maxDepth;
                 }
             }
+            // Sharp feature post-processing options
+            options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
+            options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
+            options.subdivisionIterations = m_manifoldSubdivisionIterations;
+            options.projectToSurface = m_manifoldProjectToSurface;
 
             m_manifoldExporter.setOptions(options);
             m_manifoldExporter.beginExport(m_targetFile, core);

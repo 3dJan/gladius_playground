@@ -58,6 +58,11 @@ namespace gladius::ui
         bool m_manifoldEnableCaching = true;
         float m_manifoldIsoValue = 0.0F;
         std::size_t m_manifoldMaxDepth = 7U;
+        // Sharp feature post-processing
+        bool m_manifoldEnableSharpFeaturePostProcess = false;
+        float m_manifoldSharpFeatureAngleThreshold = 0.5F;
+        std::size_t m_manifoldSubdivisionIterations = 1U;
+        bool m_manifoldProjectToSurface = true;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };

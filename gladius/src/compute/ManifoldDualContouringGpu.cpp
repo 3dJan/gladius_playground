@@ -1,11 +1,18 @@
 #include "ManifoldDualContouringGpu.h"
 #include "ManifoldDualContouringProgram.h"
 #include "../Primitives.h"
+#include "../SlicerProgram.h"
+#include "../Buffer.h"
+#include "../ResourceContext.h"
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gladius::compute
@@ -70,6 +77,12 @@ namespace gladius::compute
         constructOctree();
         generateVertices();
         generateIndices();
+        
+        // Post-processing for sharp features
+        if (m_config.enableSharpFeaturePostProcess && !m_mesh.indices.empty())
+        {
+            postProcessSharpFeatures();
+        }
     }
 
     void ManifoldDualContouringGpu::constructOctree()
@@ -381,4 +394,416 @@ namespace gladius::compute
             m_mortonToIndex[m_cpuOctreeNodes[i].mortonCode] = i;
         }
     }
+
+    void ManifoldDualContouringGpu::postProcessSharpFeatures()
+    {
+        std::cout << "Starting sharp feature post-processing..." << std::endl;
+        
+        // Step 1: Detect triangles with sharp features
+        auto sharpTriangles = detectSharpTriangles();
+        
+        if (sharpTriangles.empty())
+        {
+            std::cout << "No sharp triangles detected, skipping post-processing" << std::endl;
+            return;
+        }
+        
+        std::cout << "Detected " << sharpTriangles.size() << " sharp triangles for processing" << std::endl;
+        
+        // Step 2: Subdivide the flagged triangles
+        for (std::size_t iter = 0U; iter < m_config.subdivisionIterations; ++iter)
+        {
+            subdivideTriangles(sharpTriangles);
+            
+            // Re-detect sharp triangles for next iteration
+            if (iter + 1U < m_config.subdivisionIterations)
+            {
+                sharpTriangles = detectSharpTriangles();
+            }
+        }
+        
+        // Step 3: Project new vertices to the SDF surface
+        if (m_config.projectToSurface)
+        {
+            projectVerticesToSurface();
+        }
+        
+        std::cout << "Sharp feature post-processing complete" << std::endl;
+    }
+
+    std::vector<std::size_t> ManifoldDualContouringGpu::detectSharpTriangles()
+    {
+        std::vector<std::size_t> result;
+        
+        if (m_mesh.indices.size() < 3U || m_mesh.normals.empty())
+        {
+            return result;
+        }
+        
+        // The threshold is already a cosine value in the config
+        float const cosThreshold = m_config.sharpFeatureAngleThreshold;
+        
+        std::size_t const numTriangles = m_mesh.indices.size() / 3U;
+        result.reserve(numTriangles / 10U); // Assume ~10% might be sharp
+        
+        for (std::size_t triIdx = 0U; triIdx < numTriangles; ++triIdx)
+        {
+            std::size_t const baseIdx = triIdx * 3U;
+            auto const i0 = m_mesh.indices[baseIdx + 0U];
+            auto const i1 = m_mesh.indices[baseIdx + 1U];
+            auto const i2 = m_mesh.indices[baseIdx + 2U];
+            
+            // Get vertex normals
+            if (i0 >= m_mesh.normals.size() || 
+                i1 >= m_mesh.normals.size() || 
+                i2 >= m_mesh.normals.size())
+            {
+                continue;
+            }
+            
+            auto const & n0 = m_mesh.normals[i0];
+            auto const & n1 = m_mesh.normals[i1];
+            auto const & n2 = m_mesh.normals[i2];
+            
+            // Check dot products between vertex normals (using Eigen Vector3f member functions)
+            float const dot01 = n0.x() * n1.x() + n0.y() * n1.y() + n0.z() * n1.z();
+            float const dot12 = n1.x() * n2.x() + n1.y() * n2.y() + n1.z() * n2.z();
+            float const dot20 = n2.x() * n0.x() + n2.y() * n0.y() + n2.z() * n0.z();
+            
+            // If any pair of normals differs significantly, flag this triangle
+            if (dot01 < cosThreshold || dot12 < cosThreshold || dot20 < cosThreshold)
+            {
+                result.push_back(triIdx);
+            }
+        }
+        
+        return result;
+    }
+
+    void ManifoldDualContouringGpu::subdivideTriangles(std::vector<std::size_t> const & triangleIndices)
+    {
+        if (triangleIndices.empty())
+        {
+            return;
+        }
+        
+        // For manifold subdivision, we need to track edges and their midpoints
+        // to ensure shared edges get the same midpoint vertex
+        struct Edge
+        {
+            std::uint32_t v0;
+            std::uint32_t v1;
+            
+            bool operator<(Edge const & other) const
+            {
+                auto const minThis = std::min(v0, v1);
+                auto const maxThis = std::max(v0, v1);
+                auto const minOther = std::min(other.v0, other.v1);
+                auto const maxOther = std::max(other.v0, other.v1);
+                return (minThis < minOther) || (minThis == minOther && maxThis < maxOther);
+            }
+            
+            bool operator==(Edge const & other) const
+            {
+                auto const minThis = std::min(v0, v1);
+                auto const maxThis = std::max(v0, v1);
+                auto const minOther = std::min(other.v0, other.v1);
+                auto const maxOther = std::max(other.v0, other.v1);
+                return minThis == minOther && maxThis == maxOther;
+            }
+        };
+        
+        // Map from edge to its midpoint vertex index
+        std::map<Edge, std::uint32_t> edgeMidpoints;
+        
+        // Helper to get or create midpoint vertex for an edge
+        auto getOrCreateMidpoint = [&](std::uint32_t v0, std::uint32_t v1) -> std::uint32_t
+        {
+            Edge edge{v0, v1};
+            auto it = edgeMidpoints.find(edge);
+            if (it != edgeMidpoints.end())
+            {
+                return it->second;
+            }
+            
+            // Create new midpoint vertex
+            auto const & p0 = m_mesh.positions[v0];
+            auto const & p1 = m_mesh.positions[v1];
+            Eigen::Vector3f midPos{
+                (p0.x() + p1.x()) * 0.5F,
+                (p0.y() + p1.y()) * 0.5F,
+                (p0.z() + p1.z()) * 0.5F
+            };
+            
+            // Interpolate normal
+            auto const & n0 = m_mesh.normals[v0];
+            auto const & n1 = m_mesh.normals[v1];
+            Eigen::Vector3f midNormal{
+                (n0.x() + n1.x()) * 0.5F,
+                (n0.y() + n1.y()) * 0.5F,
+                (n0.z() + n1.z()) * 0.5F
+            };
+            
+            // Normalize the interpolated normal
+            float const len = midNormal.norm();
+            if (len > 1e-6F)
+            {
+                midNormal /= len;
+            }
+            
+            auto const newIdx = static_cast<std::uint32_t>(m_mesh.positions.size());
+            m_mesh.positions.push_back(midPos);
+            m_mesh.normals.push_back(midNormal);
+            
+            edgeMidpoints[edge] = newIdx;
+            return newIdx;
+        };
+        
+        // Collect triangles to subdivide into a set for O(1) lookup
+        std::set<std::size_t> trianglesToSubdivide(triangleIndices.begin(), triangleIndices.end());
+        
+        // First pass: collect all edges that will be split (from triangles to subdivide)
+        std::set<Edge> edgesToSplit;
+        for (auto triIdx : trianglesToSubdivide)
+        {
+            std::size_t const baseIdx = triIdx * 3U;
+            auto const i0 = m_mesh.indices[baseIdx + 0U];
+            auto const i1 = m_mesh.indices[baseIdx + 1U];
+            auto const i2 = m_mesh.indices[baseIdx + 2U];
+            edgesToSplit.insert(Edge{i0, i1});
+            edgesToSplit.insert(Edge{i1, i2});
+            edgesToSplit.insert(Edge{i2, i0});
+        }
+        
+        // Build new index buffer
+        std::vector<std::uint32_t> newIndices;
+        newIndices.reserve(m_mesh.indices.size() + triangleIndices.size() * 9U);
+        
+        std::size_t const numTriangles = m_mesh.indices.size() / 3U;
+        for (std::size_t triIdx = 0U; triIdx < numTriangles; ++triIdx)
+        {
+            std::size_t const baseIdx = triIdx * 3U;
+            auto const i0 = m_mesh.indices[baseIdx + 0U];
+            auto const i1 = m_mesh.indices[baseIdx + 1U];
+            auto const i2 = m_mesh.indices[baseIdx + 2U];
+            
+            if (trianglesToSubdivide.count(triIdx) > 0U)
+            {
+                // Subdivide this triangle into 4 triangles using midpoints
+                // Create midpoint on each edge
+                auto const m01 = getOrCreateMidpoint(i0, i1);
+                auto const m12 = getOrCreateMidpoint(i1, i2);
+                auto const m20 = getOrCreateMidpoint(i2, i0);
+                
+                // Create 4 new triangles:
+                // Triangle 1: i0, m01, m20
+                newIndices.push_back(i0);
+                newIndices.push_back(m01);
+                newIndices.push_back(m20);
+                
+                // Triangle 2: m01, i1, m12
+                newIndices.push_back(m01);
+                newIndices.push_back(i1);
+                newIndices.push_back(m12);
+                
+                // Triangle 3: m20, m12, i2
+                newIndices.push_back(m20);
+                newIndices.push_back(m12);
+                newIndices.push_back(i2);
+                
+                // Triangle 4: m01, m12, m20 (center triangle)
+                newIndices.push_back(m01);
+                newIndices.push_back(m12);
+                newIndices.push_back(m20);
+            }
+            else
+            {
+                // Check if any edges of this triangle need to be split
+                // to match neighboring subdivided triangles (T-junction fix)
+                bool const split01 = edgesToSplit.count(Edge{i0, i1}) > 0U;
+                bool const split12 = edgesToSplit.count(Edge{i1, i2}) > 0U;
+                bool const split20 = edgesToSplit.count(Edge{i2, i0}) > 0U;
+                
+                int const splitCount = (split01 ? 1 : 0) + (split12 ? 1 : 0) + (split20 ? 1 : 0);
+                
+                if (splitCount == 0)
+                {
+                    // No edges to split, keep original triangle
+                    newIndices.push_back(i0);
+                    newIndices.push_back(i1);
+                    newIndices.push_back(i2);
+                }
+                else if (splitCount == 1)
+                {
+                    // One edge split: create 2 triangles
+                    if (split01)
+                    {
+                        auto const m = getOrCreateMidpoint(i0, i1);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(m);
+                        newIndices.push_back(i2);
+                        
+                        newIndices.push_back(m);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(i2);
+                    }
+                    else if (split12)
+                    {
+                        auto const m = getOrCreateMidpoint(i1, i2);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(m);
+                        
+                        newIndices.push_back(i0);
+                        newIndices.push_back(m);
+                        newIndices.push_back(i2);
+                    }
+                    else // split20
+                    {
+                        auto const m = getOrCreateMidpoint(i2, i0);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(m);
+                        
+                        newIndices.push_back(m);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(i2);
+                    }
+                }
+                else if (splitCount == 2)
+                {
+                    // Two edges split: create 3 triangles
+                    if (!split01) // split12 and split20
+                    {
+                        auto const m12 = getOrCreateMidpoint(i1, i2);
+                        auto const m20 = getOrCreateMidpoint(i2, i0);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(m12);
+                        
+                        newIndices.push_back(i0);
+                        newIndices.push_back(m12);
+                        newIndices.push_back(m20);
+                        
+                        newIndices.push_back(m20);
+                        newIndices.push_back(m12);
+                        newIndices.push_back(i2);
+                    }
+                    else if (!split12) // split01 and split20
+                    {
+                        auto const m01 = getOrCreateMidpoint(i0, i1);
+                        auto const m20 = getOrCreateMidpoint(i2, i0);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(m01);
+                        newIndices.push_back(m20);
+                        
+                        newIndices.push_back(m01);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(m20);
+                        
+                        newIndices.push_back(m20);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(i2);
+                    }
+                    else // split01 and split12
+                    {
+                        auto const m01 = getOrCreateMidpoint(i0, i1);
+                        auto const m12 = getOrCreateMidpoint(i1, i2);
+                        newIndices.push_back(i0);
+                        newIndices.push_back(m01);
+                        newIndices.push_back(i2);
+                        
+                        newIndices.push_back(m01);
+                        newIndices.push_back(i1);
+                        newIndices.push_back(m12);
+                        
+                        newIndices.push_back(m01);
+                        newIndices.push_back(m12);
+                        newIndices.push_back(i2);
+                    }
+                }
+                else // splitCount == 3
+                {
+                    // All three edges split: create 4 triangles (same as full subdivide)
+                    auto const m01 = getOrCreateMidpoint(i0, i1);
+                    auto const m12 = getOrCreateMidpoint(i1, i2);
+                    auto const m20 = getOrCreateMidpoint(i2, i0);
+                    
+                    newIndices.push_back(i0);
+                    newIndices.push_back(m01);
+                    newIndices.push_back(m20);
+                    
+                    newIndices.push_back(m01);
+                    newIndices.push_back(i1);
+                    newIndices.push_back(m12);
+                    
+                    newIndices.push_back(m20);
+                    newIndices.push_back(m12);
+                    newIndices.push_back(i2);
+                    
+                    newIndices.push_back(m01);
+                    newIndices.push_back(m12);
+                    newIndices.push_back(m20);
+                }
+            }
+        }
+        
+        m_mesh.indices = std::move(newIndices);
+        
+        std::cout << "Subdivision added " << edgeMidpoints.size() << " midpoint vertices" << std::endl;
+        std::cout << "New triangle count: " << (m_mesh.indices.size() / 3U) << std::endl;
+    }
+
+    void ManifoldDualContouringGpu::projectVerticesToSurface()
+    {
+        auto context = m_core.getComputeContext();
+        if (!context)
+        {
+            std::cerr << "Compute context unavailable for vertex projection" << std::endl;
+            return;
+        }
+        
+        try
+        {
+            std::size_t const numVertices = m_mesh.positions.size();
+            if (numVertices == 0U)
+            {
+                return;
+            }
+            
+            // Create a VertexBuffer and populate it with positions as cl_float4
+            VertexBuffer vertexBuffer(*context);
+            auto& bufferData = vertexBuffer.getData();
+            bufferData.resize(numVertices);
+            
+            for (std::size_t i = 0U; i < numVertices; ++i)
+            {
+                auto const & pos = m_mesh.positions[i];
+                bufferData[i] = {pos.x(), pos.y(), pos.z(), 0.0F};
+            }
+            
+            // Write to GPU
+            vertexBuffer.write();
+            
+            // Use ComputeCore's adoptVertexOfMeshToSurface which handles primitives setup
+            m_core.adoptVertexOfMeshToSurface(vertexBuffer);
+            
+            // Read back projected positions
+            vertexBuffer.read();
+            
+            // Convert back to Eigen::Vector3f
+            for (std::size_t i = 0U; i < numVertices; ++i)
+            {
+                auto const & pos = bufferData[i];
+                m_mesh.positions[i] = Eigen::Vector3f{pos.s[0], pos.s[1], pos.s[2]};
+            }
+            
+            std::cout << "Projected " << numVertices << " vertices to SDF surface" << std::endl;
+        }
+        catch (std::exception const & e)
+        {
+            std::cerr << "Vertex projection failed: " << e.what() << std::endl;
+        }
+    }
 }
+

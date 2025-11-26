@@ -26,6 +26,12 @@ namespace gladius::compute
         bool enableCaching{true};
         float isoValue{0.0F};
         float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled. Controls subdivision threshold
+        
+        // Sharp feature post-processing
+        bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features
+        float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°, lower = more sensitive)
+        std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes on sharp triangles
+        bool projectToSurface{true};                ///< Project vertices to SDF surface after subdivision
     };
 
     struct ManifoldDualContouringMesh
@@ -82,5 +88,11 @@ namespace gladius::compute
         void generateVertices();
         void generateIndices();
         void refreshCpuOctreeCache();
+        
+        // Sharp feature post-processing
+        void postProcessSharpFeatures();
+        std::vector<std::size_t> detectSharpTriangles();
+        void subdivideTriangles(std::vector<std::size_t> const & triangleIndices);
+        void projectVerticesToSurface();
         };
     }

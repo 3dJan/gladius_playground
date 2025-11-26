@@ -139,6 +139,10 @@ namespace gladius::io
         config.enableCpuFallback = m_options.enableCpuFallback;
         config.enableCaching = m_options.enableCaching;
         config.isoValue = m_options.isoValue;
+        config.enableSharpFeaturePostProcess = m_options.enableSharpFeaturePostProcess;
+        config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
+        config.subdivisionIterations = m_options.subdivisionIterations;
+        config.projectToSurface = m_options.projectToSurface;
         gpuPipeline.setConfig(config);
         gpuPipeline.generateMesh();
 

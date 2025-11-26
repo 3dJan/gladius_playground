@@ -72,6 +72,12 @@ namespace gladius::io
         bool enableCpuFallback{true};
         bool enableCaching{true};
         float isoValue{0.0F};
+        
+        // Sharp feature post-processing options
+        bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features
+        float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°)
+        std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes
+        bool projectToSurface{true};                ///< Project vertices to SDF surface
 
         void applyPreset();
     };
