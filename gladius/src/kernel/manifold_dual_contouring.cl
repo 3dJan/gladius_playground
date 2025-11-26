@@ -249,6 +249,108 @@ float computeQefError(float3 vertex, float3 const * normals, float3 const * poin
     return error;
 }
 
+/// Check if normals are consistent (all pointing roughly the same direction)
+/// Returns a value between 0 (inconsistent) and 1 (fully consistent)
+float computeNormalConsistency(float3 const * normals, int count, float3 avgNormal)
+{
+    if (count <= 1) return 1.0f;
+    
+    float minDot = 1.0f;
+    for (int i = 0; i < count; i++)
+    {
+        float d = dot(normals[i], avgNormal);
+        minDot = fmin(minDot, d);
+    }
+    // Map from [-1, 1] to [0, 1]
+    return clamp((minDot + 1.0f) * 0.5f, 0.0f, 1.0f);
+}
+
+/// Compute the spread of normals - measures how "diverse" the normal directions are
+/// Returns 0 for parallel normals, higher values for more spread
+float computeNormalSpread(float3 const * normals, int count)
+{
+    if (count <= 1) return 0.0f;
+    
+    float minPairwiseDot = 1.0f;
+    for (int i = 0; i < count; i++)
+    {
+        for (int j = i + 1; j < count; j++)
+        {
+            float d = dot(normals[i], normals[j]);
+            minPairwiseDot = fmin(minPairwiseDot, d);
+        }
+    }
+    // Returns 0 for parallel normals, 1 for perpendicular, 2 for opposite
+    return 1.0f - minPairwiseDot;
+}
+
+/// Check if a displacement direction is supported by the normals
+/// Returns how well the displacement aligns with the "inward" direction from the surface
+/// For sharp features, we expect displacement to point INTO the corner/edge
+float computeDisplacementSupport(float3 displacement, float3 const * normals, int count)
+{
+    if (count == 0) return 0.0f;
+    
+    float dispLen = length(displacement);
+    if (dispLen < 1e-6f) return 1.0f;  // No displacement is always safe
+    
+    float3 dispDir = displacement / dispLen;
+    
+    // For a valid sharp feature vertex, the displacement should have
+    // NEGATIVE dot product with most normals (moving INTO the corner)
+    // or POSITIVE dot product (moving along the edge)
+    // But it should NOT be perpendicular to ALL normals
+    
+    float maxAbsDot = 0.0f;
+    int supportCount = 0;
+    for (int i = 0; i < count; i++)
+    {
+        float d = dot(dispDir, normals[i]);
+        maxAbsDot = fmax(maxAbsDot, fabs(d));
+        // Count how many normals somewhat support this displacement direction
+        if (fabs(d) > 0.1f) supportCount++;
+    }
+    
+    // If displacement is nearly perpendicular to all normals, it's suspicious
+    // (indicates the solver found a spurious minimum)
+    float support = maxAbsDot;
+    
+    // Bonus if multiple normals support the displacement
+    if (supportCount > 1)
+    {
+        support = fmin(support + 0.2f, 1.0f);
+    }
+    
+    return support;
+}
+
+/// Estimate condition number of ATA matrix using trace and Frobenius norm ratio
+/// Returns a value between 0 (ill-conditioned) and 1 (well-conditioned)
+float estimateMatrixCondition(Mat3 const * ata)
+{
+    // Frobenius norm squared
+    float frobSq = 0.0f;
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            frobSq += ata->m[i][j] * ata->m[i][j];
+        }
+    }
+    
+    // Trace (sum of eigenvalues)
+    float trace = ata->m[0][0] + ata->m[1][1] + ata->m[2][2];
+    
+    if (trace < 1e-10f) return 0.0f;
+    
+    // For well-conditioned matrices, frobSq ~ trace^2 / 3
+    // For ill-conditioned, one eigenvalue dominates so frobSq >> trace^2 / 3
+    float expectedFrobSq = trace * trace / 3.0f;
+    float ratio = expectedFrobSq / fmax(frobSq, 1e-10f);
+    
+    return clamp(ratio, 0.0f, 1.0f);
+}
+
 /// Solve QEF using least squares with regularization for sharp feature preservation
 /// This finds the vertex position that minimizes distance to all tangent planes
 /// Sharp edges and corners are naturally preserved because the solution falls
@@ -259,6 +361,7 @@ QefResult solveQefSvd(float3* intersections, float3* normals, int count, float3 
     float3 cellCenter = (cellMin + cellMax) * 0.5f;
     float3 cellSize = cellMax - cellMin;
     float cellDiag = length(cellSize);
+    float cellRadius = cellDiag * 0.5f;
     
     if (count == 0)
     {
@@ -288,41 +391,78 @@ QefResult solveQefSvd(float3* intersections, float3* normals, int count, float3 
         avgNormal = (float3)(0.0f, 1.0f, 0.0f);
     }
     
+    // Check normal consistency - if normals point in very different directions,
+    // we have a sharp feature; if they're inconsistent (some opposite), use mass point
+    float normalConsistency = computeNormalConsistency(normals, count, avgNormal);
+    
     // Build the normal equations: A^T A x = A^T b
-    // where A is the matrix of normals and b_i = dot(n_i, p_i)
     Mat3 ata = computeATA(normals, count);
     float3 atb = computeATb(normals, intersections, count);
     
-    // Solve with small regularization to handle degenerate cases
-    // The regularization biases toward the origin, so we shift coordinates
-    // to be relative to mass point, then shift back
-    float3 atbShifted = atb - mat3MulVec(&ata, massPoint);
+    // Check matrix conditioning
+    float matrixCondition = estimateMatrixCondition(&ata);
     
-    // Use adaptive regularization based on cell size
-    float lambda = 0.01f * (float)count;
-    float3 solution = solveSymmetricSystem(&ata, atbShifted, lambda);
+    // Compute confidence in QEF solution based on conditioning and normal consistency
+    // Low consistency (mixed normals) is OK for sharp features, but combined with
+    // poor conditioning suggests numerical issues
+    float qefConfidence = matrixCondition;
+    if (normalConsistency < 0.3f && matrixCondition < 0.5f)
+    {
+        // Both poor - likely numerical issues, fall back to mass point
+        qefConfidence = 0.0f;
+    }
     
-    // Shift back to world coordinates
-    float3 qefVertex = massPoint + solution;
+    float3 qefVertex = massPoint;  // Default to mass point
     
-    // Clamp to cell bounds (critical for watertightness)
-    // Use slightly expanded bounds to allow vertex on cell boundary
-    float3 clampMin = cellMin - cellSize * 0.001f;
-    float3 clampMax = cellMax + cellSize * 0.001f;
-    qefVertex = clamp(qefVertex, clampMin, clampMax);
+    // Only fall back to mass point if matrix is severely ill-conditioned
+    // Otherwise solve the QEF to preserve sharp features
+    if (qefConfidence > 0.01f)
+    {
+        // Solve with mild regularization
+        float3 atbShifted = atb - mat3MulVec(&ata, massPoint);
+        
+        // Light regularization - just enough for numerical stability
+        float lambda = 0.01f * (float)count;
+        float3 solution = solveSymmetricSystem(&ata, atbShifted, lambda);
+        
+        // Shift back to world coordinates
+        qefVertex = massPoint + solution;
+    }
     
-    // If QEF solution is too far from mass point, blend toward mass point
-    // This prevents extreme outliers while still improving sharp features
-    float3 displacement = qefVertex - massPoint;
+    // Check if the displacement is supported by the normals
+    // This helps detect artifact-producing solutions
+    float3 qefDisplacement = qefVertex - massPoint;
+    float dispSupport = computeDisplacementSupport(qefDisplacement, normals, count);
+    
+    // Compute normal spread to detect sharp features
+    float normalSpread = computeNormalSpread(normals, count);
+    
+    // For sharp features (high spread), we need good displacement support
+    // If displacement is poorly supported (perpendicular to all normals), it's likely an artifact
+    if (normalSpread > 0.5f && dispSupport < 0.3f)
+    {
+        // Suspicious displacement - blend toward mass point
+        float blend = dispSupport / 0.3f;  // 0 to 1 as support goes from 0 to 0.3
+        qefVertex = mix(massPoint, qefVertex, blend);
+    }
+    
+    // Compute displacement from cell center (not mass point) 
+    // This allows vertex to move toward sharp features
+    float3 displacement = qefVertex - cellCenter;
     float dispLen = length(displacement);
-    float maxDisp = cellDiag * 0.5f;  // Allow up to half cell diagonal
+    
+    // Allow displacement up to half the cell diagonal - this is necessary
+    // for vertices to reach edges and corners of the cell for sharp features
+    float maxDisp = cellDiag * 0.5f;
     
     if (dispLen > maxDisp)
     {
-        qefVertex = massPoint + displacement * (maxDisp / dispLen);
+        // Limit displacement magnitude
+        displacement = displacement * (maxDisp / dispLen);
+        qefVertex = cellCenter + displacement;
     }
     
-    // Final clamp to strict cell bounds
+    // Final clamp to cell bounds
     result.position = clamp(qefVertex, cellMin, cellMax);
     result.normal = avgNormal;
     result.error = computeQefError(result.position, normals, intersections, count);

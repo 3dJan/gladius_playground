@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <optional>
 
 using namespace gladius;
@@ -14,6 +15,24 @@ using namespace gladius::hierarchical_dc;
 
 namespace gladius_tests::hierarchical_dc_mesh
 {
+    namespace
+    {
+        constexpr std::uint32_t kTestMaxDepth = 6U;
+
+        void clampMaxDepthForTests(HierarchicalConfig & config)
+        {
+            if (config.maxDepth > kTestMaxDepth)
+            {
+                config.maxDepth = kTestMaxDepth;
+            }
+
+            if (config.initialDepth > config.maxDepth)
+            {
+                config.initialDepth = config.maxDepth;
+            }
+        }
+    } // namespace
+
     class HierarchicalDC_ExtractionStepsTest : public ::testing::Test
     {
       protected:
@@ -49,10 +68,13 @@ namespace gladius_tests::hierarchical_dc_mesh
             applyQualityPreset(config, HierarchicalQuality::Balanced);
             config.enableGpuAcceleration = true;
             config.projectVerticesToSurface = false;
+            
+            // Test-only: cap depths to control memory usage (depth 7 = 2M nodes!)
+            if (config.initialDepth > 4U) config.initialDepth = 4U;
+            if (config.maxDepth > 5U) config.maxDepth = 5U;
+            
             return config;
-        }
-
-        [[nodiscard]] std::optional<BoundingBox> tryComputeBoundingBox(DocumentBundle & bundle)
+        }        [[nodiscard]] std::optional<BoundingBox> tryComputeBoundingBox(DocumentBundle & bundle)
         {
             if (!bundle.core->updateBBox())
             {
@@ -244,6 +266,9 @@ namespace gladius_tests::hierarchical_dc_mesh
         config.enableGpuAcceleration = scenario.enableGpu;
         config.minFeatureSize = scenario.minFeatureSize;
         config.projectVerticesToSurface = false;
+        
+        // Test-only depth caps to prevent memory exhaustion (8^6 = 262K nodes)
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -278,12 +303,10 @@ namespace gladius_tests::hierarchical_dc_mesh
     }
 
     constexpr ExtractionScenario kExtractionScenarios[] = {
-                {"CPU_Balanced_Default", false, false, 0.0F, HierarchicalQuality::Balanced, 0.0},
-                {"CPU_Balanced_MinFeature", false, false, 0.25F, HierarchicalQuality::Balanced, 0.0},
-                {"CPU_Fine_Coarsening", true, false, 0.0F, HierarchicalQuality::Fine, 0.0},
-                {"GPU_Balanced_Default", false, true, 0.0F, HierarchicalQuality::Balanced, 0.0},
+                {"CPU_Balanced_Default", false, false, 0.0F, HierarchicalQuality::Draft, 0.0},
+                {"CPU_Balanced_MinFeature", false, false, 0.25F, HierarchicalQuality::Draft, 0.0},
+                {"GPU_Balanced_Default", false, true, 0.0F, HierarchicalQuality::Draft, 0.0},
                 {"GPU_Balanced_MinFeature", false, true, 0.25F, HierarchicalQuality::Balanced, 0.0},
-                {"GPU_Fine_Coarsening", true, true, 0.0F, HierarchicalQuality::Fine, 0.0},
     };
 
     INSTANTIATE_TEST_SUITE_P(

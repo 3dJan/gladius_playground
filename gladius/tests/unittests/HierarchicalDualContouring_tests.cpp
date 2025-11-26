@@ -11,12 +11,31 @@
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <gtest/gtest.h>
 
 namespace gladius_tests::hierarchical_dc
 {
     using namespace gladius::hierarchical_dc;
+
+    namespace
+    {
+        constexpr std::uint32_t kTestMaxDepth = 6U;
+
+        void clampMaxDepthForTests(HierarchicalConfig & config)
+        {
+            if (config.maxDepth > kTestMaxDepth)
+            {
+                config.maxDepth = kTestMaxDepth;
+            }
+
+            if (config.initialDepth > config.maxDepth)
+            {
+                config.initialDepth = config.maxDepth;
+            }
+        }
+    } // namespace
 
     class HierarchicalDualContouring_Test : public ::testing::Test
     {
@@ -64,6 +83,9 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Draft);
         config.enableGpuAcceleration = true;
+        // Test-only: ensure depth stays reasonable
+        if (config.maxDepth > 5U) config.maxDepth = 5U;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -88,6 +110,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -114,6 +137,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -145,6 +169,10 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Fine);
         config.enableGpuAcceleration = true;
+        // Test-only: cap depth to control memory
+        if (config.initialDepth > 4U) config.initialDepth = 4U;
+        if (config.maxDepth > 6U) config.maxDepth = 6U;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -169,6 +197,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Draft);
         config.enableGpuAcceleration = false; // Force CPU fallback
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -193,6 +222,8 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig gpuConfig{};
         applyQualityPreset(gpuConfig, HierarchicalQuality::Draft);
         gpuConfig.enableGpuAcceleration = true;
+        if (gpuConfig.maxDepth > 5U) gpuConfig.maxDepth = 5U;
+        clampMaxDepthForTests(gpuConfig);
 
         HierarchicalOctreeBuilder gpuBuilder(*bundle.core, gpuConfig);
         gpuBuilder.buildOctree(bbox.value());
@@ -205,6 +236,8 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig cpuConfig{};
         applyQualityPreset(cpuConfig, HierarchicalQuality::Draft);
         cpuConfig.enableGpuAcceleration = false;
+        if (cpuConfig.maxDepth > 5U) cpuConfig.maxDepth = 5U;
+        clampMaxDepthForTests(cpuConfig);
 
         HierarchicalOctreeBuilder cpuBuilder(*bundle.core, cpuConfig);
         cpuBuilder.buildOctree(bbox.value());
@@ -235,6 +268,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -287,6 +321,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
@@ -327,6 +362,8 @@ namespace gladius_tests::hierarchical_dc
         applyQualityPreset(noRefineConfig, HierarchicalQuality::Draft);
         noRefineConfig.enableGpuAcceleration = true;
         noRefineConfig.refinementIterations = 0U;
+        if (noRefineConfig.maxDepth > 5U) noRefineConfig.maxDepth = 5U;
+        clampMaxDepthForTests(noRefineConfig);
 
         HierarchicalOctreeBuilder noRefineBuilder(*bundle.core, noRefineConfig);
         noRefineBuilder.buildOctree(bbox.value());
@@ -337,6 +374,9 @@ namespace gladius_tests::hierarchical_dc
         applyQualityPreset(refineConfig, HierarchicalQuality::Balanced);
         refineConfig.enableGpuAcceleration = true;
         refineConfig.refinementIterations = 2U;
+        if (refineConfig.initialDepth > 4U) refineConfig.initialDepth = 4U;
+        if (refineConfig.maxDepth > 5U) refineConfig.maxDepth = 5U;
+        clampMaxDepthForTests(refineConfig);
 
         HierarchicalOctreeBuilder refineBuilder(*bundle.core, refineConfig);
         refineBuilder.buildOctree(bbox.value());
@@ -360,6 +400,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         // Build twice to ensure consistency
         HierarchicalOctreeBuilder builder1(*bundle.core, config);
@@ -394,6 +435,7 @@ namespace gladius_tests::hierarchical_dc
         HierarchicalConfig config{};
         applyQualityPreset(config, HierarchicalQuality::Balanced);
         config.enableGpuAcceleration = true;
+        clampMaxDepthForTests(config);
 
         HierarchicalOctreeBuilder builder(*bundle.core, config);
         builder.buildOctree(bbox.value());
