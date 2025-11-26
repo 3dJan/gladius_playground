@@ -808,6 +808,82 @@ namespace gladius::compute::tests
                   << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_SimplificationValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("../../tests/integrationtests/testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // Export with simplification enabled
+        auto tempFile = makeUniqueTempFile("mdc_simplify_test_", ".stl");
+        TempFileGuard guard(tempFile);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 7;
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+        // Enable simplification
+        exportOptions.enableSimplification = true;
+        exportOptions.simplificationMaxError = 0.01F;
+        exportOptions.simplificationFlatThreshold = 0.95F;
+        exporter.setOptions(exportOptions);
+
+        exporter.beginExport(tempFile, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+            // Continue export
+        }
+        exporter.finalize();
+
+        ASSERT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
+
+        // Run admesh
+        int exitCode = 0;
+        std::string const output = runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+        ASSERT_EQ(exitCode, 0) << "admesh returned non-zero exit code";
+        
+        auto const metrics = parseAdmeshMetrics(output);
+        
+        // For a valid simplified mesh, expect no disconnected facets
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
+            << "Mesh should have no disconnected facets after processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) 
+            << "Mesh should have no degenerate facets";
+        EXPECT_EQ(metrics.edgesFixed, 0) 
+            << "Mesh should require no edge fixes";
+        
+        // Should still have 2 parts (sphere + cage)
+        EXPECT_EQ(metrics.numberOfParts, 2) 
+            << "Simplified mesh should still have 2 parts (sphere + cage)";
+        
+        double const reversedRatio = 
+            static_cast<double>(metrics.facetsReversed) / 
+            static_cast<double>(metrics.numberOfFacets.original);
+        double const maxReversedRatio = 0.01; // 1% tolerance
+        EXPECT_LE(reversedRatio, maxReversedRatio) 
+            << "Too many facets reversed: " << metrics.facetsReversed 
+            << " out of " << metrics.numberOfFacets.original 
+            << " (" << (reversedRatio * 100.0) << "%)";
+        
+        EXPECT_GT(metrics.volume, 0.0) 
+            << "Volume should be positive for outward-facing normals";
+
+        std::cout << "SphereInACage Simplified Admesh validation:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+    }
+
     // ============================================================================
     // Implicit Surface Validation Tests
     // ============================================================================
