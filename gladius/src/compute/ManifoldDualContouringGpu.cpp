@@ -76,9 +76,109 @@ namespace gladius::compute
         // This is important when switching between different models
         m_core.getProgramManager().recompileBlockingForManifoldDC();
 
-        constructOctree();
-        generateVertices();
-        generateIndices();
+        // Pre-fetch bounding box for chunking decision
+        auto bbox = m_core.getBoundingBox();
+        if (!bbox.has_value())
+        {
+            std::cerr << "No bounding box available" << std::endl;
+            return;
+        }
+        m_cachedBoundingBox = bbox;
+        m_cachedBboxMin = Eigen::Vector3f(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
+        m_cachedBboxMax = Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        m_cachedBboxSize = m_cachedBboxMax - m_cachedBboxMin;
+
+        // Check if chunking is needed
+        std::size_t const chunkDivisor = calculateChunkDivisor();
+        bool const useChunking = m_config.enableChunking && 
+                                 m_config.minFeatureSize > 0.0F && 
+                                 chunkDivisor > 1U;
+
+        if (useChunking)
+        {
+            std::cout << "Using chunked processing with " << chunkDivisor << "^3 = " 
+                      << (chunkDivisor * chunkDivisor * chunkDivisor) << " potential chunks" << std::endl;
+            std::cout << "  BBox: [" << m_cachedBboxMin.transpose() << "] to [" 
+                      << m_cachedBboxMax.transpose() << "]" << std::endl;
+            std::cout << "  minFeatureSize: " << m_config.minFeatureSize 
+                      << ", maxDepth: " << m_config.maxDepth << std::endl;
+            
+            std::vector<ChunkInfo> chunks = generateChunkGrid();
+            std::size_t processedChunks = 0U;
+            std::size_t emptyChunks = 0U;
+            
+            ManifoldDualContouringMesh combinedMesh;
+            
+            for (auto const & chunk : chunks)
+            {
+                if (!isChunkNonEmpty(chunk))
+                {
+                    continue;
+                }
+                
+                ++processedChunks;
+                if (processedChunks <= 5U || processedChunks % 50U == 0U)
+                {
+                    std::cout << "  Processing chunk " << processedChunks << "/" << chunks.size()
+                              << " [" << chunk.indexX << "," << chunk.indexY << "," 
+                              << chunk.indexZ << "]..." << std::endl;
+                }
+                
+                ManifoldDualContouringMesh chunkMesh;
+                generateMeshForChunk(chunk, chunkMesh);
+                
+                // Note: Disabled clipping and snapping
+                // Relying on overlap + welding to connect chunks
+                // Each chunk may generate some duplicate geometry in padding region
+                
+                if (chunkMesh.positions.empty())
+                {
+                    ++emptyChunks;
+                }
+                else
+                {
+                    if (processedChunks <= 5U || processedChunks % 50U == 0U)
+                    {
+                        std::cout << "    Generated " << chunkMesh.positions.size() << " vertices, "
+                                  << chunkMesh.indices.size() / 3U << " triangles" << std::endl;
+                    }
+                    mergeMeshes(combinedMesh, chunkMesh);
+                }
+            }
+            
+            m_mesh = std::move(combinedMesh);
+            
+            std::cout << "Chunk processing complete: " << processedChunks << " chunks processed, "
+                      << emptyChunks << " produced no geometry" << std::endl;
+            std::cout << "Combined mesh before welding: " << m_mesh.positions.size() << " vertices, "
+                      << m_mesh.indices.size() / 3U << " triangles" << std::endl;
+            
+            // Weld boundary vertices to make mesh watertight
+            if (!m_mesh.positions.empty())
+            {
+                // Calculate appropriate weld tolerance if not specified
+                // Use a fraction of the voxel size at maxDepth as tolerance
+                float weldTolerance = m_config.chunkWeldTolerance;
+                if (weldTolerance <= 0.0F)
+                {
+                    // Chunk size / 2^maxDepth = voxel size within chunk
+                    // Use 0.5 * voxel size as tolerance - conservative to avoid
+                    // welding vertices that shouldn't be merged
+                    Eigen::Vector3f const chunkSize = m_cachedBboxSize / static_cast<float>(chunkDivisor);
+                    float const voxelSize = chunkSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth);
+                    weldTolerance = voxelSize * 0.5F;
+                    std::cout << "  Auto weld tolerance: " << weldTolerance << " (voxel size: " << voxelSize << ")" << std::endl;
+                }
+                weldBoundaryVertices(weldTolerance);
+            }
+        }
+        else
+        {
+            // Original single-pass processing
+            constructOctree();
+            generateVertices();
+            generateIndices();
+        }
         
         // Post-processing for sharp features
         if (m_config.enableSharpFeaturePostProcess && !m_mesh.indices.empty())
@@ -1241,5 +1341,488 @@ namespace gladius::compute
 
         return collapsedCount;
     }
+
+    // ============================================================================
+    // Chunked Processing for Large Models with Fine Features
+    // ============================================================================
+
+    std::size_t ManifoldDualContouringGpu::calculateRequiredDepth(float bboxExtent, float minFeatureSize) const
+    {
+        if (minFeatureSize <= 0.0F || bboxExtent <= 0.0F)
+        {
+            return m_config.maxDepth;
+        }
+        
+        // Cell size at depth d = bboxExtent / 2^d
+        // We need cell size <= minFeatureSize
+        // So 2^d >= bboxExtent / minFeatureSize
+        // d >= log2(bboxExtent / minFeatureSize)
+        float const ratio = bboxExtent / minFeatureSize;
+        auto const requiredDepth = static_cast<std::size_t>(std::ceil(std::log2(ratio)));
+        return std::max(requiredDepth, std::size_t{1U});
+    }
+
+    std::size_t ManifoldDualContouringGpu::calculateChunkDivisor() const
+    {
+        if (m_config.minFeatureSize <= 0.0F || !m_cachedBoundingBox.has_value())
+        {
+            return 1U; // No chunking needed
+        }
+        
+        Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
+        float const maxExtent = bboxSize.maxCoeff();
+        
+        std::size_t const requiredDepth = calculateRequiredDepth(maxExtent, m_config.minFeatureSize);
+        
+        if (requiredDepth <= m_config.maxDepth)
+        {
+            return 1U; // Can handle with single octree
+        }
+        
+        // Number of subdivisions needed: 2^(requiredDepth - maxDepth)
+        std::size_t const depthDiff = requiredDepth - m_config.maxDepth;
+        return std::size_t{1U} << depthDiff;
+    }
+
+    std::vector<ManifoldDualContouringGpu::ChunkInfo> ManifoldDualContouringGpu::generateChunkGrid() const
+    {
+        std::vector<ChunkInfo> chunks;
+        
+        if (!m_cachedBoundingBox.has_value())
+        {
+            return chunks;
+        }
+        
+        std::size_t const divisor = calculateChunkDivisor();
+        
+        // Global grid approach: all chunks share the same voxel grid
+        // Total voxels across full bbox = divisor * 2^maxDepth
+        std::size_t const cellsPerChunk = std::size_t{1U} << m_config.maxDepth;
+        std::size_t const totalCells = divisor * cellsPerChunk;
+        
+        // Global voxel size - same for all chunks
+        Eigen::Vector3f const globalVoxelSize = m_cachedBboxSize / static_cast<float>(totalCells);
+        
+        // Chunk size in world units (aligned to global grid)
+        Eigen::Vector3f const chunkSize = globalVoxelSize * static_cast<float>(cellsPerChunk);
+        
+        // For DC, we need 1 extra cell at each internal boundary to generate boundary quads
+        // The boundary cells will be duplicated in adjacent chunks, but at exact same positions
+        Eigen::Vector3f const boundaryPadding = globalVoxelSize;
+        
+        chunks.reserve(divisor * divisor * divisor);
+        
+        for (std::size_t iz = 0U; iz < divisor; ++iz)
+        {
+            for (std::size_t iy = 0U; iy < divisor; ++iy)
+            {
+                for (std::size_t ix = 0U; ix < divisor; ++ix)
+                {
+                    ChunkInfo chunk;
+                    chunk.indexX = ix;
+                    chunk.indexY = iy;
+                    chunk.indexZ = iz;
+                    
+                    // Core region: exactly aligned chunk (no overlap)
+                    chunk.coreMin = m_cachedBboxMin + Eigen::Vector3f(
+                        static_cast<float>(ix) * chunkSize.x(),
+                        static_cast<float>(iy) * chunkSize.y(),
+                        static_cast<float>(iz) * chunkSize.z()
+                    );
+                    chunk.coreMax = chunk.coreMin + chunkSize;
+                    
+                    // Processing region: add 1-cell padding at internal boundaries
+                    // This allows DC to generate quads at boundaries
+                    chunk.min = chunk.coreMin;
+                    chunk.max = chunk.coreMax;
+                    
+                    // Extend by 1 voxel at internal boundaries (not at global bbox edges)
+                    if (ix > 0U)
+                    {
+                        chunk.min.x() -= boundaryPadding.x();
+                    }
+                    if (iy > 0U)
+                    {
+                        chunk.min.y() -= boundaryPadding.y();
+                    }
+                    if (iz > 0U)
+                    {
+                        chunk.min.z() -= boundaryPadding.z();
+                    }
+                    if (ix < divisor - 1U)
+                    {
+                        chunk.max.x() += boundaryPadding.x();
+                    }
+                    if (iy < divisor - 1U)
+                    {
+                        chunk.max.y() += boundaryPadding.y();
+                    }
+                    if (iz < divisor - 1U)
+                    {
+                        chunk.max.z() += boundaryPadding.z();
+                    }
+                    
+                    chunks.push_back(chunk);
+                }
+            }
+        }
+        
+        return chunks;
+    }
+
+    bool ManifoldDualContouringGpu::isChunkNonEmpty(ChunkInfo const & chunk) const
+    {
+        // For now, assume all chunks are potentially non-empty.
+        // The octree construction will quickly determine if a chunk is empty
+        // (no surface crossings = no output nodes), so the overhead is minimal.
+        // 
+        // A more sophisticated approach would be to use GPU-based SDF sampling,
+        // but that requires additional infrastructure. For typical TPMS structures,
+        // most chunks will contain surface anyway.
+        (void)chunk;
+        return true;
+    }
+
+    void ManifoldDualContouringGpu::generateMeshForChunk(
+        ChunkInfo const & chunk, 
+        ManifoldDualContouringMesh & chunkMesh)
+    {
+        chunkMesh.positions.clear();
+        chunkMesh.normals.clear();
+        chunkMesh.indices.clear();
+        
+        // Clear the member mesh before generating for this chunk
+        m_mesh.positions.clear();
+        m_mesh.normals.clear();
+        m_mesh.indices.clear();
+        
+        auto primitives = m_core.getPrimitives();
+        if (!primitives)
+        {
+            std::cerr << "  Chunk [" << chunk.indexX << "," << chunk.indexY << "," 
+                      << chunk.indexZ << "]: No primitives available" << std::endl;
+            return;
+        }
+        
+        // Temporarily override cached bbox for this chunk
+        Eigen::Vector3f const savedBboxMin = m_cachedBboxMin;
+        Eigen::Vector3f const savedBboxMax = m_cachedBboxMax;
+        Eigen::Vector3f const savedBboxSize = m_cachedBboxSize;
+        
+        m_cachedBboxMin = chunk.min;
+        m_cachedBboxMax = chunk.max;
+        m_cachedBboxSize = chunk.max - chunk.min;
+        
+        // Build octree for this chunk
+        m_octreeDepth = static_cast<std::uint32_t>(m_config.maxDepth);
+        m_gridResolution = 1U << m_octreeDepth;
+        
+        try
+        {
+            m_program->constructOctree(
+                m_octreeBuffer,
+                m_octreeNodeCount,
+                m_cachedBboxMin,
+                m_cachedBboxMax,
+                static_cast<std::uint32_t>(m_config.initialDepth),
+                m_config.maxDepth,
+                *primitives,
+                m_config.isoValue);
+            
+            if (m_octreeNodeCount > 0)
+            {
+                refreshCpuOctreeCache();
+                generateVertices();
+                generateIndices();
+            }
+        }
+        catch (std::exception const & e)
+        {
+            std::cerr << "Error processing chunk [" << chunk.indexX << "," 
+                      << chunk.indexY << "," << chunk.indexZ << "]: " << e.what() << std::endl;
+        }
+        
+        // Copy results to chunk mesh
+        chunkMesh = m_mesh;
+        
+        // Restore original bbox
+        m_cachedBboxMin = savedBboxMin;
+        m_cachedBboxMax = savedBboxMax;
+        m_cachedBboxSize = savedBboxSize;
+    }
+
+    void ManifoldDualContouringGpu::mergeMeshes(
+        ManifoldDualContouringMesh & target, 
+        ManifoldDualContouringMesh const & source)
+    {
+        if (source.positions.empty())
+        {
+            return;
+        }
+        
+        std::uint32_t const vertexOffset = static_cast<std::uint32_t>(target.positions.size());
+        
+        // Append vertices
+        target.positions.insert(target.positions.end(), 
+                                source.positions.begin(), 
+                                source.positions.end());
+        target.normals.insert(target.normals.end(), 
+                              source.normals.begin(), 
+                              source.normals.end());
+        
+        // Append indices with offset
+        target.indices.reserve(target.indices.size() + source.indices.size());
+        for (std::uint32_t idx : source.indices)
+        {
+            target.indices.push_back(idx + vertexOffset);
+        }
+    }
+
+    void ManifoldDualContouringGpu::clipMeshToCore(
+        ManifoldDualContouringMesh & mesh, 
+        ChunkInfo const & chunk)
+    {
+        if (mesh.indices.empty())
+        {
+            return;
+        }
+        
+        // Use centroid-based triangle ownership:
+        // Keep a triangle if its centroid is within the core region.
+        // This ensures each triangle is generated by exactly one chunk.
+        Eigen::Vector3f const & coreMin = chunk.coreMin;
+        Eigen::Vector3f const & coreMax = chunk.coreMax;
+        
+        auto isCentroidInCore = [&coreMin, &coreMax](
+            Eigen::Vector3f const & p0,
+            Eigen::Vector3f const & p1,
+            Eigen::Vector3f const & p2) -> bool
+        {
+            Eigen::Vector3f const centroid = (p0 + p1 + p2) / 3.0F;
+            return centroid.x() >= coreMin.x() && centroid.x() < coreMax.x() &&
+                   centroid.y() >= coreMin.y() && centroid.y() < coreMax.y() &&
+                   centroid.z() >= coreMin.z() && centroid.z() < coreMax.z();
+        };
+        
+        // Find triangles to keep (centroid inside core)
+        std::vector<std::uint32_t> newIndices;
+        newIndices.reserve(mesh.indices.size());
+        
+        std::vector<bool> vertexUsed(mesh.positions.size(), false);
+        
+        for (std::size_t t = 0U; t < mesh.indices.size(); t += 3U)
+        {
+            std::uint32_t const i0 = mesh.indices[t + 0U];
+            std::uint32_t const i1 = mesh.indices[t + 1U];
+            std::uint32_t const i2 = mesh.indices[t + 2U];
+            
+            // Keep triangle if centroid is inside core region
+            if (isCentroidInCore(mesh.positions[i0], mesh.positions[i1], mesh.positions[i2]))
+            {
+                newIndices.push_back(i0);
+                newIndices.push_back(i1);
+                newIndices.push_back(i2);
+                vertexUsed[i0] = true;
+                vertexUsed[i1] = true;
+                vertexUsed[i2] = true;
+            }
+        }
+        
+        // Build vertex compaction map
+        std::vector<std::uint32_t> compactMap(mesh.positions.size(), 0U);
+        std::uint32_t newCount = 0U;
+        for (std::size_t i = 0U; i < mesh.positions.size(); ++i)
+        {
+            if (vertexUsed[i])
+            {
+                compactMap[i] = newCount++;
+            }
+        }
+        
+        // Compact vertices
+        std::vector<Eigen::Vector3f> newPositions(newCount);
+        std::vector<Eigen::Vector3f> newNormals(newCount);
+        for (std::size_t i = 0U; i < mesh.positions.size(); ++i)
+        {
+            if (vertexUsed[i])
+            {
+                newPositions[compactMap[i]] = mesh.positions[i];
+                newNormals[compactMap[i]] = mesh.normals[i];
+            }
+        }
+        
+        // Remap indices
+        for (auto & idx : newIndices)
+        {
+            idx = compactMap[idx];
+        }
+        
+        mesh.positions = std::move(newPositions);
+        mesh.normals = std::move(newNormals);
+        mesh.indices = std::move(newIndices);
+    }
+
+    void ManifoldDualContouringGpu::weldBoundaryVertices(float tolerance)
+    {
+        if (m_mesh.positions.size() < 2U)
+        {
+            return;
+        }
+        
+        float const toleranceSq = tolerance * tolerance;
+        std::size_t const numVertices = m_mesh.positions.size();
+        
+        // Build a simple spatial hash for faster neighbor lookup
+        float const cellSize = tolerance * 2.0F;
+        float const invCellSize = 1.0F / cellSize;
+        
+        auto hashPos = [invCellSize](Eigen::Vector3f const & pos) -> std::uint64_t
+        {
+            auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
+            auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
+            auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
+            
+            // Simple hash combining
+            std::uint64_t const hx = static_cast<std::uint64_t>(ix) & 0x1FFFFF;
+            std::uint64_t const hy = static_cast<std::uint64_t>(iy) & 0x1FFFFF;
+            std::uint64_t const hz = static_cast<std::uint64_t>(iz) & 0x1FFFFF;
+            return (hx << 42) | (hy << 21) | hz;
+        };
+        
+        // Map from cell hash to vertex indices in that cell
+        std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> spatialHash;
+        for (std::uint32_t i = 0U; i < numVertices; ++i)
+        {
+            std::uint64_t const hash = hashPos(m_mesh.positions[i]);
+            spatialHash[hash].push_back(i);
+        }
+        
+        // Vertex remapping: vertexRemap[old] = new (canonical vertex)
+        std::vector<std::uint32_t> vertexRemap(numVertices);
+        std::iota(vertexRemap.begin(), vertexRemap.end(), 0U);
+        
+        // For each vertex, find nearby vertices and potentially merge
+        for (std::uint32_t i = 0U; i < numVertices; ++i)
+        {
+            if (vertexRemap[i] != i)
+            {
+                continue; // Already remapped
+            }
+            
+            Eigen::Vector3f const & pos = m_mesh.positions[i];
+            
+            // Check neighboring cells
+            auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
+            auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
+            auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
+            
+            for (int dz = -1; dz <= 1; ++dz)
+            {
+                for (int dy = -1; dy <= 1; ++dy)
+                {
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        std::uint64_t const hx = static_cast<std::uint64_t>(ix + dx) & 0x1FFFFF;
+                        std::uint64_t const hy = static_cast<std::uint64_t>(iy + dy) & 0x1FFFFF;
+                        std::uint64_t const hz = static_cast<std::uint64_t>(iz + dz) & 0x1FFFFF;
+                        std::uint64_t const neighborHash = (hx << 42) | (hy << 21) | hz;
+                        
+                        auto it = spatialHash.find(neighborHash);
+                        if (it == spatialHash.end())
+                        {
+                            continue;
+                        }
+                        
+                        for (std::uint32_t j : it->second)
+                        {
+                            if (j <= i || vertexRemap[j] != j)
+                            {
+                                continue; // Skip self, already processed, or already remapped
+                            }
+                            
+                            float const distSq = (m_mesh.positions[j] - pos).squaredNorm();
+                            if (distSq < toleranceSq)
+                            {
+                                // Merge j into i
+                                vertexRemap[j] = i;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Count how many vertices survive and build compaction map
+        std::vector<std::uint32_t> compactMap(numVertices, std::numeric_limits<std::uint32_t>::max());
+        std::uint32_t newVertexCount = 0U;
+        
+        for (std::uint32_t i = 0U; i < numVertices; ++i)
+        {
+            if (vertexRemap[i] == i)
+            {
+                compactMap[i] = newVertexCount++;
+            }
+        }
+        
+        // Build final remap: old index -> new compacted index
+        std::vector<std::uint32_t> finalRemap(numVertices);
+        for (std::uint32_t i = 0U; i < numVertices; ++i)
+        {
+            std::uint32_t canonical = vertexRemap[i];
+            finalRemap[i] = compactMap[canonical];
+        }
+        
+        // Compact vertex buffer
+        std::vector<Eigen::Vector3f> newPositions(newVertexCount);
+        std::vector<Eigen::Vector3f> newNormals(newVertexCount);
+        
+        for (std::uint32_t i = 0U; i < numVertices; ++i)
+        {
+            if (vertexRemap[i] == i)
+            {
+                std::uint32_t const newIdx = compactMap[i];
+                newPositions[newIdx] = m_mesh.positions[i];
+                newNormals[newIdx] = m_mesh.normals[i];
+            }
+        }
+        
+        // Remap indices
+        for (auto & idx : m_mesh.indices)
+        {
+            idx = finalRemap[idx];
+        }
+        
+        // Remove degenerate triangles
+        std::vector<std::uint32_t> validIndices;
+        validIndices.reserve(m_mesh.indices.size());
+        
+        for (std::size_t t = 0U; t < m_mesh.indices.size(); t += 3U)
+        {
+            std::uint32_t const i0 = m_mesh.indices[t + 0U];
+            std::uint32_t const i1 = m_mesh.indices[t + 1U];
+            std::uint32_t const i2 = m_mesh.indices[t + 2U];
+            
+            if (i0 != i1 && i1 != i2 && i2 != i0)
+            {
+                validIndices.push_back(i0);
+                validIndices.push_back(i1);
+                validIndices.push_back(i2);
+            }
+        }
+        
+        std::size_t const vertsBefore = m_mesh.positions.size();
+        std::size_t const trisBefore = m_mesh.indices.size() / 3U;
+        
+        m_mesh.positions = std::move(newPositions);
+        m_mesh.normals = std::move(newNormals);
+        m_mesh.indices = std::move(validIndices);
+        
+        std::size_t const vertsAfter = m_mesh.positions.size();
+        std::size_t const trisAfter = m_mesh.indices.size() / 3U;
+        
+        std::cout << "  Vertex welding: " << vertsBefore << " -> " << vertsAfter 
+                  << " vertices, " << trisBefore << " -> " << trisAfter << " triangles" << std::endl;
+    }
 }
+
 

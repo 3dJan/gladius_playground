@@ -58,6 +58,9 @@ namespace gladius::ui
         bool m_manifoldEnableCaching = true;
         float m_manifoldIsoValue = 0.0F;
         std::size_t m_manifoldMaxDepth = 7U;
+        // Minimum feature size and chunking
+        float m_manifoldMinFeatureSize = 0.0F;
+        bool m_manifoldEnableChunking = true;
         // Sharp feature post-processing
         bool m_manifoldEnableSharpFeaturePostProcess = false;
         float m_manifoldSharpFeatureAngleThreshold = 0.5F;

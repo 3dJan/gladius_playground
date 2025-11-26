@@ -139,6 +139,8 @@ namespace gladius::io
         config.enableCpuFallback = m_options.enableCpuFallback;
         config.enableCaching = m_options.enableCaching;
         config.isoValue = m_options.isoValue;
+        config.minFeatureSize = m_options.minFeatureSize;
+        config.enableChunking = m_options.enableChunking;
         config.enableSharpFeaturePostProcess = m_options.enableSharpFeaturePostProcess;
         config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
         config.subdivisionIterations = m_options.subdivisionIterations;

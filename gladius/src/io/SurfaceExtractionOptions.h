@@ -73,6 +73,10 @@ namespace gladius::io
         bool enableCaching{true};
         float isoValue{0.0F};
         
+        // Minimum feature size for thin wall preservation
+        float minFeatureSize{0.0F};                 ///< Minimum feature size to preserve (world units); 0 = disabled
+        bool enableChunking{true};                  ///< Enable spatial chunking when minFeatureSize requires higher depth than maxDepth
+        
         // Sharp feature post-processing options
         bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features
         float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°)

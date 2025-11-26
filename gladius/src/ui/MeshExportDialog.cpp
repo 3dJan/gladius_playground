@@ -371,6 +371,24 @@ namespace gladius::ui
                 ImGui::TextDisabled("higher values capture more detail");
 
                 ImGui::Separator();
+                ImGui::Text("Minimum Feature Size (Thin Walls)");
+                
+                ImGui::InputFloat("Min feature size", &m_manifoldMinFeatureSize, 0.1F, 1.0F, "%.3f");
+                if (m_manifoldMinFeatureSize < 0.0F)
+                {
+                    m_manifoldMinFeatureSize = 0.0F;
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("world units; 0 = disabled");
+                
+                if (m_manifoldMinFeatureSize > 0.0F)
+                {
+                    ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("divide-and-conquer for memory efficiency");
+                }
+
+                ImGui::Separator();
                 ImGui::Text("Sharp Feature Post-Processing");
                 
                 ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
@@ -533,6 +551,9 @@ namespace gladius::ui
                     options.initialDepth = options.maxDepth;
                 }
             }
+            // Minimum feature size and chunking
+            options.minFeatureSize = m_manifoldMinFeatureSize;
+            options.enableChunking = m_manifoldEnableChunking;
             // Sharp feature post-processing options
             options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
             options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;

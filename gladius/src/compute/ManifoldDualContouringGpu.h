@@ -25,7 +25,11 @@ namespace gladius::compute
         bool enableCpuFallback{true};
         bool enableCaching{true};
         float isoValue{0.0F};
-        float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled. Controls subdivision threshold
+        float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled
+        
+        // Chunking for large models with fine features
+        bool enableChunking{true};               ///< Auto-enable chunking when minFeatureSize requires higher depth than maxDepth
+        float chunkWeldTolerance{0.0F};          ///< Tolerance for welding vertices at chunk boundaries; 0 = auto (based on voxel size)
         
         // Sharp feature post-processing
         bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features
@@ -107,5 +111,26 @@ namespace gladius::compute
         void simplifyMesh();
         [[nodiscard]] std::size_t simplifyMeshPass(float minEdgeLength, float flatThreshold);
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;
+        
+        // Chunked processing for large models with fine features
+        struct ChunkInfo
+        {
+            Eigen::Vector3f min;        ///< Processing region min (with overlap)
+            Eigen::Vector3f max;        ///< Processing region max (with overlap)
+            Eigen::Vector3f coreMin;    ///< Core region min (without overlap, used for clipping)
+            Eigen::Vector3f coreMax;    ///< Core region max (without overlap, used for clipping)
+            std::size_t indexX{0U};
+            std::size_t indexY{0U};
+            std::size_t indexZ{0U};
+        };
+        
+        [[nodiscard]] std::size_t calculateRequiredDepth(float bboxExtent, float minFeatureSize) const;
+        [[nodiscard]] std::size_t calculateChunkDivisor() const;
+        [[nodiscard]] std::vector<ChunkInfo> generateChunkGrid() const;
+        [[nodiscard]] bool isChunkNonEmpty(ChunkInfo const & chunk) const;
+        void generateMeshForChunk(ChunkInfo const & chunk, ManifoldDualContouringMesh & chunkMesh);
+        void clipMeshToCore(ManifoldDualContouringMesh & mesh, ChunkInfo const & chunk);
+        void mergeMeshes(ManifoldDualContouringMesh & target, ManifoldDualContouringMesh const & source);
+        void weldBoundaryVertices(float tolerance);
     };
     }
