@@ -396,6 +396,31 @@ namespace gladius::ui
                     ImGui::Unindent();
                 }
 
+                ImGui::Separator();
+                ImGui::Text("Mesh Simplification");
+                
+                ImGui::Checkbox("Enable simplification", &m_manifoldEnableSimplification);
+                if (m_manifoldEnableSimplification)
+                {
+                    ImGui::Indent();
+                    
+                    ImGui::SliderFloat("Max SDF error", 
+                                       &m_manifoldSimplificationMaxError, 
+                                       0.001F, 0.1F, 
+                                       "%.3f mm");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("maximum deviation from surface");
+                    
+                    ImGui::SliderFloat("Flat threshold", 
+                                       &m_manifoldSimplificationFlatThreshold, 
+                                       0.8F, 0.99F, 
+                                       "cos(angle) = %.2f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("higher = more aggressive (0.95 ≈ 18°)");
+                    
+                    ImGui::Unindent();
+                }
+
                 ImGui::TextWrapped(
                   "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
                   "while the kernels are under active development.");
@@ -513,6 +538,10 @@ namespace gladius::ui
             options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
             options.subdivisionIterations = m_manifoldSubdivisionIterations;
             options.projectToSurface = m_manifoldProjectToSurface;
+            // Mesh simplification options
+            options.enableSimplification = m_manifoldEnableSimplification;
+            options.simplificationMaxError = m_manifoldSimplificationMaxError;
+            options.simplificationFlatThreshold = m_manifoldSimplificationFlatThreshold;
 
             m_manifoldExporter.setOptions(options);
             m_manifoldExporter.beginExport(m_targetFile, core);

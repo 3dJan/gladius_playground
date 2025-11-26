@@ -143,6 +143,9 @@ namespace gladius::io
         config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
         config.subdivisionIterations = m_options.subdivisionIterations;
         config.projectToSurface = m_options.projectToSurface;
+        config.enableSimplification = m_options.enableSimplification;
+        config.simplificationMaxError = m_options.simplificationMaxError;
+        config.simplificationFlatThreshold = m_options.simplificationFlatThreshold;
         gpuPipeline.setConfig(config);
         gpuPipeline.generateMesh();
 

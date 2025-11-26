@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -82,6 +83,12 @@ namespace gladius::compute
         if (m_config.enableSharpFeaturePostProcess && !m_mesh.indices.empty())
         {
             postProcessSharpFeatures();
+        }
+        
+        // Mesh simplification (after sharp feature processing)
+        if (m_config.enableSimplification && !m_mesh.indices.empty())
+        {
+            simplifyMesh();
         }
     }
 
@@ -804,6 +811,403 @@ namespace gladius::compute
         {
             std::cerr << "Vertex projection failed: " << e.what() << std::endl;
         }
+    }
+
+    float ManifoldDualContouringGpu::evaluateSdf(Eigen::Vector3f const & pos) const
+    {
+        // For single-point SDF evaluation, we use the precomputed SDF grid if available
+        // This is a simplified approach - for production, consider caching the SDF grid
+        auto resources = m_core.getResourceContext();
+        if (!resources)
+        {
+            return 0.0F;
+        }
+
+        auto & sdfBuffer = resources->getPrecompSdfBuffer();
+        auto const width = sdfBuffer.getWidth();
+        auto const height = sdfBuffer.getHeight();
+        auto const depth = sdfBuffer.getDepth();
+        
+        if (width == 0U || height == 0U || depth == 0U || !m_cachedBoundingBox.has_value())
+        {
+            return 0.0F;
+        }
+
+        // Transform world position to normalized coordinates within the bounding box
+        Eigen::Vector3f const extent = m_cachedBboxMax - m_cachedBboxMin;
+        Eigen::Vector3f const safeExtent = extent.cwiseMax(Eigen::Vector3f::Constant(1e-6F));
+        Eigen::Vector3f normalized = (pos - m_cachedBboxMin).cwiseQuotient(safeExtent);
+        normalized = normalized.cwiseMax(Eigen::Vector3f::Zero()).cwiseMin(Eigen::Vector3f::Ones());
+
+        // Convert to grid indices
+        float const gx = normalized.x() * static_cast<float>(width - 1U);
+        float const gy = normalized.y() * static_cast<float>(height - 1U);
+        float const gz = normalized.z() * static_cast<float>(depth - 1U);
+
+        auto const x0 = static_cast<std::size_t>(std::floor(gx));
+        auto const y0 = static_cast<std::size_t>(std::floor(gy));
+        auto const z0 = static_cast<std::size_t>(std::floor(gz));
+        auto const x1 = std::min(x0 + 1U, width - 1U);
+        auto const y1 = std::min(y0 + 1U, height - 1U);
+        auto const z1 = std::min(z0 + 1U, depth - 1U);
+
+        float const fx = gx - static_cast<float>(x0);
+        float const fy = gy - static_cast<float>(y0);
+        float const fz = gz - static_cast<float>(z0);
+
+        // Trilinear interpolation
+        auto const & data = sdfBuffer.getData();
+        auto index = [&](std::size_t x, std::size_t y, std::size_t z) -> std::size_t {
+            return z * width * height + y * width + x;
+        };
+
+        float const v000 = data[index(x0, y0, z0)];
+        float const v100 = data[index(x1, y0, z0)];
+        float const v010 = data[index(x0, y1, z0)];
+        float const v110 = data[index(x1, y1, z0)];
+        float const v001 = data[index(x0, y0, z1)];
+        float const v101 = data[index(x1, y0, z1)];
+        float const v011 = data[index(x0, y1, z1)];
+        float const v111 = data[index(x1, y1, z1)];
+
+        float const c00 = v000 * (1.0F - fx) + v100 * fx;
+        float const c10 = v010 * (1.0F - fx) + v110 * fx;
+        float const c01 = v001 * (1.0F - fx) + v101 * fx;
+        float const c11 = v011 * (1.0F - fx) + v111 * fx;
+        float const c0 = c00 * (1.0F - fy) + c10 * fy;
+        float const c1 = c01 * (1.0F - fy) + c11 * fy;
+        
+        return c0 * (1.0F - fz) + c1 * fz;
+    }
+
+    void ManifoldDualContouringGpu::simplifyMesh()
+    {
+        std::cout << "Starting mesh simplification..." << std::endl;
+        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const initialVertices = m_mesh.positions.size();
+        
+        if (initialTriangles < 2U || initialVertices < 4U)
+        {
+            std::cout << "Mesh too small for simplification" << std::endl;
+            return;
+        }
+
+        // Calculate voxel size for automatic edge length threshold
+        float minEdgeLength = m_config.simplificationMinEdgeLength;
+        if (minEdgeLength <= 0.0F && m_cachedBoundingBox.has_value())
+        {
+            // Default to half voxel size at current octree depth
+            Eigen::Vector3f const extent = m_cachedBboxMax - m_cachedBboxMin;
+            float const voxelSize = extent.maxCoeff() / static_cast<float>(m_gridResolution);
+            minEdgeLength = voxelSize * 0.5F;
+        }
+
+        // Build edge-to-triangles adjacency
+        struct Edge
+        {
+            std::uint32_t v0;
+            std::uint32_t v1;
+            
+            bool operator==(Edge const & other) const
+            {
+                auto const a0 = std::min(v0, v1);
+                auto const a1 = std::max(v0, v1);
+                auto const b0 = std::min(other.v0, other.v1);
+                auto const b1 = std::max(other.v0, other.v1);
+                return a0 == b0 && a1 == b1;
+            }
+        };
+        
+        struct EdgeHash
+        {
+            std::size_t operator()(Edge const & e) const
+            {
+                auto const low = std::min(e.v0, e.v1);
+                auto const high = std::max(e.v0, e.v1);
+                return std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(low) << 32U | high);
+            }
+        };
+
+        // Map each edge to the triangles that use it
+        std::unordered_map<Edge, std::vector<std::size_t>, EdgeHash> edgeTriangles;
+        
+        // Map each vertex to its triangles
+        std::vector<std::vector<std::size_t>> vertexTriangles(m_mesh.positions.size());
+        std::size_t const numTriangles = m_mesh.indices.size() / 3U;
+        
+        for (std::size_t t = 0U; t < numTriangles; ++t)
+        {
+            std::uint32_t const i0 = m_mesh.indices[t * 3U + 0U];
+            std::uint32_t const i1 = m_mesh.indices[t * 3U + 1U];
+            std::uint32_t const i2 = m_mesh.indices[t * 3U + 2U];
+            
+            vertexTriangles[i0].push_back(t);
+            vertexTriangles[i1].push_back(t);
+            vertexTriangles[i2].push_back(t);
+            
+            edgeTriangles[Edge{i0, i1}].push_back(t);
+            edgeTriangles[Edge{i1, i2}].push_back(t);
+            edgeTriangles[Edge{i2, i0}].push_back(t);
+        }
+
+        // Collect candidate edges for collapse (only internal edges with exactly 2 triangles)
+        struct CollapseCandidate
+        {
+            Edge edge;
+            float length;
+            float normalDot;
+        };
+        std::vector<CollapseCandidate> candidates;
+        
+        for (auto const & [edge, triangles] : edgeTriangles)
+        {
+            // Only collapse interior edges (exactly 2 triangles share this edge)
+            if (triangles.size() != 2U)
+            {
+                continue;
+            }
+            
+            auto const & p0 = m_mesh.positions[edge.v0];
+            auto const & p1 = m_mesh.positions[edge.v1];
+            float const length = (p1 - p0).norm();
+            
+            // Skip edges that are too long
+            if (length > minEdgeLength)
+            {
+                continue;
+            }
+            
+            // Check if normals are similar (flat region)
+            auto const & n0 = m_mesh.normals[edge.v0];
+            auto const & n1 = m_mesh.normals[edge.v1];
+            float const normalDot = n0.dot(n1);
+            
+            // Only consider edges in relatively flat regions
+            if (normalDot >= m_config.simplificationFlatThreshold)
+            {
+                candidates.push_back({edge, length, normalDot});
+            }
+        }
+        
+        if (candidates.empty())
+        {
+            std::cout << "No simplification candidates found" << std::endl;
+            return;
+        }
+
+        // Sort candidates by length (shortest first)
+        std::sort(candidates.begin(), candidates.end(),
+                  [](CollapseCandidate const & a, CollapseCandidate const & b)
+                  {
+                      return a.length < b.length;
+                  });
+
+        // Track which vertices have been collapsed (vertex -> replacement vertex)
+        std::vector<std::uint32_t> vertexRemap(m_mesh.positions.size());
+        std::iota(vertexRemap.begin(), vertexRemap.end(), 0U);
+        
+        // Track which vertices have been touched (to avoid cascading collapses)
+        std::vector<bool> vertexTouched(m_mesh.positions.size(), false);
+        
+        // Helper to get the final vertex after all remaps
+        auto getFinalVertex = [&vertexRemap](std::uint32_t v) -> std::uint32_t
+        {
+            while (vertexRemap[v] != v)
+            {
+                v = vertexRemap[v];
+            }
+            return v;
+        };
+
+        std::size_t collapsedCount = 0U;
+
+        // Perform edge collapses
+        for (auto const & candidate : candidates)
+        {
+            std::uint32_t const v0 = getFinalVertex(candidate.edge.v0);
+            std::uint32_t const v1 = getFinalVertex(candidate.edge.v1);
+            
+            // Skip if already collapsed into same vertex
+            if (v0 == v1)
+            {
+                continue;
+            }
+            
+            // Skip if either vertex was already touched (avoid cascading collapses)
+            if (vertexTouched[v0] || vertexTouched[v1])
+            {
+                continue;
+            }
+
+            // Check SDF error at midpoint
+            Eigen::Vector3f const & p0 = m_mesh.positions[v0];
+            Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+            Eigen::Vector3f const midpoint = (p0 + p1) * 0.5F;
+            
+            float const sdfError = std::abs(evaluateSdf(midpoint));
+            if (sdfError > m_config.simplificationMaxError)
+            {
+                continue;
+            }
+
+            // Check for triangle inversions after collapse
+            bool wouldInvert = false;
+            
+            auto checkTrianglesForInversion = [&](std::uint32_t vertex) -> bool
+            {
+                for (std::size_t triIdx : vertexTriangles[vertex])
+                {
+                    std::size_t const baseIdx = triIdx * 3U;
+                    std::uint32_t triVerts[3] = {
+                        getFinalVertex(m_mesh.indices[baseIdx + 0U]),
+                        getFinalVertex(m_mesh.indices[baseIdx + 1U]),
+                        getFinalVertex(m_mesh.indices[baseIdx + 2U])
+                    };
+                    
+                    // Skip already-degenerate triangles
+                    if (triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[2] == triVerts[0])
+                    {
+                        continue;
+                    }
+                    
+                    // Skip triangles that contain both v0 and v1 (they will become degenerate)
+                    bool const hasV0 = (triVerts[0] == v0 || triVerts[1] == v0 || triVerts[2] == v0);
+                    bool const hasV1 = (triVerts[0] == v1 || triVerts[1] == v1 || triVerts[2] == v1);
+                    if (hasV0 && hasV1)
+                    {
+                        continue;
+                    }
+
+                    Eigen::Vector3f const & a = m_mesh.positions[triVerts[0]];
+                    Eigen::Vector3f const & b = m_mesh.positions[triVerts[1]];
+                    Eigen::Vector3f const & c = m_mesh.positions[triVerts[2]];
+                    
+                    Eigen::Vector3f const normalBefore = (b - a).cross(c - a);
+                    
+                    auto getNewPos = [&](std::uint32_t idx) -> Eigen::Vector3f
+                    {
+                        if (idx == v0 || idx == v1)
+                        {
+                            return midpoint;
+                        }
+                        return m_mesh.positions[idx];
+                    };
+                    
+                    Eigen::Vector3f const aPrime = getNewPos(triVerts[0]);
+                    Eigen::Vector3f const bPrime = getNewPos(triVerts[1]);
+                    Eigen::Vector3f const cPrime = getNewPos(triVerts[2]);
+                    
+                    Eigen::Vector3f const normalAfter = (bPrime - aPrime).cross(cPrime - aPrime);
+                    
+                    float const normalLenBefore = normalBefore.norm();
+                    float const normalLenAfter = normalAfter.norm();
+                    
+                    if (normalLenBefore > 1e-10F && normalLenAfter > 1e-10F)
+                    {
+                        if (normalBefore.dot(normalAfter) < 0.0F)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            
+            wouldInvert = checkTrianglesForInversion(v0) || checkTrianglesForInversion(v1);
+
+            if (wouldInvert)
+            {
+                continue;
+            }
+
+            // Perform the collapse: v1 -> v0
+            vertexRemap[v1] = v0;
+            vertexTouched[v0] = true;
+            vertexTouched[v1] = true;
+            
+            // Update the position of v0 to the midpoint
+            m_mesh.positions[v0] = midpoint;
+            
+            // Average the normals
+            Eigen::Vector3f avgNormal = (m_mesh.normals[v0] + m_mesh.normals[v1]).normalized();
+            m_mesh.normals[v0] = avgNormal;
+            
+            ++collapsedCount;
+        }
+
+        if (collapsedCount == 0U)
+        {
+            std::cout << "No edges could be collapsed" << std::endl;
+            return;
+        }
+
+        // Rebuild index buffer with collapsed vertices
+        std::vector<std::uint32_t> newIndices;
+        newIndices.reserve(m_mesh.indices.size());
+        
+        for (std::size_t t = 0U; t < numTriangles; ++t)
+        {
+            std::size_t const baseIdx = t * 3U;
+            std::uint32_t const i0 = getFinalVertex(m_mesh.indices[baseIdx + 0U]);
+            std::uint32_t const i1 = getFinalVertex(m_mesh.indices[baseIdx + 1U]);
+            std::uint32_t const i2 = getFinalVertex(m_mesh.indices[baseIdx + 2U]);
+            
+            // Skip degenerate triangles
+            if (i0 != i1 && i1 != i2 && i2 != i0)
+            {
+                newIndices.push_back(i0);
+                newIndices.push_back(i1);
+                newIndices.push_back(i2);
+            }
+        }
+
+        m_mesh.indices = std::move(newIndices);
+
+        // Compact vertex buffer (remove unused vertices)
+        std::vector<bool> vertexUsed(m_mesh.positions.size(), false);
+        for (auto idx : m_mesh.indices)
+        {
+            vertexUsed[idx] = true;
+        }
+
+        std::vector<std::uint32_t> newVertexIndices(m_mesh.positions.size(), 0U);
+        std::vector<Eigen::Vector3f> newPositions;
+        std::vector<Eigen::Vector3f> newNormals;
+        newPositions.reserve(m_mesh.positions.size());
+        newNormals.reserve(m_mesh.normals.size());
+
+        std::uint32_t newIdx = 0U;
+        for (std::size_t i = 0U; i < m_mesh.positions.size(); ++i)
+        {
+            if (vertexUsed[i])
+            {
+                newVertexIndices[i] = newIdx++;
+                newPositions.push_back(m_mesh.positions[i]);
+                if (i < m_mesh.normals.size())
+                {
+                    newNormals.push_back(m_mesh.normals[i]);
+                }
+            }
+        }
+
+        // Remap indices to new vertex buffer
+        for (auto & idx : m_mesh.indices)
+        {
+            idx = newVertexIndices[idx];
+        }
+
+        m_mesh.positions = std::move(newPositions);
+        m_mesh.normals = std::move(newNormals);
+
+        std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const finalVertices = m_mesh.positions.size();
+        
+        std::cout << "Mesh simplification complete:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
+                  << " (removed " << (initialTriangles - finalTriangles) << ")" << std::endl;
+        std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
+                  << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
+        std::cout << "  Edges collapsed: " << collapsedCount << std::endl;
     }
 }
 

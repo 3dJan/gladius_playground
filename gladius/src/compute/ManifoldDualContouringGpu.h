@@ -32,6 +32,12 @@ namespace gladius::compute
         float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°, lower = more sensitive)
         std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes on sharp triangles
         bool projectToSurface{true};                ///< Project vertices to SDF surface after subdivision
+        
+        // Mesh simplification
+        bool enableSimplification{false};           ///< Enable edge-collapse simplification in flat regions
+        float simplificationMaxError{0.01F};        ///< Maximum SDF deviation allowed for edge collapse (world units)
+        float simplificationMinEdgeLength{0.0F};    ///< Minimum edge length to preserve (0 = auto based on voxel size)
+        float simplificationFlatThreshold{0.95F};   ///< Cosine threshold for coplanar normals (0.95 ≈ 18°)
     };
 
     struct ManifoldDualContouringMesh
@@ -94,5 +100,9 @@ namespace gladius::compute
         std::vector<std::size_t> detectSharpTriangles();
         void subdivideTriangles(std::vector<std::size_t> const & triangleIndices);
         void projectVerticesToSurface();
-        };
+        
+        // Mesh simplification
+        void simplifyMesh();
+        [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;
+    };
     }

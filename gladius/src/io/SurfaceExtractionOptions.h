@@ -78,6 +78,11 @@ namespace gladius::io
         float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°)
         std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes
         bool projectToSurface{true};                ///< Project vertices to SDF surface
+        
+        // Mesh simplification options
+        bool enableSimplification{false};           ///< Enable edge-collapse simplification in flat regions
+        float simplificationMaxError{0.01F};        ///< Maximum SDF deviation allowed (world units)
+        float simplificationFlatThreshold{0.95F};   ///< Cosine threshold for coplanar normals
 
         void applyPreset();
     };

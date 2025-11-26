@@ -63,6 +63,10 @@ namespace gladius::ui
         float m_manifoldSharpFeatureAngleThreshold = 0.5F;
         std::size_t m_manifoldSubdivisionIterations = 1U;
         bool m_manifoldProjectToSurface = true;
+        // Mesh simplification
+        bool m_manifoldEnableSimplification = false;
+        float m_manifoldSimplificationMaxError = 0.01F;
+        float m_manifoldSimplificationFlatThreshold = 0.95F;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
     };
