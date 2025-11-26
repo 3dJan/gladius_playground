@@ -249,6 +249,24 @@ namespace gladius
         }
     }
 
+    void ProgramManager::recompileBlockingForManifoldDC()
+    {
+        ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        
+        if (m_modelSource.empty())
+        {
+            // No model source set - nothing to compile
+            return;
+        }
+        
+        if (m_manifoldDualContouringProgram)
+        {
+            m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+            m_manifoldDualContouringProgram->recompileBlocking();
+        }
+    }
+
     void ProgramManager::recompileBlockingNoLock()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

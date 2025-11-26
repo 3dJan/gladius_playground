@@ -63,6 +63,10 @@ namespace gladius::compute
             return;
         }
 
+        // Ensure the program is compiled with the current model's SDF
+        // This is important when switching between different models
+        m_core.getProgramManager().recompileBlockingForManifoldDC();
+
         constructOctree();
         generateVertices();
         generateIndices();
@@ -144,6 +148,11 @@ namespace gladius::compute
         }
         
         size_t numNodes = m_octreeNodeCount;
+
+        // IMPORTANT: Sort octree by Morton code BEFORE generating vertices.
+        // This ensures vertexOffsets[i] corresponds to the sorted node at index i,
+        // which is required for emit_indices to find correct neighbor vertices.
+        m_program->sortOctreeByMorton(m_octreeBuffer, numNodes);
         
         // Get primitives
         auto primitives = m_core.getPrimitives();
@@ -281,18 +290,18 @@ namespace gladius::compute
 
         try
         {
-            // 1. Sort octree by Morton code (required for neighbor lookup)
-            m_program->sortOctreeByMorton(m_octreeBuffer, numNodes);
+            // Note: Octree was already sorted in generateVertices()
+            // The sorted order ensures vertexOffsets[i] matches sorted node i
 
             // Calculate maxCoord for bounds checking in kernels (2^depth - 1)
             std::uint32_t const maxCoord = m_gridResolution - 1U;
 
-            // 2. Count quads per cell
+            // 1. Count quads per cell
             auto quadCountBuffer =
                 context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
             m_program->countQuads(*m_octreeBuffer, *quadCountBuffer, numNodes, maxCoord);
 
-            // 3. CPU-side prefix sum for index offsets
+            // 2. CPU-side prefix sum for index offsets
             std::vector<int> quadCounts(numNodes);
             queue.enqueueReadBuffer(*quadCountBuffer, CL_TRUE, 0, numNodes * sizeof(int), quadCounts.data());
 

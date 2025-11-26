@@ -597,6 +597,11 @@ __kernel void emit_indices(
     
     // Edge 5: Y-axis at (x=max, z=max), corners 5-7: (1,0,1)-(1,1,1)
     // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
+    // DIFFERENT from edges 6 and 10:
+    // - Base winding (v0,v1,v2) with v1=+X, v2=+Z gives (+X)×(+Z) = -Y
+    // - When corner7Inside, we want -Y normal (away from corner7 at max Y)
+    // - So use base winding (v0,v1,v2) when corner7Inside (NO swap)
+    // - When !corner7Inside, swap to get +Y normal
     if (node.edgeMask & (1 << 5))
     {
         if (coords.x < maxCoord && coords.z < maxCoord)
@@ -616,18 +621,10 @@ __kernel void emit_indices(
                 uint v2 = (uint)vertexOffsets[nIdx2];
                 uint v3 = (uint)vertexOffsets[nIdx3];
                 
+                // INVERTED logic compared to edges 6 and 10
                 if (corner7Inside)
                 {
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v2;
-                    outputIndices[writeOffset + 2] = v1;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v2;
-                    outputIndices[writeOffset + 5] = v3;
-                }
-                else
-                {
+                    // Need -Y: base winding gives -Y, so NO swap
                     outputIndices[writeOffset + 0] = v0;
                     outputIndices[writeOffset + 1] = v1;
                     outputIndices[writeOffset + 2] = v2;
@@ -635,6 +632,17 @@ __kernel void emit_indices(
                     outputIndices[writeOffset + 3] = v1;
                     outputIndices[writeOffset + 4] = v3;
                     outputIndices[writeOffset + 5] = v2;
+                }
+                else
+                {
+                    // Need +Y: swap to get +Y
+                    outputIndices[writeOffset + 0] = v0;
+                    outputIndices[writeOffset + 1] = v2;
+                    outputIndices[writeOffset + 2] = v1;
+                    
+                    outputIndices[writeOffset + 3] = v1;
+                    outputIndices[writeOffset + 4] = v2;
+                    outputIndices[writeOffset + 5] = v3;
                 }
                 
                 writeOffset += 6;
