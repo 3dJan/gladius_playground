@@ -987,6 +987,74 @@ namespace gladius::compute::tests
                   << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
+    /// Test for webcam mount model - documents known issue with holes in complex geometry
+    /// KNOWN ISSUE: The GPU quad generation algorithm skips quads when neighbor cells don't
+    /// exist (don't intersect the surface). This creates holes (~426 boundary edges) where
+    /// the surface has complex topology with missing neighbors.
+    /// Root cause: emit_indices kernel requires all 4 cells around an edge to emit a quad.
+    /// If any neighbor cell doesn't intersect the surface, the quad is skipped entirely.
+    /// 
+    /// This test currently documents the issue and checks that admesh can auto-repair it.
+    /// A proper fix would require kernel changes to emit partial geometry when neighbors are missing.
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWebcamMount_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        // Webcam mount is a solid mechanical part with complex geometry (screw holes, brackets)
+        // that causes the quad generation algorithm to create internal holes.
+        auto bundle = loadDocument("testdata/webcam_003.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+        
+        std::cout << "Webcam mount bounding box: [" 
+                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
+                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
+        
+        // After admesh auto-repair, mesh should be connected
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
+            << "Mesh should have no disconnected facets after admesh processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) 
+            << "Mesh should have no degenerate facets";
+        
+        // Should be a single part after repair
+        EXPECT_EQ(metrics.numberOfParts, 1) 
+            << "Webcam mount should be a single part after repair";
+        
+        // Mesh should be watertight with proper winding after bounding box margin fix
+        std::cout << "Webcam mount Admesh validation:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
+        
+        double const reversedRatio = 
+            static_cast<double>(metrics.facetsReversed) / 
+            static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        
+        // Strict validation: mesh should be watertight
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0) 
+            << "Mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.facetsAdded, 0) 
+            << "No facets should need to be added for gap filling";
+        EXPECT_EQ(metrics.backwardsEdges, 0) 
+            << "Mesh should have no backwards edges (boundary edges)";
+        EXPECT_LT(reversedRatio, 0.01) 
+            << "Less than 1% of facets should be reversed";
+        EXPECT_GT(metrics.volume, 0.0) 
+            << "Volume should be positive for outward-facing normals";
+    }
+
     // ============================================================================
     // Implicit Surface Validation Tests
     // ============================================================================
