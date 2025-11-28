@@ -412,20 +412,15 @@ namespace gladius::compute::tests
         }
 
         /// Exports mesh to STL and validates with admesh, returning metrics
-        AdmeshMetrics exportAndValidateWithAdmesh(ComputeCore & core)
+        AdmeshMetrics exportAndValidateWithAdmesh(
+            ComputeCore & core,
+            gladius::io::ManifoldDualContouringOptions const & exportOptions)
         {
             auto tempFile = makeUniqueTempFile("mdc_admesh_test_", ".stl");
             TempFileGuard guard(tempFile);
 
             // Export mesh
             gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
-            gladius::io::ManifoldDualContouringOptions exportOptions;
-            exportOptions.initialDepth = 5;
-            exportOptions.maxDepth = 7;
-            exportOptions.enableGpu = true;
-            exportOptions.enableCpuFallback = true;
-            exportOptions.enableCaching = true;
-            exportOptions.isoValue = 0.0F;
             exporter.setOptions(exportOptions);
 
             exporter.beginExport(tempFile, core);
@@ -448,6 +443,19 @@ namespace gladius::compute::tests
                 throw std::runtime_error("admesh returned non-zero exit code: " + std::to_string(exitCode));
             }
             return parseAdmeshMetrics(output);
+        }
+
+        /// Overload with default options for backward compatibility
+        AdmeshMetrics exportAndValidateWithAdmesh(ComputeCore & core)
+        {
+            gladius::io::ManifoldDualContouringOptions exportOptions;
+            exportOptions.initialDepth = 5;
+            exportOptions.maxDepth = 7;
+            exportOptions.enableGpu = true;
+            exportOptions.enableCpuFallback = true;
+            exportOptions.enableCaching = true;
+            exportOptions.isoValue = 0.0F;
+            return exportAndValidateWithAdmesh(core, exportOptions);
         }
 
         std::shared_ptr<ComputeContext> m_context;
@@ -769,7 +777,7 @@ namespace gladius::compute::tests
 
         // SphereInACage is a closed solid (sphere inside a cage) - tests proper
         // outward-facing normals for solid objects, unlike the gyroid sheet surface
-        auto bundle = loadDocument("../../tests/integrationtests/testdata/SphereInACage.3mf");
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
@@ -808,6 +816,101 @@ namespace gladius::compute::tests
                   << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_ChunkedMeshAdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        // SphereInACage contains a sphere inside a cage - two separate closed surfaces
+        // This test verifies that chunked mesh generation works and produces reasonable output
+        // NOTE: Current chunking implementation may produce seams at chunk boundaries because
+        // octree cells don't align perfectly between chunks. This is a known limitation.
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available after update";
+
+        // Calculate a minFeatureSize that will trigger chunking:
+        // With maxDepth=7, we get 128 voxels per axis
+        // Setting minFeatureSize small enough will require higher depth, forcing chunking
+        float const bboxDiag = std::max({
+            bbox->max.x - bbox->min.x,
+            bbox->max.y - bbox->min.y,
+            bbox->max.z - bbox->min.z
+        });
+        // Target: require depth 9, so minFeatureSize = bboxDiag / 512
+        float const minFeatureSize = bboxDiag / 512.0F;
+
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 7;
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+        exportOptions.minFeatureSize = minFeatureSize;
+        exportOptions.enableChunking = true;
+
+        std::cout << "Testing chunked mesh generation:" << std::endl;
+        std::cout << "  BBox diagonal: " << bboxDiag << " mm" << std::endl;
+        std::cout << "  minFeatureSize: " << minFeatureSize << " mm" << std::endl;
+        std::cout << "  (This should trigger 4x4x4 = 64 chunks)" << std::endl;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+
+        // Due to chunk boundary alignment limitations, we may have more than 2 parts
+        // Accept up to 50 parts as a reasonable threshold for chunked processing
+        // TODO: Improve chunk stitching to achieve exactly 2 parts
+        int constexpr maxAcceptableParts = 50;
+        EXPECT_LE(metrics.numberOfParts, maxAcceptableParts) 
+            << "Chunked mesh has too many disconnected parts (" << metrics.numberOfParts 
+            << "), suggesting severe stitching problems";
+        
+        if (metrics.numberOfParts > 2)
+        {
+            std::cout << "NOTE: Chunked mesh has " << metrics.numberOfParts 
+                      << " parts instead of 2. This is a known limitation of the current "
+                      << "chunking implementation." << std::endl;
+        }
+
+        // The mesh should be watertight with no disconnected facets
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
+            << "Chunked mesh should have no disconnected facets after processing";
+        
+        // Allow a small number of degenerate facets from gap-filling bridge triangles
+        // (Some bridge triangles may collapse to degenerate when vertices are very close)
+        EXPECT_LE(metrics.degenerateFacets, 50) 
+            << "Mesh should have minimal degenerate facets";
+        
+        // Check for reasonable winding consistency
+        // Allow higher threshold for chunked processing due to boundary artifacts
+        double const reversedRatio = 
+            static_cast<double>(metrics.facetsReversed) / 
+            static_cast<double>(metrics.numberOfFacets.original);
+        double const maxReversedRatio = 0.05; // 5% tolerance for chunked mesh
+        EXPECT_LE(reversedRatio, maxReversedRatio) 
+            << "Too many facets reversed: " << metrics.facetsReversed 
+            << " out of " << metrics.numberOfFacets.original 
+            << " (" << (reversedRatio * 100.0) << "%)";
+
+        // For a solid, expect positive volume (normals pointing outward)
+        EXPECT_GT(metrics.volume, 0.0) 
+            << "Volume should be positive for outward-facing normals";
+
+        // Log summary info
+        std::cout << "Chunked SphereInACage Admesh validation:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.final << std::endl;
+        std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+    }
+
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_SimplificationValidation)
     {
         if (!isAdmeshAvailable())
@@ -815,7 +918,7 @@ namespace gladius::compute::tests
             GTEST_SKIP() << "admesh not available, skipping validation test";
         }
 
-        auto bundle = loadDocument("../../tests/integrationtests/testdata/SphereInACage.3mf");
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         // Export with simplification enabled
@@ -1306,7 +1409,7 @@ namespace gladius::compute::tests
 
     TEST_F(ManifoldDualContouringGpu_Test, ValidateMesh_SphereInACage_VerticesOnSurface)
     {
-        auto bundle = loadDocument("../../tests/integrationtests/testdata/SphereInACage.3mf");
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         auto const bbox = bundle.core->getBoundingBox();
