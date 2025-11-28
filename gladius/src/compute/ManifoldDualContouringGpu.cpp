@@ -84,8 +84,19 @@ namespace gladius::compute
             return;
         }
         m_cachedBoundingBox = bbox;
-        m_cachedBboxMin = Eigen::Vector3f(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
-        m_cachedBboxMax = Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        Eigen::Vector3f originalBboxMin = Eigen::Vector3f(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
+        Eigen::Vector3f originalBboxMax = Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        
+        // Add margin to bounding box to ensure surface at boundaries is properly captured.
+        // The margin should be at least 2 voxels at the finest level to allow proper
+        // sign change detection at the surface boundary.
+        Eigen::Vector3f const originalSize = originalBboxMax - originalBboxMin;
+        float const maxExtent = originalSize.maxCoeff();
+        float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+        float const margin = 2.0f * voxelSize;
+        
+        m_cachedBboxMin = originalBboxMin - Eigen::Vector3f(margin, margin, margin);
+        m_cachedBboxMax = originalBboxMax + Eigen::Vector3f(margin, margin, margin);
         m_cachedBboxSize = m_cachedBboxMax - m_cachedBboxMin;
 
         // Use hierarchical octree approach if enabled (produces watertight meshes)
@@ -192,6 +203,13 @@ namespace gladius::compute
                 constructOctree();
                 generateVertices();
                 generateIndices();
+                
+                // Note: fillBoundaryGaps is NOT called for single-pass processing.
+                // The boundary edges in single-pass mode are typically at the bbox
+                // boundary (surface clipped by domain) or from thin-sheet surfaces
+                // (e.g., gyroid). In both cases, gap filling would create incorrect
+                // geometry. For watertight meshes with complex geometry, consider
+                // using hierarchical/chunked processing which handles gaps properly.
             }
         } // End of else block for non-hierarchical processing
         
@@ -232,10 +250,23 @@ namespace gladius::compute
         
         Eigen::Vector3f bboxMin(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
         Eigen::Vector3f bboxMax(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        
+        // Add margin to bounding box to ensure surface at boundaries is properly captured.
+        // The margin should be at least 2 voxels at the finest level to allow proper
+        // sign change detection at the surface boundary.
+        Eigen::Vector3f const originalSize = bboxMax - bboxMin;
+        float const maxExtent = originalSize.maxCoeff();
+        std::uint32_t const depth = m_config.maxDepth;
+        float const voxelSize = maxExtent / static_cast<float>(1U << depth);
+        float const margin = 2.0f * voxelSize;
+        
+        bboxMin -= Eigen::Vector3f(margin, margin, margin);
+        bboxMax += Eigen::Vector3f(margin, margin, margin);
+        
         m_cachedBboxMin = bboxMin;
         m_cachedBboxMax = bboxMax;
         m_cachedBboxSize = bboxMax - bboxMin;
-        m_octreeDepth = m_config.maxDepth;
+        m_octreeDepth = depth;
         if (m_octreeDepth >= 31U)
         {
             m_gridResolution = std::numeric_limits<std::uint32_t>::max();
@@ -249,8 +280,11 @@ namespace gladius::compute
             }
         }
         
-          std::cout << "Constructing Octree. BBox: [" << bboxMin.transpose() << "] to ["
-              << bboxMax.transpose() << "], Extents: " << m_cachedBboxSize.transpose()
+        std::cout << "Constructing Octree. Original BBox: [" << (bboxMin + Eigen::Vector3f(margin, margin, margin)).transpose() 
+              << "] to [" << (bboxMax - Eigen::Vector3f(margin, margin, margin)).transpose() 
+              << "], Padded BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose()
+              << "], Margin: " << margin << " (voxelSize=" << voxelSize << ")"
+              << ", Extents: " << m_cachedBboxSize.transpose()
               << ", initialDepth: " << m_config.initialDepth
               << ", maxDepth: " << m_config.maxDepth << std::endl;
         
@@ -1848,21 +1882,17 @@ namespace gladius::compute
         
         // Build edge-to-triangle map to find boundary edges
         // An edge is a boundary edge if it's used by only 1 triangle
-        struct Edge
+        // IMPORTANT: We store DIRECTED edges to preserve winding order
+        struct DirectedEdge
         {
-            std::uint32_t v0;
-            std::uint32_t v1;
-            
-            bool operator==(Edge const & other) const
-            {
-                return (v0 == other.v0 && v1 == other.v1) || 
-                       (v0 == other.v1 && v1 == other.v0);
-            }
+            std::uint32_t v0;  // Start vertex (as in original triangle winding)
+            std::uint32_t v1;  // End vertex (as in original triangle winding)
         };
         
-        struct EdgeHash
+        // For counting, we use undirected edge representation
+        struct UndirectedEdgeHash
         {
-            std::size_t operator()(Edge const & e) const
+            std::size_t operator()(DirectedEdge const & e) const
             {
                 std::uint32_t minV = std::min(e.v0, e.v1);
                 std::uint32_t maxV = std::max(e.v0, e.v1);
@@ -1871,9 +1901,9 @@ namespace gladius::compute
             }
         };
         
-        struct EdgeEqual
+        struct UndirectedEdgeEqual
         {
-            bool operator()(Edge const & a, Edge const & b) const
+            bool operator()(DirectedEdge const & a, DirectedEdge const & b) const
             {
                 std::uint32_t minA = std::min(a.v0, a.v1);
                 std::uint32_t maxA = std::max(a.v0, a.v1);
@@ -1883,8 +1913,16 @@ namespace gladius::compute
             }
         };
         
-        // Count edge usage
-        std::unordered_map<Edge, std::size_t, EdgeHash, EdgeEqual> edgeCount;
+        // Store edge usage count and the DIRECTED edge from the original triangle
+        // Also store the third vertex of the triangle for normal computation
+        struct EdgeInfo
+        {
+            std::size_t count = 0U;
+            DirectedEdge directedEdge;  // Direction from the first triangle using this edge
+            std::uint32_t thirdVertex;  // The third vertex of the triangle (for normal)
+        };
+        
+        std::unordered_map<DirectedEdge, EdgeInfo, UndirectedEdgeHash, UndirectedEdgeEqual> edgeInfo;
         
         for (std::size_t t = 0U; t < m_mesh.indices.size(); t += 3U)
         {
@@ -1892,28 +1930,95 @@ namespace gladius::compute
             std::uint32_t const i1 = m_mesh.indices[t + 1U];
             std::uint32_t const i2 = m_mesh.indices[t + 2U];
             
-            edgeCount[{i0, i1}]++;
-            edgeCount[{i1, i2}]++;
-            edgeCount[{i2, i0}]++;
+            // Store directed edges as they appear in the triangle (preserves winding)
+            // Also store the opposite vertex for each edge (for normal computation)
+            std::tuple<DirectedEdge, std::uint32_t> const edges[3] = {
+                {{i0, i1}, i2},
+                {{i1, i2}, i0},
+                {{i2, i0}, i1}
+            };
+            for (auto const & [e, opposite] : edges)
+            {
+                auto & info = edgeInfo[e];
+                if (info.count == 0U)
+                {
+                    info.directedEdge = e;  // Store the direction from first occurrence
+                    info.thirdVertex = opposite;
+                }
+                info.count++;
+            }
         }
         
-        // Collect boundary edges (used by only 1 triangle)
-        std::vector<Edge> boundaryEdges;
-        for (auto const & [edge, count] : edgeCount)
+        // Get bounding box for filtering - edges on bbox faces should not be filled
+        // as they are legitimate open boundaries (surface clipped at bbox)
+        Eigen::Vector3f bboxMin(std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max());
+        Eigen::Vector3f bboxMax(std::numeric_limits<float>::lowest(),
+                                std::numeric_limits<float>::lowest(),
+                                std::numeric_limits<float>::lowest());
+        for (auto const & pos : m_mesh.positions)
         {
-            if (count == 1U)
+            bboxMin = bboxMin.cwiseMin(pos);
+            bboxMax = bboxMax.cwiseMax(pos);
+        }
+        float const bboxTolerance = searchRadius * 0.5F;  // Tolerance for bbox face detection
+        
+        // Helper to check if a point is on a bounding box face
+        auto isOnBboxFace = [&bboxMin, &bboxMax, bboxTolerance](Eigen::Vector3f const & p) -> bool
+        {
+            return p.x() <= bboxMin.x() + bboxTolerance ||
+                   p.x() >= bboxMax.x() - bboxTolerance ||
+                   p.y() <= bboxMin.y() + bboxTolerance ||
+                   p.y() >= bboxMax.y() - bboxTolerance ||
+                   p.z() <= bboxMin.z() + bboxTolerance ||
+                   p.z() >= bboxMax.z() - bboxTolerance;
+        };
+        
+        // Collect boundary edges (used by only 1 triangle) with their original direction
+        // Skip edges that lie on the bounding box faces (legitimate open boundaries)
+        struct BoundaryEdge
+        {
+            DirectedEdge edge;
+            std::uint32_t thirdVertex;  // Third vertex of original triangle (for normal)
+        };
+        std::vector<BoundaryEdge> boundaryEdges;
+        std::size_t skippedBboxEdges = 0U;
+        for (auto const & [edge, info] : edgeInfo)
+        {
+            if (info.count == 1U)
             {
-                boundaryEdges.push_back(edge);
+                // Check if both vertices are on bbox faces
+                Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
+                Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
+                
+                if (isOnBboxFace(p0) && isOnBboxFace(p1))
+                {
+                    // Skip edges on bbox faces - these are legitimate open boundaries
+                    ++skippedBboxEdges;
+                    continue;
+                }
+                
+                boundaryEdges.push_back({info.directedEdge, info.thirdVertex});
             }
         }
         
         if (boundaryEdges.empty())
         {
-            std::cout << "  Gap filling: No boundary edges found - mesh is closed" << std::endl;
+            if (skippedBboxEdges > 0U)
+            {
+                std::cout << "  Gap filling: No internal boundary edges found (" 
+                          << skippedBboxEdges << " edges on bbox boundary skipped)" << std::endl;
+            }
+            else
+            {
+                std::cout << "  Gap filling: No boundary edges found - mesh is closed" << std::endl;
+            }
             return;
         }
         
-        std::cout << "  Gap filling: Found " << boundaryEdges.size() << " boundary edges" << std::endl;
+        std::cout << "  Gap filling: Found " << boundaryEdges.size() << " internal boundary edges"
+                  << " (" << skippedBboxEdges << " on bbox boundary skipped)" << std::endl;
         
         // Build spatial hash for edge midpoints
         float const searchRadiusSq = searchRadius * searchRadius;
@@ -1937,8 +2042,8 @@ namespace gladius::compute
         
         for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
         {
-            Eigen::Vector3f const & p0 = m_mesh.positions[boundaryEdges[i].v0];
-            Eigen::Vector3f const & p1 = m_mesh.positions[boundaryEdges[i].v1];
+            Eigen::Vector3f const & p0 = m_mesh.positions[boundaryEdges[i].edge.v0];
+            Eigen::Vector3f const & p1 = m_mesh.positions[boundaryEdges[i].edge.v1];
             edgeMidpoints[i] = (p0 + p1) * 0.5F;
             edgeSpatialHash[hashPos(edgeMidpoints[i])].push_back(i);
         }
@@ -1955,10 +2060,15 @@ namespace gladius::compute
             }
             
             Eigen::Vector3f const & midI = edgeMidpoints[i];
-            Edge const & edgeI = boundaryEdges[i];
+            BoundaryEdge const & boundaryI = boundaryEdges[i];
+            DirectedEdge const & edgeI = boundaryI.edge;
             Eigen::Vector3f const & pI0 = m_mesh.positions[edgeI.v0];
             Eigen::Vector3f const & pI1 = m_mesh.positions[edgeI.v1];
             float const edgeLenI = (pI1 - pI0).norm();
+            
+            // Compute normal of original triangle containing edge I
+            Eigen::Vector3f const & pI2 = m_mesh.positions[boundaryI.thirdVertex];
+            Eigen::Vector3f const normalI = (pI1 - pI0).cross(pI2 - pI0).normalized();
             
             // Search neighboring cells
             auto const ix = static_cast<std::int32_t>(std::floor(midI.x() * invCellSize));
@@ -1993,7 +2103,8 @@ namespace gladius::compute
                             }
                             
                             // Check if edges have similar length
-                            Edge const & edgeJ = boundaryEdges[j];
+                            BoundaryEdge const & boundaryJ = boundaryEdges[j];
+                            DirectedEdge const & edgeJ = boundaryJ.edge;
                             Eigen::Vector3f const & pJ0 = m_mesh.positions[edgeJ.v0];
                             Eigen::Vector3f const & pJ1 = m_mesh.positions[edgeJ.v1];
                             float const edgeLenJ = (pJ1 - pJ0).norm();
@@ -2003,6 +2114,16 @@ namespace gladius::compute
                             if (lenRatio < 0.5F)
                             {
                                 continue;  // Edge lengths too different
+                            }
+                            
+                            // Check if edges come from triangles with similar normals
+                            // This avoids connecting edges from opposite sides of a thin sheet
+                            Eigen::Vector3f const & pJ2 = m_mesh.positions[boundaryJ.thirdVertex];
+                            Eigen::Vector3f const normalJ = (pJ1 - pJ0).cross(pJ2 - pJ0).normalized();
+                            float const normalDot = normalI.dot(normalJ);
+                            if (normalDot < 0.7F)  // Normals should point nearly the same direction
+                            {
+                                continue;  // Edges from opposite sides of surface
                             }
                             
                             float const distSq = (edgeMidpoints[j] - midI).squaredNorm();
@@ -2019,14 +2140,24 @@ namespace gladius::compute
             if (bestMatch != std::numeric_limits<std::size_t>::max())
             {
                 // Create bridge triangles between edges i and bestMatch
-                Edge const & edgeJ = boundaryEdges[bestMatch];
+                BoundaryEdge const & boundaryJ = boundaryEdges[bestMatch];
+                DirectedEdge const & edgeJ = boundaryJ.edge;
                 
-                // Determine vertex pairing based on distance
+                // We have normal of original triangle (normalI) computed earlier.
+                // Use distance to determine which vertices to pair.
                 float const d00 = (m_mesh.positions[edgeI.v0] - m_mesh.positions[edgeJ.v0]).squaredNorm();
                 float const d01 = (m_mesh.positions[edgeI.v0] - m_mesh.positions[edgeJ.v1]).squaredNorm();
                 
-                // Helper to add non-degenerate triangle
-                auto addTriangleIfValid = [this, &newTriangles](
+                // Determine vertex pairing based on distance
+                std::uint32_t const jNear0 = (d00 < d01) ? edgeJ.v0 : edgeJ.v1;  // Near I.v0
+                std::uint32_t const jNear1 = (d00 < d01) ? edgeJ.v1 : edgeJ.v0;  // Near I.v1
+                
+                // Create bridge triangles with correct winding based on original normal
+                // The quad is: I.v0 -- I.v1 -- jNear1 -- jNear0 (spatial order)
+                // We need to determine if this should be CCW or CW based on normalI
+                
+                // Helper to add triangle with winding check
+                auto addTriangleWithCorrectWinding = [this, &newTriangles, &normalI](
                     std::uint32_t a, std::uint32_t b, std::uint32_t c) -> bool
                 {
                     // Skip if any two vertices are the same
@@ -2035,36 +2166,41 @@ namespace gladius::compute
                         return false;
                     }
                     
-                    // Check triangle area - skip if degenerate
                     Eigen::Vector3f const & pA = m_mesh.positions[a];
                     Eigen::Vector3f const & pB = m_mesh.positions[b];
                     Eigen::Vector3f const & pC = m_mesh.positions[c];
                     
-                    float const areaSq = ((pB - pA).cross(pC - pA)).squaredNorm();
-                    float constexpr minAreaSq = 1e-12F;  // Minimum area threshold
+                    // Check triangle area - skip if degenerate
+                    Eigen::Vector3f const triNormal = (pB - pA).cross(pC - pA);
+                    float const areaSq = triNormal.squaredNorm();
+                    float constexpr minAreaSq = 1e-12F;
                     if (areaSq < minAreaSq)
                     {
                         return false;
                     }
                     
-                    newTriangles.push_back(a);
-                    newTriangles.push_back(b);
-                    newTriangles.push_back(c);
+                    // Check if triangle normal aligns with original normal
+                    // If not, reverse the winding
+                    if (triNormal.dot(normalI) < 0.0F)
+                    {
+                        // Reverse winding: swap b and c
+                        newTriangles.push_back(a);
+                        newTriangles.push_back(c);
+                        newTriangles.push_back(b);
+                    }
+                    else
+                    {
+                        newTriangles.push_back(a);
+                        newTriangles.push_back(b);
+                        newTriangles.push_back(c);
+                    }
                     return true;
                 };
                 
-                if (d00 < d01)
-                {
-                    // Connect: I.v0-J.v0, I.v1-J.v1
-                    addTriangleIfValid(edgeI.v0, edgeI.v1, edgeJ.v0);
-                    addTriangleIfValid(edgeI.v1, edgeJ.v1, edgeJ.v0);
-                }
-                else
-                {
-                    // Connect: I.v0-J.v1, I.v1-J.v0
-                    addTriangleIfValid(edgeI.v0, edgeI.v1, edgeJ.v1);
-                    addTriangleIfValid(edgeI.v1, edgeJ.v0, edgeJ.v1);
-                }
+                // Create the two bridge triangles for the quad
+                // Quad: I.v0 -- I.v1 -- jNear1 -- jNear0
+                addTriangleWithCorrectWinding(edgeI.v0, edgeI.v1, jNear1);
+                addTriangleWithCorrectWinding(edgeI.v0, jNear1, jNear0);
                 
                 edgeUsed[i] = true;
                 edgeUsed[bestMatch] = true;
