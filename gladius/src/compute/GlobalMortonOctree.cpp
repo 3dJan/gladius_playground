@@ -19,6 +19,14 @@
 #include <set>
 #include <unordered_set>
 
+// NOTE: This GlobalMortonOctree implementation is EXPERIMENTAL and DISABLED by default.
+// It uses path-based Morton codes to build a hierarchical octree structure.
+// Currently disabled because edge-to-cells mapping fails when neighbor cells don't
+// intersect the surface (common at boundaries), causing non-manifold meshes.
+// The GPU chunked approach (used when enableHierarchicalOctree=false) works correctly.
+// To enable verbose debug output during development, define GLOBALMORTON_DEBUG_OUTPUT.
+// #define GLOBALMORTON_DEBUG_OUTPUT
+
 namespace gladius::compute
 {
     namespace
@@ -122,11 +130,13 @@ namespace gladius::compute
         m_vertexRegistry.initialize(m_globalBboxMin, m_globalBboxMax,
                                      static_cast<std::uint32_t>(config.maxDepth));
 
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Building GlobalMortonOctree:" << std::endl;
         std::cout << "  BBox: [" << m_globalBboxMin.transpose() << "] to ["
                   << m_globalBboxMax.transpose() << "]" << std::endl;
         std::cout << "  Depth range: " << config.initialDepth << " to " << config.maxDepth << std::endl;
 
+#endif
         // Phase 1: Build initial coarse octree
         buildInitialOctree();
 
@@ -137,19 +147,25 @@ namespace gladius::compute
         }
 
         // Phase 3: Generate vertices using QEF
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Generating vertices..." << std::endl;
+        #endif
         generateVertices();
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Vertices generated: " << m_stats.vertexCount << std::endl;
 
+#endif
         auto const endTime = std::chrono::high_resolution_clock::now();
         m_stats.constructionTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Octree construction complete:" << std::endl;
         std::cout << "  Total nodes: " << m_stats.totalNodes << std::endl;
         std::cout << "  Leaf nodes: " << m_stats.leafNodes << std::endl;
         std::cout << "  Intersecting leaves: " << m_stats.intersectingLeaves << std::endl;
         std::cout << "  Vertices: " << m_stats.vertexCount << std::endl;
         std::cout << "  Time: " << m_stats.constructionTimeMs << " ms" << std::endl;
+        #endif
     }
 
     void GlobalMortonOctree::buildInitialOctree()
@@ -186,7 +202,9 @@ namespace gladius::compute
         }
 
         // Count final statistics
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Counting statistics for " << m_nodes.size() << " nodes..." << std::endl;
+        #endif
         for (auto const& node : m_nodes)
         {
             if (node.isLeaf)
@@ -199,8 +217,10 @@ namespace gladius::compute
             }
         }
         m_stats.totalNodes = m_nodes.size();
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Statistics complete: " << m_stats.leafNodes << " leaves, " 
                   << m_stats.intersectingLeaves << " intersecting" << std::endl;
+                  #endif
     }
 
     void GlobalMortonOctree::processLevel(std::size_t levelIndex, bool forceSubdivision)
@@ -221,12 +241,18 @@ namespace gladius::compute
         // During initial build (forceSubdivision=true), subdivide ALL nodes
         if (levelIndex < m_config.maxDepth)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    Creating children for level " << levelIndex << "..." << std::flush;
+            #endif
             createChildNodes(levelIndex, forceSubdivision);
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << " done" << std::endl << std::flush;
+            #endif
         }
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Level " << levelIndex << " processing complete. Nodes in next level: " 
                   << (levelIndex < m_levels.size() - 1U ? m_levels[levelIndex + 1U].nodeIndices.size() : 0U) << std::endl << std::flush;
+                  #endif
     }
 
     void GlobalMortonOctree::evaluateCornersCpu(std::vector<std::size_t> const& nodeIndices)
@@ -240,10 +266,12 @@ namespace gladius::compute
             // Read SDF data from GPU to CPU
             sdfBuffer.read();
             
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  SDF buffer size: " << sdfBuffer.getWidth() << "x" 
                       << sdfBuffer.getHeight() << "x" << sdfBuffer.getDepth()
                       << " (data size: " << sdfBuffer.getData().size() << ")" << std::endl;
             
+            #endif
             // Print min/max of SDF data for debugging
             auto const& data = sdfBuffer.getData();
             if (!data.empty())
@@ -255,16 +283,22 @@ namespace gladius::compute
                     minVal = std::min(minVal, v);
                     maxVal = std::max(maxVal, v);
                 }
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  SDF value range: [" << minVal << ", " << maxVal << "]" << std::endl;
+                #endif
             }
             else
             {
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  SDF buffer is EMPTY!" << std::endl;
+                #endif
             }
         }
         else
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  No resources available for SDF sampling!" << std::endl;
+            #endif
         }
 
         for (std::size_t nodeIdx : nodeIndices)
@@ -282,12 +316,18 @@ namespace gladius::compute
             // Debug: Print first node's corner values
             if (nodeIdx == 0U)
             {
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  Root node corner values: ";
+                #endif
                 for (int c = 0; c < 8; ++c)
                 {
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << node.cornerValues[c] << " ";
+                    #endif
                 }
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << std::endl;
+                #endif
             }
         }
     }
@@ -337,17 +377,23 @@ namespace gladius::compute
             {
                 BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
                                                                static_cast<std::uint32_t>(m_config.maxDepth));
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  Leaf node " << nodeIdx << " at depth " << (int)node.depth 
                           << " isIntersecting=" << node.isIntersecting
                           << " edgeMask=" << node.edgeMask
                           << " corners: ";
+                          #endif
                 for (int c = 0; c < 8; ++c)
                 {
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << node.cornerValues[c] << " ";
+                    #endif
                 }
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "\n    bounds: [" << bounds.min.x << "," << bounds.min.y << "," << bounds.min.z 
                           << "] to [" << bounds.max.x << "," << bounds.max.y << "," << bounds.max.z << "]";
                 std::cout << std::endl;
+                #endif
                 ++debugCount;
             }
             
@@ -357,16 +403,22 @@ namespace gladius::compute
             {
                 BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
                                                                static_cast<std::uint32_t>(m_config.maxDepth));
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  INTERSECTING node " << nodeIdx << " at depth " << (int)node.depth 
                           << " edgeMask=" << node.edgeMask
                           << " corners: ";
+                          #endif
                 for (int c = 0; c < 8; ++c)
                 {
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << node.cornerValues[c] << " ";
+                    #endif
                 }
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "\n    bounds: [" << bounds.min.x << "," << bounds.min.y << "," << bounds.min.z 
                           << "] to [" << bounds.max.x << "," << bounds.max.y << "," << bounds.max.z << "]";
                 std::cout << std::endl;
+                #endif
                 ++intersectingDebugCount;
             }
         }
@@ -375,8 +427,10 @@ namespace gladius::compute
         static bool printedSummary = false;
         if (!printedSummary && nodeIndices.size() > 1000)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  Corner value summary: " << negativeCornerCount << " negative, "
                       << positiveCornerCount << " positive" << std::endl;
+                      #endif
             printedSummary = true;
         }
     }
@@ -405,8 +459,10 @@ namespace gladius::compute
             ++subdivideCount;
             if (subdivideCount <= 3 || subdivideCount % 1000 == 0)
             {
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << " [subdividing node " << parentIdx << " at depth " << (int)m_nodes[parentIdx].depth 
                           << ", count=" << subdivideCount << "]" << std::flush;
+                          #endif
             }
 
             m_nodes[parentIdx].isLeaf = false;
@@ -471,9 +527,11 @@ namespace gladius::compute
                 break;
             }
 
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  Refinement pass " << (pass + 1U) << ": subdividing "
                       << refineCount << " leaves" << std::endl;
 
+#endif
             // Subdivide marked leaves
             subdivideMarkedLeaves();
         }
@@ -819,9 +877,11 @@ namespace gladius::compute
                 }
             }
             
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  POST-FIX directed edge analysis: paired=" << (pairedEdges / 2) 
                       << ", single=" << singleEdges 
                       << ", multiple=" << multipleEdges << std::endl;
+                      #endif
         }
 
         m_stats.triangleCount = indices.size() / 3U;
@@ -884,8 +944,10 @@ namespace gladius::compute
                 // Debug: print details for first few non-manifold edges
                 if (debugCount < 5)
                 {
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << "  Non-manifold edge (" << edge.first << "," << edge.second 
                               << ") count=" << count << " from quads: ";
+                              #endif
                     for (auto t : triangles)
                     {
                         std::size_t quadIdx = t / 2;
@@ -894,20 +956,29 @@ namespace gladius::compute
                             (indices[t*3] == edge.second && indices[t*3+2] == edge.first) :
                             (indices[t*3] == edge.first && indices[t*3+2] == edge.second) ||
                             (indices[t*3] == edge.second && indices[t*3+2] == edge.first);
+                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << "Q" << quadIdx << (isDiagonal ? "(diag)" : "(peri)") << " ";
+                        #endif
                     }
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << std::endl;
                     std::cout << "    Triangles: ";
+                    #endif
                     for (auto t : triangles)
                     {
+                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << t << "[" << indices[t*3] << "," << indices[t*3+1] << "," << indices[t*3+2] << "] ";
+                        #endif
                     }
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << std::endl;
+                    #endif
                     ++debugCount;
                 }
             }
         }
 
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Mesh extraction complete:" << std::endl;
         std::cout << "  Edge analysis: internal=" << internalEdges 
                   << ", boundary=" << m_stats.boundaryEdges 
@@ -918,6 +989,7 @@ namespace gladius::compute
         std::cout << "  Boundary edges: " << m_stats.boundaryEdges << std::endl;
         std::cout << "  Non-manifold edges: " << m_stats.nonManifoldEdges << std::endl;
         std::cout << "  Time: " << m_stats.meshExtractionTimeMs << " ms" << std::endl;
+        #endif
     }
 
     void GlobalMortonOctree::generateQuads(std::vector<std::uint32_t>& indices)
@@ -948,11 +1020,15 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  mortonToNode map size: " << mortonToNode.size() << std::endl;
         std::cout << "  Intersecting leaf depth distribution:" << std::endl;
+        #endif
         for (auto const& [depth, count] : depthDistribution)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    Depth " << static_cast<int>(depth) << ": " << count << " leaves" << std::endl;
+            #endif
         }
         
         // Debug: verify Morton encoding/decoding round-trip
@@ -990,16 +1066,20 @@ namespace gladius::compute
             
             if (reencoded != node.mortonCode && roundTripErrors < 5)
             {
+                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << "  Round-trip error: node " << nodeIdx 
                           << " mc=" << std::hex << node.mortonCode 
                           << " -> (" << std::dec << x << "," << y << "," << z 
                           << ") -> " << std::hex << reencoded << std::dec << std::endl;
+                          #endif
                 ++roundTripErrors;
             }
         }
         if (roundTripErrors > 0)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  Total round-trip errors: " << roundTripErrors << std::endl;
+            #endif
         }
         
         // Helper to get vertex index from a node (returns max if no vertex)
@@ -1075,16 +1155,21 @@ namespace gladius::compute
                         auto checkNode = [this](std::uint64_t mc, char const* name) {
                             auto it = m_mortonToIndex.find(mc);
                             if (it == m_mortonToIndex.end()) {
+                                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                                 std::cout << "    " << name << " mc=" << std::hex << mc << std::dec 
                                           << ": NOT IN OCTREE" << std::endl;
+                                          #endif
                             } else {
                                 auto const& n = m_nodes[it->second];
+                                #ifdef GLOBALMORTON_DEBUG_OUTPUT
                                 std::cout << "    " << name << " mc=" << std::hex << mc << std::dec 
                                           << ": exists, isLeaf=" << n.isLeaf 
                                           << " isIntersecting=" << n.isIntersecting << std::endl;
+                                          #endif
                             }
                         };
                         
+                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << "  Edge6 neighbor miss at (" << cx << "," << cy << "," << cz 
                                   << ") depth=" << static_cast<int>(node.depth)
                                   << " mc=" << std::hex << node.mortonCode << std::dec
@@ -1093,6 +1178,7 @@ namespace gladius::compute
                                   << ") n3(" << (it3 != mortonToNode.end()) << ")" << std::endl;
                         std::cout << "    Lookup codes: m1=" << std::hex << m1 
                                   << " m2=" << m2 << " m3=" << m3 << std::dec << std::endl;
+                                  #endif
                         checkNode(m1, "n1");
                         checkNode(m2, "n2");
                         checkNode(m3, "n3");
@@ -1396,6 +1482,7 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Quad generation (explicit neighbor lookup):" << std::endl;
         std::cout << "    Intersecting leaves: " << intersectingLeafCount << std::endl;
         std::cout << "    Emitted quads: " << emittedQuads << std::endl;
@@ -1404,6 +1491,7 @@ namespace gladius::compute
         std::cout << "    Missing vertex quads: " << missingVertexQuads << std::endl;
         std::cout << "    Triangles: " << (indices.size() / 3) << std::endl;
         
+        #endif
         // Debug: check for degenerate triangles
         std::size_t degenerateCount = 0;
         for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
@@ -1415,7 +1503,9 @@ namespace gladius::compute
         }
         if (degenerateCount > 0)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    WARNING: " << degenerateCount << " degenerate triangles!" << std::endl;
+            #endif
         }
         
         // Debug: Check directed edge consistency
@@ -1460,14 +1550,18 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Directed edge analysis: paired=" << (pairedEdges / 2) 
                   << ", single=" << singleEdges 
                   << ", multiple=" << multipleEdges << std::endl;
         
+        #endif
         // Debug: sample some multiple edges
         if (multipleEdges > 0)
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  Multiple edge samples (first 10):" << std::endl;
+            #endif
             int sampleCount = 0;
             for (auto const& [edgeKey, count] : directedEdgeCount)
             {
@@ -1491,12 +1585,18 @@ namespace gladius::compute
                         }
                     }
                     
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << "    Edge " << a << "->" << b << " appears " << count << " times in triangles: ";
+                    #endif
                     for (std::size_t tri : trianglesWithEdge)
                     {
+                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << tri << " ";
+                        #endif
                     }
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << std::endl;
+                    #endif
                     ++sampleCount;
                 }
             }
@@ -1556,12 +1656,16 @@ namespace gladius::compute
         
         if (boundaryNext.empty())
         {
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  No boundary edges to fill" << std::endl;
+            #endif
             return;
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Filling holes: " << boundaryNext.size() << " boundary edges" << std::endl;
         
+        #endif
         // Extract boundary loops
         std::unordered_set<std::uint32_t> visited;
         std::vector<std::vector<std::uint32_t>> loops;
@@ -1597,8 +1701,10 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Found " << loops.size() << " boundary loops" << std::endl;
         
+        #endif
         // Triangulate each loop using ear clipping or simple fan triangulation
         std::size_t addedTriangles = 0;
         
@@ -1606,8 +1712,10 @@ namespace gladius::compute
         {
             if (loop.size() < 3) continue;
             
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    Loop with " << loop.size() << " vertices" << std::endl;
             
+            #endif
             // For small loops (3-4 vertices), use simple fan triangulation
             // For larger loops, we'd need proper ear clipping
             if (loop.size() == 3)
@@ -1670,7 +1778,9 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Added " << addedTriangles << " triangles to fill holes" << std::endl;
+        #endif
     }
 
     void GlobalMortonOctree::fixTriangleOrientation(std::vector<std::uint32_t>& indices)
@@ -1808,9 +1918,11 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Orientation propagation: " << numComponents << " components, "
                   << flippedTriangles << " triangles flipped" << std::endl;
         
+        #endif
         // Now vote on whether each component should be globally flipped
         // based on gradient alignment
         float const cellSize = (m_globalBboxSize.x() + m_globalBboxSize.y() + m_globalBboxSize.z()) / 
@@ -1914,12 +2026,14 @@ namespace gladius::compute
             float const correctRatio = totalVotes > 0 ? 
                 static_cast<float>(correctVotes) / static_cast<float>(totalVotes) : 0.5F;
             
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    Component " << comp << ": " << componentTriangles[comp].size() 
                       << " triangles, correct=" << correctVotes << " (" << (correctRatio * 100.0F) << "%)"
                       << " wrong=" << wrongVotes << " (" << ((1.0F - correctRatio) * 100.0F) << "%)"
                       << " skipped=" << skippedVotes
                       << " -> " << (wrongVotes > correctVotes ? "FLIP" : "keep") << std::endl;
             
+            #endif
             if (wrongVotes > correctVotes)
             {
                 ++globallyFlippedComponents;
@@ -1931,8 +2045,10 @@ namespace gladius::compute
             }
         }
         
+        #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "  Global orientation: flipped " << globallyFlippedComponents 
                   << " components (" << globallyFlippedTriangles << " triangles)" << std::endl;
+                  #endif
     }
 
     std::size_t GlobalMortonOctree::allocateNode()

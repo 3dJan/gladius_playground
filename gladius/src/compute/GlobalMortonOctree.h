@@ -1,5 +1,22 @@
 #pragma once
 
+/**
+ * @file GlobalMortonOctree.h
+ * @brief EXPERIMENTAL - Path-based Morton octree for manifold dual contouring.
+ * 
+ * @warning This implementation is DISABLED by default (enableHierarchicalOctree=false
+ * in ManifoldDualContouringGpu.h).
+ * 
+ * Known limitation: Edge-to-cells mapping fails when neighbor cells don't intersect
+ * the surface, which is common at mesh boundaries. This causes non-manifold meshes.
+ * 
+ * The GPU chunked approach (enabled by default) works correctly and produces
+ * watertight manifold meshes suitable for 3D printing.
+ * 
+ * For development/debugging, define GLOBALMORTON_DEBUG_OUTPUT before including
+ * GlobalMortonOctree.cpp to enable verbose debug output.
+ */
+
 #include "GlobalVertexRegistry.h"
 #include "../types.h"
 #include "../kernel/types.h"
