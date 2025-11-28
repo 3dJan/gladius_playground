@@ -4,6 +4,7 @@
 #include "../ComputeContext.h"
 #include "../types.h"
 #include "ComputeCore.h"
+#include "GlobalMortonOctree.h"
 #include "ManifoldDualContouringProgram.h"
 
 #include <Eigen/Core>
@@ -27,7 +28,13 @@ namespace gladius::compute
         float isoValue{0.0F};
         float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled
         
-        // Chunking for large models with fine features
+        // Global hierarchical octree (watertight mesh generation)
+        bool enableHierarchicalOctree{false};   ///< DISABLED: Global Morton octree is experimental and broken
+        bool enableAdaptiveRefinement{false};    ///< TEMPORARILY DISABLED: Enable curvature-based adaptive refinement
+        float curvatureThreshold{0.3F};          ///< Gradient variance threshold for subdivision
+        std::size_t refinementPasses{2U};        ///< Number of adaptive refinement passes
+        
+        // Chunking for large models with fine features (fallback if hierarchical disabled)
         bool enableChunking{true};               ///< Auto-enable chunking when minFeatureSize requires higher depth than maxDepth
         float chunkWeldTolerance{0.0F};          ///< Tolerance for welding vertices at chunk boundaries; 0 = auto (based on voxel size)
         
@@ -132,5 +139,10 @@ namespace gladius::compute
         void clipMeshToCore(ManifoldDualContouringMesh & mesh, ChunkInfo const & chunk);
         void mergeMeshes(ManifoldDualContouringMesh & target, ManifoldDualContouringMesh const & source);
         void weldBoundaryVertices(float tolerance);
+        void fillBoundaryGaps(float searchRadius);
+        
+        // Hierarchical octree approach (watertight mesh generation)
+        void generateMeshHierarchical();
+        std::unique_ptr<GlobalMortonOctree> m_hierarchicalOctree;
     };
     }
