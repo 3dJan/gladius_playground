@@ -1,5 +1,6 @@
 #include "ManifoldDualContouringStlExporter.h"
 
+#include "3mf/MeshWriter3mf.h"
 #include "MeshExporter.h"
 
 #include "ComputeContext.h"
@@ -48,6 +49,16 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setOptions(ManifoldDualContouringOptions options)
     {
         m_options = std::move(options);
+    }
+
+    void ManifoldDualContouringStlExporter::setOutputFormat(MeshOutputFileFormat format)
+    {
+        m_outputFormat = format;
+    }
+
+    void ManifoldDualContouringStlExporter::setDocument(Document const * doc)
+    {
+        m_document = doc;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -218,7 +229,7 @@ namespace gladius::io
         auto computeContext = generator.getComputeContext();
         if (computeContext == nullptr)
         {
-            throw std::runtime_error("Compute context unavailable for STL export");
+            throw std::runtime_error("Compute context unavailable for mesh export");
         }
 
         Mesh convertedMesh(*computeContext);
@@ -277,6 +288,15 @@ namespace gladius::io
             throw std::runtime_error("Manifold dual contouring produced no valid faces");
         }
 
-        vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+        // Write to the appropriate format
+        if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
+        {
+            MeshWriter3mf writer(m_logger);
+            writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+        }
+        else
+        {
+            vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+        }
     }
 }

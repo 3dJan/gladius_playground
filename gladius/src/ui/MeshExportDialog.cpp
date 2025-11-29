@@ -13,11 +13,19 @@ namespace gladius::ui
 {
     namespace
     {
-                constexpr std::array<char const *, 4> METHOD_LABELS{
-                    "Layered marching cubes (OpenVDB)",
-                    "Dual contouring (octree)",
-                    "Hierarchical dual contouring (adaptive)",
-                    "Manifold dual contouring (GPU beta)"};
+        constexpr std::array<char const *, 2> FORMAT_LABELS{
+            "STL (Standard Triangle Language)",
+            "3MF (3D Manufacturing Format)"};
+        
+        constexpr std::array<char const *, 2> FORMAT_EXTENSIONS{
+            ".stl",
+            ".3mf"};
+
+        constexpr std::array<char const *, 4> METHOD_LABELS{
+            "Layered marching cubes (OpenVDB)",
+            "Dual contouring (octree)",
+            "Hierarchical dual contouring (adaptive)",
+            "Manifold dual contouring (GPU beta)"};
 
         constexpr std::array<char const *, 4> QUALITY_LABELS{
           "Draft (fast)",
@@ -25,25 +33,25 @@ namespace gladius::ui
           "High fidelity",
           "Ultra"};
 
-                constexpr std::array<char const *, 4> DUAL_QUALITY_LABELS{
+        constexpr std::array<char const *, 4> DUAL_QUALITY_LABELS{
           "Draft",
           "Balanced",
           "Fine",
           "Ultra Fine"};
 
-                constexpr std::array<char const *, 5> HIERARCHICAL_QUALITY_LABELS{
-                    "Draft",
-                    "Balanced",
-                    "Fine",
-                    "Ultra Fine",
-                    "Custom"};
+        constexpr std::array<char const *, 5> HIERARCHICAL_QUALITY_LABELS{
+            "Draft",
+            "Balanced",
+            "Fine",
+            "Ultra Fine",
+            "Custom"};
 
-                constexpr std::array<char const *, 5> MANIFOLD_QUALITY_LABELS{
-                    "Draft",
-                    "Balanced",
-                    "Fine",
-                    "Ultra Fine",
-                    "Custom"};
+        constexpr std::array<char const *, 5> MANIFOLD_QUALITY_LABELS{
+            "Draft",
+            "Balanced",
+            "Fine",
+            "Ultra Fine",
+            "Custom"};
     }
 
     void MeshExportDialog::show(std::filesystem::path suggestedFilename)
@@ -84,23 +92,28 @@ namespace gladius::ui
 
     std::string MeshExportDialog::getWindowTitle() const
     {
-        return m_exportInProgress ? "Exporting STL" : "Export STL";
+        if (m_exportInProgress)
+        {
+            return m_outputFormat == MeshOutputFormat::ThreeMF ? "Exporting 3MF" : "Exporting STL";
+        }
+        return "Export Mesh";
     }
 
     std::string MeshExportDialog::getExportMessage() const
     {
+        std::string const formatName = m_outputFormat == MeshOutputFormat::ThreeMF ? "3MF" : "STL";
         switch (m_selectedMethod)
         {
         case io::SurfaceExtractionMethod::LayeredMarchingCubes:
-            return "Exporting STL using layered marching cubes";
+            return "Exporting " + formatName + " using layered marching cubes";
         case io::SurfaceExtractionMethod::DualContouring:
-            return "Exporting STL using dual contouring";
+            return "Exporting " + formatName + " using dual contouring";
         case io::SurfaceExtractionMethod::HierarchicalDualContouring:
-            return "Exporting STL using hierarchical dual contouring";
+            return "Exporting " + formatName + " using hierarchical dual contouring";
         case io::SurfaceExtractionMethod::ManifoldDualContouring:
-            return "Exporting STL using manifold dual contouring";
+            return "Exporting " + formatName + " using manifold dual contouring";
         default:
-            return "Exporting STL";
+            return "Exporting " + formatName;
         }
     }
 
@@ -118,6 +131,10 @@ namespace gladius::ui
         if (m_activeExporter == &m_layeredExporter && m_computeCore != nullptr)
         {
             m_layeredExporter.finalizeExportSTL(*m_computeCore);
+        }
+        else if (m_activeExporter == &m_layeredExporter3mf)
+        {
+            m_layeredExporter3mf.finalize();
         }
         else if (m_activeExporter == &m_dualExporter)
         {
@@ -145,6 +162,10 @@ namespace gladius::ui
         if (m_activeExporter == &m_layeredExporter)
         {
             m_layeredExporter.finalize();
+        }
+        else if (m_activeExporter == &m_layeredExporter3mf)
+        {
+            m_layeredExporter3mf.finalize();
         }
         else if (m_activeExporter == &m_dualExporter)
         {
@@ -196,14 +217,30 @@ namespace gladius::ui
         ImGui::SetNextWindowSize(ImVec2(550.0F, 0.0F), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(getWindowTitle().c_str(), &m_visible))
         {
+            // During export: show only progress and cancel button
+            if (m_exportInProgress)
+            {
+                renderStatusArea();
+                
+                ImGui::Spacing();
+                
+                if (ImGui::Button("Cancel Export"))
+                {
+                    onExportCancelled();
+                    m_statusMessage = "Export cancelled";
+                    m_statusIsError = false;
+                }
+                
+                ImGui::End();
+                return;
+            }
+            
             // File selection section
             renderFileSelection();
             
             ImGui::Separator();
 
-            // Disable settings during export
-            ImGui::BeginDisabled(m_exportInProgress);
-            
+            // Settings are only shown when not exporting
             ImGui::TextUnformatted("Select surface extraction method for STL export.");
 
             int methodIndex = static_cast<int>(m_selectedMethod);
@@ -482,8 +519,6 @@ namespace gladius::ui
                   "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
                   "while the kernels are under active development.");
             }
-
-            ImGui::EndDisabled(); // End disabled during export
             
             ImGui::Separator();
             
@@ -500,7 +535,7 @@ namespace gladius::ui
             ImGui::Spacing();
 
             // Buttons section
-            bool const canExport = !m_targetFile.empty() && !m_exportInProgress;
+            bool const canExport = !m_targetFile.empty();
             
             ImGui::BeginDisabled(!canExport);
             if (ImGui::Button("Start Export"))
@@ -532,22 +567,10 @@ namespace gladius::ui
             
             ImGui::SameLine();
             
-            if (m_exportInProgress)
+            if (ImGui::Button("Close"))
             {
-                if (ImGui::Button("Cancel Export"))
-                {
-                    onExportCancelled();
-                    m_statusMessage = "Export cancelled";
-                    m_statusIsError = false;
-                }
-            }
-            else
-            {
-                if (ImGui::Button("Close"))
-                {
-                    resetState();
-                    m_visible = false;
-                }
+                resetState();
+                m_visible = false;
             }
         }
         ImGui::End();
@@ -560,13 +583,42 @@ namespace gladius::ui
     
     void MeshExportDialog::renderFileSelection()
     {
+        // Output format selection
+        int formatIndex = static_cast<int>(m_outputFormat);
+        if (ImGui::BeginCombo("Format", FORMAT_LABELS.at(static_cast<std::size_t>(formatIndex))))
+        {
+            for (int i = 0; i < static_cast<int>(FORMAT_LABELS.size()); ++i)
+            {
+                bool const selected = (i == formatIndex);
+                if (ImGui::Selectable(FORMAT_LABELS[static_cast<std::size_t>(i)], selected))
+                {
+                    formatIndex = i;
+                    auto const newFormat = static_cast<MeshOutputFormat>(i);
+                    if (newFormat != m_outputFormat)
+                    {
+                        m_outputFormat = newFormat;
+                        // Update file extension if a file is already selected
+                        if (!m_targetFile.empty())
+                        {
+                            m_targetFile.replace_extension(FORMAT_EXTENSIONS[static_cast<std::size_t>(i)]);
+                        }
+                    }
+                }
+                if (selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        
+        ImGui::Spacing();
         ImGui::Text("Target File:");
         
         // Display the current filename (read-only text input for copying)
         std::string displayPath = m_targetFile.empty() ? "(no file selected)" : m_targetFile.string();
         
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 100.0F);
-        ImGui::BeginDisabled(m_exportInProgress);
         
         // Use InputText with read-only flag for the path display
         char pathBuffer[512] = {};
@@ -580,8 +632,13 @@ namespace gladius::ui
         ImGui::BeginDisabled(dialogActive);
         if (ImGui::Button(dialogActive ? "Waiting..." : "Browse..."))
         {
-            std::filesystem::path defaultPath = m_targetFile.empty() ? std::filesystem::path{"part.stl"} : m_targetFile;
-            m_browseDialog.saveFile({"*.stl"}, defaultPath);
+            std::string const extension = FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)];
+            std::string const filter = "*" + extension;
+            std::filesystem::path defaultPath = m_targetFile.empty() 
+                ? std::filesystem::path{"part" + extension} 
+                : m_targetFile;
+            defaultPath.replace_extension(extension);
+            m_browseDialog.saveFile({filter}, defaultPath);
         }
         ImGui::EndDisabled();
         
@@ -592,7 +649,7 @@ namespace gladius::ui
             if (*result) // User selected a file
             {
                 auto filename = **result;
-                filename.replace_extension(".stl");
+                filename.replace_extension(FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)]);
                 m_targetFile = filename;
                 // Clear any previous export status when changing file
                 if (m_exportCompleted)
@@ -602,8 +659,6 @@ namespace gladius::ui
                 }
             }
         }
-        
-        ImGui::EndDisabled();
     }
     
     void MeshExportDialog::renderStatusArea()
@@ -642,7 +697,18 @@ namespace gladius::ui
     {
         if (m_targetFile.empty())
         {
-            throw std::runtime_error("No target filename specified for STL export");
+            throw std::runtime_error("No target filename specified for mesh export");
+        }
+
+        bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
+        
+        // For 3MF format, only certain methods are supported
+        if (is3mf && m_selectedMethod != io::SurfaceExtractionMethod::LayeredMarchingCubes &&
+            m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring)
+        {
+            throw std::runtime_error(
+              "3MF export is currently only supported with layered marching cubes "
+              "or manifold dual contouring methods.");
         }
 
         switch (m_selectedMethod)
@@ -650,9 +716,18 @@ namespace gladius::ui
         case io::SurfaceExtractionMethod::LayeredMarchingCubes:
         {
             std::size_t const quality = std::min<std::size_t>(m_marchingCubesQuality, QUALITY_LABELS.size() - 1);
-            m_layeredExporter.setQualityLevel(quality);
-            m_layeredExporter.beginExport(m_targetFile, core);
-            m_activeExporter = &m_layeredExporter;
+            if (is3mf)
+            {
+                m_layeredExporter3mf.setQualityLevel(quality);
+                m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
+                m_activeExporter = &m_layeredExporter3mf;
+            }
+            else
+            {
+                m_layeredExporter.setQualityLevel(quality);
+                m_layeredExporter.beginExport(m_targetFile, core);
+                m_activeExporter = &m_layeredExporter;
+            }
             break;
         }
         case io::SurfaceExtractionMethod::DualContouring:
@@ -727,6 +802,10 @@ namespace gladius::ui
             options.simplificationFlatThreshold = m_manifoldSimplificationFlatThreshold;
 
             m_manifoldExporter.setOptions(options);
+            // Set output format and document for 3MF support
+            m_manifoldExporter.setOutputFormat(is3mf ? io::MeshOutputFileFormat::ThreeMF 
+                                                      : io::MeshOutputFileFormat::STL);
+            m_manifoldExporter.setDocument(m_document);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;
@@ -740,7 +819,8 @@ namespace gladius::ui
         // Lock UI modifications during export
         if (m_exportState != nullptr)
         {
-            m_exportState->beginExport("STL mesh export");
+            std::string const formatName = is3mf ? "3MF" : "STL";
+            m_exportState->beginExport(formatName + " mesh export");
         }
     }
 

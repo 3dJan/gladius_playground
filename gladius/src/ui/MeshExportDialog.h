@@ -6,14 +6,28 @@
 #include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
+#include "io/MeshExporter3mf.h"
 #include "io/SurfaceExtractionOptions.h"
 
 #include <cstddef>
 #include <filesystem>
 #include <string>
 
+// Forward declaration
+namespace gladius
+{
+    class Document;
+}
+
 namespace gladius::ui
 {
+    /// @brief Output file format for mesh export
+    enum class MeshOutputFormat
+    {
+        STL = 0,
+        ThreeMF = 1
+    };
+
     class MeshExportDialog : public BaseExportDialog
     {
       public:
@@ -22,6 +36,13 @@ namespace gladius::ui
         void setExportState(ExportState * state)
         {
             m_exportState = state;
+        }
+
+        /// @brief Set the document for 3MF thumbnail generation
+        /// @param doc Pointer to the document (must remain valid during export)
+        void setDocument(Document const * doc)
+        {
+            m_document = doc;
         }
 
         /// @brief Show the dialog with optional suggested filename
@@ -51,11 +72,14 @@ namespace gladius::ui
 
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
+        vdb::MeshExporter3mf m_layeredExporter3mf;
         io::DualContouringStlExporter m_dualExporter;
         io::HierarchicalDualContouringStlExporter m_hierarchicalExporter;
         io::ManifoldDualContouringStlExporter m_manifoldExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
+        Document const * m_document = nullptr;
+        MeshOutputFormat m_outputFormat = MeshOutputFormat::STL;
         io::SurfaceExtractionMethod m_selectedMethod =
           io::SurfaceExtractionMethod::LayeredMarchingCubes;
         std::size_t m_marchingCubesQuality = 1U;

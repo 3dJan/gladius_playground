@@ -131,7 +131,6 @@ namespace gladius::ui
 
         // Wire up export state to dialogs and editors that need it
         m_meshExporterDialog.setExportState(&m_exportState);
-        m_meshExporterDialog3mf.setExportState(&m_exportState);
         m_modelEditor.setExportState(&m_exportState);
 
         nodeEditor();
@@ -663,7 +662,6 @@ namespace gladius::ui
                     sliceWindow();
                     renderWindow();
                     meshExportDialog();
-                    meshExportDialog3mf();
                     cliExportDialog();
                 }
                 mainMenu();
@@ -788,13 +786,6 @@ namespace gladius::ui
             {
             }
             exporter.finalizeExportNanoVdb();
-            break;
-        }
-        case AsyncDialogOperation::Export3mfSliced:
-        {
-            auto exportPath = filename;
-            exportPath.replace_extension(".3mf");
-            m_meshExporterDialog3mf.beginExport(exportPath, *m_core, m_doc.get());
             break;
         }
         case AsyncDialogOperation::Import:
@@ -1157,7 +1148,7 @@ namespace gladius::ui
                 m_asyncFileDialog.saveFile({"*.nvdb"});
             }
 
-            if (ImGui::MenuItem(reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tSTL")))
+            if (ImGui::MenuItem(reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tMesh Export...")))
             {
                 closeMenu();
                 // Open dialog with suggested filename based on current assembly
@@ -1171,21 +1162,8 @@ namespace gladius::ui
                 {
                     suggestedFilename = "part.stl";
                 }
+                m_meshExporterDialog.setDocument(m_doc.get());
                 m_meshExporterDialog.show(suggestedFilename);
-            }
-
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\t3MF (Mesh)")))
-            {
-                closeMenu();
-                m_asyncDialogOp = AsyncDialogOperation::Export3mfSliced;
-                std::filesystem::path defaultPath = "part.3mf";
-                if (m_currentAssemblyFileName.has_value())
-                {
-                    defaultPath = m_currentAssemblyFileName.value();
-                    defaultPath.replace_extension("3mf");
-                }
-                m_asyncFileDialog.saveFile({"*.3mf"}, defaultPath);
             }
             ImGui::EndDisabled();
         }
@@ -1285,16 +1263,6 @@ namespace gladius::ui
             m_renderWindow.invalidateView();
         }
         m_meshExporterDialog.render(*m_core);
-    }
-
-    void MainWindow::meshExportDialog3mf()
-    {
-        if (m_meshExporterDialog3mf.isVisible())
-        {
-            m_mainView.startAnimationMode();
-            m_renderWindow.invalidateView();
-        }
-        m_meshExporterDialog3mf.render(*m_core);
     }
 
     void MainWindow::cliExportDialog()

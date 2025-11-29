@@ -18,10 +18,18 @@
 namespace gladius
 {
     class ComputeCore;
+    class Document;
 }
 
 namespace gladius::io
 {
+    /// @brief Output format for mesh export
+    enum class MeshOutputFileFormat
+    {
+        STL,
+        ThreeMF
+    };
+
     class ManifoldDualContouringStlExporter : public IExporter
     {
       public:
@@ -29,6 +37,12 @@ namespace gladius::io
         explicit ManifoldDualContouringStlExporter(events::SharedLogger logger);
 
         void setOptions(ManifoldDualContouringOptions options);
+        
+        /// @brief Set the output file format (default: STL)
+        void setOutputFormat(MeshOutputFileFormat format);
+        
+        /// @brief Set the document for 3MF thumbnail generation
+        void setDocument(Document const * doc);
 
         void beginExport(std::filesystem::path const & fileName, ComputeCore & generator) override;
         bool advanceExport(ComputeCore & generator) override;
@@ -60,6 +74,10 @@ namespace gladius::io
         std::atomic<State> m_state{State::Idle};
         std::atomic<double> m_progress{0.0};
         std::string m_errorMessage;
+        
+        // Output format and document for 3MF
+        MeshOutputFileFormat m_outputFormat{MeshOutputFileFormat::STL};
+        Document const * m_document{nullptr};
         
         // Background thread for non-blocking export
         std::future<void> m_exportFuture;
