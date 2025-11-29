@@ -77,9 +77,11 @@ __kernel void count_vertices(
     
     OctreeNode node = nodes[id];
     
-    // If edgeMask is 0, no edges cross the surface -> no vertex
     // If edgeMask != 0, we have surface crossing -> generate 1 vertex
-    countBuffer[id] = (node.edgeMask != 0) ? 1 : 0;
+    // If padding[0] == 1, this is a halo node that needs a synthetic vertex
+    // Otherwise, no vertex needed
+    bool needsVertex = (node.edgeMask != 0) || (node.padding[0] == 1);
+    countBuffer[id] = needsVertex ? 1 : 0;
 }
 
 // QEF (Quadratic Error Function) Solver
@@ -534,16 +536,65 @@ __kernel void emit_vertices(
     OctreeNode node = nodes[id];
     int vertexIndex = offsets[id];
     
-    // Skip cells with no surface intersection
-    if (node.edgeMask == 0) return;
-    
-    // Get cell bounds
+    // Get cell bounds (needed for both surface and halo nodes)
     ulong3 coords = decodeMorton3(node.mortonCode);
     uint depth = node.depth;
     float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
-    
     float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
     float3 cellMax = cellMin + cellExtent;
+    float3 cellCenter = (cellMin + cellMax) * 0.5f;
+    
+    // Handle halo nodes: project cell center onto the nearest surface point
+    // Halo nodes are marked with padding[0] == 1
+    if (node.padding[0] == 1)
+    {
+        // Start at cell center
+        float3 pos = cellCenter;
+        
+        // Sample SDF at cell center
+        float4 sdfResult = model(pos, PASS_PAYLOAD_ARGS);
+        float dist = sdfResult.w - isoValue;
+        
+        // Gradient-descent projection onto surface (sphere tracing style)
+        for (int iter = 0; iter < 16; iter++)
+        {
+            if (fabs(dist) < 1e-6f) break;  // Close enough to surface
+            
+            float3 gradient = computeGradient(pos, PASS_PAYLOAD_ARGS);
+            float gradLen = length(gradient);
+            if (gradLen < 1e-8f) break;
+            
+            gradient = gradient / gradLen;
+            
+            // Move towards surface by the SDF distance (sphere tracing)
+            pos = pos - gradient * dist;
+            
+            // Re-sample
+            sdfResult = model(pos, PASS_PAYLOAD_ARGS);
+            dist = sdfResult.w - isoValue;
+        }
+        
+        // Use final gradient for normal
+        float3 gradient = computeGradient(pos, PASS_PAYLOAD_ARGS);
+        float gradLen = length(gradient);
+        if (gradLen > 1e-6f)
+        {
+            gradient = gradient / gradLen;
+        }
+        else
+        {
+            gradient = (float3)(0.0f, 0.0f, 1.0f);
+        }
+        
+        Vertex v;
+        v.position = (float4)(pos.x, pos.y, pos.z, 1.0f);
+        v.normal = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);
+        outputVertices[vertexIndex] = v;
+        return;
+    }
+    
+    // Skip cells with no surface intersection (non-halo nodes without surface)
+    if (node.edgeMask == 0) return;
     
     // Sample SDF at 8 corners
     float cornerValues[8];
@@ -708,24 +759,24 @@ __kernel void construct_octree_level(
 }
 
 // ============================================================================
-// GPU-Based Watertight Index Generation
+// Halo Cell Generation for Watertight Meshes
 // ============================================================================
 //
-// Strategy for watertightness:
-// 1. Each edge with a sign change generates exactly one quad (2 triangles)
-// 2. A quad is formed by 4 cells sharing that edge
-// 3. To avoid duplicates, only the cell with the smallest Morton code among
-//    the 4 neighbors "owns" the edge and emits the quad
-// 4. Cells are sorted by Morton code, enabling binary search for neighbors
+// To ensure quads can always be formed, we need neighbor cells to exist for
+// every surface-crossing cell. This kernel identifies missing neighbors and
+// creates "halo nodes" for them (with edgeMask=0 since they don't have surface).
 //
-// For uniform grids (all cells at same depth):
-// - Edge 0 (X-axis at min Y, min Z) shared by: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
-// - Edge 3 (Y-axis at min X, min Z) shared by: (x,y,z), (x-1,y,z), (x,y,z-1), (x-1,y,z-1)
-// - Edge 8 (Z-axis at min X, min Y) shared by: (x,y,z), (x-1,y,z), (x,y-1,z), (x-1,y-1,z)
+// For quad emission, we use edges 6, 5, 10 which require neighbors at:
+// - Edge 6: (x, y+1, z), (x, y, z+1), (x, y+1, z+1)
+// - Edge 5: (x+1, y, z), (x, y, z+1), (x+1, y, z+1)
+// - Edge 10: (x+1, y, z), (x, y+1, z), (x+1, y+1, z)
+//
+// Combined unique neighbors needed: +X, +Y, +Z, +XY, +XZ, +YZ, +XYZ (7 neighbors)
 // ============================================================================
 
 /// Binary search to find a node by Morton code (for uniform-depth octrees)
 /// Returns the index of the node, or -1 if not found
+/// Note: This function is defined here for use by halo kernels.
 int findNodeByMorton(__global const OctreeNode* nodes, int numNodes, ulong targetMorton)
 {
     int left = 0;
@@ -753,6 +804,188 @@ int findNodeByMorton(__global const OctreeNode* nodes, int numNodes, ulong targe
     return -1;
 }
 
+/// Count missing halo neighbors for each surface cell
+/// We check ALL 26 neighbors (3x3x3 cube minus center) because:
+/// - +X,+Y,+Z directions are needed when this cell emits quads for its edges
+/// - -X,-Y,-Z directions are needed when NEIGHBOR cells emit quads that include this cell
+__kernel void count_halo_neighbors(
+    __global const OctreeNode* nodes,
+    __global int* haloCounts,
+    const int numNodes,
+    const uint maxCoord,
+    const uchar targetDepth)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+    
+    OctreeNode node = nodes[id];
+    
+    // Only process cells with surface
+    if (node.edgeMask == 0)
+    {
+        haloCounts[id] = 0;
+        return;
+    }
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    int count = 0;
+    
+    // Check all 26 neighbors in the 3x3x3 cube around this cell
+    for (int dz = -1; dz <= 1; dz++)
+    {
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                // Skip self
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                
+                // Check bounds
+                long nx = (long)coords.x + dx;
+                long ny = (long)coords.y + dy;
+                long nz = (long)coords.z + dz;
+                
+                if (nx < 0 || ny < 0 || nz < 0) continue;
+                if (nx > maxCoord || ny > maxCoord || nz > maxCoord) continue;
+                
+                // Check if neighbor exists
+                ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
+                if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
+                    count++;
+            }
+        }
+    }
+    
+    haloCounts[id] = count;
+}
+
+/// Emit halo nodes for missing neighbors (all 26 directions)
+/// Also compute edgeMask for halo nodes based on corresponding edges in neighbor surface cells
+__kernel void emit_halo_neighbors(
+    __global const OctreeNode* nodes,
+    __global const int* haloOffsets,
+    __global OctreeNode* haloNodes,
+    const int numNodes,
+    const uint maxCoord,
+    const uchar targetDepth)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+    
+    OctreeNode node = nodes[id];
+    
+    // Only process cells with surface
+    if (node.edgeMask == 0) return;
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    int writeIdx = haloOffsets[id];
+    
+    // Edge correspondence: edge at (cx, cy, cz) corresponds to edge at halo offset
+    // Surface cell at (0,0,0) with edge X corresponds to halo at offset (dx, dy, dz) with edge Y:
+    // Edge 0 (X at y=0, z=0) -> Edge 6 at offset (0, -1, -1)  (X at y=max, z=max)
+    // Edge 3 (Y at x=0, z=0) -> Edge 5 at offset (-1, 0, -1)  (Y at x=max, z=max)
+    // Edge 8 (Z at x=0, y=0) -> Edge 10 at offset (-1, -1, 0) (Z at x=max, y=max)
+    // Edge 1 (Y at x=1, z=0) -> Edge 5 at offset (0, 0, -1)
+    // Edge 2 (X at y=1, z=0) -> Edge 6 at offset (0, 0, -1)
+    // Edge 4 (X at y=0, z=1) -> Edge 6 at offset (0, -1, 0)
+    // Edge 7 (Y at x=0, z=1) -> Edge 5 at offset (-1, 0, 0)
+    // Edge 9 (Z at x=1, y=0) -> Edge 10 at offset (0, -1, 0)
+    // Edge 11 (Z at x=0, y=1) -> Edge 10 at offset (-1, 0, 0)
+    
+    // Check all 26 neighbors in the 3x3x3 cube around this cell
+    for (int dz = -1; dz <= 1; dz++)
+    {
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                // Skip self
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                
+                // Check bounds
+                long nx = (long)coords.x + dx;
+                long ny = (long)coords.y + dy;
+                long nz = (long)coords.z + dz;
+                
+                if (nx < 0 || ny < 0 || nz < 0) continue;
+                if (nx > maxCoord || ny > maxCoord || nz > maxCoord) continue;
+                
+                // Check if neighbor exists
+                ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
+                if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
+                {
+                    // Compute edgeMask for halo node based on this surface cell's edges
+                    uint haloEdgeMask = 0;
+                    
+                    // If this surface cell has an edge, and the halo is at the corresponding offset,
+                    // set the corresponding edge in the halo
+                    if (dx == 0 && dy == -1 && dz == -1)
+                    {
+                        // Halo at (0,-1,-1) inherits edge 6 from surface edge 0
+                        if (node.edgeMask & (1 << 0)) haloEdgeMask |= (1 << 6);
+                    }
+                    if (dx == -1 && dy == 0 && dz == -1)
+                    {
+                        // Halo at (-1,0,-1) inherits edge 5 from surface edge 3
+                        if (node.edgeMask & (1 << 3)) haloEdgeMask |= (1 << 5);
+                    }
+                    if (dx == -1 && dy == -1 && dz == 0)
+                    {
+                        // Halo at (-1,-1,0) inherits edge 10 from surface edge 8
+                        if (node.edgeMask & (1 << 8)) haloEdgeMask |= (1 << 10);
+                    }
+                    if (dx == 0 && dy == 0 && dz == -1)
+                    {
+                        // Halo at (0,0,-1) inherits edges from surface edges 1, 2
+                        if (node.edgeMask & (1 << 1)) haloEdgeMask |= (1 << 5);
+                        if (node.edgeMask & (1 << 2)) haloEdgeMask |= (1 << 6);
+                    }
+                    if (dx == 0 && dy == -1 && dz == 0)
+                    {
+                        // Halo at (0,-1,0) inherits edges from surface edges 4, 9
+                        if (node.edgeMask & (1 << 4)) haloEdgeMask |= (1 << 6);
+                        if (node.edgeMask & (1 << 9)) haloEdgeMask |= (1 << 10);
+                    }
+                    if (dx == -1 && dy == 0 && dz == 0)
+                    {
+                        // Halo at (-1,0,0) inherits edges from surface edges 7, 11
+                        if (node.edgeMask & (1 << 7)) haloEdgeMask |= (1 << 5);
+                        if (node.edgeMask & (1 << 11)) haloEdgeMask |= (1 << 10);
+                    }
+                    
+                    OctreeNode halo;
+                    halo.mortonCode = nMorton;
+                    halo.edgeMask = haloEdgeMask;
+                    halo.internalMask = 0;
+                    halo.depth = targetDepth;
+                    halo.padding[0] = 1; // Mark as halo node needing synthetic vertex
+                    for (int p = 1; p < 7; p++) halo.padding[p] = 0;
+                    haloNodes[writeIdx++] = halo;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// GPU-Based Watertight Index Generation
+// ============================================================================
+//
+// Strategy for watertightness:
+// 1. Each edge with a sign change generates exactly one quad (2 triangles)
+// 2. A quad is formed by 4 cells sharing that edge
+// 3. To avoid duplicates, only the cell with the smallest Morton code among
+//    the 4 neighbors "owns" the edge and emits the quad
+// 4. Cells are sorted by Morton code, enabling binary search for neighbors
+//
+// For uniform grids (all cells at same depth):
+// - Edge 0 (X-axis at min Y, min Z) shared by: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
+// - Edge 3 (Y-axis at min X, min Z) shared by: (x,y,z), (x-1,y,z), (x,y,z-1), (x-1,y,z-1)
+// - Edge 8 (Z-axis at min X, min Y) shared by: (x,y,z), (x-1,y,z), (x,y-1,z), (x-1,y-1,z)
+// ============================================================================
+
+// Note: findNodeByMorton is defined earlier (in the Halo Cell Generation section)
+
 /// Count quads per cell (first pass for prefix sum)
 /// We use edges at the MAX corner (6, 5, 10) because for these edges,
 /// the current cell has the smallest Morton code among the 4 cells sharing it.
@@ -760,7 +993,11 @@ int findNodeByMorton(__global const OctreeNode* nodes, int numNodes, ulong targe
 ///
 /// Edge ownership rule: emit a quad if:
 /// 1. The edge crosses the surface (edgeMask bit set)
-/// 2. All 4 cells around this edge exist (have surface)
+/// 2. All 4 cells around this edge exist (including halo nodes)
+/// 3. This cell is the owner (smallest Morton code among the 4)
+///
+/// For edges at the MIN corner (0, 3, 8), we also check - if the normal owner
+/// doesn't exist, we emit the quad ourselves to close the boundary.
 __kernel void count_quads(
     __global const OctreeNode* nodes,
     __global int* quadCounts,
@@ -772,7 +1009,7 @@ __kernel void count_quads(
     
     OctreeNode node = nodes[id];
     
-    // Skip cells without surface
+    // Skip cells without surface (including halo nodes which have edgeMask=0)
     if (node.edgeMask == 0)
     {
         quadCounts[id] = 0;
@@ -782,6 +1019,10 @@ __kernel void count_quads(
     ulong3 coords = decodeMorton3(node.mortonCode);
     
     int count = 0;
+    
+    // =========================================================================
+    // Edges at MAX corner (this cell is always the owner)
+    // =========================================================================
     
     // Edge 6: X-axis at (y=max, z=max), corners 7-6: (1,1,1)-(0,1,1)
     // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
@@ -799,7 +1040,7 @@ __kernel void count_quads(
             int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
             int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
             
-            // All 3 neighbors must exist (contain surface)
+            // All 3 neighbors must exist (surface or halo)
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
                 count++;
@@ -845,6 +1086,92 @@ __kernel void count_quads(
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
                 count++;
+            }
+        }
+    }
+    
+    // =========================================================================
+    // Edges at MIN corner - emit if normal owner doesn't exist (boundary case)
+    // =========================================================================
+    
+    // Edge 0: X-axis at (y=min, z=min), corners 0-1
+    // Normally owned by cell (x, y-1, z-1) via its edge 6
+    // We emit if that cell doesn't exist AND all 4 cells around edge 0 exist
+    if (node.edgeMask & (1 << 0))
+    {
+        if (coords.y > 0 && coords.z > 0)
+        {
+            // Check if normal owner exists
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            // Only emit if owner doesn't exist (we take over)
+            if (ownerIdx < 0)
+            {
+                // Need all 4 cells: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
+                ulong n1 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                // n3 = ownerMorton (already checked, doesn't exist)
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                // For boundary case, emit if at least 2 neighbors exist
+                // (We use current cell's vertex for missing corners)
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    count++;
+                }
+            }
+        }
+    }
+    
+    // Edge 3: Y-axis at (x=min, z=min), corners 0-2
+    // Normally owned by cell (x-1, y, z-1) via its edge 5
+    if (node.edgeMask & (1 << 3))
+    {
+        if (coords.x > 0 && coords.z > 0)
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            if (ownerIdx < 0)
+            {
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    count++;
+                }
+            }
+        }
+    }
+    
+    // Edge 8: Z-axis at (x=min, y=min), corners 0-4
+    // Normally owned by cell (x-1, y-1, z) via its edge 10
+    if (node.edgeMask & (1 << 8))
+    {
+        if (coords.x > 0 && coords.y > 0)
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            if (ownerIdx < 0)
+            {
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    count++;
+                }
             }
         }
     }
@@ -1026,6 +1353,167 @@ __kernel void emit_indices(
                 }
                 
                 writeOffset += 6;
+            }
+        }
+    }
+    
+    // =========================================================================
+    // Boundary edges at MIN corner - emit if normal owner doesn't exist
+    // =========================================================================
+    
+    // Edge 0: X-axis at (y=min, z=min)
+    // Normally owned by cell (x, y-1, z-1) via its edge 6
+    if (node.edgeMask & (1 << 0))
+    {
+        if (coords.y > 0 && coords.z > 0)
+        {
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            if (ownerIdx < 0)
+            {
+                ulong n1 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    uint v0 = GET_VERTEX(id);
+                    uint v1 = GET_VERTEX(idx1);  // y-1
+                    uint v2 = GET_VERTEX(idx2);  // z-1
+                    // v3 (owner) doesn't exist - use degenerate triangle with v0
+                    
+                    // Corner 0 is at (0,0,0), bit 0 in internalMask
+                    bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
+                    
+                    // Emit degenerate quad (triangle) - skip the missing vertex
+                    if (corner0Inside)
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v1;
+                        outputIndices[writeOffset + 2] = v2;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v2;
+                        outputIndices[writeOffset + 5] = v1;  // Degenerate, will be culled
+                    }
+                    else
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v2;
+                        outputIndices[writeOffset + 2] = v1;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v1;
+                        outputIndices[writeOffset + 5] = v2;  // Degenerate
+                    }
+                    
+                    writeOffset += 6;
+                }
+            }
+        }
+    }
+    
+    // Edge 3: Y-axis at (x=min, z=min)
+    if (node.edgeMask & (1 << 3))
+    {
+        if (coords.x > 0 && coords.z > 0)
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            if (ownerIdx < 0)
+            {
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    uint v0 = GET_VERTEX(id);
+                    uint v1 = GET_VERTEX(idx1);
+                    uint v2 = GET_VERTEX(idx2);
+                    
+                    bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
+                    
+                    if (corner0Inside)
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v1;
+                        outputIndices[writeOffset + 2] = v2;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v2;
+                        outputIndices[writeOffset + 5] = v1;
+                    }
+                    else
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v2;
+                        outputIndices[writeOffset + 2] = v1;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v1;
+                        outputIndices[writeOffset + 5] = v2;
+                    }
+                    
+                    writeOffset += 6;
+                }
+            }
+        }
+    }
+    
+    // Edge 8: Z-axis at (x=min, y=min)
+    if (node.edgeMask & (1 << 8))
+    {
+        if (coords.x > 0 && coords.y > 0)
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
+            int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
+            
+            if (ownerIdx < 0)
+            {
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    uint v0 = GET_VERTEX(id);
+                    uint v1 = GET_VERTEX(idx1);
+                    uint v2 = GET_VERTEX(idx2);
+                    
+                    bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
+                    
+                    if (corner0Inside)
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v1;
+                        outputIndices[writeOffset + 2] = v2;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v2;
+                        outputIndices[writeOffset + 5] = v1;
+                    }
+                    else
+                    {
+                        outputIndices[writeOffset + 0] = v0;
+                        outputIndices[writeOffset + 1] = v2;
+                        outputIndices[writeOffset + 2] = v1;
+                        
+                        outputIndices[writeOffset + 3] = v0;
+                        outputIndices[writeOffset + 4] = v1;
+                        outputIndices[writeOffset + 5] = v2;
+                    }
+                    
+                    writeOffset += 6;
+                }
             }
         }
     }

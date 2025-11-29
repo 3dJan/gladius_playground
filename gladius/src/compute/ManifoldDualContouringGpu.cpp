@@ -299,7 +299,14 @@ namespace gladius::compute
                 *primitives,
                 m_config.isoValue);
             
-            std::cout << "Octree construction complete. Total nodes: " << m_octreeNodeCount << std::endl;
+            std::cout << "Octree construction complete. Nodes before halo: " << m_octreeNodeCount << std::endl;
+            
+            // Add halo nodes around surface-crossing cells to ensure all neighbors exist for quad generation.
+            // This fixes holes in thin structures where boundary cells lack neighbors.
+            std::uint32_t const maxCoord = m_gridResolution - 1;
+            m_program->addHaloNodes(m_octreeBuffer, m_octreeNodeCount, maxCoord, m_config.maxDepth);
+            
+            std::cout << "Octree construction complete. Total nodes after halo: " << m_octreeNodeCount << std::endl;
             refreshCpuOctreeCache();
         } catch (std::exception& e) {
             std::cerr << "Error in octree construction: " << e.what() << std::endl;

@@ -247,4 +247,145 @@ namespace gladius::compute
         m_ComputeContext->GetQueue().enqueueWriteBuffer(
             *octreeBuffer, CL_TRUE, 0, nodeCount * sizeof(OctreeNode), nodes.data());
     }
+
+    void ManifoldDualContouringProgram::addHaloNodes(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t & nodeCount,
+        std::uint32_t maxCoord,
+        std::uint8_t depth)
+    {
+        if (nodeCount == 0)
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        // First, sort the octree so binary search works
+        sortOctreeByMorton(octreeBuffer, nodeCount);
+
+        // 1. Count halo neighbors needed per surface cell
+        auto haloCountBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE,
+            nodeCount * sizeof(int));
+
+        cl::NDRange global(nodeCount);
+        m_programFront->run("count_halo_neighbors",
+                           cl::NullRange,
+                           global,
+                           *octreeBuffer,
+                           *haloCountBuffer,
+                           static_cast<int>(nodeCount),
+                           static_cast<cl_uint>(maxCoord),
+                           static_cast<cl_uchar>(depth));
+
+        // 2. CPU-side prefix sum for halo offsets
+        std::vector<int> haloCounts(nodeCount);
+        queue.enqueueReadBuffer(*haloCountBuffer, CL_TRUE, 0, nodeCount * sizeof(int), haloCounts.data());
+
+        std::vector<int> haloOffsets(nodeCount);
+        int totalHaloNodes = 0;
+        for (std::size_t i = 0; i < nodeCount; ++i)
+        {
+            haloOffsets[i] = totalHaloNodes;
+            totalHaloNodes += haloCounts[i];
+        }
+
+        if (totalHaloNodes == 0)
+        {
+            // No halo nodes needed - mesh should already be watertight
+            return;
+        }
+
+        std::cout << "Adding " << totalHaloNodes << " halo nodes for watertight mesh" << std::endl;
+
+        auto haloOffsetBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            nodeCount * sizeof(int),
+            haloOffsets.data());
+
+        // 3. Emit halo nodes
+        auto haloNodesBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_WRITE_ONLY,
+            static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode));
+
+        m_programFront->run("emit_halo_neighbors",
+                           cl::NullRange,
+                           global,
+                           *octreeBuffer,
+                           *haloOffsetBuffer,
+                           *haloNodesBuffer,
+                           static_cast<int>(nodeCount),
+                           static_cast<cl_uint>(maxCoord),
+                           static_cast<cl_uchar>(depth));
+
+        // 4. Read halo nodes, deduplicate, merge with original octree
+        std::vector<OctreeNode> haloNodes(static_cast<std::size_t>(totalHaloNodes));
+        queue.enqueueReadBuffer(*haloNodesBuffer, CL_TRUE, 0,
+                               static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode),
+                               haloNodes.data());
+
+        // Deduplicate halo nodes, MERGING edgeMasks for nodes at the same position
+        // Multiple surface cells may contribute edges to the same halo node
+        std::sort(haloNodes.begin(), haloNodes.end(),
+                 [](OctreeNode const & a, OctreeNode const & b)
+                 { return a.mortonCode < b.mortonCode; });
+
+        // Custom deduplication that merges edgeMask and internalMask
+        if (!haloNodes.empty())
+        {
+            auto writeIt = haloNodes.begin();
+            for (auto readIt = haloNodes.begin() + 1; readIt != haloNodes.end(); ++readIt)
+            {
+                if (readIt->mortonCode == writeIt->mortonCode)
+                {
+                    // Merge edge masks (OR them together)
+                    writeIt->edgeMask |= readIt->edgeMask;
+                    writeIt->internalMask |= readIt->internalMask;
+                }
+                else
+                {
+                    // Move to next unique position
+                    ++writeIt;
+                    *writeIt = *readIt;
+                }
+            }
+            haloNodes.erase(writeIt + 1, haloNodes.end());
+        }
+
+        if (haloNodes.empty())
+        {
+            return;
+        }
+
+        std::cout << "After deduplication: " << haloNodes.size() << " unique halo nodes" << std::endl;
+
+        // 5. Read original nodes
+        std::vector<OctreeNode> originalNodes(nodeCount);
+        queue.enqueueReadBuffer(*octreeBuffer, CL_TRUE, 0,
+                               nodeCount * sizeof(OctreeNode),
+                               originalNodes.data());
+
+        // 6. Merge and sort
+        originalNodes.insert(originalNodes.end(), haloNodes.begin(), haloNodes.end());
+        std::sort(originalNodes.begin(), originalNodes.end(),
+                 [](OctreeNode const & a, OctreeNode const & b)
+                 { return a.mortonCode < b.mortonCode; });
+
+        // 7. Write back to new buffer
+        std::size_t const newNodeCount = originalNodes.size();
+        octreeBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            newNodeCount * sizeof(OctreeNode),
+            originalNodes.data());
+
+        nodeCount = newNodeCount;
+    }
 }

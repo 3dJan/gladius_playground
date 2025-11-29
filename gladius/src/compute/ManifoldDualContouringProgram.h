@@ -86,6 +86,14 @@ namespace gladius::compute
         void sortOctreeByMorton(
             std::unique_ptr<cl::Buffer> & octreeBuffer,
             std::size_t nodeCount);
+        
+        /// Add halo nodes for missing neighbors to ensure watertight mesh
+        /// This ensures quads can always be formed at surface boundaries
+        void addHaloNodes(
+            std::unique_ptr<cl::Buffer> & octreeBuffer,
+            std::size_t & nodeCount,
+            std::uint32_t maxCoord,
+            std::uint8_t depth);
             
       private:
         void ensureCompiled();
