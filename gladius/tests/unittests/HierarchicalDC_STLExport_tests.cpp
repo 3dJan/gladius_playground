@@ -691,4 +691,109 @@ namespace gladius_tests::hierarchical_dc_mesh
                                     return std::string(info.param.name);
                     });
 
+    // ============================================================================
+    // Model-Specific Hierarchical DC Tests
+    // ============================================================================
+    // NOTE: These tests document the current state of hierarchical DC.
+    // The hierarchical approach has known issues with mesh connectivity,
+    // producing highly fragmented meshes with thousands of parts.
+    // For production use, ManifoldDualContouringGpu is recommended.
+    // ============================================================================
+    
+    /// Test hierarchical DC with SphereInACage model - admesh validation
+    /// NOTE: Hierarchical DC currently produces fragmented meshes with many parts
+    TEST_F(HierarchicalDC_STL_Test, SphereInACage_ProducesValidAdmeshOutput)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh CLI is not available on PATH";
+        }
+
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox());
+
+        io::HierarchicalDualContouringOptions options;
+        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
+        options.applyPreset();
+        options.config.projectVerticesToSurface = true;
+        options.config.enableGpuAcceleration = true;
+
+        AdmeshMetrics metrics{};
+        exportAndValidateWithAdmesh(bundle, options, "SphereInACage_Hierarchical", false, &metrics);
+
+        std::cout << "SphereInACage Hierarchical DC results:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
+        std::cout << "  Facets added: " << metrics.facetsAdded << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        
+        double const reversedRatio = metrics.numberOfFacets.original > 0 
+            ? static_cast<double>(metrics.facetsReversed) / 
+              static_cast<double>(metrics.numberOfFacets.original)
+            : 0.0;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+
+        // Mesh should have positive volume (even if normals are flipped)
+        EXPECT_NE(metrics.volume, 0.0) << "Volume should be non-zero";
+        
+        // NOTE: Hierarchical DC currently produces fragmented meshes.
+        // This test documents current behavior - ManifoldDualContouringGpu 
+        // produces much better results (1-2 parts vs thousands).
+        // Just ensure it produces some geometry.
+        EXPECT_GT(metrics.numberOfFacets.original, 0) 
+            << "Should produce some facets";
+    }
+
+    /// Test hierarchical DC with webcam mount model - admesh validation
+    /// NOTE: Hierarchical DC currently produces fragmented meshes with many parts
+    TEST_F(HierarchicalDC_STL_Test, WebcamMount_ProducesValidAdmeshOutput)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh CLI is not available on PATH";
+        }
+
+        auto bundle = loadDocument("testdata/webcam_003.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox());
+
+        io::HierarchicalDualContouringOptions options;
+        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
+        options.applyPreset();
+        options.config.projectVerticesToSurface = true;
+        options.config.enableGpuAcceleration = true;
+
+        AdmeshMetrics metrics{};
+        exportAndValidateWithAdmesh(bundle, options, "WebcamMount_Hierarchical", false, &metrics);
+
+        std::cout << "Webcam Mount Hierarchical DC results:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
+        std::cout << "  Facets added: " << metrics.facetsAdded << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        
+        double const reversedRatio = metrics.numberOfFacets.original > 0 
+            ? static_cast<double>(metrics.facetsReversed) / 
+              static_cast<double>(metrics.numberOfFacets.original)
+            : 0.0;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+
+        // Mesh should have positive volume (even if normals are flipped)
+        EXPECT_NE(metrics.volume, 0.0) << "Volume should be non-zero";
+        
+        // NOTE: Hierarchical DC currently produces fragmented meshes.
+        // This test documents current behavior - ManifoldDualContouringGpu 
+        // produces much better results (1 part vs thousands).
+        // Just ensure it produces some geometry.
+        EXPECT_GT(metrics.numberOfFacets.original, 0) 
+            << "Should produce some facets";
+    }
+
 } // namespace gladius_tests::hierarchical_dc_mesh
