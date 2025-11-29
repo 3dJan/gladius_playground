@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Document.h"
+#include "ExportState.h"
 #include "FileDialogService.h"
 #include <memory>
 
@@ -27,6 +28,12 @@ namespace gladius::ui
          */
         bool render(SharedDocument document);
 
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state)
+        {
+            m_exportState = state;
+        }
+
       private:
         void renderImportDialog(SharedDocument document, bool & propertiesChanged);
 
@@ -46,5 +53,8 @@ namespace gladius::ui
 
         // Async file dialog for browsing STL files
         AsyncFileDialog m_asyncFileDialog;
+
+        // Export state for blocking UI modifications
+        ExportState * m_exportState{nullptr};
     };
 }

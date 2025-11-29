@@ -131,6 +131,9 @@ namespace gladius::ui
             return;
         }
 
+        // Check if export is in progress - disable modifications
+        bool const exportInProgress = m_exportState != nullptr && m_exportState->isExportInProgress();
+        
         auto & resourceManager = document->getGeneratorContext().resourceManager;
 
         auto const & resources = resourceManager.getResourceMap();
@@ -146,6 +149,7 @@ namespace gladius::ui
         if (ImGui::TreeNodeEx("Mesh Resources", baseFlags | ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::Indent();
+            ImGui::BeginDisabled(exportInProgress);
             if (ImGui::Button("Import STL"))
             {
                 addMesh(document);
@@ -160,6 +164,7 @@ namespace gladius::ui
             {
                 m_showCustomBoxDialog = true;
             }
+            ImGui::EndDisabled();
 
             ImGui::Unindent();
 

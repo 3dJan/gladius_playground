@@ -9,6 +9,7 @@
 #include "../Document.h"
 #include "AboutDialog.h"
 #include "CliExportDialog.h"
+#include "ExportState.h"
 #include "FileDialogService.h"
 #include "GLView.h"
 #include "LogView.h"
@@ -139,6 +140,24 @@ namespace gladius::ui
         std::shared_ptr<Document> getCurrentDocument() const
         {
             return m_doc;
+        }
+
+        /**
+         * @brief Get the export state for checking if export is in progress
+         * @return Reference to the export state
+         */
+        ExportState & getExportState()
+        {
+            return m_exportState;
+        }
+
+        /**
+         * @brief Get the export state (const version)
+         * @return Const reference to the export state
+         */
+        ExportState const & getExportState() const
+        {
+            return m_exportState;
         }
 
       private:
@@ -288,5 +307,8 @@ namespace gladius::ui
 
         /// @brief Process async file dialog results and execute pending operations
         void processAsyncFileDialog();
+
+        // Export state for blocking UI modifications during mesh export
+        ExportState m_exportState;
     };
 }

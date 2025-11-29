@@ -167,6 +167,12 @@ namespace gladius::ui
         m_exportInProgress = false;
         m_statusMessage = "Export completed successfully!";
         m_statusIsError = false;
+        
+        // Unlock UI modifications
+        if (m_exportState != nullptr)
+        {
+            m_exportState->endExport();
+        }
         // Dialog stays open - user can close manually or start another export
     }
 
@@ -730,10 +736,22 @@ namespace gladius::ui
         }
 
         m_exportInProgress = true;
+        
+        // Lock UI modifications during export
+        if (m_exportState != nullptr)
+        {
+            m_exportState->beginExport("STL mesh export");
+        }
     }
 
     void MeshExportDialog::resetState()
     {
+        // Unlock UI if we were exporting
+        if (m_exportInProgress && m_exportState != nullptr)
+        {
+            m_exportState->endExport();
+        }
+        
         m_activeExporter = nullptr;
         m_exportInProgress = false;
         m_exportCompleted = false;
@@ -745,6 +763,12 @@ namespace gladius::ui
     
     void MeshExportDialog::resetExportState()
     {
+        // Unlock UI if we were exporting
+        if (m_exportInProgress && m_exportState != nullptr)
+        {
+            m_exportState->endExport();
+        }
+        
         m_activeExporter = nullptr;
         m_exportInProgress = false;
         m_exportCompleted = false;

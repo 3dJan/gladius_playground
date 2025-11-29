@@ -21,6 +21,9 @@ namespace gladius::ui
             return false;
         }
 
+        // Check if export is in progress - disable modifications
+        bool const exportInProgress = m_exportState != nullptr && m_exportState->isExportInProgress();
+
         auto & resourceManager = document->getGeneratorContext().resourceManager;
         auto const & resources = resourceManager.getResourceMap();
 
@@ -38,10 +41,12 @@ namespace gladius::ui
         if (ImGui::TreeNodeEx("Beam Lattices", baseFlags | ImGuiTreeNodeFlags_DefaultOpen))
         {
             // Import button
+            ImGui::BeginDisabled(exportInProgress);
             if (ImGui::Button("Import STL as Beam Lattice..."))
             {
                 m_showImportDialog = true;
             }
+            ImGui::EndDisabled();
 
             bool hasBeamLattices = false;
 

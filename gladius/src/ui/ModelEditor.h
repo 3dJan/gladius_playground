@@ -3,6 +3,7 @@
 #include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
 #include "BeamLatticeView.h"
+#include "ExportState.h"
 #include "ExpressionDialog.h"
 #include "LibraryBrowser.h"
 #include "NodeLayoutEngine.h"
@@ -51,6 +52,9 @@ namespace gladius::ui
         [[nodiscard]] nodes::SharedModel currentModel() const;
 
         void setDocument(std::shared_ptr<Document> document);
+
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state);
 
         [[nodiscard]] bool modelWasModified() const;
 
@@ -301,6 +305,9 @@ namespace gladius::ui
 
         // One-time auto layout helper state
         bool m_pendingAutoLayout{false};
+
+        // Export state for blocking UI modifications during export
+        ExportState * m_exportState{nullptr};
 
         void initNavigationHistory();
     };

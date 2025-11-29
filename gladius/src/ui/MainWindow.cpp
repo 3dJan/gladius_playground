@@ -129,6 +129,11 @@ namespace gladius::ui
         // Set examples directory
         m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
 
+        // Wire up export state to dialogs and editors that need it
+        m_meshExporterDialog.setExportState(&m_exportState);
+        m_meshExporterDialog3mf.setExportState(&m_exportState);
+        m_modelEditor.setExportState(&m_exportState);
+
         nodeEditor();
         newModel();
         loadRenderSettings();
@@ -1031,6 +1036,16 @@ namespace gladius::ui
 
         ImGui::SetWindowSize(ImVec2(menuWidth, io.DisplaySize.y - menuBarHeight));
 
+        // Check if export is in progress - disable model-modifying operations
+        bool const exportInProgress = m_exportState.isExportInProgress();
+        if (exportInProgress)
+        {
+            ImGui::TextColored(ImVec4{1.0F, 0.6F, 0.2F, 1.0F}, 
+                ICON_FA_HOURGLASS_HALF " Export in progress...");
+            ImGui::Separator();
+        }
+
+        ImGui::BeginDisabled(exportInProgress);
         if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_FILE "\tNew")))
         {
             closeMenu();
@@ -1079,6 +1094,7 @@ namespace gladius::ui
                 }
             }
         }
+        ImGui::EndDisabled(); // End export lock for file operations
 
         if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_HOME "\tHome")))
         {

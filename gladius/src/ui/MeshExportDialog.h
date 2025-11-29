@@ -1,5 +1,6 @@
 #pragma once
 #include "BaseExportDialog.h"
+#include "ExportState.h"
 #include "FileDialogService.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
@@ -16,6 +17,13 @@ namespace gladius::ui
     class MeshExportDialog : public BaseExportDialog
     {
       public:
+        /// @brief Set the export state reference for blocking UI during export
+        /// @param state Pointer to the ExportState (must remain valid)
+        void setExportState(ExportState * state)
+        {
+            m_exportState = state;
+        }
+
         /// @brief Show the dialog with optional suggested filename
         /// @param suggestedFilename Optional initial filename to suggest
         void show(std::filesystem::path suggestedFilename = {});
@@ -89,5 +97,8 @@ namespace gladius::ui
         
         // File browse dialog
         AsyncFileDialog m_browseDialog;
+        
+        // Export state for blocking UI modifications during export
+        ExportState * m_exportState = nullptr;
     };
 } // namespace gladius::ui
