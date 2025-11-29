@@ -10,6 +10,7 @@
 #include <Eigen/Geometry>
 #include <fmt/format.h>
 
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -57,52 +58,81 @@ namespace gladius::io
         m_state = State::Running;
         m_progress = 0.0;
         m_errorMessage.clear();
+        
+        // Launch export in background thread
+        m_exportFuture = std::async(std::launch::async, [this, &generator]() {
+            try
+            {
+                performExport(generator);
+                m_state = State::Completed;
+                m_progress = 1.0;
+            }
+            catch (std::exception const & ex)
+            {
+                m_state = State::Failed;
+                m_errorMessage = ex.what();
+                m_progress = 1.0;
+                if (m_logger)
+                {
+                    m_logger->addEvent({fmt::format("Manifold dual contouring export failed: {}",
+                                                     ex.what()),
+                                        events::Severity::Error});
+                }
+            }
+        });
     }
 
-    bool ManifoldDualContouringStlExporter::advanceExport(ComputeCore & generator)
+    bool ManifoldDualContouringStlExporter::advanceExport(ComputeCore & /*generator*/)
     {
+        // Check if background thread has finished
         if (m_state == State::Completed || m_state == State::Failed || m_state == State::Idle)
         {
             return false;
         }
 
-        try
+        // Check if future is ready (non-blocking)
+        if (m_exportFuture.valid())
         {
-            performExport(generator);
-            m_state = State::Completed;
-            m_progress = 1.0;
-        }
-        catch (std::exception const & ex)
-        {
-            m_state = State::Failed;
-            m_errorMessage = ex.what();
-            m_progress = 1.0;
-            if (m_logger)
+            auto status = m_exportFuture.wait_for(std::chrono::milliseconds(0));
+            if (status == std::future_status::ready)
             {
-                m_logger->addEvent({fmt::format("Manifold dual contouring export failed: {}",
-                                                 ex.what()),
-                                    events::Severity::Error});
+                // Get any exceptions from the future
+                try
+                {
+                    m_exportFuture.get();
+                }
+                catch (...)
+                {
+                    // Exception already handled in the async lambda
+                }
+                return false; // Export finished
             }
         }
 
-        return false;
+        return true; // Still running
     }
 
     void ManifoldDualContouringStlExporter::finalize()
     {
+        // Wait for background thread to complete if still running
+        if (m_exportFuture.valid())
+        {
+            m_exportFuture.wait();
+        }
+        
         m_computeCore = nullptr;
         m_state = State::Idle;
-        m_progress = clampProgress(m_progress);
+        m_progress = clampProgress(m_progress.load());
     }
 
     double ManifoldDualContouringStlExporter::getProgress() const
     {
-        return clampProgress(m_progress);
+        return clampProgress(m_progress.load());
     }
 
     bool ManifoldDualContouringStlExporter::hasError() const
     {
-        return m_state == State::Failed;
+        return m_state.load() == State::Failed;
     }
 
     std::string const & ManifoldDualContouringStlExporter::errorMessage() const

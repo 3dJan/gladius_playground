@@ -74,54 +74,75 @@ namespace gladius::io
     {
         m_targetFile = fileName;
         m_computeCore = &generator;
-        m_state = State::Running;
-        m_progress = 0.0;
+        m_state.store(State::Running);
+        m_progress.store(0.0);
         m_errorMessage.clear();
+
+        // Launch the export in a background thread
+        m_exportFuture = std::async(std::launch::async, [this, &generator]() {
+            performExport(generator);
+        });
     }
 
-    bool DualContouringStlExporter::advanceExport(ComputeCore & generator)
+    bool DualContouringStlExporter::advanceExport(ComputeCore & /*generator*/)
     {
-        if (m_state == State::Completed || m_state == State::Failed || m_state == State::Idle)
+        auto const currentState = m_state.load();
+        if (currentState == State::Completed || currentState == State::Failed ||
+            currentState == State::Idle)
         {
             return false;
         }
 
-        try
+        // Check if background task has completed
+        if (m_exportFuture.valid())
         {
-            performExport(generator);
-            m_state = State::Completed;
-            m_progress = 1.0;
-        }
-        catch (std::exception const & ex)
-        {
-            m_state = State::Failed;
-            m_errorMessage = ex.what();
-            m_progress = 1.0;
-            if (m_logger)
+            auto const status = m_exportFuture.wait_for(std::chrono::seconds(0));
+            if (status == std::future_status::ready)
             {
-                m_logger->addEvent({fmt::format("Dual contouring STL export failed: {}", ex.what()),
-                                    events::Severity::Error});
+                try
+                {
+                    m_exportFuture.get(); // Retrieve result and propagate exceptions
+                    m_state.store(State::Completed);
+                    m_progress.store(1.0);
+                }
+                catch (std::exception const & ex)
+                {
+                    m_state.store(State::Failed);
+                    m_errorMessage = ex.what();
+                    m_progress.store(1.0);
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {fmt::format("Dual contouring STL export failed: {}", ex.what()),
+                           events::Severity::Error});
+                    }
+                }
+                return false;
             }
         }
 
-        return false;
+        return true; // Still running
     }
 
     void DualContouringStlExporter::finalize()
     {
+        // Wait for background task to complete
+        if (m_exportFuture.valid())
+        {
+            m_exportFuture.wait();
+        }
         m_computeCore = nullptr;
-        m_state = State::Idle;
-        m_progress = clampProgress(m_progress);
+        m_state.store(State::Idle);
     }
 
     double DualContouringStlExporter::getProgress() const
     {
-        return clampProgress(m_progress);
+        return clampProgress(m_progress.load());
     }
 
     bool DualContouringStlExporter::hasError() const
     {
-        return m_state == State::Failed;
+        return m_state.load() == State::Failed;
     }
 
     std::string const & DualContouringStlExporter::errorMessage() const
@@ -169,7 +190,7 @@ namespace gladius::io
             throw std::runtime_error("Failed to build dual contouring octree");
         }
 
-        m_progress = 0.5;
+        m_progress.store(0.5);
 
         dual_contouring::DualContouringDiagnostics diagnostics{};
         auto mesh = dual_contouring::buildDualContouringMesh(builder, *root, config, &diagnostics);

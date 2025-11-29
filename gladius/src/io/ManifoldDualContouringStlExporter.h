@@ -8,7 +8,9 @@
 
 #include <Eigen/Core>
 
+#include <atomic>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,8 +57,11 @@ namespace gladius::io
         ManifoldDualContouringOptions m_options{};
         std::filesystem::path m_targetFile;
         ComputeCore * m_computeCore{nullptr};
-        State m_state{State::Idle};
-        double m_progress{0.0};
+        std::atomic<State> m_state{State::Idle};
+        std::atomic<double> m_progress{0.0};
         std::string m_errorMessage;
+        
+        // Background thread for non-blocking export
+        std::future<void> m_exportFuture;
     };
 }
