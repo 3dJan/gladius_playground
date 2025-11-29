@@ -64,7 +64,8 @@ namespace gladius::compute
             Eigen::Vector3f const & bboxMin,
             Eigen::Vector3f const & bboxMax,
             Primitives const & primitives,
-            float isoValue);
+            float isoValue,
+            float gradientEpsilon);
 
         /// Count quads (for index allocation via prefix sum)
         void countQuads(

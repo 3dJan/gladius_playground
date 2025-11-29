@@ -77,6 +77,9 @@ namespace gladius::io
         float minFeatureSize{0.0F};                 ///< Minimum feature size to preserve (world units); 0 = disabled
         bool enableChunking{true};                  ///< Enable spatial chunking when minFeatureSize requires higher depth than maxDepth
         
+        // Hierarchical octree approach (experimental, improves watertightness)
+        bool enableHierarchicalOctree{false};       ///< Enable global Morton octree with 2:1 balancing for watertight mesh
+        
         // Sharp feature post-processing options
         bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features
         float sharpFeatureAngleThreshold{0.5F};     ///< Cosine of angle threshold (0.5 = ~60°)

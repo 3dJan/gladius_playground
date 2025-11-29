@@ -182,6 +182,7 @@ namespace gladius::io
         config.isoValue = m_options.isoValue;
         config.minFeatureSize = m_options.minFeatureSize;
         config.enableChunking = m_options.enableChunking;
+        config.enableHierarchicalOctree = m_options.enableHierarchicalOctree;
         config.enableSharpFeaturePostProcess = m_options.enableSharpFeaturePostProcess;
         config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
         config.subdivisionIterations = m_options.subdivisionIterations;

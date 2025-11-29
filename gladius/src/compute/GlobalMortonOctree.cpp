@@ -140,10 +140,16 @@ namespace gladius::compute
         // Phase 1: Build initial coarse octree
         buildInitialOctree();
 
+        // Phase 1b: Balance octree for watertight mesh generation
+        // Ensures all intersecting cells have face-adjacent neighbors at the same depth
+        balanceOctree();
+
         // Phase 2: Adaptive refinement
         if (config.enableAdaptiveRefinement && config.refinementPasses > 0U)
         {
             refineAdaptively();
+            // Re-balance after adaptive refinement
+            balanceOctree();
         }
 
         // Phase 3: Generate vertices using QEF
@@ -487,6 +493,266 @@ namespace gladius::compute
                 childLevel.nodeIndices.push_back(childNodeIdx);
             }
         }
+    }
+
+    void GlobalMortonOctree::balanceOctree()
+    {
+        // 2:1 octree balancing: ensure all intersecting cells have face-adjacent neighbors
+        // at the same depth. This is critical for proper quad formation.
+        
+        std::cout << "  Balancing octree for watertight mesh generation..." << std::endl;
+        
+        std::size_t totalNeighborsCreated = 0U;
+        std::size_t passes = 0U;
+        constexpr std::size_t MAX_BALANCE_PASSES = 10U;
+        
+        // Repeat until no new neighbors are created (convergence)
+        bool changed = true;
+        while (changed && passes < MAX_BALANCE_PASSES)
+        {
+            changed = false;
+            ++passes;
+            std::size_t neighborsThisPass = 0U;
+            
+            // Collect all current intersecting leaves
+            std::vector<std::size_t> intersectingLeaves;
+            for (std::size_t i = 0U; i < m_nodes.size(); ++i)
+            {
+                if (m_nodes[i].isLeaf && m_nodes[i].isIntersecting)
+                {
+                    intersectingLeaves.push_back(i);
+                }
+            }
+            
+            // For each intersecting leaf, ensure its 6 face-adjacent neighbors exist
+            for (std::size_t nodeIdx : intersectingLeaves)
+            {
+                auto const& node = m_nodes[nodeIdx];
+                
+                // Decode this cell's coordinates
+                std::uint32_t cx = 0U;
+                std::uint32_t cy = 0U;
+                std::uint32_t cz = 0U;
+                decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+                
+                auto const maxCoord = (1U << node.depth) - 1U;
+                
+                // 6 face-adjacent neighbors: +x, -x, +y, -y, +z, -z
+                std::array<std::tuple<int, int, int>, 6> const offsets = {{
+                    {1, 0, 0}, {-1, 0, 0},
+                    {0, 1, 0}, {0, -1, 0},
+                    {0, 0, 1}, {0, 0, -1}
+                }};
+                
+                for (auto const& [dx, dy, dz] : offsets)
+                {
+                    // Check bounds
+                    auto const nx = static_cast<std::int32_t>(cx) + dx;
+                    auto const ny = static_cast<std::int32_t>(cy) + dy;
+                    auto const nz = static_cast<std::int32_t>(cz) + dz;
+                    
+                    if (nx < 0 || nx > static_cast<std::int32_t>(maxCoord) ||
+                        ny < 0 || ny > static_cast<std::int32_t>(maxCoord) ||
+                        nz < 0 || nz > static_cast<std::int32_t>(maxCoord))
+                    {
+                        continue; // Out of bounds
+                    }
+                    
+                    // Check if neighbor exists
+                    std::uint64_t const neighborMorton = encodePathMorton(
+                        static_cast<std::uint32_t>(nx),
+                        static_cast<std::uint32_t>(ny),
+                        static_cast<std::uint32_t>(nz),
+                        node.depth);
+                    
+                    if (m_mortonToIndex.find(neighborMorton) == m_mortonToIndex.end())
+                    {
+                        // Neighbor doesn't exist - create it
+                        std::size_t const newNodeIdx = createNodeAtCoordinates(
+                            static_cast<std::uint32_t>(nx),
+                            static_cast<std::uint32_t>(ny),
+                            static_cast<std::uint32_t>(nz),
+                            node.depth);
+                        
+                        if (newNodeIdx != std::numeric_limits<std::size_t>::max())
+                        {
+                            ++neighborsThisPass;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            
+            totalNeighborsCreated += neighborsThisPass;
+            
+            #ifdef GLOBALMORTON_DEBUG_OUTPUT
+            if (neighborsThisPass > 0U)
+            {
+                std::cout << "    Balance pass " << passes << ": created " 
+                          << neighborsThisPass << " neighbor cells" << std::endl;
+            }
+            #endif
+        }
+        
+        std::cout << "  Balancing complete: " << totalNeighborsCreated << " neighbor cells created in "
+                  << passes << " passes" << std::endl;
+    }
+
+    std::size_t GlobalMortonOctree::createNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
+                                                             std::uint32_t z, std::uint8_t depth)
+    {
+        // First check if node already exists
+        std::uint64_t const mortonCode = encodePathMorton(x, y, z, depth);
+        auto it = m_mortonToIndex.find(mortonCode);
+        if (it != m_mortonToIndex.end())
+        {
+            return it->second; // Already exists
+        }
+        
+        // Allocate and initialize the node
+        std::size_t const nodeIdx = allocateNode();
+        auto& node = m_nodes[nodeIdx];
+        node.mortonCode = mortonCode;
+        node.depth = depth;
+        node.isLeaf = true;
+        node.isIntersecting = false; // Will be evaluated below
+        node.needsRefinement = false;
+        
+        // Register in Morton lookup
+        m_mortonToIndex[mortonCode] = nodeIdx;
+        
+        // Add to appropriate level
+        if (depth < m_levels.size())
+        {
+            m_levels[depth].nodeIndices.push_back(nodeIdx);
+        }
+        
+        // Evaluate corners for this node to determine if it's intersecting
+        BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize, 0);
+        
+        // Sample SDF at all 8 corners
+        std::uint8_t signMask = 0U;
+        std::uint8_t zeroMask = 0U;
+        for (std::uint8_t c = 0U; c < 8U; ++c)
+        {
+            Eigen::Vector3f const cornerPos = cornerPosition(c, bounds);
+            float const sdfValue = sampleSdf(cornerPos);
+            node.cornerValues[c] = sdfValue;
+            
+            if (sdfValue >= 0.0F)
+            {
+                signMask |= (1U << c);
+            }
+            if (std::abs(sdfValue) < 1e-6F)
+            {
+                zeroMask |= (1U << c);
+            }
+        }
+        
+        // Check if node intersects surface
+        bool const allPositive = (signMask == 0xFFU);
+        bool const allNegative = (signMask == 0x00U);
+        node.isIntersecting = !allPositive && !allNegative;
+        
+        // Detect edge crossings
+        node.edgeMask = 0U;
+        for (std::size_t e = 0U; e < 12U; ++e)
+        {
+            auto const c0 = EDGE_CORNERS[e][0];
+            auto const c1 = EDGE_CORNERS[e][1];
+            float const v0 = node.cornerValues[c0];
+            float const v1 = node.cornerValues[c1];
+            
+            if (v0 * v1 < 0.0F)
+            {
+                node.edgeMask |= (1U << e);
+            }
+        }
+        
+        return nodeIdx;
+    }
+
+    void GlobalMortonOctree::ensureNeighborsExist(std::size_t nodeIndex)
+    {
+        // This is a wrapper that ensures face-adjacent neighbors exist for a single node.
+        // The actual implementation is in balanceOctree which does it for all nodes.
+        auto const& node = m_nodes[nodeIndex];
+        if (!node.isLeaf)
+        {
+            return;
+        }
+        
+        std::uint32_t cx = 0U;
+        std::uint32_t cy = 0U;
+        std::uint32_t cz = 0U;
+        decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+        
+        auto const maxCoord = (1U << node.depth) - 1U;
+        
+        // 6 face-adjacent neighbors
+        std::array<std::tuple<int, int, int>, 6> const offsets = {{
+            {1, 0, 0}, {-1, 0, 0},
+            {0, 1, 0}, {0, -1, 0},
+            {0, 0, 1}, {0, 0, -1}
+        }};
+        
+        for (auto const& [dx, dy, dz] : offsets)
+        {
+            auto const nx = static_cast<std::int32_t>(cx) + dx;
+            auto const ny = static_cast<std::int32_t>(cy) + dy;
+            auto const nz = static_cast<std::int32_t>(cz) + dz;
+            
+            if (nx < 0 || nx > static_cast<std::int32_t>(maxCoord) ||
+                ny < 0 || ny > static_cast<std::int32_t>(maxCoord) ||
+                nz < 0 || nz > static_cast<std::int32_t>(maxCoord))
+            {
+                continue;
+            }
+            
+            (void)createNodeAtCoordinates(
+                static_cast<std::uint32_t>(nx),
+                static_cast<std::uint32_t>(ny),
+                static_cast<std::uint32_t>(nz),
+                node.depth);
+        }
+    }
+
+    void GlobalMortonOctree::decodePathMorton(std::uint64_t mortonCode, std::uint8_t depth,
+                                               std::uint32_t& x, std::uint32_t& y, std::uint32_t& z) const
+    {
+        x = 0U;
+        y = 0U;
+        z = 0U;
+        
+        for (std::uint8_t d = 0U; d < depth; ++d)
+        {
+            auto const shift = (depth - 1U - d) * 3U;
+            auto const octant = static_cast<std::uint8_t>((mortonCode >> shift) & 0x7U);
+            
+            auto const ox = (octant >> 0U) & 1U;
+            auto const oy = (octant >> 1U) & 1U;
+            auto const oz = (octant >> 2U) & 1U;
+            
+            auto const levelScale = 1U << (depth - 1U - d);
+            x += ox * levelScale;
+            y += oy * levelScale;
+            z += oz * levelScale;
+        }
+    }
+
+    std::uint64_t GlobalMortonOctree::encodePathMorton(std::uint32_t x, std::uint32_t y,
+                                                        std::uint32_t z, std::uint8_t depth) const
+    {
+        std::uint64_t code = 0U;
+        for (std::uint8_t d = 0U; d < depth; ++d)
+        {
+            auto const shift = depth - 1U - d;
+            auto const ox = (x >> shift) & 1U;
+            auto const oy = (y >> shift) & 1U;
+            auto const oz = (z >> shift) & 1U;
+            code = (code << 3U) | (ox | (oy << 1U) | (oz << 2U));
+        }
+        return code;
     }
 
     void GlobalMortonOctree::refineAdaptively()
@@ -995,7 +1261,11 @@ namespace gladius::compute
     void GlobalMortonOctree::generateQuads(std::vector<std::uint32_t>& indices)
     {
         // NEW APPROACH: Explicit neighbor lookup (like GPU emit_indices)
-        // For each intersecting leaf, check 3 "owned" edges (6, 5, 10 - edges at max corner).
+        // For each intersecting leaf, check 3 "owned" edges (3, 7, 11 - edges at max corner).
+        // NOTE: GPU uses different edge numbering (6, 5, 10), but CPU EDGE_CORNERS uses:
+        //   Edge 3: X-aligned at y=max, z=max (corners 6-7)
+        //   Edge 7: Y-aligned at x=max, z=max (corners 5-7)
+        //   Edge 11: Z-aligned at x=max, y=max (corners 3-7)
         // For each edge with sign-change, explicitly look up the 3 neighbors that share it.
         // This guarantees we find all 4 cells if they exist.
 
@@ -1116,10 +1386,11 @@ namespace gladius::compute
             
             auto const maxCoord = (1U << node.depth) - 1U;
             
-            // Check owned edges 6, 5, 10 (like GPU kernel)
-            // Edge 6: X-axis at (y=max, z=max), corners 7-6
+            // Check owned edges 3, 7, 11 (edges at max corner)
+            // CPU EDGE_CORNERS uses different numbering than GPU:
+            //   CPU Edge 3 = GPU Edge 6: X-axis at (y=max, z=max), corners 6-7
             // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
-            if ((node.edgeMask & (1U << 6)) && cy < maxCoord && cz < maxCoord)
+            if ((node.edgeMask & (1U << 3)) && cy < maxCoord && cz < maxCoord)
             {
                 // Look up 3 neighbors by coordinate
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
@@ -1170,7 +1441,7 @@ namespace gladius::compute
                         };
                         
                         #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                        std::cout << "  Edge6 neighbor miss at (" << cx << "," << cy << "," << cz 
+                        std::cout << "  Edge3 neighbor miss at (" << cx << "," << cy << "," << cz 
                                   << ") depth=" << static_cast<int>(node.depth)
                                   << " mc=" << std::hex << node.mortonCode << std::dec
                                   << ": n1(" << (it1 != mortonToNode.end()) 
@@ -1266,9 +1537,9 @@ namespace gladius::compute
                 }  // closes foundAll
             }
             
-            // Edge 5: Y-axis at (x=max, z=max), corners 5-7
+            // CPU Edge 7 = GPU Edge 5: Y-axis at (x=max, z=max), corners 5-7
             // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
-            if ((node.edgeMask & (1U << 5)) && cx < maxCoord && cz < maxCoord)
+            if ((node.edgeMask & (1U << 7)) && cx < maxCoord && cz < maxCoord)
             {
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
                     std::uint64_t code = 0U;
@@ -1374,9 +1645,9 @@ namespace gladius::compute
                 }
             }
             
-            // Edge 10: Z-axis at (x=max, y=max), corners 3-7
+            // CPU Edge 11 = GPU Edge 10: Z-axis at (x=max, y=max), corners 3-7
             // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
-            if ((node.edgeMask & (1U << 10)) && cx < maxCoord && cy < maxCoord)
+            if ((node.edgeMask & (1U << 11)) && cx < maxCoord && cy < maxCoord)
             {
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
                     std::uint64_t code = 0U;
@@ -2079,65 +2350,6 @@ namespace gladius::compute
         // Child Morton code is parent shifted left by 3 bits plus child octant index
         // Each level adds 3 bits (one for each axis)
         return (parentMorton << 3U) | static_cast<std::uint64_t>(childIndex);
-    }
-
-    namespace
-    {
-        /**
-         * @brief Decode path-based Morton code to grid coordinates.
-         * @param mortonCode The Morton code (octant path)
-         * @param depth The depth of the node
-         * @param x Output X coordinate
-         * @param y Output Y coordinate
-         * @param z Output Z coordinate
-         */
-        void decodePathMorton(std::uint64_t mortonCode, std::uint8_t depth,
-                               std::uint32_t& x, std::uint32_t& y, std::uint32_t& z)
-        {
-            x = 0U;
-            y = 0U;
-            z = 0U;
-            
-            for (std::uint8_t d = 0U; d < depth; ++d)
-            {
-                auto const shift = (depth - 1U - d) * 3U;
-                auto const octant = static_cast<std::uint8_t>((mortonCode >> shift) & 0x7U);
-                
-                auto const ox = (octant >> 0U) & 1U;
-                auto const oy = (octant >> 1U) & 1U;
-                auto const oz = (octant >> 2U) & 1U;
-                
-                auto const levelScale = 1U << (depth - 1U - d);
-                x += ox * levelScale;
-                y += oy * levelScale;
-                z += oz * levelScale;
-            }
-        }
-
-        /**
-         * @brief Encode grid coordinates to path-based Morton code.
-         * @param x X coordinate
-         * @param y Y coordinate
-         * @param z Z coordinate
-         * @param depth The depth (number of octant levels)
-         * @return The Morton code
-         */
-        std::uint64_t encodePathMorton(std::uint32_t x, std::uint32_t y, std::uint32_t z,
-                                        std::uint8_t depth)
-        {
-            std::uint64_t code = 0U;
-            for (std::uint8_t d = 0U; d < depth; ++d)
-            {
-                auto const shift = depth - 1U - d;
-                auto const ox = (x >> shift) & 1U;
-                auto const oy = (y >> shift) & 1U;
-                auto const oz = (z >> shift) & 1U;
-                
-                auto const octant = ox | (oy << 1U) | (oz << 2U);
-                code = (code << 3U) | octant;
-            }
-            return code;
-        }
     }
 
     std::size_t GlobalMortonOctree::findNeighborNode(std::uint64_t mortonCode,

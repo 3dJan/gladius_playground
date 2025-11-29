@@ -484,10 +484,9 @@ float3 findEdgeIntersection(float3 p0, float3 p1, float v0, float v1)
 }
 
 /// Compute gradient (normal) at a point using finite differences
-float3 computeGradient(float3 pos, PAYLOAD_ARGS)
+float3 computeGradientWithEps(float3 pos, float h, PAYLOAD_ARGS)
 {
     // Central difference gradient using model evaluation
-    const float h = 0.001f;
     const float h2 = 2.0f * h;
     
     const float3 posXp = pos + (float3)(h, 0.0f, 0.0f);
@@ -519,6 +518,12 @@ float3 computeGradient(float3 pos, PAYLOAD_ARGS)
     return gradient;
 }
 
+/// Compute gradient with default epsilon (for backward compatibility)
+float3 computeGradient(float3 pos, PAYLOAD_ARGS)
+{
+    return computeGradientWithEps(pos, 0.01f, PASS_PAYLOAD_ARGS);
+}
+
 /// Generate one vertex per cell using SVD-based QEF solver for sharp edge preservation
 __kernel void emit_vertices(
     __global OctreeNode const* nodes,
@@ -528,7 +533,8 @@ __kernel void emit_vertices(
     const float3 bboxMin,
     const float3 bboxMax,
     PAYLOAD_ARGS,
-    const float isoValue)
+    const float isoValue,
+    const float gradientEpsilon)
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
@@ -560,7 +566,7 @@ __kernel void emit_vertices(
         {
             if (fabs(dist) < 1e-6f) break;  // Close enough to surface
             
-            float3 gradient = computeGradient(pos, PASS_PAYLOAD_ARGS);
+            float3 gradient = computeGradientWithEps(pos, gradientEpsilon, PASS_PAYLOAD_ARGS);
             float gradLen = length(gradient);
             if (gradLen < 1e-8f) break;
             
@@ -575,7 +581,7 @@ __kernel void emit_vertices(
         }
         
         // Use final gradient for normal
-        float3 gradient = computeGradient(pos, PASS_PAYLOAD_ARGS);
+        float3 gradient = computeGradientWithEps(pos, gradientEpsilon, PASS_PAYLOAD_ARGS);
         float gradLen = length(gradient);
         if (gradLen > 1e-6f)
         {
@@ -636,7 +642,7 @@ __kernel void emit_vertices(
         
         float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
         intersections[intersectionCount] = intersection;
-        normals[intersectionCount] = computeGradient(intersection, PASS_PAYLOAD_ARGS);
+        normals[intersectionCount] = computeGradientWithEps(intersection, gradientEpsilon, PASS_PAYLOAD_ARGS);
         intersectionCount++;
     }
     

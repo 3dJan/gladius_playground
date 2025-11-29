@@ -1159,6 +1159,46 @@ namespace gladius::compute::tests
         std::cout << "If holes stayed same/increased, the issue is algorithmic" << std::endl;
     }
 
+    /// Test wristsupport with hierarchical octree approach for improved watertightness
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWristsupport_HierarchicalOctree)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/wristsupport.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+
+        // Enable hierarchical octree with 2:1 balancing
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 7;
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+        exportOptions.enableHierarchicalOctree = true;  // Enable hierarchical octree
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+        
+        std::cout << "=== WRISTSUPPORT HIERARCHICAL OCTREE ===" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        
+        // Report comparison
+        std::cout << "\nCompare with standard sparse octree approach:" << std::endl;
+        std::cout << "  If disconnected facets are lower, hierarchical approach is working" << std::endl;
+    }
+
 
     // ============================================================================
     // Implicit Surface Validation Tests

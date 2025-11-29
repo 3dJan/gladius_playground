@@ -204,12 +204,14 @@ namespace gladius::compute
                 generateVertices();
                 generateIndices();
                 
-                // Note: fillBoundaryGaps is NOT called for single-pass processing.
-                // The boundary edges in single-pass mode are typically at the bbox
-                // boundary (surface clipped by domain) or from thin-sheet surfaces
-                // (e.g., gyroid). In both cases, gap filling would create incorrect
-                // geometry. For watertight meshes with complex geometry, consider
-                // using hierarchical/chunked processing which handles gaps properly.
+                // Fill gaps between disconnected boundary edges.
+                // This helps close holes caused by missing neighbor cells in the octree.
+                // The function skips edges on the bbox boundary to avoid creating
+                // incorrect geometry at domain boundaries.
+                if (!m_mesh.indices.empty())
+                {
+                    fillBoundaryGaps(voxelSize * 1.5F);
+                }
             }
         } // End of else block for non-hierarchical processing
         
@@ -342,6 +344,13 @@ namespace gladius::compute
         Eigen::Vector3f bboxMin = m_cachedBboxMin;
         Eigen::Vector3f bboxMax = m_cachedBboxMax;
         
+        // Calculate voxel size and gradient epsilon based on octree depth
+        Eigen::Vector3f const bboxSize = bboxMax - bboxMin;
+        float const maxExtent = bboxSize.maxCoeff();
+        float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+        // Use 10% of voxel size for gradient computation - balances detail vs noise
+        float const gradientEpsilon = voxelSize * 0.1f;
+        
         // 1. Count vertices (1-4 per cell based on normal clustering)
         m_countBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
         
@@ -397,7 +406,8 @@ namespace gladius::compute
                 bboxMin,
                 bboxMax,
                 *primitives,
-                m_config.isoValue);
+                m_config.isoValue,
+                gradientEpsilon);
                 
             std::vector<GpuVertex> hostVertices(static_cast<std::size_t>(totalVertices));
             queue.enqueueReadBuffer(*m_vertexBuffer,
@@ -480,6 +490,17 @@ namespace gladius::compute
             // 2. CPU-side prefix sum for index offsets
             std::vector<int> quadCounts(numNodes);
             queue.enqueueReadBuffer(*quadCountBuffer, CL_TRUE, 0, numNodes * sizeof(int), quadCounts.data());
+
+            // Debug: Count total quads and cells with quads
+            int totalQuads = 0;
+            int cellsWithQuads = 0;
+            for (std::size_t i = 0U; i < numNodes; ++i)
+            {
+                totalQuads += quadCounts[i];
+                if (quadCounts[i] > 0) cellsWithQuads++;
+            }
+            std::cout << "Quad counting: " << totalQuads << " quads from " << cellsWithQuads 
+                      << " cells (of " << numNodes << " total nodes)" << std::endl;
 
             std::vector<int> indexOffsets(numNodes);
             int totalIndices = 0;

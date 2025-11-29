@@ -232,6 +232,12 @@ namespace gladius::compute
         void detectIntersections(std::vector<std::size_t> const& nodeIndices);
         void createChildNodes(std::size_t parentLevelIndex, bool forceSubdivision = false);
 
+        // Phase 1b: Octree balancing for watertight mesh
+        void balanceOctree();
+        void ensureNeighborsExist(std::size_t nodeIndex);
+        [[nodiscard]] std::size_t createNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
+                                                           std::uint32_t z, std::uint8_t depth);
+
         // Phase 2: Adaptive refinement
         void refineAdaptively();
         void estimateCurvatureGpu(std::vector<std::size_t> const& leafIndices);
@@ -265,6 +271,12 @@ namespace gladius::compute
         [[nodiscard]] std::size_t findNeighborNode(std::uint64_t mortonCode,
                                                     int dx, int dy, int dz,
                                                     std::uint8_t depth) const;
+
+        // Morton coordinate helpers
+        void decodePathMorton(std::uint64_t mortonCode, std::uint8_t depth,
+                              std::uint32_t& x, std::uint32_t& y, std::uint32_t& z) const;
+        [[nodiscard]] std::uint64_t encodePathMorton(std::uint32_t x, std::uint32_t y,
+                                                      std::uint32_t z, std::uint8_t depth) const;
 
         // SDF evaluation
         [[nodiscard]] float sampleSdf(Eigen::Vector3f const& position) const;

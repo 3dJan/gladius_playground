@@ -158,7 +158,8 @@ namespace gladius::compute
         Eigen::Vector3f const & bboxMin,
         Eigen::Vector3f const & bboxMax,
         Primitives const & primitives,
-        float isoValue)
+        float isoValue,
+        float gradientEpsilon)
     {
         ensureCompiled();
         swapProgramsIfNeeded();
@@ -178,7 +179,8 @@ namespace gladius::compute
                            clBboxMin,
                            clBboxMax,
                            PAYLOAD_ARGUMENTS,
-                           isoValue);
+                           isoValue,
+                           gradientEpsilon);
     }
 
     void ManifoldDualContouringProgram::countQuads(
