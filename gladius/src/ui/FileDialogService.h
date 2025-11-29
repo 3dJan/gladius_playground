@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <optional>
 #include <vector>
@@ -42,6 +43,10 @@ namespace gladius::ui
     class AsyncFileDialog
     {
       public:
+        /// @brief Function signature for dialog implementations.
+        using DialogFunc = std::function<QueriedFilename(FilePatterns, std::filesystem::path)>;
+        using DirectoryFunc = std::function<QueriedFilename(std::filesystem::path)>;
+
         /// @brief Start a save file dialog asynchronously.
         void saveFile(FilePatterns patterns, std::filesystem::path defaultPath = {});
 
@@ -59,9 +64,13 @@ namespace gladius::ui
         ///         (which itself may be nullopt if user cancelled).
         [[nodiscard]] std::optional<QueriedFilename> checkResult();
 
+        /// @brief Set custom dialog function for testing. Pass nullptr to reset to default.
+        void setTestDialogFunc(DialogFunc func);
+
       private:
         std::future<QueriedFilename> m_future;
         bool m_hasResult{false};
+        DialogFunc m_testDialogFunc;
     };
 
 } // namespace gladius::ui

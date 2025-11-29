@@ -161,10 +161,18 @@ namespace gladius::ui
             return cmd.str();
         }
 
-        /// @brief Show dialog using zenity or kdialog (blocking - run in background thread)
-        [[nodiscard]] QueriedFilename showLinuxDialog(DialogMode mode,
-                                                       FilePatterns const & patterns,
-                                                       std::filesystem::path const & defaultPath)
+        /// @brief Try to show dialog using zenity or kdialog (blocking - run in background thread)
+        /// @return The selected path, or nullopt if cancelled/error
+        /// @note Returns a special "cancelled" marker to distinguish from "tool not available"
+        struct LinuxDialogResult
+        {
+            bool toolAvailable{false};
+            QueriedFilename result;
+        };
+
+        [[nodiscard]] LinuxDialogResult showLinuxDialog(DialogMode mode,
+                                                         FilePatterns const & patterns,
+                                                         std::filesystem::path const & defaultPath)
         {
             std::string command;
 
@@ -178,15 +186,17 @@ namespace gladius::ui
             }
             else
             {
-                // Fall back to tinyfiledialogs
-                return std::nullopt;
+                // No tool available - fall back to tinyfiledialogs
+                return {false, std::nullopt};
             }
 
+            // Tool is available
             if (auto result = executeCommand(command))
             {
-                return std::filesystem::path(*result);
+                return {true, std::filesystem::path(*result)};
             }
-            return std::nullopt;
+            // User cancelled - still return that tool was available
+            return {true, std::nullopt};
         }
 #endif // __linux__
 
@@ -195,12 +205,13 @@ namespace gladius::ui
                                                      std::filesystem::path defaultPath)
         {
 #ifdef __linux__
-            if (auto result = showLinuxDialog(DialogMode::Save, patterns, defaultPath))
+            auto [toolAvailable, result] = showLinuxDialog(DialogMode::Save, patterns, defaultPath);
+            if (toolAvailable)
             {
-                return result;
+                return result;  // Return result (may be nullopt if cancelled)
             }
 #endif
-            // Fallback to tinyfiledialogs
+            // Fallback to tinyfiledialogs only if no Linux tool available
             return querySaveFilename(patterns, defaultPath);
         }
 
@@ -209,7 +220,8 @@ namespace gladius::ui
                                                      std::filesystem::path defaultPath)
         {
 #ifdef __linux__
-            if (auto result = showLinuxDialog(DialogMode::Open, patterns, defaultPath))
+            auto [toolAvailable, result] = showLinuxDialog(DialogMode::Open, patterns, defaultPath);
+            if (toolAvailable)
             {
                 return result;
             }
@@ -221,7 +233,8 @@ namespace gladius::ui
         [[nodiscard]] QueriedFilename runDirectoryDialog(std::filesystem::path defaultPath)
         {
 #ifdef __linux__
-            if (auto result = showLinuxDialog(DialogMode::Directory, {}, defaultPath))
+            auto [toolAvailable, result] = showLinuxDialog(DialogMode::Directory, {}, defaultPath);
+            if (toolAvailable)
             {
                 return result;
             }
@@ -238,7 +251,15 @@ namespace gladius::ui
             return; // Already running
         }
         m_hasResult = false;
-        m_future = std::async(std::launch::async, runSaveDialog, std::move(patterns), std::move(defaultPath));
+        
+        if (m_testDialogFunc)
+        {
+            m_future = std::async(std::launch::async, m_testDialogFunc, std::move(patterns), std::move(defaultPath));
+        }
+        else
+        {
+            m_future = std::async(std::launch::async, runSaveDialog, std::move(patterns), std::move(defaultPath));
+        }
     }
 
     void AsyncFileDialog::openFile(FilePatterns patterns, std::filesystem::path defaultPath)
@@ -248,7 +269,15 @@ namespace gladius::ui
             return;
         }
         m_hasResult = false;
-        m_future = std::async(std::launch::async, runOpenDialog, std::move(patterns), std::move(defaultPath));
+        
+        if (m_testDialogFunc)
+        {
+            m_future = std::async(std::launch::async, m_testDialogFunc, std::move(patterns), std::move(defaultPath));
+        }
+        else
+        {
+            m_future = std::async(std::launch::async, runOpenDialog, std::move(patterns), std::move(defaultPath));
+        }
     }
 
     void AsyncFileDialog::selectDirectory(std::filesystem::path defaultPath)
@@ -267,8 +296,14 @@ namespace gladius::ui
         {
             return false;
         }
-        // Check if still running (wait for 0 time)
-        return m_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+        // Active if still running OR if result is ready but not yet consumed
+        // This prevents the window where button appears enabled but result hasn't been processed
+        if (m_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return true;  // Still running
+        }
+        // Future is ready - we're "active" until result is consumed
+        return !m_hasResult;
     }
 
     std::optional<QueriedFilename> AsyncFileDialog::checkResult()
@@ -285,6 +320,11 @@ namespace gladius::ui
         }
 
         return std::nullopt;
+    }
+    
+    void AsyncFileDialog::setTestDialogFunc(DialogFunc func)
+    {
+        m_testDialogFunc = std::move(func);
     }
 
 } // namespace gladius::ui
