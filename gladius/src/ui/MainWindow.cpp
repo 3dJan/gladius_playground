@@ -1024,23 +1024,18 @@ namespace gladius::ui
             if (ImGui::MenuItem(reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tSTL")))
             {
                 closeMenu();
-                QueriedFilename filename;
+                // Open dialog with suggested filename based on current assembly
+                std::filesystem::path suggestedFilename;
                 if (m_currentAssemblyFileName.has_value())
                 {
-                    auto suggestedFilename = m_currentAssemblyFileName.value();
+                    suggestedFilename = m_currentAssemblyFileName.value();
                     suggestedFilename.replace_extension("stl");
-                    filename = querySaveFilename({"*.stl"}, suggestedFilename);
                 }
                 else
                 {
-                    filename = querySaveFilename({"*.stl"}, "part.stl");
+                    suggestedFilename = "part.stl";
                 }
-                if (filename.has_value())
-                {
-                    filename->replace_extension(".stl");
-
-                    m_meshExporterDialog.beginExport(filename.value(), *m_core);
-                }
+                m_meshExporterDialog.show(suggestedFilename);
             }
 
             if (ImGui::MenuItem(

@@ -1,10 +1,12 @@
 #include "MeshExportDialog.h"
+#include "FileDialogService.h"
 
 #include "imgui.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstring>
 #include <stdexcept>
 
 namespace gladius::ui
@@ -44,13 +46,26 @@ namespace gladius::ui
                     "Custom"};
     }
 
+    void MeshExportDialog::show(std::filesystem::path suggestedFilename)
+    {
+        if (!m_visible)
+        {
+            // Only reset state when opening fresh, not when already visible
+            resetExportState();
+        }
+        m_visible = true;
+        if (!suggestedFilename.empty())
+        {
+            m_targetFile = std::move(suggestedFilename);
+        }
+    }
+
     void MeshExportDialog::beginExport(std::filesystem::path const & stlFilename,
                                        ComputeCore & core)
     {
-        resetState();
-        m_visible = true;
+        // Legacy method for backward compatibility
         m_computeCore = &core;
-        m_targetFile = stlFilename;
+        show(stlFilename);
     }
 
     void MeshExportDialog::render(ComputeCore & core)
@@ -60,16 +75,11 @@ namespace gladius::ui
             return;
         }
 
-        if (!m_exportInProgress)
-        {
-            renderConfiguration(core);
-            if (!m_exportInProgress)
-            {
-                return;
-            }
-        }
+        // Store compute core reference for export operations
+        m_computeCore = &core;
 
-        BaseExportDialog::render(core);
+        // Always render the configuration dialog (it handles progress internally now)
+        renderConfiguration(core);
     }
 
     std::string MeshExportDialog::getWindowTitle() const
@@ -104,7 +114,7 @@ namespace gladius::ui
     }
 
     void MeshExportDialog::finalizeExport()
-    {
+    {        
         if (m_activeExporter == &m_layeredExporter && m_computeCore != nullptr)
         {
             m_layeredExporter.finalizeExportSTL(*m_computeCore);
@@ -126,8 +136,8 @@ namespace gladius::ui
             BaseExportDialog::finalizeExport();
         }
 
-        resetState();
-        m_computeCore = nullptr;
+        // Only reset the exporter, not the whole dialog state
+        m_activeExporter = nullptr;
     }
 
     void MeshExportDialog::onExportCancelled()
@@ -153,7 +163,11 @@ namespace gladius::ui
 
     void MeshExportDialog::onExportCompleted()
     {
-        BaseExportDialog::onExportCompleted();
+        m_exportCompleted = true;
+        m_exportInProgress = false;
+        m_statusMessage = "Export completed successfully!";
+        m_statusIsError = false;
+        // Dialog stays open - user can close manually or start another export
     }
 
     void MeshExportDialog::renderConfiguration(ComputeCore & core)
@@ -163,8 +177,27 @@ namespace gladius::ui
             return;
         }
 
+        // Check if export is in progress and handle it
+        if (m_exportInProgress && m_activeExporter != nullptr)
+        {
+            if (isExportFinished(core))
+            {
+                finalizeExport();
+                onExportCompleted();
+            }
+        }
+
+        ImGui::SetNextWindowSize(ImVec2(550.0F, 0.0F), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(getWindowTitle().c_str(), &m_visible))
         {
+            // File selection section
+            renderFileSelection();
+            
+            ImGui::Separator();
+
+            // Disable settings during export
+            ImGui::BeginDisabled(m_exportInProgress);
+            
             ImGui::TextUnformatted("Select surface extraction method for STL export.");
 
             int methodIndex = static_cast<int>(m_selectedMethod);
@@ -444,14 +477,34 @@ namespace gladius::ui
                   "while the kernels are under active development.");
             }
 
+            ImGui::EndDisabled(); // End disabled during export
+            
+            ImGui::Separator();
+            
+            // Status area
+            renderStatusArea();
+
+            // Error message (separate from status)
             if (!m_errorMessage.empty())
             {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4{1.0F, 0.3F, 0.3F, 1.0F}, "%s", m_errorMessage.c_str());
             }
+            
+            ImGui::Spacing();
 
-            if (ImGui::Button("Start export"))
+            // Buttons section
+            bool const canExport = !m_targetFile.empty() && !m_exportInProgress;
+            
+            ImGui::BeginDisabled(!canExport);
+            if (ImGui::Button("Start Export"))
             {
+                // Clear previous status when starting new export
+                m_exportCompleted = false;
+                m_statusMessage.clear();
+                m_statusIsError = false;
+                m_errorMessage.clear();
+                
                 try
                 {
                     startExport(core);
@@ -459,13 +512,36 @@ namespace gladius::ui
                 catch (std::exception const & ex)
                 {
                     m_errorMessage = ex.what();
+                    m_statusMessage = "Export failed";
+                    m_statusIsError = true;
                 }
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel"))
+            ImGui::EndDisabled();
+            
+            if (m_targetFile.empty())
             {
-                resetState();
-                m_visible = false;
+                ImGui::SameLine();
+                ImGui::TextDisabled("(select a file first)");
+            }
+            
+            ImGui::SameLine();
+            
+            if (m_exportInProgress)
+            {
+                if (ImGui::Button("Cancel Export"))
+                {
+                    onExportCancelled();
+                    m_statusMessage = "Export cancelled";
+                    m_statusIsError = false;
+                }
+            }
+            else
+            {
+                if (ImGui::Button("Close"))
+                {
+                    resetState();
+                    m_visible = false;
+                }
             }
         }
         ImGui::End();
@@ -473,6 +549,86 @@ namespace gladius::ui
         if (!m_visible)
         {
             resetState();
+        }
+    }
+    
+    void MeshExportDialog::renderFileSelection()
+    {
+        ImGui::Text("Target File:");
+        
+        // Display the current filename (read-only text input for copying)
+        std::string displayPath = m_targetFile.empty() ? "(no file selected)" : m_targetFile.string();
+        
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 100.0F);
+        ImGui::BeginDisabled(m_exportInProgress);
+        
+        // Use InputText with read-only flag for the path display
+        char pathBuffer[512] = {};
+        std::strncpy(pathBuffer, displayPath.c_str(), sizeof(pathBuffer) - 1);
+        ImGui::InputText("##filepath", pathBuffer, sizeof(pathBuffer), ImGuiInputTextFlags_ReadOnly);
+        
+        ImGui::SameLine();
+        
+        // Button first - if dialog is active, disable it
+        bool const dialogActive = m_browseDialog.isActive();
+        ImGui::BeginDisabled(dialogActive);
+        if (ImGui::Button(dialogActive ? "Waiting..." : "Browse..."))
+        {
+            std::filesystem::path defaultPath = m_targetFile.empty() ? std::filesystem::path{"part.stl"} : m_targetFile;
+            m_browseDialog.saveFile({"*.stl"}, defaultPath);
+        }
+        ImGui::EndDisabled();
+        
+        // Check for result AFTER button processing - this way the button
+        // won't be clickable in the same frame we consume the result
+        if (auto result = m_browseDialog.checkResult())
+        {
+            if (*result) // User selected a file
+            {
+                auto filename = **result;
+                filename.replace_extension(".stl");
+                m_targetFile = filename;
+                // Clear any previous export status when changing file
+                if (m_exportCompleted)
+                {
+                    m_exportCompleted = false;
+                    m_statusMessage.clear();
+                }
+            }
+        }
+        
+        ImGui::EndDisabled();
+    }
+    
+    void MeshExportDialog::renderStatusArea()
+    {
+        // Progress bar during export
+        if (m_exportInProgress && m_activeExporter != nullptr)
+        {
+            float const progress = static_cast<float>(m_activeExporter->getProgress());
+            ImGui::ProgressBar(progress, ImVec2(-1.0F, 0.0F));
+            ImGui::TextUnformatted(getExportMessage().c_str());
+        }
+        // Success message after export
+        else if (m_exportCompleted)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.3F, 0.9F, 0.3F, 1.0F});
+            ImGui::TextUnformatted(m_statusMessage.c_str());
+            ImGui::PopStyleColor();
+            
+            ImGui::TextDisabled("Exported to: %s", m_targetFile.string().c_str());
+        }
+        // Error message
+        else if (m_statusIsError && !m_statusMessage.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{1.0F, 0.3F, 0.3F, 1.0F});
+            ImGui::TextUnformatted(m_statusMessage.c_str());
+            ImGui::PopStyleColor();
+        }
+        // Idle state - show hint
+        else if (!m_statusMessage.empty())
+        {
+            ImGui::TextDisabled("%s", m_statusMessage.c_str());
         }
     }
 
@@ -580,7 +736,21 @@ namespace gladius::ui
     {
         m_activeExporter = nullptr;
         m_exportInProgress = false;
+        m_exportCompleted = false;
         m_errorMessage.clear();
+        m_statusMessage.clear();
+        m_statusIsError = false;
         m_targetFile.clear();
+    }
+    
+    void MeshExportDialog::resetExportState()
+    {
+        m_activeExporter = nullptr;
+        m_exportInProgress = false;
+        m_exportCompleted = false;
+        m_errorMessage.clear();
+        m_statusMessage.clear();
+        m_statusIsError = false;
+        // Note: m_targetFile is preserved so user can re-export to same file
     }
 }

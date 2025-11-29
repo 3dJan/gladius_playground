@@ -1,5 +1,6 @@
 #pragma once
 #include "BaseExportDialog.h"
+#include "FileDialogService.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
@@ -15,6 +16,11 @@ namespace gladius::ui
     class MeshExportDialog : public BaseExportDialog
     {
       public:
+        /// @brief Show the dialog with optional suggested filename
+        /// @param suggestedFilename Optional initial filename to suggest
+        void show(std::filesystem::path suggestedFilename = {});
+        
+        /// @brief Legacy beginExport - calls show() for backward compatibility
         void beginExport(std::filesystem::path const & stlFilename, ComputeCore & core) override;
         void render(ComputeCore & core) override;
 
@@ -29,8 +35,11 @@ namespace gladius::ui
 
       private:
         void renderConfiguration(ComputeCore & core);
+        void renderFileSelection();
+        void renderStatusArea();
         void startExport(ComputeCore & core);
         void resetState();
+        void resetExportState();
 
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
@@ -72,5 +81,13 @@ namespace gladius::ui
         float m_manifoldSimplificationFlatThreshold = 0.95F;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
+        
+        // Status display
+        std::string m_statusMessage;
+        bool m_statusIsError = false;
+        bool m_exportCompleted = false;
+        
+        // File browse dialog
+        AsyncFileDialog m_browseDialog;
     };
 } // namespace gladius::ui
