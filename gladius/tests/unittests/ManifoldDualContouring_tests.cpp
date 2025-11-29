@@ -1055,6 +1055,109 @@ namespace gladius::compute::tests
             << "Volume should be positive for outward-facing normals";
     }
 
+    /// Test mesh generation with wristsupport model (gyroid lattice structure)
+    /// This model has thin gyroid walls that may create holes at intersections
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWristsupport_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/wristsupport.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+        
+        std::cout << "Wristsupport bounding box: [" 
+                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
+                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
+        std::cout << "Wristsupport extents: " 
+                  << (bbox->max.x - bbox->min.x) << " x " 
+                  << (bbox->max.y - bbox->min.y) << " x "
+                  << (bbox->max.z - bbox->min.z) << " mm" << std::endl;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
+        
+        std::cout << "Wristsupport Admesh validation:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets with 3 disconnected edges: " << metrics.facetsWith3DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
+        std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
+        std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Edges fixed: " << metrics.edgesFixed << std::endl;
+        std::cout << "  Normals fixed: " << metrics.normalsFixed << std::endl;
+        
+        double const reversedRatio = 
+            static_cast<double>(metrics.facetsReversed) / 
+            static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        
+        // Report on boundary edges - these indicate holes
+        std::cout << "\n=== HOLE ANALYSIS ===" << std::endl;
+        if (metrics.totalDisconnectedFacets.original > 0)
+        {
+            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original 
+                      << " disconnected facets indicating holes" << std::endl;
+            std::cout << "  This gyroid lattice may have holes at:" << std::endl;
+            std::cout << "  - Thin wall intersections where cells meet" << std::endl;
+            std::cout << "  - High curvature regions of the gyroid surface" << std::endl;
+            std::cout << "  - Boundary between the gyroid and solid outer shell" << std::endl;
+        }
+        
+        // For now, just document the current state - don't fail the test
+        // We want to understand the pattern before fixing
+        EXPECT_GT(metrics.numberOfFacets.original, 0) 
+            << "Should produce facets";
+        EXPECT_NE(metrics.volume, 0.0) 
+            << "Volume should be non-zero";
+    }
+
+    /// Test wristsupport with higher resolution to check if holes are resolution-related
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWristsupport_HigherResolution)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/wristsupport.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+
+        // Use higher resolution (depth 8 instead of 7)
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 8;  // Higher depth = smaller voxels
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+        
+        std::cout << "=== WRISTSUPPORT HIGH-RES (maxDepth=8) ===" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        
+        // Compare with standard resolution in the output
+        std::cout << "\nIf holes decreased, the issue is likely voxel resolution vs wall thickness" << std::endl;
+        std::cout << "If holes stayed same/increased, the issue is algorithmic" << std::endl;
+    }
 
 
     // ============================================================================
