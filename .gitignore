@@ -43,3 +43,4 @@ vcpkg/buildtrees/
 **/vcpkg_installed/
 _CPack_Packages/*
 *.deb
+gladius/.serena/*
