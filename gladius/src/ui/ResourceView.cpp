@@ -391,23 +391,24 @@ namespace gladius::ui
                      "Meshes define the surface of your objects using connected triangles\n"
                      "and can include properties like color and texture.");
 
+        // Process async file dialog results
+        processAsyncFileDialog(document);
+
+        bool const dialogActive = m_asyncFileDialog.isActive();
+
         // image stack
         ImGui::BeginGroup();
         if (ImGui::TreeNodeEx("Image Stacks", baseFlags | ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::Indent();
             // import image stack
+            ImGui::BeginDisabled(dialogActive);
             if (ImGui::Button("Import from directory"))
             {
-                // query directory
-                const auto directory = queryDirectory();
-                if (!directory.has_value())
-                {
-                    return;
-                }
-
-                document->addImageStackResource(directory.value());
+                m_asyncDialogOp = ResourceViewDialogOp::ImportImageStack;
+                m_asyncFileDialog.selectDirectory();
             }
+            ImGui::EndDisabled();
 
             ImGui::Unindent();
 
@@ -547,18 +548,51 @@ namespace gladius::ui
                      "represent object properties that vary throughout the volume.");
     }
 
-    void ResourceView::addMesh(SharedDocument document) const
+    void ResourceView::addMesh(SharedDocument document)
     {
-        if (!document)
+        if (!document || m_asyncFileDialog.isActive())
         {
             return;
         }
 
-        const auto filename = queryLoadFilename({{"*.stl"}});
-        if (!filename.has_value())
+        m_asyncDialogOp = ResourceViewDialogOp::AddMesh;
+        m_asyncFileDialog.openFile({{"*.stl"}});
+    }
+
+    void ResourceView::processAsyncFileDialog(SharedDocument document)
+    {
+        auto result = m_asyncFileDialog.checkResult();
+        if (!result)
         {
-            return;
+            return; // No result yet
         }
-        document->addMeshResource(filename.value());
+
+        auto const operation = m_asyncDialogOp;
+        m_asyncDialogOp = ResourceViewDialogOp::None;
+
+        if (!result->has_value())
+        {
+            return; // User cancelled
+        }
+
+        std::filesystem::path const path = result->value();
+
+        switch (operation)
+        {
+        case ResourceViewDialogOp::ImportImageStack:
+            if (document)
+            {
+                document->addImageStackResource(path);
+            }
+            break;
+        case ResourceViewDialogOp::AddMesh:
+            if (document)
+            {
+                document->addMeshResource(path);
+            }
+            break;
+        case ResourceViewDialogOp::None:
+            break;
+        }
     }
 }

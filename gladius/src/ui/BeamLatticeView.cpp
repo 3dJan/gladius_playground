@@ -201,6 +201,15 @@ namespace gladius::ui
             return;
         }
 
+        // Check for async file dialog result
+        if (auto result = m_asyncFileDialog.checkResult())
+        {
+            if (*result)
+            {
+                m_filename = (*result)->generic_string();
+            }
+        }
+
         ImVec2 const center(ImGui::GetIO().DisplaySize.x * 0.5f,
                             ImGui::GetIO().DisplaySize.y * 0.5f);
         ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -226,14 +235,13 @@ namespace gladius::ui
             ImGui::PopItemWidth();
 
             ImGui::SameLine();
-            if (ImGui::Button("Browse..."))
+            bool const dialogActive = m_asyncFileDialog.isActive();
+            ImGui::BeginDisabled(dialogActive);
+            if (ImGui::Button(dialogActive ? "Waiting..." : "Browse..."))
             {
-                auto result = queryLoadFilename({{"*.stl"}});
-                if (result)
-                {
-                    m_filename = result->generic_string();
-                }
+                m_asyncFileDialog.openFile({{"*.stl"}});
             }
+            ImGui::EndDisabled();
 
             // Beam diameter input
             ImGui::Text("Beam Diameter:");

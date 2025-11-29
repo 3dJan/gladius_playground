@@ -9,6 +9,7 @@
 #include "../Document.h"
 #include "AboutDialog.h"
 #include "CliExportDialog.h"
+#include "FileDialogService.h"
 #include "GLView.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
@@ -34,6 +35,25 @@ namespace gladius::ui
         None,
         NewModel,
         OpenFile
+    };
+
+    /// @brief Identifies which async file dialog operation is pending
+    enum class AsyncDialogOperation
+    {
+        None,
+        ExportCliCurrentLayer,
+        ExportCliSliced,
+        ExportSvgCurrentLayer,
+        ExportVdb,
+        ExportNvdb,
+        Export3mfSliced,
+        Import,
+        Open,
+        Merge,
+        SaveAs,
+        SaveCurrentFunction,
+        ImportImageStack,
+        OpenAfterSavePrompt  ///< Open dialog triggered from "save before opening" popup
     };
 
     class MainWindow
@@ -261,5 +281,12 @@ namespace gladius::ui
 
         // Instance-level flag to propagate OpenCL debug verbosity to contexts we create
         bool m_openclDebugEnabled{false};
+
+        // Async file dialog for non-blocking file/directory selection
+        AsyncFileDialog m_asyncFileDialog;
+        AsyncDialogOperation m_asyncDialogOp{AsyncDialogOperation::None};
+
+        /// @brief Process async file dialog results and execute pending operations
+        void processAsyncFileDialog();
     };
 }

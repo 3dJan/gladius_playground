@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Document.h"
+#include "FileDialogService.h"
 #include <memory>
 
 namespace Lib3MF
@@ -42,5 +43,8 @@ namespace gladius::ui
         bool m_showImportDialog = false;
         std::string m_filename;
         float m_beamDiameter = 2.0f;
+
+        // Async file dialog for browsing STL files
+        AsyncFileDialog m_asyncFileDialog;
     };
 }
