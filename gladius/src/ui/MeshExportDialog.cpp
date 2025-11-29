@@ -6,8 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+
+#ifdef _WIN32
+#include <shellapi.h>
+#endif
 
 namespace gladius::ui
 {
@@ -19,13 +24,29 @@ namespace gladius::ui
         
         constexpr std::array<char const *, 2> FORMAT_EXTENSIONS{
             ".stl",
-            ".3mf"};
+            ".model.3mf"};
 
-        constexpr std::array<char const *, 4> METHOD_LABELS{
+        constexpr std::array<char const *, 2> METHOD_LABELS{
             "Layered marching cubes (OpenVDB)",
-            "Dual contouring (octree)",
-            "Hierarchical dual contouring (adaptive)",
-            "Manifold dual contouring (GPU beta)"};
+            "Manifold dual contouring (GPU)"};
+
+        /// Maps UI method index to actual SurfaceExtractionMethod enum values
+        constexpr std::array<io::SurfaceExtractionMethod, 2> METHOD_VALUES{
+            io::SurfaceExtractionMethod::LayeredMarchingCubes,
+            io::SurfaceExtractionMethod::ManifoldDualContouring};
+
+        /// Get UI index from SurfaceExtractionMethod
+        constexpr int getMethodIndex(io::SurfaceExtractionMethod method)
+        {
+            for (std::size_t i = 0; i < METHOD_VALUES.size(); ++i)
+            {
+                if (METHOD_VALUES[i] == method)
+                {
+                    return static_cast<int>(i);
+                }
+            }
+            return 1; // Default to manifold DC
+        }
 
         constexpr std::array<char const *, 4> QUALITY_LABELS{
           "Draft (fast)",
@@ -241,9 +262,9 @@ namespace gladius::ui
             ImGui::Separator();
 
             // Settings are only shown when not exporting
-            ImGui::TextUnformatted("Select surface extraction method for STL export.");
+            ImGui::TextUnformatted("Select surface extraction method for mesh export.");
 
-            int methodIndex = static_cast<int>(m_selectedMethod);
+            int methodIndex = getMethodIndex(m_selectedMethod);
             if (ImGui::BeginCombo("Method", METHOD_LABELS.at(static_cast<std::size_t>(methodIndex))))
             {
                 for (int i = 0; i < static_cast<int>(METHOD_LABELS.size()); ++i)
@@ -252,7 +273,7 @@ namespace gladius::ui
                     if (ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected))
                     {
                         methodIndex = i;
-                        m_selectedMethod = static_cast<io::SurfaceExtractionMethod>(i);
+                        m_selectedMethod = METHOD_VALUES[static_cast<std::size_t>(i)];
                     }
                     if (selected)
                     {
@@ -637,7 +658,13 @@ namespace gladius::ui
             std::filesystem::path defaultPath = m_targetFile.empty() 
                 ? std::filesystem::path{"part" + extension} 
                 : m_targetFile;
-            defaultPath.replace_extension(extension);
+            // Remove compound extensions (.model.3mf or .stl) before adding new one
+            auto stem = defaultPath.stem();
+            if (stem.extension() == ".model")
+            {
+                stem = stem.stem();
+            }
+            defaultPath = defaultPath.parent_path() / (stem.string() + extension);
             m_browseDialog.saveFile({filter}, defaultPath);
         }
         ImGui::EndDisabled();
@@ -649,7 +676,14 @@ namespace gladius::ui
             if (*result) // User selected a file
             {
                 auto filename = **result;
-                filename.replace_extension(FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)]);
+                std::string const extension = FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)];
+                // Remove compound extensions (.model.3mf or .stl) before adding new one
+                auto stem = filename.stem();
+                if (stem.extension() == ".model")
+                {
+                    stem = stem.stem();
+                }
+                filename = filename.parent_path() / (stem.string() + extension);
                 m_targetFile = filename;
                 // Clear any previous export status when changing file
                 if (m_exportCompleted)
@@ -661,6 +695,24 @@ namespace gladius::ui
         }
     }
     
+    namespace
+    {
+        /// Opens the given folder in the system's default file manager
+        void openFolderInFileManager(std::filesystem::path const & folderPath)
+        {
+#ifdef _WIN32
+            ShellExecuteW(nullptr, L"open", folderPath.wstring().c_str(), nullptr, nullptr, SW_SHOW);
+#elif defined(__APPLE__)
+            std::string const command = "open \"" + folderPath.string() + "\"";
+            std::system(command.c_str());
+#else
+            // Linux and other Unix-like systems
+            std::string const command = "xdg-open \"" + folderPath.string() + "\" &";
+            std::system(command.c_str());
+#endif
+        }
+    }
+
     void MeshExportDialog::renderStatusArea()
     {
         // Progress bar during export
@@ -678,6 +730,11 @@ namespace gladius::ui
             ImGui::PopStyleColor();
             
             ImGui::TextDisabled("Exported to: %s", m_targetFile.string().c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open Folder"))
+            {
+                openFolderInFileManager(m_targetFile.parent_path());
+            }
         }
         // Error message
         else if (m_statusIsError && !m_statusMessage.empty())

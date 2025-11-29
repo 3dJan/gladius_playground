@@ -1156,11 +1156,11 @@ namespace gladius::ui
                 if (m_currentAssemblyFileName.has_value())
                 {
                     suggestedFilename = m_currentAssemblyFileName.value();
-                    suggestedFilename.replace_extension("stl");
+                    suggestedFilename.replace_extension("model.3mf");
                 }
                 else
                 {
-                    suggestedFilename = "part.stl";
+                    suggestedFilename = "part.model.3mf";
                 }
                 m_meshExporterDialog.setDocument(m_doc.get());
                 m_meshExporterDialog.show(suggestedFilename);
