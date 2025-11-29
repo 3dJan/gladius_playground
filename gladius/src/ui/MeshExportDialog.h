@@ -93,12 +93,12 @@ namespace gladius::ui
         bool m_hierarchicalEnableCoarsening = false;
         float m_hierarchicalMinFeatureSize = 0.0F;
         io::ManifoldDualContouringQuality m_manifoldQualityPreset =
-          io::ManifoldDualContouringQuality::Balanced;
+          io::ManifoldDualContouringQuality::UltraFine;
         bool m_manifoldEnableGpu = true;
         bool m_manifoldAllowCpuFallback = true;
         bool m_manifoldEnableCaching = true;
         float m_manifoldIsoValue = 0.0F;
-        std::size_t m_manifoldMaxDepth = 7U;
+        std::size_t m_manifoldMaxDepth = 9U;  // Sync with UltraFine preset
         // Minimum feature size and chunking
         float m_manifoldMinFeatureSize = 0.0F;
         bool m_manifoldEnableChunking = true;

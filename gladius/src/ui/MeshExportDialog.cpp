@@ -443,6 +443,12 @@ namespace gladius::ui
                             qualityIndex = i;
                             m_manifoldQualityPreset =
                               static_cast<io::ManifoldDualContouringQuality>(i);
+                            
+                            // Sync maxDepth with the selected preset
+                            io::ManifoldDualContouringOptions tempOpts{};
+                            tempOpts.qualityPreset = m_manifoldQualityPreset;
+                            tempOpts.applyPreset();
+                            m_manifoldMaxDepth = tempOpts.maxDepth;
                         }
                         if (selected)
                         {

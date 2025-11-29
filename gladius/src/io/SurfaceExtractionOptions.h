@@ -65,7 +65,7 @@ namespace gladius::io
     struct ManifoldDualContouringOptions
     {
         ManifoldDualContouringQuality qualityPreset{
-          ManifoldDualContouringQuality::Balanced};
+          ManifoldDualContouringQuality::UltraFine};
         std::size_t initialDepth{5U};
         std::size_t maxDepth{7U};
         bool enableGpu{true};
