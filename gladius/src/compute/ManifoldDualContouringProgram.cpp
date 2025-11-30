@@ -128,7 +128,8 @@ namespace gladius::compute
         Eigen::Vector3f const & bboxMin,
         Eigen::Vector3f const & bboxMax,
         Primitives const & primitives,
-        float isoValue)
+        float isoValue,
+        float gradientEpsilon)
     {
         ensureCompiled();
         swapProgramsIfNeeded();
@@ -147,7 +148,8 @@ namespace gladius::compute
                            clBboxMin,
                            clBboxMax,
                            PAYLOAD_ARGUMENTS,
-                           isoValue);
+                           isoValue,
+                           gradientEpsilon);
     }
 
     void ManifoldDualContouringProgram::generateVertices(
@@ -187,7 +189,8 @@ namespace gladius::compute
         cl::Buffer const & octreeBuffer,
         cl::Buffer & quadCountBuffer,
         std::size_t nodeCount,
-        std::uint32_t maxCoord)
+        std::uint32_t maxCoord,
+        std::uint32_t disableBoundaryChecks)
     {
         ensureCompiled();
         swapProgramsIfNeeded();
@@ -200,7 +203,8 @@ namespace gladius::compute
                            octreeBuffer,
                            quadCountBuffer,
                            static_cast<int>(nodeCount),
-                           static_cast<cl_uint>(maxCoord));
+                           static_cast<cl_uint>(maxCoord),
+                           static_cast<cl_uint>(disableBoundaryChecks));
     }
 
     void ManifoldDualContouringProgram::generateIndices(
@@ -209,7 +213,8 @@ namespace gladius::compute
         cl::Buffer const & indexOffsetBuffer,
         cl::Buffer & indexBuffer,
         std::size_t nodeCount,
-        std::uint32_t maxCoord)
+        std::uint32_t maxCoord,
+        std::uint32_t disableBoundaryChecks)
     {
         ensureCompiled();
         swapProgramsIfNeeded();
@@ -224,7 +229,8 @@ namespace gladius::compute
                            indexOffsetBuffer,
                            indexBuffer,
                            static_cast<int>(nodeCount),
-                           static_cast<cl_uint>(maxCoord));
+                           static_cast<cl_uint>(maxCoord),
+                           static_cast<cl_uint>(disableBoundaryChecks));
     }
 
     void ManifoldDualContouringProgram::sortOctreeByMorton(
@@ -389,5 +395,124 @@ namespace gladius::compute
             originalNodes.data());
 
         nodeCount = newNodeCount;
+    }
+
+    ManifoldDualContouringProgram::DiagnosticCounters ManifoldDualContouringProgram::runQuadDiagnostics(
+        cl::Buffer const & octreeBuffer,
+        std::size_t nodeCount,
+        std::uint32_t maxCoord)
+    {
+        DiagnosticCounters result{};
+        
+        if (nodeCount == 0)
+        {
+            return result;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        // Allocate buffer for 24 diagnostic counters (2 per edge)
+        constexpr std::size_t numCounters = 24;
+        auto diagnosticBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE,
+            numCounters * sizeof(int));
+
+        // Zero-initialize the counters
+        std::vector<int> zeros(numCounters, 0);
+        queue.enqueueWriteBuffer(*diagnosticBuffer, CL_TRUE, 0, numCounters * sizeof(int), zeros.data());
+
+        cl::NDRange global(nodeCount);
+        m_programFront->run("count_quads_diagnostic",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           *diagnosticBuffer,
+                           static_cast<int>(nodeCount),
+                           static_cast<cl_uint>(maxCoord));
+
+        // Read back results
+        std::vector<int> counters(numCounters);
+        queue.enqueueReadBuffer(*diagnosticBuffer, CL_TRUE, 0, numCounters * sizeof(int), counters.data());
+
+        // Unpack into result struct
+        for (int e = 0; e < 12; ++e)
+        {
+            result.edgeEmitted[static_cast<std::size_t>(e)] = counters[static_cast<std::size_t>(e * 2)];
+            result.edgeSkipped[static_cast<std::size_t>(e)] = counters[static_cast<std::size_t>(e * 2 + 1)];
+        }
+
+        return result;
+    }
+
+    ManifoldDualContouringProgram::DiscontinuityCounters ManifoldDualContouringProgram::runDiscontinuityDiagnostics(
+        cl::Buffer const & octreeBuffer,
+        std::size_t nodeCount,
+        BBox const & paddedBbox,
+        Primitives const & primitives,
+        float isoValue,
+        float gradientEpsilon)
+    {
+        DiscontinuityCounters result{};
+        
+        if (nodeCount == 0)
+        {
+            return result;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        // Allocate buffer for 8 diagnostic counters
+        constexpr std::size_t numCounters = 8;
+        auto diagnosticBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE,
+            numCounters * sizeof(int));
+
+        // Zero-initialize the counters
+        std::vector<int> zeros(numCounters, 0);
+        queue.enqueueWriteBuffer(*diagnosticBuffer, CL_TRUE, 0, numCounters * sizeof(int), zeros.data());
+
+        // Convert bbox to float3 for kernel
+        auto const bboxMin = paddedBbox.getMin();
+        auto const bboxMax = paddedBbox.getMax();
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        cl::NDRange global(nodeCount);
+        m_programFront->run("count_discontinuities_diagnostic",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           *diagnosticBuffer,
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           isoValue,
+                           gradientEpsilon);
+
+        // Read back results
+        std::vector<int> counters(numCounters);
+        queue.enqueueReadBuffer(*diagnosticBuffer, CL_TRUE, 0, numCounters * sizeof(int), counters.data());
+
+        // Unpack into result struct
+        result.cells1Component = counters[0];
+        result.cells2Components = counters[1];
+        result.cells3Components = counters[2];
+        result.cells4Components = counters[3];
+        result.totalCells = counters[4];
+        result.avgDiscontinuityScore = (result.totalCells > 0) 
+            ? static_cast<float>(counters[5]) / (1000.0F * static_cast<float>(result.totalCells))
+            : 0.0F;
+        result.severeDiscontinuities = counters[6];
+
+        return result;
     }
 }

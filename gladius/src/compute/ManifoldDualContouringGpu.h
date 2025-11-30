@@ -96,6 +96,9 @@ namespace gladius::compute
             std::vector<OctreeNode> m_cpuOctreeNodes;
             std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
             std::vector<int> m_cpuVertexOffsets;
+            
+            // Flag to indicate chunked processing mode (disables maxCoord boundary check)
+            bool m_isChunkedMode{false};
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};

@@ -62,7 +62,152 @@ float3 getCellExtent(float3 bboxMin, float3 bboxMax, uint depth)
     return extent * scale;
 }
 
-// Each cell with surface intersection generates exactly 1 vertex
+// Forward declaration for gradient computation
+float3 computeGradientWithEps(float3 pos, float epsilon, PAYLOAD_ARGS);
+
+// Forward declaration for edge intersection
+float3 findEdgeIntersection(float3 p0, float3 p1, float v0, float v1);
+
+// ============================================================================
+// Gradient Discontinuity Detection for CSG Operations
+// ============================================================================
+// When implicit functions use min/max operations (CSG union/intersection),
+// gradients become discontinuous at the boundary where the operator switches.
+// This causes holes because DC generates one vertex but the surface has
+// multiple distinct components meeting at that point.
+//
+// Detection strategy: Cluster normals by direction. If we find clusters
+// pointing in incompatible directions (dot product < threshold), we have
+// a discontinuity requiring multiple vertices per cell.
+
+/// Result of discontinuity analysis
+typedef struct
+{
+    int componentCount;      ///< Number of distinct surface components (1-4)
+    int componentIndices[12]; ///< Which component each sample belongs to (0-3)
+    float discontinuityScore; ///< 0 = smooth, 1 = severe discontinuity
+} DiscontinuityResult;
+
+/// Analyze edge samples to detect gradient discontinuities from CSG operations.
+/// Uses greedy clustering: assign each normal to nearest existing cluster,
+/// or create new cluster if angle exceeds threshold.
+///
+/// @param normals Array of gradient normals at edge crossings
+/// @param count Number of edge crossings
+/// @param angleThreshold Cosine threshold for clustering (e.g., 0.3 = ~72°)
+/// @return Analysis result with component count and assignments
+DiscontinuityResult detectGradientDiscontinuity(
+    float3 const* normals,
+    int count,
+    float angleThreshold)
+{
+    DiscontinuityResult result;
+    result.componentCount = 0;
+    result.discontinuityScore = 0.0f;
+    
+    if (count == 0)
+    {
+        return result;
+    }
+    
+    // Cluster centroids (normalized)
+    float3 clusterNormals[4];
+    int clusterSizes[4] = {0, 0, 0, 0};
+    
+    // Process each normal
+    for (int i = 0; i < count; i++)
+    {
+        float3 n = normals[i];
+        float nLen = length(n);
+        if (nLen < 1e-6f)
+        {
+            // Degenerate normal - assign to cluster 0
+            result.componentIndices[i] = 0;
+            continue;
+        }
+        n = n / nLen; // Normalize
+        
+        // Find best matching cluster
+        int bestCluster = -1;
+        float bestDot = angleThreshold; // Must exceed threshold to join
+        
+        for (int c = 0; c < result.componentCount; c++)
+        {
+            float d = dot(n, clusterNormals[c]);
+            if (d > bestDot)
+            {
+                bestDot = d;
+                bestCluster = c;
+            }
+        }
+        
+        if (bestCluster >= 0)
+        {
+            // Add to existing cluster - update centroid
+            result.componentIndices[i] = bestCluster;
+            clusterSizes[bestCluster]++;
+            // Running average for centroid
+            float3 newCentroid = clusterNormals[bestCluster] * (float)(clusterSizes[bestCluster] - 1) + n;
+            float centroidLen = length(newCentroid);
+            if (centroidLen > 1e-6f)
+            {
+                clusterNormals[bestCluster] = newCentroid / centroidLen;
+            }
+        }
+        else if (result.componentCount < 4)
+        {
+            // Create new cluster
+            int newCluster = result.componentCount;
+            result.componentCount++;
+            clusterNormals[newCluster] = n;
+            clusterSizes[newCluster] = 1;
+            result.componentIndices[i] = newCluster;
+        }
+        else
+        {
+            // Max clusters reached - assign to closest
+            bestDot = -2.0f;
+            for (int c = 0; c < 4; c++)
+            {
+                float d = dot(n, clusterNormals[c]);
+                if (d > bestDot)
+                {
+                    bestDot = d;
+                    bestCluster = c;
+                }
+            }
+            result.componentIndices[i] = bestCluster;
+        }
+    }
+    
+    // Ensure at least 1 component
+    if (result.componentCount == 0)
+    {
+        result.componentCount = 1;
+    }
+    
+    // Compute discontinuity score based on cluster separation
+    if (result.componentCount > 1)
+    {
+        float minDot = 1.0f;
+        for (int i = 0; i < result.componentCount; i++)
+        {
+            for (int j = i + 1; j < result.componentCount; j++)
+            {
+                float d = dot(clusterNormals[i], clusterNormals[j]);
+                minDot = fmin(minDot, d);
+            }
+        }
+        // Score: 0 if parallel, 1 if opposite
+        result.discontinuityScore = (1.0f - minDot) * 0.5f;
+    }
+    
+    return result;
+}
+
+/// Detect gradient discontinuities and count vertices needed per cell.
+/// Cells with CSG discontinuities need multiple vertices (one per component).
+/// Also stores componentCount in node.padding[1] for later use.
 __kernel void count_vertices(
     __global OctreeNode* nodes,
     __global int* countBuffer,
@@ -70,18 +215,90 @@ __kernel void count_vertices(
     const float3 bboxMin,
     const float3 bboxMax,
     PAYLOAD_ARGS,
-    const float isoValue)
+    const float isoValue,
+    const float gradientEpsilon)
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
     
     OctreeNode node = nodes[id];
     
-    // If edgeMask != 0, we have surface crossing -> generate 1 vertex
-    // If padding[0] == 1, this is a halo node that needs a synthetic vertex
-    // Otherwise, no vertex needed
-    bool needsVertex = (node.edgeMask != 0) || (node.padding[0] == 1);
-    countBuffer[id] = needsVertex ? 1 : 0;
+    // Halo nodes always get 1 vertex (for boundary stitching)
+    if (node.padding[0] == 1)
+    {
+        countBuffer[id] = 1;
+        nodes[id].padding[1] = 1; // componentCount = 1
+        return;
+    }
+    
+    // No surface crossing -> no vertex
+    if (node.edgeMask == 0)
+    {
+        countBuffer[id] = 0;
+        nodes[id].padding[1] = 0;
+        return;
+    }
+    
+    // Get cell bounds
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    float3 cellMax = cellMin + cellExtent;
+    
+    // Sample SDF at 8 corners
+    float cornerValues[8];
+    for (int corner = 0; corner < 8; corner++)
+    {
+        int cx = (corner >> 0) & 1;
+        int cy = (corner >> 1) & 1;
+        int cz = (corner >> 2) & 1;
+        
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
+        float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+        cornerValues[corner] = sdfResult.w - isoValue;
+    }
+    
+    // Edge table
+    const int edgeCorners[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},  // Bottom face
+        {4,5}, {5,7}, {7,6}, {6,4},  // Top face
+        {0,4}, {1,5}, {3,7}, {2,6}   // Vertical edges
+    };
+    
+    // Collect edge intersection normals
+    float3 normals[12];
+    int intersectionCount = 0;
+    
+    for (int e = 0; e < 12; e++)
+    {
+        if ((node.edgeMask & (1 << e)) == 0) continue;
+        
+        int c0 = edgeCorners[e][0];
+        int c1 = edgeCorners[e][1];
+        
+        int cx0 = (c0 >> 0) & 1, cy0 = (c0 >> 1) & 1, cz0 = (c0 >> 2) & 1;
+        int cx1 = (c1 >> 0) & 1, cy1 = (c1 >> 1) & 1, cz1 = (c1 >> 2) & 1;
+        
+        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellExtent;
+        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellExtent;
+        
+        float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
+        normals[intersectionCount] = computeGradientWithEps(intersection, gradientEpsilon, PASS_PAYLOAD_ARGS);
+        intersectionCount++;
+    }
+    
+    // Detect gradient discontinuities - cluster normals by direction
+    // Threshold 0.3 corresponds to ~72° angle between normals
+    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+    
+    // Store component count in padding[1] for use by emit_vertices
+    int componentCount = discResult.componentCount;
+    if (componentCount < 1) componentCount = 1;
+    if (componentCount > 4) componentCount = 4;
+    
+    nodes[id].padding[1] = (uchar)componentCount;
+    countBuffer[id] = componentCount;
 }
 
 // QEF (Quadratic Error Function) Solver
@@ -525,8 +742,10 @@ float3 computeGradient(float3 pos, PAYLOAD_ARGS)
 }
 
 /// Generate one vertex per cell using SVD-based QEF solver for sharp edge preservation
+/// For multi-component cells, generates separate vertices per component.
+/// Also stores edge→component mapping in padding[2-4] for edges 5, 6, 10.
 __kernel void emit_vertices(
-    __global OctreeNode const* nodes,
+    __global OctreeNode* nodes,
     __global int const* offsets,
     __global Vertex* outputVertices,
     const int numNodes,
@@ -625,6 +844,7 @@ __kernel void emit_vertices(
     // Collect all edge intersections and their normals
     float3 intersections[12];
     float3 normals[12];
+    int edgeIndices[12]; // Track which original edge each sample came from
     int intersectionCount = 0;
     
     for (int e = 0; e < 12; e++)
@@ -643,18 +863,99 @@ __kernel void emit_vertices(
         float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
         intersections[intersectionCount] = intersection;
         normals[intersectionCount] = computeGradientWithEps(intersection, gradientEpsilon, PASS_PAYLOAD_ARGS);
+        edgeIndices[intersectionCount] = e;
         intersectionCount++;
     }
     
-    // Solve QEF using SVD to find optimal vertex position
-    QefResult qef = solveQefSvd(intersections, normals, intersectionCount, cellMin, cellMax);
+    // Get component count from padding[1] (set by count_vertices)
+    int componentCount = (int)node.padding[1];
+    if (componentCount < 1) componentCount = 1;
+    if (componentCount > 4) componentCount = 4;
     
-    // Output vertex
-    Vertex v;
-    v.position = (float4)(qef.position.x, qef.position.y, qef.position.z, 1.0f);
-    v.normal = (float4)(qef.normal.x, qef.normal.y, qef.normal.z, 0.0f);
-    
-    outputVertices[vertexIndex] = v;
+    if (componentCount == 1)
+    {
+        // Single component: standard QEF solve with all samples
+        QefResult qef = solveQefSvd(intersections, normals, intersectionCount, cellMin, cellMax);
+        
+        Vertex v;
+        v.position = (float4)(qef.position.x, qef.position.y, qef.position.z, 1.0f);
+        v.normal = (float4)(qef.normal.x, qef.normal.y, qef.normal.z, 0.0f);
+        outputVertices[vertexIndex] = v;
+    }
+    else
+    {
+        // Multiple components: detect discontinuities and solve separate QEF per component
+        DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+        
+        // For each component, collect its samples and solve QEF
+        for (int comp = 0; comp < componentCount; comp++)
+        {
+            float3 compIntersections[12];
+            float3 compNormals[12];
+            int compCount = 0;
+            
+            // Collect samples belonging to this component
+            for (int i = 0; i < intersectionCount; i++)
+            {
+                if (discResult.componentIndices[i] == comp)
+                {
+                    compIntersections[compCount] = intersections[i];
+                    compNormals[compCount] = normals[i];
+                    compCount++;
+                }
+            }
+            
+            // If this component has no samples, use mass point of all samples
+            // (this can happen if componentCount from count_vertices doesn't match exactly)
+            if (compCount == 0)
+            {
+                // Fall back to mass point
+                float3 massPoint = (float3)(0.0f, 0.0f, 0.0f);
+                for (int i = 0; i < intersectionCount; i++)
+                {
+                    massPoint += intersections[i];
+                }
+                if (intersectionCount > 0)
+                {
+                    massPoint /= (float)intersectionCount;
+                }
+                else
+                {
+                    massPoint = cellCenter;
+                }
+                
+                Vertex v;
+                v.position = (float4)(massPoint.x, massPoint.y, massPoint.z, 1.0f);
+                v.normal = (float4)(0.0f, 1.0f, 0.0f, 0.0f);
+                outputVertices[vertexIndex + comp] = v;
+            }
+            else
+            {
+                // Solve QEF for this component's samples
+                QefResult qef = solveQefSvd(compIntersections, compNormals, compCount, cellMin, cellMax);
+                
+                Vertex v;
+                v.position = (float4)(qef.position.x, qef.position.y, qef.position.z, 1.0f);
+                v.normal = (float4)(qef.normal.x, qef.normal.y, qef.normal.z, 0.0f);
+                outputVertices[vertexIndex + comp] = v;
+            }
+        }
+        
+        // Store edge→component mapping for edges 5, 6, 10 (used by emit_indices)
+        // Default to component 0 for edges not in the sample list
+        uchar edge5Comp = 0, edge6Comp = 0, edge10Comp = 0;
+        for (int i = 0; i < intersectionCount; i++)
+        {
+            int edgeIdx = edgeIndices[i];
+            uchar comp = (uchar)discResult.componentIndices[i];
+            if (edgeIdx == 5) edge5Comp = comp;
+            else if (edgeIdx == 6) edge6Comp = comp;
+            else if (edgeIdx == 10) edge10Comp = comp;
+        }
+        nodes[id].padding[2] = edge5Comp;
+        nodes[id].padding[3] = edge6Comp;
+        nodes[id].padding[4] = edge10Comp;
+    }
 }
 
 // Octree construction kernel
@@ -1004,11 +1305,17 @@ __kernel void emit_halo_neighbors(
 ///
 /// For edges at the MIN corner (0, 3, 8), we also check - if the normal owner
 /// doesn't exist, we emit the quad ourselves to close the boundary.
+///
+/// When disableBoundaryChecks is non-zero (chunked mode), the coord checks for
+/// min (>0) and max (<maxCoord) are bypassed, allowing edges at chunk boundaries
+/// to attempt emission. The findNodeByMorton check still correctly skips edges
+/// where neighbor cells don't exist.
 __kernel void count_quads(
     __global const OctreeNode* nodes,
     __global int* quadCounts,
     const int numNodes,
-    const uint maxCoord)  // Maximum valid coordinate (2^depth - 1)
+    const uint maxCoord,              // Maximum valid coordinate (2^depth - 1)
+    const uint disableBoundaryChecks) // Non-zero to disable boundary coord checks
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
@@ -1024,7 +1331,14 @@ __kernel void count_quads(
     
     ulong3 coords = decodeMorton3(node.mortonCode);
     
-    int count = 0;
+    int count = 0;     // Number of quads (6 indices each)
+    int triCount = 0;  // Number of boundary triangles (3 indices each)
+    
+    // In chunked mode, all boundary checks pass
+    bool const atMinBoundary = (disableBoundaryChecks == 0) && 
+                               (coords.x == 0 || coords.y == 0 || coords.z == 0);
+    bool const atMaxBoundary = (disableBoundaryChecks == 0) &&
+                               (coords.x >= maxCoord || coords.y >= maxCoord || coords.z >= maxCoord);
     
     // =========================================================================
     // Edges at MAX corner (this cell is always the owner)
@@ -1035,8 +1349,8 @@ __kernel void count_quads(
     // Current cell has smallest Morton code since neighbors have larger y and/or z
     if (node.edgeMask & (1 << 6))
     {
-        // Check if neighbors exist within grid bounds
-        if (coords.y < maxCoord && coords.z < maxCoord)
+        // Check if neighbors exist within grid bounds (bypassed in chunked mode)
+        if (disableBoundaryChecks || (coords.y < maxCoord && coords.z < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x, coords.y + 1, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
@@ -1058,7 +1372,7 @@ __kernel void count_quads(
     // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
     if (node.edgeMask & (1 << 5))
     {
-        if (coords.x < maxCoord && coords.z < maxCoord)
+        if (disableBoundaryChecks || (coords.x < maxCoord && coords.z < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
@@ -1079,7 +1393,7 @@ __kernel void count_quads(
     // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
     if (node.edgeMask & (1 << 10))
     {
-        if (coords.x < maxCoord && coords.y < maxCoord)
+        if (disableBoundaryChecks || (coords.x < maxCoord && coords.y < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y + 1, coords.z);
@@ -1098,14 +1412,15 @@ __kernel void count_quads(
     
     // =========================================================================
     // Edges at MIN corner - emit if normal owner doesn't exist (boundary case)
+    // These emit triangles instead of quads (missing 4th vertex)
     // =========================================================================
     
     // Edge 0: X-axis at (y=min, z=min), corners 0-1
     // Normally owned by cell (x, y-1, z-1) via its edge 6
-    // We emit if that cell doesn't exist AND all 4 cells around edge 0 exist
+    // We emit if that cell doesn't exist AND we have 2 neighbors
     if (node.edgeMask & (1 << 0))
     {
-        if (coords.y > 0 && coords.z > 0)
+        if (disableBoundaryChecks || (coords.y > 0 && coords.z > 0))
         {
             // Check if normal owner exists
             ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
@@ -1114,19 +1429,16 @@ __kernel void count_quads(
             // Only emit if owner doesn't exist (we take over)
             if (ownerIdx < 0)
             {
-                // Need all 4 cells: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
                 ulong n1 = encodeMorton3(coords.x, coords.y - 1, coords.z);
                 ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
-                // n3 = ownerMorton (already checked, doesn't exist)
                 
                 int idx1 = findNodeByMorton(nodes, numNodes, n1);
                 int idx2 = findNodeByMorton(nodes, numNodes, n2);
                 
-                // For boundary case, emit if at least 2 neighbors exist
-                // (We use current cell's vertex for missing corners)
+                // Emit triangle if we have 2 neighbors (3 vertices total)
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    count++;
+                    triCount++;  // Count as triangle (3 indices) not quad (6 indices)
                 }
             }
         }
@@ -1136,7 +1448,7 @@ __kernel void count_quads(
     // Normally owned by cell (x-1, y, z-1) via its edge 5
     if (node.edgeMask & (1 << 3))
     {
-        if (coords.x > 0 && coords.z > 0)
+        if (disableBoundaryChecks || (coords.x > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
             int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
@@ -1151,7 +1463,7 @@ __kernel void count_quads(
                 
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    count++;
+                    triCount++;
                 }
             }
         }
@@ -1161,7 +1473,7 @@ __kernel void count_quads(
     // Normally owned by cell (x-1, y-1, z) via its edge 10
     if (node.edgeMask & (1 << 8))
     {
-        if (coords.x > 0 && coords.y > 0)
+        if (disableBoundaryChecks || (coords.x > 0 && coords.y > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
             int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
@@ -1176,26 +1488,57 @@ __kernel void count_quads(
                 
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    count++;
+                    triCount++;
                 }
             }
         }
     }
     
-    // Each quad = 2 triangles = 6 indices
-    quadCounts[id] = count * 6;
+    // Quads = 6 indices each, triangles = 3 indices each
+    quadCounts[id] = count * 6 + triCount * 3;
+}
+
+/// Get the component offset for a specific edge within a cell.
+/// For multi-component cells, the component determines which vertex to use.
+/// padding[2] = edge 5 component, padding[3] = edge 6 component, padding[4] = edge 10 component
+/// 
+/// NOTE: Currently disabled - always returns 0 because component indices are local
+/// to each cell and don't match across neighbors. This causes mismatched vertices.
+/// TODO: Implement global component assignment based on edge normal direction.
+int getEdgeComponentOffset(OctreeNode node, int edgeNum)
+{
+    // DISABLED: Component mapping causes mesh tearing because different cells
+    // may assign the same edge to different component indices.
+    // Always use component 0 (base vertex) for now.
+    return 0;
+    
+    /*
+    // Only edges 5, 6, 10 are processed by emit_indices
+    // For single-component cells, always return 0
+    if (node.padding[1] <= 1) return 0;
+    
+    switch (edgeNum)
+    {
+        case 5:  return (int)node.padding[2];
+        case 6:  return (int)node.padding[3];
+        case 10: return (int)node.padding[4];
+        default: return 0;
+    }
+    */
 }
 
 /// Emit indices for quads (second pass after prefix sum)
 /// Must use the same edges as count_quads (6, 5, 10)
 /// Winding order is determined by the sign of corner 7 (the max corner)
+/// Uses edge→component mapping from padding[2-4] for multi-vertex cells
 __kernel void emit_indices(
     __global OctreeNode const* nodes,
     __global int const* vertexOffsets,
     __global int const* indexOffsets,
     __global uint* outputIndices,
     const int numNodes,
-    const uint maxCoord)
+    const uint maxCoord,
+    const uint disableBoundaryChecks)
 {
     int id = get_global_id(0);
     if (id >= numNodes) return;
@@ -1212,14 +1555,21 @@ __kernel void emit_indices(
     // Corner 7 is at (1,1,1), bit 7 in internalMask
     bool corner7Inside = (node.internalMask & (1 << 7)) != 0;
     
-    // Get vertex index for a cell (1 vertex per cell)
+    // Get vertex index for a cell, accounting for edge→component mapping
+    // For edge 5, 6, 10, use the stored component offset from padding[2-4]
+    // For multi-component cells: vertex = vertexOffsets[nodeIdx] + componentOffset
+    #define GET_VERTEX_FOR_EDGE(nodeIdx, edgeNum) \
+        ((uint)(vertexOffsets[nodeIdx] + getEdgeComponentOffset(nodes[nodeIdx], edgeNum)))
+    
+    // Fallback for boundary edges (0, 3, 8) which don't have component mapping
+    // These are only used for partial boundary triangles, and always use component 0
     #define GET_VERTEX(nodeIdx) ((uint)vertexOffsets[nodeIdx])
     
     // Edge 6: X-axis at (y=max, z=max), corners 7-6: (1,1,1)-(0,1,1)
     // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
     if (node.edgeMask & (1 << 6))
     {
-        if (coords.y < maxCoord && coords.z < maxCoord)
+        if (disableBoundaryChecks || (coords.y < maxCoord && coords.z < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x, coords.y + 1, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
@@ -1231,10 +1581,10 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX(id);
-                uint v1 = GET_VERTEX(nIdx1);
-                uint v2 = GET_VERTEX(nIdx2);
-                uint v3 = GET_VERTEX(nIdx3);
+                uint v0 = GET_VERTEX_FOR_EDGE(id, 6);
+                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 6);
+                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 6);
+                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 6);
                 
                 // Emit 2 triangles for quad
                 // Winding depends on whether corner 7 is inside
@@ -1270,7 +1620,7 @@ __kernel void emit_indices(
     // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
     if (node.edgeMask & (1 << 5))
     {
-        if (coords.x < maxCoord && coords.z < maxCoord)
+        if (disableBoundaryChecks || (coords.x < maxCoord && coords.z < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
@@ -1282,10 +1632,10 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX(id);
-                uint v1 = GET_VERTEX(nIdx1);
-                uint v2 = GET_VERTEX(nIdx2);
-                uint v3 = GET_VERTEX(nIdx3);
+                uint v0 = GET_VERTEX_FOR_EDGE(id, 5);
+                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 5);
+                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 5);
+                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 5);
                 
                 // INVERTED logic compared to edges 6 and 10
                 if (corner7Inside)
@@ -1320,7 +1670,7 @@ __kernel void emit_indices(
     // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
     if (node.edgeMask & (1 << 10))
     {
-        if (coords.x < maxCoord && coords.y < maxCoord)
+        if (disableBoundaryChecks || (coords.x < maxCoord && coords.y < maxCoord))
         {
             ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
             ulong nMorton2 = encodeMorton3(coords.x, coords.y + 1, coords.z);
@@ -1332,10 +1682,10 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX(id);
-                uint v1 = GET_VERTEX(nIdx1);
-                uint v2 = GET_VERTEX(nIdx2);
-                uint v3 = GET_VERTEX(nIdx3);
+                uint v0 = GET_VERTEX_FOR_EDGE(id, 10);
+                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 10);
+                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 10);
+                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 10);
                 
                 if (corner7Inside)
                 {
@@ -1364,14 +1714,15 @@ __kernel void emit_indices(
     }
     
     // =========================================================================
-    // Boundary edges at MIN corner - emit if normal owner doesn't exist
+    // Boundary edges at MIN corner - emit TRIANGULAR cap if normal owner doesn't exist
+    // These edges have only 3 vertices (owner cell missing), so we emit single triangles
     // =========================================================================
     
     // Edge 0: X-axis at (y=min, z=min)
     // Normally owned by cell (x, y-1, z-1) via its edge 6
     if (node.edgeMask & (1 << 0))
     {
-        if (coords.y > 0 && coords.z > 0)
+        if (disableBoundaryChecks || (coords.y > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
             int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
@@ -1389,34 +1740,25 @@ __kernel void emit_indices(
                     uint v0 = GET_VERTEX(id);
                     uint v1 = GET_VERTEX(idx1);  // y-1
                     uint v2 = GET_VERTEX(idx2);  // z-1
-                    // v3 (owner) doesn't exist - use degenerate triangle with v0
                     
                     // Corner 0 is at (0,0,0), bit 0 in internalMask
                     bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
                     
-                    // Emit degenerate quad (triangle) - skip the missing vertex
+                    // Emit single triangle with correct winding
                     if (corner0Inside)
                     {
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v1;
                         outputIndices[writeOffset + 2] = v2;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v2;
-                        outputIndices[writeOffset + 5] = v1;  // Degenerate, will be culled
                     }
                     else
                     {
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v2;
                         outputIndices[writeOffset + 2] = v1;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v1;
-                        outputIndices[writeOffset + 5] = v2;  // Degenerate
                     }
                     
-                    writeOffset += 6;
+                    writeOffset += 3;
                 }
             }
         }
@@ -1425,7 +1767,7 @@ __kernel void emit_indices(
     // Edge 3: Y-axis at (x=min, z=min)
     if (node.edgeMask & (1 << 3))
     {
-        if (coords.x > 0 && coords.z > 0)
+        if (disableBoundaryChecks || (coords.x > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
             int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
@@ -1451,23 +1793,15 @@ __kernel void emit_indices(
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v1;
                         outputIndices[writeOffset + 2] = v2;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v2;
-                        outputIndices[writeOffset + 5] = v1;
                     }
                     else
                     {
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v2;
                         outputIndices[writeOffset + 2] = v1;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v1;
-                        outputIndices[writeOffset + 5] = v2;
                     }
                     
-                    writeOffset += 6;
+                    writeOffset += 3;
                 }
             }
         }
@@ -1476,7 +1810,7 @@ __kernel void emit_indices(
     // Edge 8: Z-axis at (x=min, y=min)
     if (node.edgeMask & (1 << 8))
     {
-        if (coords.x > 0 && coords.y > 0)
+        if (disableBoundaryChecks || (coords.x > 0 && coords.y > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
             int ownerIdx = findNodeByMorton(nodes, numNodes, ownerMorton);
@@ -1502,23 +1836,15 @@ __kernel void emit_indices(
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v1;
                         outputIndices[writeOffset + 2] = v2;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v2;
-                        outputIndices[writeOffset + 5] = v1;
                     }
                     else
                     {
                         outputIndices[writeOffset + 0] = v0;
                         outputIndices[writeOffset + 1] = v2;
                         outputIndices[writeOffset + 2] = v1;
-                        
-                        outputIndices[writeOffset + 3] = v0;
-                        outputIndices[writeOffset + 4] = v1;
-                        outputIndices[writeOffset + 5] = v2;
                     }
                     
-                    writeOffset += 6;
+                    writeOffset += 3;
                 }
             }
         }
@@ -1526,3 +1852,472 @@ __kernel void emit_indices(
     
     #undef GET_VERTEX
 }
+
+// ============================================================================
+// Diagnostic Kernel for Boundary Hole Analysis (Extended)
+// ============================================================================
+//
+// This kernel collects statistics about ALL 12 edges and their emission status.
+// It helps identify which edges are responsible for holes.
+//
+// Diagnostic counters (24 ints):
+// For each of 12 edges (0-11), we store 2 counters:
+// [edge*2]   = emitted count
+// [edge*2+1] = skipped count (either bbox boundary or missing neighbor)
+// ============================================================================
+
+__kernel void count_quads_diagnostic(
+    __global const OctreeNode* nodes,
+    __global int* diagnosticCounters,  // Array of 24 ints
+    const int numNodes,
+    const uint maxCoord)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+    
+    OctreeNode node = nodes[id];
+    
+    // Skip cells without surface
+    if (node.edgeMask == 0) return;
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    
+    // Edge neighbor lookup - each edge is shared by 4 cells
+    // For edge at position (ex, ey, ez) axis A:
+    // The 4 cells are at offsets in the 2 non-A axes
+    
+    // Edge 0: X-axis at (y=0, z=0), corners 0-1
+    // Shared by: (x,y,z), (x,y-1,z), (x,y,z-1), (x,y-1,z-1)
+    // Owned by cell (x,y-1,z-1) via edge 6
+    if (node.edgeMask & (1 << 0))
+    {
+        if (coords.y == 0 || coords.z == 0)
+        {
+            atomic_inc(&diagnosticCounters[1]);  // at boundary, can't form full quad
+        }
+        else
+        {
+            // Check if owner cell exists
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[0]);  // owner will emit
+            }
+            else
+            {
+                // We take over, but check if we can form the quad
+                ulong n1 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    atomic_inc(&diagnosticCounters[0]);  // we emit
+                }
+                else
+                {
+                    atomic_inc(&diagnosticCounters[1]);  // skipped
+                }
+            }
+        }
+    }
+    
+    // Edge 1: Y-axis at (x=1, z=0), corners 1-3
+    // Shared by: (x,y,z), (x+1,y,z), (x,y,z-1), (x+1,y,z-1)
+    // Owned by cell (x,y,z-1) via edge 5
+    if (node.edgeMask & (1 << 1))
+    {
+        if (coords.z == 0)
+        {
+            atomic_inc(&diagnosticCounters[3]);  // at boundary
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y, coords.z - 1);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[2]);  // owner will emit
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[3]);  // skipped - no emission path
+            }
+        }
+    }
+    
+    // Edge 2: X-axis at (y=1, z=0), corners 2-3
+    // Shared by: (x,y,z), (x,y+1,z), (x,y,z-1), (x,y+1,z-1)
+    // Owned by cell (x,y,z-1) via edge 6
+    if (node.edgeMask & (1 << 2))
+    {
+        if (coords.z == 0)
+        {
+            atomic_inc(&diagnosticCounters[5]);  // at boundary
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y, coords.z - 1);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[4]);  // owner will emit
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[5]);  // skipped
+            }
+        }
+    }
+    
+    // Edge 3: Y-axis at (x=0, z=0), corners 0-2
+    // Shared by: (x,y,z), (x-1,y,z), (x,y,z-1), (x-1,y,z-1)
+    // Owned by cell (x-1,y,z-1) via edge 5
+    if (node.edgeMask & (1 << 3))
+    {
+        if (coords.x == 0 || coords.z == 0)
+        {
+            atomic_inc(&diagnosticCounters[7]);  // at boundary
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[6]);  // owner will emit
+            }
+            else
+            {
+                // We take over
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y, coords.z - 1);
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    atomic_inc(&diagnosticCounters[6]);
+                }
+                else
+                {
+                    atomic_inc(&diagnosticCounters[7]);
+                }
+            }
+        }
+    }
+    
+    // Edge 4: X-axis at (y=0, z=1), corners 4-5
+    // Shared by: (x,y,z), (x,y-1,z), (x,y,z+1), (x,y-1,z+1)
+    // Owned by cell (x,y-1,z) via edge 6
+    if (node.edgeMask & (1 << 4))
+    {
+        if (coords.y == 0)
+        {
+            atomic_inc(&diagnosticCounters[9]);  // at boundary
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[8]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[9]);
+            }
+        }
+    }
+    
+    // Edge 5: Y-axis at (x=1, z=1), corners 5-7
+    // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
+    // This cell owns it!
+    if (node.edgeMask & (1 << 5))
+    {
+        if (coords.x >= maxCoord || coords.z >= maxCoord)
+        {
+            atomic_inc(&diagnosticCounters[11]);  // at bbox boundary
+        }
+        else
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                atomic_inc(&diagnosticCounters[10]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[11]);
+            }
+        }
+    }
+    
+    // Edge 6: X-axis at (y=1, z=1), corners 6-7
+    // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
+    // This cell owns it!
+    if (node.edgeMask & (1 << 6))
+    {
+        if (coords.y >= maxCoord || coords.z >= maxCoord)
+        {
+            atomic_inc(&diagnosticCounters[13]);
+        }
+        else
+        {
+            ulong nMorton1 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y, coords.z + 1);
+            ulong nMorton3 = encodeMorton3(coords.x, coords.y + 1, coords.z + 1);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                atomic_inc(&diagnosticCounters[12]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[13]);
+            }
+        }
+    }
+    
+    // Edge 7: Y-axis at (x=0, z=1), corners 4-6
+    // Shared by: (x,y,z), (x-1,y,z), (x,y,z+1), (x-1,y,z+1)
+    // Owned by cell (x-1,y,z) via edge 5
+    if (node.edgeMask & (1 << 7))
+    {
+        if (coords.x == 0)
+        {
+            atomic_inc(&diagnosticCounters[15]);
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[14]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[15]);
+            }
+        }
+    }
+    
+    // Edge 8: Z-axis at (x=0, y=0), corners 0-4
+    // Shared by: (x,y,z), (x-1,y,z), (x,y-1,z), (x-1,y-1,z)
+    // Owned by cell (x-1,y-1,z) via edge 10
+    if (node.edgeMask & (1 << 8))
+    {
+        if (coords.x == 0 || coords.y == 0)
+        {
+            atomic_inc(&diagnosticCounters[17]);
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[16]);
+            }
+            else
+            {
+                ulong n1 = encodeMorton3(coords.x - 1, coords.y, coords.z);
+                ulong n2 = encodeMorton3(coords.x, coords.y - 1, coords.z);
+                int idx1 = findNodeByMorton(nodes, numNodes, n1);
+                int idx2 = findNodeByMorton(nodes, numNodes, n2);
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    atomic_inc(&diagnosticCounters[16]);
+                }
+                else
+                {
+                    atomic_inc(&diagnosticCounters[17]);
+                }
+            }
+        }
+    }
+    
+    // Edge 9: Z-axis at (x=1, y=0), corners 1-5
+    // Shared by: (x,y,z), (x+1,y,z), (x,y-1,z), (x+1,y-1,z)
+    // Owned by cell (x,y-1,z) via edge 10
+    if (node.edgeMask & (1 << 9))
+    {
+        if (coords.y == 0)
+        {
+            atomic_inc(&diagnosticCounters[19]);
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[18]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[19]);
+            }
+        }
+    }
+    
+    // Edge 10: Z-axis at (x=1, y=1), corners 3-7
+    // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
+    // This cell owns it!
+    if (node.edgeMask & (1 << 10))
+    {
+        if (coords.x >= maxCoord || coords.y >= maxCoord)
+        {
+            atomic_inc(&diagnosticCounters[21]);
+        }
+        else
+        {
+            ulong nMorton1 = encodeMorton3(coords.x + 1, coords.y, coords.z);
+            ulong nMorton2 = encodeMorton3(coords.x, coords.y + 1, coords.z);
+            ulong nMorton3 = encodeMorton3(coords.x + 1, coords.y + 1, coords.z);
+            
+            int nIdx1 = findNodeByMorton(nodes, numNodes, nMorton1);
+            int nIdx2 = findNodeByMorton(nodes, numNodes, nMorton2);
+            int nIdx3 = findNodeByMorton(nodes, numNodes, nMorton3);
+            
+            if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
+            {
+                atomic_inc(&diagnosticCounters[20]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[21]);
+            }
+        }
+    }
+    
+    // Edge 11: Z-axis at (x=0, y=1), corners 2-6
+    // Shared by: (x,y,z), (x-1,y,z), (x,y+1,z), (x-1,y+1,z)
+    // Owned by cell (x-1,y,z) via edge 10
+    if (node.edgeMask & (1 << 11))
+    {
+        if (coords.x == 0)
+        {
+            atomic_inc(&diagnosticCounters[23]);
+        }
+        else
+        {
+            ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z);
+            if (findNodeByMorton(nodes, numNodes, ownerMorton) >= 0)
+            {
+                atomic_inc(&diagnosticCounters[22]);
+            }
+            else
+            {
+                atomic_inc(&diagnosticCounters[23]);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Discontinuity Diagnostic Kernel
+// Counts cells that have gradient discontinuities (multiple surface components)
+// Diagnostic counters layout (8 ints):
+// [0] = cells with 1 component (smooth surface)
+// [1] = cells with 2 components (one discontinuity)
+// [2] = cells with 3 components
+// [3] = cells with 4 components
+// [4] = total cells analyzed
+// [5] = sum of discontinuity scores (scaled by 1000)
+// [6] = cells with discontinuity score > 0.5
+// [7] = reserved
+// ============================================================================
+
+__kernel void count_discontinuities_diagnostic(
+    __global OctreeNode const* nodes,
+    __global int* discontinuityCounters,  // Array of 8 ints
+    const int numNodes,
+    const float3 bboxMin,
+    const float3 bboxMax,
+    PAYLOAD_ARGS,
+    const float isoValue,
+    const float gradientEpsilon)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+
+    OctreeNode node = nodes[id];
+    
+    // Skip halo nodes and cells without surface
+    if (node.padding[0] == 1) return;
+    if (node.edgeMask == 0) return;
+    
+    // Get cell bounds
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    float3 cellMax = cellMin + cellExtent;
+    
+    // Sample SDF at 8 corners
+    float cornerValues[8];
+    for (int corner = 0; corner < 8; corner++)
+    {
+        int cx = (corner >> 0) & 1;
+        int cy = (corner >> 1) & 1;
+        int cz = (corner >> 2) & 1;
+        
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
+        float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+        cornerValues[corner] = sdfResult.w - isoValue;
+    }
+    
+    // Edge table
+    const int edgeCorners[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},  // Bottom face
+        {4,5}, {5,7}, {7,6}, {6,4},  // Top face
+        {0,4}, {1,5}, {3,7}, {2,6}   // Vertical edges
+    };
+    
+    // Collect edge intersection normals
+    float3 normals[12];
+    int intersectionCount = 0;
+    
+    for (int e = 0; e < 12; e++)
+    {
+        if ((node.edgeMask & (1 << e)) == 0) continue;
+        
+        int c0 = edgeCorners[e][0];
+        int c1 = edgeCorners[e][1];
+        
+        int cx0 = (c0 >> 0) & 1, cy0 = (c0 >> 1) & 1, cz0 = (c0 >> 2) & 1;
+        int cx1 = (c1 >> 0) & 1, cy1 = (c1 >> 1) & 1, cz1 = (c1 >> 2) & 1;
+        
+        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellExtent;
+        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellExtent;
+        
+        float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
+        normals[intersectionCount] = computeGradientWithEps(intersection, gradientEpsilon, PASS_PAYLOAD_ARGS);
+        intersectionCount++;
+    }
+    
+    // Detect gradient discontinuities
+    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+    
+    // Update counters
+    atomic_inc(&discontinuityCounters[4]); // Total cells
+    
+    int compIdx = clamp(discResult.componentCount - 1, 0, 3);
+    atomic_inc(&discontinuityCounters[compIdx]);
+    
+    // Track discontinuity scores
+    int scoreScaled = (int)(discResult.discontinuityScore * 1000.0f);
+    atomic_add(&discontinuityCounters[5], scoreScaled);
+    
+    if (discResult.discontinuityScore > 0.5f)
+    {
+        atomic_inc(&discontinuityCounters[6]);
+    }
+}
+

@@ -122,6 +122,9 @@ namespace gladius::compute
             std::cout << "  minFeatureSize: " << m_config.minFeatureSize 
                       << ", maxDepth: " << m_config.maxDepth << std::endl;
             
+            // Enable chunked mode - disables maxCoord boundary check in generateIndices()
+            m_isChunkedMode = true;
+            
             std::vector<ChunkInfo> chunks = generateChunkGrid();
             std::size_t processedChunks = 0U;
             std::size_t emptyChunks = 0U;
@@ -146,9 +149,9 @@ namespace gladius::compute
                 ManifoldDualContouringMesh chunkMesh;
                 generateMeshForChunk(chunk, chunkMesh);
                 
-                // Note: Disabled clipping and snapping
-                // Relying on overlap + welding to connect chunks
-                // Each chunk may generate some duplicate geometry in padding region
+                // Clip triangles to core region to avoid duplicate geometry in overlap areas
+                // Each triangle is kept only if its centroid is within the chunk's core region
+                clipMeshToCore(chunkMesh, chunk);
                 
                 if (chunkMesh.positions.empty())
                 {
@@ -196,10 +199,14 @@ namespace gladius::compute
                 // should be within this distance
                 fillBoundaryGaps(voxelSize * 1.5F);
             }
+            
+            // Reset chunked mode flag
+            m_isChunkedMode = false;
             }
             else
             {
-                // Original single-pass processing
+                // Original single-pass processing (not chunked)
+                m_isChunkedMode = false;
                 constructOctree();
                 generateVertices();
                 generateIndices();
@@ -351,12 +358,12 @@ namespace gladius::compute
         // Use 10% of voxel size for gradient computation - balances detail vs noise
         float const gradientEpsilon = voxelSize * 0.1f;
         
-        // 1. Count vertices (1-4 per cell based on normal clustering)
+        // 1. Count vertices (1-4 per cell based on discontinuity detection)
         m_countBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
         
         try {
             m_program->countVertices(*m_octreeBuffer, *m_countBuffer, numNodes,
-                                    bboxMin, bboxMax, *primitives, m_config.isoValue);
+                                    bboxMin, bboxMax, *primitives, m_config.isoValue, gradientEpsilon);
         } catch (std::exception& e) {
             std::cerr << "Error running count_vertices: " << e.what() << std::endl;
             return;
@@ -481,11 +488,15 @@ namespace gladius::compute
 
             // Calculate maxCoord for bounds checking in kernels (2^depth - 1)
             std::uint32_t const maxCoord = m_gridResolution - 1U;
+            
+            // In chunked mode, disable boundary checks since chunk boundaries
+            // are internal and we want to emit quads there
+            std::uint32_t const disableBoundaryChecks = m_isChunkedMode ? 1U : 0U;
 
             // 1. Count quads per cell
             auto quadCountBuffer =
                 context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * sizeof(int));
-            m_program->countQuads(*m_octreeBuffer, *quadCountBuffer, numNodes, maxCoord);
+            m_program->countQuads(*m_octreeBuffer, *quadCountBuffer, numNodes, maxCoord, disableBoundaryChecks);
 
             // 2. CPU-side prefix sum for index offsets
             std::vector<int> quadCounts(numNodes);
@@ -501,6 +512,82 @@ namespace gladius::compute
             }
             std::cout << "Quad counting: " << totalQuads << " quads from " << cellsWithQuads 
                       << " cells (of " << numNodes << " total nodes)" << std::endl;
+
+            // Run diagnostic analysis to understand boundary hole causes
+            auto diagnostics = m_program->runQuadDiagnostics(*m_octreeBuffer, numNodes, maxCoord);
+            std::cout << "\n=== Boundary Hole Diagnostics (All 12 Edges) ===" << std::endl;
+            
+            // Edge axis names for better readability
+            static char const * edgeNames[] = {
+                "Edge  0 (X at y=0,z=0)",  // corners 0-1
+                "Edge  1 (Y at x=1,z=0)",  // corners 1-3
+                "Edge  2 (X at y=1,z=0)",  // corners 2-3
+                "Edge  3 (Y at x=0,z=0)",  // corners 0-2
+                "Edge  4 (X at y=0,z=1)",  // corners 4-5
+                "Edge  5 (Y at x=1,z=1)",  // corners 5-7, owner
+                "Edge  6 (X at y=1,z=1)",  // corners 6-7, owner
+                "Edge  7 (Y at x=0,z=1)",  // corners 4-6
+                "Edge  8 (Z at x=0,y=0)",  // corners 0-4
+                "Edge  9 (Z at x=1,y=0)",  // corners 1-5
+                "Edge 10 (Z at x=1,y=1)",  // corners 3-7, owner
+                "Edge 11 (Z at x=0,y=1)"   // corners 2-6
+            };
+            
+            int totalEmitted = 0;
+            int totalSkipped = 0;
+            for (int e = 0; e < 12; ++e)
+            {
+                int emitted = diagnostics.edgeEmitted[static_cast<std::size_t>(e)];
+                int skipped = diagnostics.edgeSkipped[static_cast<std::size_t>(e)];
+                if (emitted > 0 || skipped > 0)
+                {
+                    std::cout << edgeNames[e] << ": emitted=" << emitted << ", skipped=" << skipped << std::endl;
+                }
+                totalEmitted += emitted;
+                totalSkipped += skipped;
+            }
+            std::cout << "Summary: " << totalEmitted << " edges emitted, " << totalSkipped << " edges skipped" << std::endl;
+            std::cout << "=================================================\n" << std::endl;
+
+            // Run discontinuity diagnostic to detect CSG-related gradient issues
+            BBox paddedBbox;
+            paddedBbox.extend(m_cachedBboxMin);
+            paddedBbox.extend(m_cachedBboxMax);
+            Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
+            float const maxExtent = bboxSize.maxCoeff();
+            float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+            float const gradientEpsilon = voxelSize * 0.1F;
+            
+            // Get primitives for discontinuity diagnostic
+            auto primitives = m_core.getPrimitives();
+            if (primitives)
+            {
+                auto discDiag = m_program->runDiscontinuityDiagnostics(
+                    *m_octreeBuffer, numNodes, paddedBbox, *primitives, m_config.isoValue, gradientEpsilon);
+                
+                if (discDiag.cells2Components > 0 || discDiag.cells3Components > 0 || discDiag.cells4Components > 0)
+                {
+                    std::cout << "\n=== Gradient Discontinuity Analysis ===" << std::endl;
+                    std::cout << "Cells analyzed: " << discDiag.totalCells << std::endl;
+                    std::cout << "  1 component (smooth): " << discDiag.cells1Component 
+                              << " (" << (100.0F * static_cast<float>(discDiag.cells1Component) / 
+                                         static_cast<float>(discDiag.totalCells)) << "%)" << std::endl;
+                    std::cout << "  2 components: " << discDiag.cells2Components 
+                              << " (" << (100.0F * static_cast<float>(discDiag.cells2Components) / 
+                                         static_cast<float>(discDiag.totalCells)) << "%)" << std::endl;
+                    if (discDiag.cells3Components > 0)
+                    {
+                        std::cout << "  3 components: " << discDiag.cells3Components << std::endl;
+                    }
+                    if (discDiag.cells4Components > 0)
+                    {
+                        std::cout << "  4 components: " << discDiag.cells4Components << std::endl;
+                    }
+                    std::cout << "Average discontinuity score: " << discDiag.avgDiscontinuityScore << std::endl;
+                    std::cout << "Severe discontinuities (>0.5): " << discDiag.severeDiscontinuities << std::endl;
+                    std::cout << "========================================\n" << std::endl;
+                }
+            }
 
             std::vector<int> indexOffsets(numNodes);
             int totalIndices = 0;
@@ -524,7 +611,7 @@ namespace gladius::compute
 
             m_program->generateIndices(
                 *m_octreeBuffer, *m_offsetBuffer, *indexOffsetBuffer,
-                *m_indexBuffer, numNodes, maxCoord);
+                *m_indexBuffer, numNodes, maxCoord, disableBoundaryChecks);
 
             // 5. Read back indices
             m_mesh.indices.resize(static_cast<std::size_t>(totalIndices));
@@ -1483,9 +1570,11 @@ namespace gladius::compute
         // Chunk size in world units (aligned to global grid)
         Eigen::Vector3f const chunkSize = globalVoxelSize * static_cast<float>(cellsPerChunk);
         
-        // For DC, we need 1 extra cell at each internal boundary to generate boundary quads
-        // The boundary cells will be duplicated in adjacent chunks, but at exact same positions
-        Eigen::Vector3f const boundaryPadding = globalVoxelSize;
+        // For DC, we need 2 extra cells at each internal boundary:
+        // - Cell at boundary edge needs neighbor at +1 offset for quad generation
+        // - So the cell at boundary (at +1 padding) needs its neighbor (at +2 padding)
+        // The boundary cells will be duplicated in adjacent chunks, but clipping removes duplicates
+        Eigen::Vector3f const boundaryPadding = globalVoxelSize * 2.0F;
         
         chunks.reserve(divisor * divisor * divisor);
         
