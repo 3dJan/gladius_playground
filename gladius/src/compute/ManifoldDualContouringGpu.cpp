@@ -2004,14 +2004,15 @@ namespace gladius::compute
         };
         
         // Collect boundary edges (used by only 1 triangle) with their original direction
-        // Skip edges that lie on the bounding box faces (legitimate open boundaries)
+        // Separate internal edges from bbox boundary edges for different handling
         struct BoundaryEdge
         {
             DirectedEdge edge;
             std::uint32_t thirdVertex;  // Third vertex of original triangle (for normal)
         };
-        std::vector<BoundaryEdge> boundaryEdges;
-        std::size_t skippedBboxEdges = 0U;
+        std::vector<BoundaryEdge> boundaryEdges;      // Internal boundary edges
+        std::vector<BoundaryEdge> bboxBoundaryEdges;  // Edges on bbox faces (need capping)
+        
         for (auto const & [edge, info] : edgeInfo)
         {
             if (info.count == 1U)
@@ -2022,31 +2023,24 @@ namespace gladius::compute
                 
                 if (isOnBboxFace(p0) && isOnBboxFace(p1))
                 {
-                    // Skip edges on bbox faces - these are legitimate open boundaries
-                    ++skippedBboxEdges;
-                    continue;
+                    // Collect bbox boundary edges for capping (CSG intersection boundaries)
+                    bboxBoundaryEdges.push_back({info.directedEdge, info.thirdVertex});
                 }
-                
-                boundaryEdges.push_back({info.directedEdge, info.thirdVertex});
+                else
+                {
+                    boundaryEdges.push_back({info.directedEdge, info.thirdVertex});
+                }
             }
         }
         
-        if (boundaryEdges.empty())
+        if (boundaryEdges.empty() && bboxBoundaryEdges.empty())
         {
-            if (skippedBboxEdges > 0U)
-            {
-                std::cout << "  Gap filling: No internal boundary edges found (" 
-                          << skippedBboxEdges << " edges on bbox boundary skipped)" << std::endl;
-            }
-            else
-            {
-                std::cout << "  Gap filling: No boundary edges found - mesh is closed" << std::endl;
-            }
+            std::cout << "  Gap filling: No boundary edges found - mesh is closed" << std::endl;
             return;
         }
         
         std::cout << "  Gap filling: Found " << boundaryEdges.size() << " internal boundary edges"
-                  << " (" << skippedBboxEdges << " on bbox boundary skipped)" << std::endl;
+                  << ", " << bboxBoundaryEdges.size() << " on bbox boundary (will cap)" << std::endl;
         
         // Build spatial hash for edge midpoints
         float const searchRadiusSq = searchRadius * searchRadius;
@@ -2255,9 +2249,412 @@ namespace gladius::compute
                       << " bridge triangles, " << remainingBoundary 
                       << " boundary edges remain" << std::endl;
         }
-        else
+        else if (!boundaryEdges.empty())
         {
             std::cout << "  Gap filling: No matching edge pairs found" << std::endl;
+        }
+        
+        // ========================================================================
+        // Phase 2: Cap bbox boundary edges (CSG intersection boundaries)
+        // These edges form closed loops on each bbox face that need triangulation
+        // ========================================================================
+        if (!bboxBoundaryEdges.empty())
+        {
+            std::vector<std::uint32_t> capTriangles;
+            
+            // Build adjacency map for bbox boundary edges: vertex -> list of edges starting there
+            std::unordered_map<std::uint32_t, std::vector<std::size_t>> vertexToEdges;
+            for (std::size_t i = 0U; i < bboxBoundaryEdges.size(); ++i)
+            {
+                vertexToEdges[bboxBoundaryEdges[i].edge.v0].push_back(i);
+            }
+            
+            // Track which edges have been used in loops
+            std::vector<bool> bboxEdgeUsed(bboxBoundaryEdges.size(), false);
+            std::size_t loopCount = 0U;
+            std::size_t cappedEdges = 0U;
+            
+            // Find and triangulate closed loops
+            for (std::size_t startIdx = 0U; startIdx < bboxBoundaryEdges.size(); ++startIdx)
+            {
+                if (bboxEdgeUsed[startIdx])
+                {
+                    continue;
+                }
+                
+                // Try to build a closed loop starting from this edge
+                // Don't mark edges as used until we confirm the loop is closed
+                std::vector<std::size_t> loopEdgeIndices;  // Edge indices in the loop
+                std::vector<std::uint32_t> loopVertices;   // Vertex sequence
+                std::set<std::size_t> visitedEdges;        // Edges in current attempt
+                
+                std::size_t currentIdx = startIdx;
+                std::uint32_t startVertex = bboxBoundaryEdges[startIdx].edge.v0;
+                
+                bool foundLoop = false;
+                std::size_t const maxLoopSize = 1000U;  // Prevent infinite loops
+                
+                while (loopEdgeIndices.size() < maxLoopSize)
+                {
+                    if (bboxEdgeUsed[currentIdx] || visitedEdges.count(currentIdx) > 0)
+                    {
+                        break;  // Already used or visited in this attempt
+                    }
+                    
+                    BoundaryEdge const & edge = bboxBoundaryEdges[currentIdx];
+                    loopEdgeIndices.push_back(currentIdx);
+                    loopVertices.push_back(edge.edge.v0);
+                    visitedEdges.insert(currentIdx);
+                    
+                    std::uint32_t nextVertex = edge.edge.v1;
+                    
+                    // Check if we closed the loop
+                    if (nextVertex == startVertex && loopVertices.size() >= 3U)
+                    {
+                        foundLoop = true;
+                        break;
+                    }
+                    
+                    // Find next edge in the chain
+                    auto it = vertexToEdges.find(nextVertex);
+                    if (it == vertexToEdges.end() || it->second.empty())
+                    {
+                        break;  // Dead end
+                    }
+                    
+                    // Find an unused edge from this vertex
+                    bool foundNext = false;
+                    for (std::size_t nextIdx : it->second)
+                    {
+                        if (!bboxEdgeUsed[nextIdx] && visitedEdges.count(nextIdx) == 0)
+                        {
+                            currentIdx = nextIdx;
+                            foundNext = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!foundNext)
+                    {
+                        break;  // No more edges
+                    }
+                }
+                
+                // If we found a closed loop with at least 3 vertices, triangulate it
+                if (foundLoop && loopVertices.size() >= 3U)
+                {
+                    // Mark all edges in this loop as used
+                    for (std::size_t edgeIdx : loopEdgeIndices)
+                    {
+                        bboxEdgeUsed[edgeIdx] = true;
+                    }
+                    
+                    ++loopCount;
+                    cappedEdges += loopVertices.size();
+                    
+                    // Get the average normal from original triangles (for winding)
+                    Eigen::Vector3f avgNormal = Eigen::Vector3f::Zero();
+                    for (std::size_t i = 0U; i < loopVertices.size(); ++i)
+                    {
+                        std::uint32_t v0 = loopVertices[i];
+                        std::uint32_t v1 = loopVertices[(i + 1U) % loopVertices.size()];
+                        
+                        // Find the original edge to get its third vertex
+                        for (auto const & be : bboxBoundaryEdges)
+                        {
+                            if (be.edge.v0 == v0 && be.edge.v1 == v1)
+                            {
+                                Eigen::Vector3f const & p0 = m_mesh.positions[be.edge.v0];
+                                Eigen::Vector3f const & p1 = m_mesh.positions[be.edge.v1];
+                                Eigen::Vector3f const & p2 = m_mesh.positions[be.thirdVertex];
+                                avgNormal += (p1 - p0).cross(p2 - p0).normalized();
+                                break;
+                            }
+                        }
+                    }
+                    if (avgNormal.squaredNorm() > 0.0F)
+                    {
+                        avgNormal.normalize();
+                    }
+                    
+                    // Simple fan triangulation from first vertex
+                    // Works well for convex-ish loops, may need ear-clipping for complex ones
+                    std::uint32_t const anchor = loopVertices[0];
+                    for (std::size_t i = 1U; i + 1U < loopVertices.size(); ++i)
+                    {
+                        std::uint32_t v1 = loopVertices[i];
+                        std::uint32_t v2 = loopVertices[i + 1U];
+                        
+                        // Skip degenerate triangles
+                        if (anchor == v1 || v1 == v2 || v2 == anchor)
+                        {
+                            continue;
+                        }
+                        
+                        // Check winding and emit triangle
+                        Eigen::Vector3f const & p0 = m_mesh.positions[anchor];
+                        Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+                        Eigen::Vector3f const & p2 = m_mesh.positions[v2];
+                        
+                        Eigen::Vector3f triNormal = (p1 - p0).cross(p2 - p0);
+                        if (triNormal.squaredNorm() < 1e-12F)
+                        {
+                            continue;  // Degenerate
+                        }
+                        
+                        // Emit with correct winding based on average normal
+                        if (triNormal.dot(avgNormal) >= 0.0F)
+                        {
+                            capTriangles.push_back(anchor);
+                            capTriangles.push_back(v1);
+                            capTriangles.push_back(v2);
+                        }
+                        else
+                        {
+                            capTriangles.push_back(anchor);
+                            capTriangles.push_back(v2);
+                            capTriangles.push_back(v1);
+                        }
+                    }
+                }
+            }
+            
+            // Add cap triangles to mesh
+            if (!capTriangles.empty())
+            {
+                std::size_t const capTriCount = capTriangles.size() / 3U;
+                m_mesh.indices.insert(m_mesh.indices.end(),
+                                      capTriangles.begin(),
+                                      capTriangles.end());
+                
+                std::size_t uncappedEdges = 0U;
+                for (bool used : bboxEdgeUsed)
+                {
+                    if (!used)
+                    {
+                        ++uncappedEdges;
+                    }
+                }
+                
+                std::cout << "  Bbox capping: Created " << capTriCount
+                          << " cap triangles from " << loopCount << " loops"
+                          << " (capped " << cappedEdges << " edges"
+                          << ", " << uncappedEdges << " remain)" << std::endl;
+            }
+            else
+            {
+                std::cout << "  Bbox capping: No closed loops found in " 
+                          << bboxBoundaryEdges.size() << " bbox boundary edges" << std::endl;
+            }
+            
+            // ----------------------------------------------------------------
+            // Phase 2b: Stitch remaining uncapped bbox boundary edges
+            // Use spatial hashing to find nearby edges and create bridge triangles
+            // ----------------------------------------------------------------
+            std::size_t uncappedCount = 0U;
+            for (bool used : bboxEdgeUsed)
+            {
+                if (!used)
+                {
+                    ++uncappedCount;
+                }
+            }
+            
+            if (uncappedCount > 0U)
+            {
+                // Build spatial hash for uncapped bbox edge midpoints
+                float const bboxStitchRadius = searchRadius * 2.0F;  // Slightly larger radius
+                float const bboxStitchRadiusSq = bboxStitchRadius * bboxStitchRadius;
+                float const bboxCellSize = bboxStitchRadius * 2.0F;
+                float const bboxInvCellSize = 1.0F / bboxCellSize;
+                
+                std::unordered_map<std::uint64_t, std::vector<std::size_t>> bboxEdgeSpatialHash;
+                std::vector<Eigen::Vector3f> bboxEdgeMidpoints(bboxBoundaryEdges.size());
+                
+                auto bboxHashPos = [bboxInvCellSize](Eigen::Vector3f const & pos) -> std::uint64_t
+                {
+                    auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * bboxInvCellSize));
+                    auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * bboxInvCellSize));
+                    auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * bboxInvCellSize));
+                    std::uint64_t const hx = static_cast<std::uint64_t>(ix) & 0x1FFFFF;
+                    std::uint64_t const hy = static_cast<std::uint64_t>(iy) & 0x1FFFFF;
+                    std::uint64_t const hz = static_cast<std::uint64_t>(iz) & 0x1FFFFF;
+                    return (hx << 42) | (hy << 21) | hz;
+                };
+                
+                for (std::size_t i = 0U; i < bboxBoundaryEdges.size(); ++i)
+                {
+                    if (bboxEdgeUsed[i])
+                    {
+                        continue;
+                    }
+                    Eigen::Vector3f const & p0 = m_mesh.positions[bboxBoundaryEdges[i].edge.v0];
+                    Eigen::Vector3f const & p1 = m_mesh.positions[bboxBoundaryEdges[i].edge.v1];
+                    bboxEdgeMidpoints[i] = (p0 + p1) * 0.5F;
+                    bboxEdgeSpatialHash[bboxHashPos(bboxEdgeMidpoints[i])].push_back(i);
+                }
+                
+                std::vector<std::uint32_t> stitchTriangles;
+                
+                for (std::size_t i = 0U; i < bboxBoundaryEdges.size(); ++i)
+                {
+                    if (bboxEdgeUsed[i])
+                    {
+                        continue;
+                    }
+                    
+                    Eigen::Vector3f const & midI = bboxEdgeMidpoints[i];
+                    BoundaryEdge const & boundaryI = bboxBoundaryEdges[i];
+                    DirectedEdge const & edgeI = boundaryI.edge;
+                    Eigen::Vector3f const & pI0 = m_mesh.positions[edgeI.v0];
+                    Eigen::Vector3f const & pI1 = m_mesh.positions[edgeI.v1];
+                    float const edgeLenI = (pI1 - pI0).norm();
+                    
+                    // Get normal from original triangle
+                    Eigen::Vector3f const & pI2 = m_mesh.positions[boundaryI.thirdVertex];
+                    Eigen::Vector3f const normalI = (pI1 - pI0).cross(pI2 - pI0).normalized();
+                    
+                    // Search neighboring cells
+                    auto const ix = static_cast<std::int32_t>(std::floor(midI.x() * bboxInvCellSize));
+                    auto const iy = static_cast<std::int32_t>(std::floor(midI.y() * bboxInvCellSize));
+                    auto const iz = static_cast<std::int32_t>(std::floor(midI.z() * bboxInvCellSize));
+                    
+                    std::size_t bestMatch = std::numeric_limits<std::size_t>::max();
+                    float bestDistSq = bboxStitchRadiusSq;
+                    
+                    for (int dz = -1; dz <= 1; ++dz)
+                    {
+                        for (int dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int dx = -1; dx <= 1; ++dx)
+                            {
+                                std::uint64_t const hx = static_cast<std::uint64_t>(ix + dx) & 0x1FFFFF;
+                                std::uint64_t const hy = static_cast<std::uint64_t>(iy + dy) & 0x1FFFFF;
+                                std::uint64_t const hz = static_cast<std::uint64_t>(iz + dz) & 0x1FFFFF;
+                                std::uint64_t const neighborHash = (hx << 42) | (hy << 21) | hz;
+                                
+                                auto it = bboxEdgeSpatialHash.find(neighborHash);
+                                if (it == bboxEdgeSpatialHash.end())
+                                {
+                                    continue;
+                                }
+                                
+                                for (std::size_t j : it->second)
+                                {
+                                    if (j == i || bboxEdgeUsed[j])
+                                    {
+                                        continue;
+                                    }
+                                    
+                                    // Check edge length similarity
+                                    BoundaryEdge const & boundaryJ = bboxBoundaryEdges[j];
+                                    DirectedEdge const & edgeJ = boundaryJ.edge;
+                                    Eigen::Vector3f const & pJ0 = m_mesh.positions[edgeJ.v0];
+                                    Eigen::Vector3f const & pJ1 = m_mesh.positions[edgeJ.v1];
+                                    float const edgeLenJ = (pJ1 - pJ0).norm();
+                                    
+                                    float const lenRatio = std::min(edgeLenI, edgeLenJ) / 
+                                                           std::max(edgeLenI, edgeLenJ);
+                                    if (lenRatio < 0.3F)
+                                    {
+                                        continue;  // Edge lengths too different
+                                    }
+                                    
+                                    // Check normal compatibility
+                                    Eigen::Vector3f const & pJ2 = m_mesh.positions[boundaryJ.thirdVertex];
+                                    Eigen::Vector3f const normalJ = (pJ1 - pJ0).cross(pJ2 - pJ0).normalized();
+                                    float const normalDot = normalI.dot(normalJ);
+                                    if (normalDot < 0.5F)  // More lenient for bbox edges
+                                    {
+                                        continue;
+                                    }
+                                    
+                                    float const distSq = (bboxEdgeMidpoints[j] - midI).squaredNorm();
+                                    if (distSq < bestDistSq)
+                                    {
+                                        bestDistSq = distSq;
+                                        bestMatch = j;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (bestMatch != std::numeric_limits<std::size_t>::max())
+                    {
+                        BoundaryEdge const & boundaryJ = bboxBoundaryEdges[bestMatch];
+                        DirectedEdge const & edgeJ = boundaryJ.edge;
+                        
+                        // Determine vertex pairing
+                        float const d00 = (pI0 - m_mesh.positions[edgeJ.v0]).squaredNorm();
+                        float const d01 = (pI0 - m_mesh.positions[edgeJ.v1]).squaredNorm();
+                        
+                        std::uint32_t const jNear0 = (d00 < d01) ? edgeJ.v0 : edgeJ.v1;
+                        std::uint32_t const jNear1 = (d00 < d01) ? edgeJ.v1 : edgeJ.v0;
+                        
+                        // Create bridge triangles with winding check
+                        auto addTriWithWinding = [this, &stitchTriangles, &normalI](
+                            std::uint32_t a, std::uint32_t b, std::uint32_t c) -> bool
+                        {
+                            if (a == b || b == c || c == a)
+                            {
+                                return false;
+                            }
+                            
+                            Eigen::Vector3f const & pA = m_mesh.positions[a];
+                            Eigen::Vector3f const & pB = m_mesh.positions[b];
+                            Eigen::Vector3f const & pC = m_mesh.positions[c];
+                            
+                            Eigen::Vector3f const triNormal = (pB - pA).cross(pC - pA);
+                            if (triNormal.squaredNorm() < 1e-12F)
+                            {
+                                return false;
+                            }
+                            
+                            if (triNormal.dot(normalI) < 0.0F)
+                            {
+                                stitchTriangles.push_back(a);
+                                stitchTriangles.push_back(c);
+                                stitchTriangles.push_back(b);
+                            }
+                            else
+                            {
+                                stitchTriangles.push_back(a);
+                                stitchTriangles.push_back(b);
+                                stitchTriangles.push_back(c);
+                            }
+                            return true;
+                        };
+                        
+                        addTriWithWinding(edgeI.v0, edgeI.v1, jNear1);
+                        addTriWithWinding(edgeI.v0, jNear1, jNear0);
+                        
+                        bboxEdgeUsed[i] = true;
+                        bboxEdgeUsed[bestMatch] = true;
+                    }
+                }
+                
+                if (!stitchTriangles.empty())
+                {
+                    std::size_t const stitchTriCount = stitchTriangles.size() / 3U;
+                    m_mesh.indices.insert(m_mesh.indices.end(),
+                                          stitchTriangles.begin(),
+                                          stitchTriangles.end());
+                    
+                    std::size_t finalUncapped = 0U;
+                    for (bool used : bboxEdgeUsed)
+                    {
+                        if (!used)
+                        {
+                            ++finalUncapped;
+                        }
+                    }
+                    
+                    std::cout << "  Bbox stitching: Created " << stitchTriCount
+                              << " stitch triangles, " << finalUncapped 
+                              << " bbox edges remain uncapped" << std::endl;
+                }
+            }
         }
     }
 
