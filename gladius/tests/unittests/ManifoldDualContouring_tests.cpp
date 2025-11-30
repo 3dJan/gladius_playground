@@ -1199,6 +1199,107 @@ namespace gladius::compute::tests
         std::cout << "  If disconnected facets are lower, hierarchical approach is working" << std::endl;
     }
 
+    /// Test mesh generation with filamentholder model
+    /// This model has been reported to have significant holes when using manifold DC
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithFilamentholder_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+        
+        std::cout << "=== FILAMENTHOLDER MODEL ===" << std::endl;
+        std::cout << "Bounding box: [" 
+                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
+                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
+        std::cout << "Extents: " 
+                  << (bbox->max.x - bbox->min.x) << " x " 
+                  << (bbox->max.y - bbox->min.y) << " x "
+                  << (bbox->max.z - bbox->min.z) << " mm" << std::endl;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
+        
+        std::cout << "\nAdmesh validation:" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets with 3 disconnected edges: " << metrics.facetsWith3DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
+        std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
+        std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Edges fixed: " << metrics.edgesFixed << std::endl;
+        std::cout << "  Normals fixed: " << metrics.normalsFixed << std::endl;
+        
+        double const reversedRatio = 
+            static_cast<double>(metrics.facetsReversed) / 
+            static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed 
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        
+        // Report on boundary edges - these indicate holes
+        std::cout << "\n=== HOLE ANALYSIS ===" << std::endl;
+        if (metrics.totalDisconnectedFacets.original > 0)
+        {
+            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original 
+                      << " disconnected facets indicating holes" << std::endl;
+        }
+        
+        // For now, just document the current state
+        EXPECT_GT(metrics.numberOfFacets.original, 0) 
+            << "Should produce facets";
+        EXPECT_NE(metrics.volume, 0.0) 
+            << "Volume should be non-zero";
+    }
+
+    /// Test filamentholder with hierarchical octree
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithFilamentholder_HierarchicalOctree)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+
+        // Enable hierarchical octree with 2:1 balancing
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 7;
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+        exportOptions.enableHierarchicalOctree = true;  // Enable hierarchical octree
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+        
+        std::cout << "=== FILAMENTHOLDER HIERARCHICAL OCTREE ===" << std::endl;
+        std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Volume: " << metrics.volume << std::endl;
+        
+        // Report comparison
+        std::cout << "\nCompare with standard sparse octree approach above." << std::endl;
+    }
+
 
     // ============================================================================
     // Implicit Surface Validation Tests
@@ -1682,5 +1783,425 @@ namespace gladius::compute::tests
                                              static_cast<float>(edgeAnalysis.triangleCount);
         EXPECT_LE(actualSuspiciousRatio, maxSuspiciousRatio)
             << "Too many triangles with abnormally long edges (possible cross-surface connections)";
+    }
+
+    // ============================================================================
+    // Hole Localization Tests - Debug mesh holes by analyzing boundary edges
+    // ============================================================================
+
+    /// Information about a boundary edge (edge with only 1 adjacent triangle)
+    struct BoundaryEdgeInfo
+    {
+        std::uint32_t v0;                   ///< First vertex index
+        std::uint32_t v1;                   ///< Second vertex index
+        Eigen::Vector3f pos0;               ///< Position of v0
+        Eigen::Vector3f pos1;               ///< Position of v1
+        Eigen::Vector3f midpoint;           ///< Midpoint of edge
+        float length;                       ///< Edge length
+        std::uint32_t triangleIndex;        ///< Triangle that owns this edge
+        std::size_t clusterIndex{0U};       ///< Which hole cluster this belongs to
+    };
+
+    /// Cluster of connected boundary edges (represents a hole)
+    struct HoleCluster
+    {
+        std::vector<std::size_t> edgeIndices;  ///< Indices into boundary edges vector
+        Eigen::Vector3f centroid;               ///< Centroid of hole
+        float averageEdgeLength{0.0F};
+        float perimeter{0.0F};                  ///< Total length of hole boundary
+    };
+
+    /// Analyze mesh to find all boundary edges and cluster them into holes
+    [[nodiscard]] std::pair<std::vector<BoundaryEdgeInfo>, std::vector<HoleCluster>>
+    analyzeMeshHoles(ManifoldDualContouringMesh const& mesh)
+    {
+        std::vector<BoundaryEdgeInfo> boundaryEdges;
+        std::vector<HoleCluster> clusters;
+
+        if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
+        {
+            return {boundaryEdges, clusters};
+        }
+
+        // Count edge usage and track which triangle owns each edge
+        struct EdgeData
+        {
+            std::uint32_t count{0U};
+            std::uint32_t triangleIndex{0U};
+        };
+        std::unordered_map<EdgeKey, EdgeData, EdgeKeyHash> edgeUsage;
+
+        for (std::size_t tri = 0U; tri + 2U < mesh.indices.size(); tri += 3U)
+        {
+            std::uint32_t const triIdx = static_cast<std::uint32_t>(tri / 3U);
+            std::array<std::uint32_t, 3> const verts = {
+                mesh.indices[tri + 0U],
+                mesh.indices[tri + 1U],
+                mesh.indices[tri + 2U]
+            };
+
+            for (std::size_t e = 0U; e < 3U; ++e)
+            {
+                std::uint32_t const i0 = verts[e];
+                std::uint32_t const i1 = verts[(e + 1U) % 3U];
+                EdgeKey const key{std::min(i0, i1), std::max(i0, i1)};
+                auto& data = edgeUsage[key];
+                ++data.count;
+                if (data.count == 1U)
+                {
+                    data.triangleIndex = triIdx;
+                }
+            }
+        }
+
+        // Collect boundary edges (edges with count == 1)
+        for (auto const& [key, data] : edgeUsage)
+        {
+            if (data.count == 1U)
+            {
+                BoundaryEdgeInfo info;
+                info.v0 = key.a;
+                info.v1 = key.b;
+                info.pos0 = mesh.positions[key.a];
+                info.pos1 = mesh.positions[key.b];
+                info.midpoint = (info.pos0 + info.pos1) * 0.5F;
+                info.length = (info.pos1 - info.pos0).norm();
+                info.triangleIndex = data.triangleIndex;
+                boundaryEdges.push_back(info);
+            }
+        }
+
+        if (boundaryEdges.empty())
+        {
+            return {boundaryEdges, clusters};
+        }
+
+        // Cluster boundary edges by vertex connectivity (edges sharing a vertex are in same hole)
+        std::vector<bool> visited(boundaryEdges.size(), false);
+        
+        // Build vertex-to-edge adjacency
+        std::unordered_map<std::uint32_t, std::vector<std::size_t>> vertexToEdges;
+        for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
+        {
+            vertexToEdges[boundaryEdges[i].v0].push_back(i);
+            vertexToEdges[boundaryEdges[i].v1].push_back(i);
+        }
+
+        for (std::size_t startIdx = 0U; startIdx < boundaryEdges.size(); ++startIdx)
+        {
+            if (visited[startIdx])
+            {
+                continue;
+            }
+
+            // BFS to find all connected boundary edges
+            HoleCluster cluster;
+            std::vector<std::size_t> queue;
+            queue.push_back(startIdx);
+            visited[startIdx] = true;
+
+            while (!queue.empty())
+            {
+                std::size_t const current = queue.back();
+                queue.pop_back();
+                
+                cluster.edgeIndices.push_back(current);
+                boundaryEdges[current].clusterIndex = clusters.size();
+                cluster.perimeter += boundaryEdges[current].length;
+
+                // Find adjacent edges (share a vertex)
+                for (std::uint32_t v : {boundaryEdges[current].v0, boundaryEdges[current].v1})
+                {
+                    for (std::size_t adjIdx : vertexToEdges[v])
+                    {
+                        if (!visited[adjIdx])
+                        {
+                            visited[adjIdx] = true;
+                            queue.push_back(adjIdx);
+                        }
+                    }
+                }
+            }
+
+            // Compute cluster centroid
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            for (std::size_t edgeIdx : cluster.edgeIndices)
+            {
+                sum += boundaryEdges[edgeIdx].midpoint;
+            }
+            cluster.centroid = sum / static_cast<float>(cluster.edgeIndices.size());
+            cluster.averageEdgeLength = cluster.perimeter / static_cast<float>(cluster.edgeIndices.size());
+
+            clusters.push_back(std::move(cluster));
+        }
+
+        // Sort clusters by size (largest holes first)
+        std::sort(clusters.begin(), clusters.end(),
+                  [](HoleCluster const& a, HoleCluster const& b)
+                  { return a.edgeIndices.size() > b.edgeIndices.size(); });
+
+        return {boundaryEdges, clusters};
+    }
+
+    /// Test that analyzes and reports hole locations in filamentholder mesh
+    TEST_F(ManifoldDualContouringGpu_Test, DebugHoles_Filamentholder_LocalizeHoles)
+    {
+        auto bundle = loadDocument("testdata/filamentholder.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+
+        // Use default settings (sparse octree)
+        gladius::io::ManifoldDualContouringOptions exportOptions;
+        exportOptions.initialDepth = 5;
+        exportOptions.maxDepth = 7;
+        exportOptions.enableGpu = true;
+        exportOptions.enableCpuFallback = true;
+        exportOptions.enableCaching = true;
+        exportOptions.isoValue = 0.0F;
+        exportOptions.enableHierarchicalOctree = false;
+
+        // Generate mesh
+        ManifoldDualContouringGpu mesher(*bundle.core);
+        mesher.setConfig({
+            .initialDepth = exportOptions.initialDepth,
+            .maxDepth = exportOptions.maxDepth,
+            .enableGpu = exportOptions.enableGpu,
+            .enableCpuFallback = exportOptions.enableCpuFallback,
+            .enableCaching = exportOptions.enableCaching,
+            .isoValue = exportOptions.isoValue,
+            .enableHierarchicalOctree = exportOptions.enableHierarchicalOctree
+        });
+        mesher.generateMesh();
+        auto const& mesh = mesher.getMesh();
+
+        ASSERT_FALSE(mesh.positions.empty()) << "Mesh should have vertices";
+        ASSERT_FALSE(mesh.indices.empty()) << "Mesh should have triangles";
+
+        // Analyze holes
+        auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
+
+        std::cout << "\n=== HOLE LOCALIZATION: FILAMENTHOLDER (Sparse Octree) ===" << std::endl;
+        std::cout << "Total boundary edges: " << boundaryEdges.size() << std::endl;
+        std::cout << "Number of hole clusters: " << clusters.size() << std::endl;
+
+        if (clusters.empty())
+        {
+            std::cout << "*** MESH IS WATERTIGHT! ***" << std::endl;
+            return;
+        }
+
+        // Calculate bbox extents for relative position reporting
+        Eigen::Vector3f bboxMin(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
+        Eigen::Vector3f bboxMax(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        Eigen::Vector3f bboxSize = bboxMax - bboxMin;
+        float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << exportOptions.maxDepth);
+
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
+        std::cout << "Voxel size at maxDepth: " << voxelSize << " mm" << std::endl;
+        std::cout << std::endl;
+
+        // Report statistics on clusters
+        std::cout << "=== CLUSTER SIZE DISTRIBUTION ===" << std::endl;
+        std::map<std::size_t, std::size_t> sizeDistribution;
+        for (auto const& cluster : clusters)
+        {
+            std::size_t sizeCategory = 0;
+            if (cluster.edgeIndices.size() <= 3)
+                sizeCategory = 3;
+            else if (cluster.edgeIndices.size() <= 10)
+                sizeCategory = 10;
+            else if (cluster.edgeIndices.size() <= 50)
+                sizeCategory = 50;
+            else if (cluster.edgeIndices.size() <= 100)
+                sizeCategory = 100;
+            else
+                sizeCategory = 1000;
+            ++sizeDistribution[sizeCategory];
+        }
+        for (auto const& [size, count] : sizeDistribution)
+        {
+            std::cout << "  Holes with <= " << size << " edges: " << count << std::endl;
+        }
+
+        // Report top 10 largest holes
+        std::cout << "\n=== TOP 10 LARGEST HOLES ===" << std::endl;
+        std::size_t const maxReport = std::min<std::size_t>(10U, clusters.size());
+        for (std::size_t i = 0U; i < maxReport; ++i)
+        {
+            auto const& cluster = clusters[i];
+            
+            // Compute relative position (0-1 range within bbox)
+            Eigen::Vector3f relPos = (cluster.centroid - bboxMin).cwiseQuotient(bboxSize);
+            
+            std::cout << "Hole #" << (i + 1) << ":" << std::endl;
+            std::cout << "  Edges: " << cluster.edgeIndices.size() << std::endl;
+            std::cout << "  Perimeter: " << cluster.perimeter << " mm" << std::endl;
+            std::cout << "  Avg edge length: " << cluster.averageEdgeLength << " mm"
+                      << " (" << (cluster.averageEdgeLength / voxelSize) << " voxels)" << std::endl;
+            std::cout << "  Centroid: [" << cluster.centroid.transpose() << "]" << std::endl;
+            std::cout << "  Relative position: [" << relPos.transpose() << "]" << std::endl;
+            
+            // Report a few sample edges from this cluster
+            std::cout << "  Sample edges:" << std::endl;
+            std::size_t const maxEdges = std::min<std::size_t>(3U, cluster.edgeIndices.size());
+            for (std::size_t j = 0U; j < maxEdges; ++j)
+            {
+                auto const& edge = boundaryEdges[cluster.edgeIndices[j]];
+                std::cout << "    Edge " << edge.v0 << "-" << edge.v1 
+                          << " at [" << edge.midpoint.transpose() << "]"
+                          << " len=" << edge.length << " mm"
+                          << " (tri " << edge.triangleIndex << ")" << std::endl;
+            }
+        }
+
+        // Analyze edge lengths
+        std::cout << "\n=== EDGE LENGTH ANALYSIS ===" << std::endl;
+        float minLen = std::numeric_limits<float>::max();
+        float maxLen = 0.0F;
+        float sumLen = 0.0F;
+        for (auto const& edge : boundaryEdges)
+        {
+            minLen = std::min(minLen, edge.length);
+            maxLen = std::max(maxLen, edge.length);
+            sumLen += edge.length;
+        }
+        float const avgLen = sumLen / static_cast<float>(boundaryEdges.size());
+        std::cout << "  Min edge length: " << minLen << " mm (" << (minLen / voxelSize) << " voxels)" << std::endl;
+        std::cout << "  Max edge length: " << maxLen << " mm (" << (maxLen / voxelSize) << " voxels)" << std::endl;
+        std::cout << "  Avg edge length: " << avgLen << " mm (" << (avgLen / voxelSize) << " voxels)" << std::endl;
+
+        // Count edges by length category (in voxel units)
+        std::cout << "\n=== EDGE LENGTH DISTRIBUTION (in voxels) ===" << std::endl;
+        std::map<std::size_t, std::size_t> lengthDistribution;
+        for (auto const& edge : boundaryEdges)
+        {
+            float const lenInVoxels = edge.length / voxelSize;
+            std::size_t category = 0;
+            if (lenInVoxels <= 0.5F)
+                category = 0;
+            else if (lenInVoxels <= 1.0F)
+                category = 1;
+            else if (lenInVoxels <= 2.0F)
+                category = 2;
+            else if (lenInVoxels <= 5.0F)
+                category = 5;
+            else
+                category = 10;
+            ++lengthDistribution[category];
+        }
+        std::cout << "  <= 0.5 voxels: " << lengthDistribution[0] << std::endl;
+        std::cout << "  <= 1.0 voxels: " << lengthDistribution[1] << std::endl;
+        std::cout << "  <= 2.0 voxels: " << lengthDistribution[2] << std::endl;
+        std::cout << "  <= 5.0 voxels: " << lengthDistribution[5] << std::endl;
+        std::cout << "  > 5.0 voxels: " << lengthDistribution[10] << std::endl;
+
+        // Spatial distribution - divide bbox into 8 octants and count holes per octant
+        std::cout << "\n=== SPATIAL DISTRIBUTION (holes per octant) ===" << std::endl;
+        std::array<std::size_t, 8> octantCounts{};
+        Eigen::Vector3f const bboxCenter = (bboxMin + bboxMax) * 0.5F;
+        for (auto const& cluster : clusters)
+        {
+            int const octant =
+                (cluster.centroid.x() > bboxCenter.x() ? 1 : 0) +
+                (cluster.centroid.y() > bboxCenter.y() ? 2 : 0) +
+                (cluster.centroid.z() > bboxCenter.z() ? 4 : 0);
+            ++octantCounts[static_cast<std::size_t>(octant)];
+        }
+        char const* octantNames[] = {
+            "(-X,-Y,-Z)", "(+X,-Y,-Z)", "(-X,+Y,-Z)", "(+X,+Y,-Z)",
+            "(-X,-Y,+Z)", "(+X,-Y,+Z)", "(-X,+Y,+Z)", "(+X,+Y,+Z)"
+        };
+        for (std::size_t o = 0U; o < 8U; ++o)
+        {
+            std::cout << "  " << octantNames[o] << ": " << octantCounts[o] << " holes" << std::endl;
+        }
+
+        // Record baseline for regression tracking
+        std::cout << "\n=== BASELINE METRICS ===" << std::endl;
+        std::cout << "  Boundary edges: " << boundaryEdges.size() << std::endl;
+        std::cout << "  Hole clusters: " << clusters.size() << std::endl;
+        std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
+        std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
+
+        // The test currently just documents the state; we can add assertions later
+        // once we establish what the expected behavior should be
+        EXPECT_GT(mesh.positions.size(), 0U);
+    }
+
+    /// Test comparing sparse vs hierarchical octree hole patterns
+    TEST_F(ManifoldDualContouringGpu_Test, DebugHoles_Filamentholder_CompareApproaches)
+    {
+        auto bundle = loadDocument("testdata/filamentholder.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
+
+        Eigen::Vector3f bboxMin(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
+        Eigen::Vector3f bboxMax(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        Eigen::Vector3f bboxSize = bboxMax - bboxMin;
+        float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << 7U);
+
+        std::cout << "\n=== SPARSE VS HIERARCHICAL COMPARISON ===" << std::endl;
+
+        // Test sparse octree
+        {
+            ManifoldDualContouringGpu mesher(*bundle.core);
+            mesher.setConfig({
+                .initialDepth = 5,
+                .maxDepth = 7,
+                .enableGpu = true,
+                .enableCpuFallback = true,
+                .enableCaching = true,
+                .isoValue = 0.0F,
+                .enableHierarchicalOctree = false
+            });
+            mesher.generateMesh();
+            auto const& mesh = mesher.getMesh();
+            auto [edges, clusters] = analyzeMeshHoles(mesh);
+            
+            std::cout << "\nSPARSE OCTREE:" << std::endl;
+            std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
+            std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
+            std::cout << "  Boundary edges: " << edges.size() << std::endl;
+            std::cout << "  Hole clusters: " << clusters.size() << std::endl;
+            
+            if (!clusters.empty())
+            {
+                std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges at ["
+                          << clusters[0].centroid.transpose() << "]" << std::endl;
+            }
+        }
+
+        // Test hierarchical octree
+        {
+            ManifoldDualContouringGpu mesher(*bundle.core);
+            mesher.setConfig({
+                .initialDepth = 5,
+                .maxDepth = 7,
+                .enableGpu = true,
+                .enableCpuFallback = true,
+                .enableCaching = true,
+                .isoValue = 0.0F,
+                .enableHierarchicalOctree = true
+            });
+            mesher.generateMesh();
+            auto const& mesh = mesher.getMesh();
+            auto [edges, clusters] = analyzeMeshHoles(mesh);
+            
+            std::cout << "\nHIERARCHICAL OCTREE:" << std::endl;
+            std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
+            std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
+            std::cout << "  Boundary edges: " << edges.size() << std::endl;
+            std::cout << "  Hole clusters: " << clusters.size() << std::endl;
+            
+            if (!clusters.empty())
+            {
+                std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges at ["
+                          << clusters[0].centroid.transpose() << "]" << std::endl;
+            }
+        }
     }
 }
