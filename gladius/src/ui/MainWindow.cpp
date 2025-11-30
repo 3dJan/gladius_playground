@@ -1156,7 +1156,13 @@ namespace gladius::ui
                 if (m_currentAssemblyFileName.has_value())
                 {
                     suggestedFilename = m_currentAssemblyFileName.value();
-                    suggestedFilename.replace_extension("model.3mf");
+                    // Strip .implicit or other compound extensions from stem
+                    auto stem = suggestedFilename.stem();
+                    while (stem.extension() == ".implicit" || stem.extension() == ".model")
+                    {
+                        stem = stem.stem();
+                    }
+                    suggestedFilename = suggestedFilename.parent_path() / (stem.string() + ".model.3mf");
                 }
                 else
                 {

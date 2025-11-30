@@ -73,6 +73,19 @@ namespace gladius::ui
             "Fine",
             "Ultra Fine",
             "Custom"};
+        
+        /// Strips compound extensions like .implicit.3mf or .model.3mf down to base stem
+        /// e.g., "mypart.implicit.3mf" -> "mypart", "mypart.model.3mf" -> "mypart"
+        std::filesystem::path stripCompoundExtensions(std::filesystem::path const& path)
+        {
+            auto stem = path.stem();
+            // Remove known compound suffixes
+            while (stem.extension() == ".implicit" || stem.extension() == ".model")
+            {
+                stem = stem.stem();
+            }
+            return stem;
+        }
     }
 
     void MeshExportDialog::show(std::filesystem::path suggestedFilename)
@@ -627,7 +640,8 @@ namespace gladius::ui
                         // Update file extension if a file is already selected
                         if (!m_targetFile.empty())
                         {
-                            m_targetFile.replace_extension(FORMAT_EXTENSIONS[static_cast<std::size_t>(i)]);
+                            auto stem = stripCompoundExtensions(m_targetFile);
+                            m_targetFile = m_targetFile.parent_path() / (stem.string() + FORMAT_EXTENSIONS[static_cast<std::size_t>(i)]);
                         }
                     }
                 }
@@ -664,12 +678,8 @@ namespace gladius::ui
             std::filesystem::path defaultPath = m_targetFile.empty() 
                 ? std::filesystem::path{"part" + extension} 
                 : m_targetFile;
-            // Remove compound extensions (.model.3mf or .stl) before adding new one
-            auto stem = defaultPath.stem();
-            if (stem.extension() == ".model")
-            {
-                stem = stem.stem();
-            }
+            // Remove compound extensions (.implicit.3mf, .model.3mf) before adding new one
+            auto stem = stripCompoundExtensions(defaultPath);
             defaultPath = defaultPath.parent_path() / (stem.string() + extension);
             m_browseDialog.saveFile({filter}, defaultPath);
         }
@@ -683,12 +693,8 @@ namespace gladius::ui
             {
                 auto filename = **result;
                 std::string const extension = FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)];
-                // Remove compound extensions (.model.3mf or .stl) before adding new one
-                auto stem = filename.stem();
-                if (stem.extension() == ".model")
-                {
-                    stem = stem.stem();
-                }
+                // Remove compound extensions (.implicit.3mf, .model.3mf) before adding new one
+                auto stem = stripCompoundExtensions(filename);
                 filename = filename.parent_path() / (stem.string() + extension);
                 m_targetFile = filename;
                 // Clear any previous export status when changing file
