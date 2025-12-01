@@ -539,18 +539,18 @@ namespace gladius::ui
                     ImGui::Indent();
                     
                     ImGui::SliderFloat("Max SDF error", 
-                                       &m_manifoldSimplificationMaxError, 
+                                       &m_manifoldSimplificationMaxSdfError, 
                                        0.001F, 0.1F, 
                                        "%.3f mm");
                     ImGui::SameLine();
                     ImGui::TextDisabled("maximum deviation from surface");
                     
-                    ImGui::SliderFloat("Flat threshold", 
-                                       &m_manifoldSimplificationFlatThreshold, 
-                                       0.8F, 0.99F, 
-                                       "cos(angle) = %.2f");
+                    ImGui::SliderFloat("SDF weight", 
+                                       &m_manifoldSimplificationSdfWeight, 
+                                       0.0F, 1.0F, 
+                                       "%.2f");
                     ImGui::SameLine();
-                    ImGui::TextDisabled("higher = more aggressive (0.95 ≈ 18°)");
+                    ImGui::TextDisabled("SDF vs QEM balance (higher = more accurate)");
                     
                     ImGui::Unindent();
                 }
@@ -865,10 +865,11 @@ namespace gladius::ui
             options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
             options.subdivisionIterations = m_manifoldSubdivisionIterations;
             options.projectToSurface = m_manifoldProjectToSurface;
-            // Mesh simplification options
+            // Mesh simplification options (QEM-based with GPU SDF evaluation)
             options.enableSimplification = m_manifoldEnableSimplification;
-            options.simplificationMaxError = m_manifoldSimplificationMaxError;
-            options.simplificationFlatThreshold = m_manifoldSimplificationFlatThreshold;
+            options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
+            options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
+            options.simplificationQemWeight = 1.0F - m_manifoldSimplificationSdfWeight;
 
             m_manifoldExporter.setOptions(options);
             // Set output format and document for 3MF support

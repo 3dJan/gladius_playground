@@ -6,6 +6,7 @@
 #include "ComputeCore.h"
 #include "GlobalMortonOctree.h"
 #include "ManifoldDualContouringProgram.h"
+#include "MeshSimplification.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -44,13 +45,17 @@ namespace gladius::compute
         std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes on sharp triangles
         bool projectToSurface{true};                ///< Project vertices to SDF surface after subdivision
         
-        // Mesh simplification
-        bool enableSimplification{false};           ///< Enable edge-collapse simplification in flat regions
-        float simplificationMaxError{0.01F};        ///< Maximum SDF deviation allowed for edge collapse (world units)
-        float simplificationMinEdgeLength{0.0F};    ///< Minimum edge length to preserve (0 = auto based on voxel size)
-        float simplificationFlatThreshold{0.95F};   ///< Cosine threshold for coplanar normals (0.95 ≈ 18°)
-        std::size_t simplificationPasses{3U};       ///< Number of simplification passes (more = more reduction)
-        float simplificationAggressiveness{1.0F};   ///< Edge length multiplier (higher = more aggressive)
+        // Mesh simplification (QEM-based with GPU SDF error evaluation)
+        bool enableSimplification{false};           ///< Enable QEM-based edge-collapse simplification
+        float simplificationMaxSdfError{0.01F};     ///< Maximum SDF deviation allowed for edge collapse (world units)
+        float simplificationMaxQemError{1e-4F};     ///< Maximum QEM error allowed for edge collapse
+        float simplificationSdfWeight{0.7F};        ///< Weight for SDF error in combined metric [0,1]
+        float simplificationQemWeight{0.3F};        ///< Weight for QEM error in combined metric [0,1]
+        float simplificationSharpEdgeThreshold{0.7F}; ///< Cosine threshold for sharp edges (0.7 ≈ 45°)
+        std::size_t simplificationBatchSize{100000U}; ///< Number of edges per GPU evaluation batch
+        std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
+        std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
+        std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
     };
 
     struct ManifoldDualContouringMesh
@@ -117,10 +122,12 @@ namespace gladius::compute
         void subdivideTriangles(std::vector<std::size_t> const & triangleIndices);
         void projectVerticesToSurface();
         
-        // Mesh simplification
+        // Mesh simplification (QEM-based with GPU SDF)
         void simplifyMesh();
-        [[nodiscard]] std::size_t simplifyMeshPass(float minEdgeLength, float flatThreshold);
+        void simplifyMeshQem();
+        [[nodiscard]] std::vector<float> evaluateSdfBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;
+        std::unique_ptr<QemMeshSimplifier> m_qemSimplifier;
         
         // Chunked processing for large models with fine features
         struct ChunkInfo

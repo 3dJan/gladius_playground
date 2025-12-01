@@ -188,8 +188,15 @@ namespace gladius::io
         config.subdivisionIterations = m_options.subdivisionIterations;
         config.projectToSurface = m_options.projectToSurface;
         config.enableSimplification = m_options.enableSimplification;
-        config.simplificationMaxError = m_options.simplificationMaxError;
-        config.simplificationFlatThreshold = m_options.simplificationFlatThreshold;
+        config.simplificationMaxSdfError = m_options.simplificationMaxSdfError;
+        config.simplificationMaxQemError = m_options.simplificationMaxQemError;
+        config.simplificationSdfWeight = m_options.simplificationSdfWeight;
+        config.simplificationQemWeight = m_options.simplificationQemWeight;
+        config.simplificationSharpEdgeThreshold = m_options.simplificationSharpEdgeThreshold;
+        config.simplificationBatchSize = m_options.simplificationBatchSize;
+        config.simplificationMaxPasses = m_options.simplificationMaxPasses;
+        config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
+        config.simplificationTargetReduction = m_options.simplificationTargetReduction;
         gpuPipeline.setConfig(config);
         gpuPipeline.generateMesh();
 

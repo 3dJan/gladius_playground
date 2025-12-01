@@ -86,10 +86,17 @@ namespace gladius::io
         std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes
         bool projectToSurface{true};                ///< Project vertices to SDF surface
         
-        // Mesh simplification options
-        bool enableSimplification{false};           ///< Enable edge-collapse simplification in flat regions
-        float simplificationMaxError{0.01F};        ///< Maximum SDF deviation allowed (world units)
-        float simplificationFlatThreshold{0.95F};   ///< Cosine threshold for coplanar normals
+        // Mesh simplification options (QEM-based with GPU SDF evaluation)
+        bool enableSimplification{false};           ///< Enable QEM-based edge-collapse simplification
+        float simplificationMaxSdfError{0.01F};     ///< Maximum SDF deviation allowed for edge collapse (world units)
+        float simplificationMaxQemError{1e-4F};     ///< Maximum QEM error allowed for edge collapse
+        float simplificationSdfWeight{0.7F};        ///< Weight for SDF error in combined metric [0,1]
+        float simplificationQemWeight{0.3F};        ///< Weight for QEM error in combined metric [0,1]
+        float simplificationSharpEdgeThreshold{0.7F}; ///< Cosine threshold for sharp edges (0.7 ≈ 45°)
+        std::size_t simplificationBatchSize{100000U}; ///< Number of edges per GPU evaluation batch
+        std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
+        std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
+        std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
 
         void applyPreset();
     };

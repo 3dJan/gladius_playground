@@ -1,5 +1,6 @@
 #include "ManifoldDualContouringGpu.h"
 #include "ManifoldDualContouringProgram.h"
+#include "MeshSimplification.h"
 #include "../Primitives.h"
 #include "../SlicerProgram.h"
 #include "../Buffer.h"
@@ -1147,7 +1148,7 @@ namespace gladius::compute
 
     void ManifoldDualContouringGpu::simplifyMesh()
     {
-        std::cout << "Starting mesh simplification..." << std::endl;
+        std::cout << "Starting QEM mesh simplification..." << std::endl;
         std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
         std::size_t const initialVertices = m_mesh.positions.size();
         
@@ -1157,353 +1158,127 @@ namespace gladius::compute
             return;
         }
 
-        // Calculate base voxel size for edge length threshold
-        float baseEdgeLength = m_config.simplificationMinEdgeLength;
-        if (baseEdgeLength <= 0.0F && m_cachedBoundingBox.has_value())
-        {
-            Eigen::Vector3f const extent = m_cachedBboxMax - m_cachedBboxMin;
-            float const voxelSize = extent.maxCoeff() / static_cast<float>(m_gridResolution);
-            baseEdgeLength = voxelSize * 0.5F * m_config.simplificationAggressiveness;
-        }
-
-        std::size_t totalCollapsed = 0U;
-        std::size_t const maxPasses = m_config.simplificationPasses;
+        // Configure QEM simplifier
+        QemSimplificationConfig qemConfig;
+        qemConfig.targetTriangleCount = m_config.simplificationTargetTriangles;
+        qemConfig.targetReductionPercent = m_config.simplificationTargetReduction;
+        qemConfig.sdfErrorWeight = m_config.simplificationSdfWeight;
+        qemConfig.qemErrorWeight = m_config.simplificationQemWeight;
+        qemConfig.maxSdfError = m_config.simplificationMaxSdfError;
+        qemConfig.maxQemError = m_config.simplificationMaxQemError;
+        qemConfig.sharpEdgeAngleThreshold = m_config.simplificationSharpEdgeThreshold;
+        qemConfig.batchSize = m_config.simplificationBatchSize;
+        qemConfig.maxPasses = m_config.simplificationMaxPasses;
         
-        // Multi-pass simplification - each pass can collapse more edges
-        for (std::size_t pass = 0U; pass < maxPasses; ++pass)
+        // Create SDF evaluation callback using GPU batch evaluation
+        auto sdfCallback = [this](std::vector<Eigen::Vector3f> const& positions) -> std::vector<float>
         {
-            // Increase edge length threshold slightly each pass
-            float const passMultiplier = 1.0F + static_cast<float>(pass) * 0.25F;
-            float const minEdgeLength = baseEdgeLength * passMultiplier;
-            
-            // Slightly relax the flat threshold in later passes
-            float const flatThreshold = m_config.simplificationFlatThreshold - 
-                                        static_cast<float>(pass) * 0.05F;
-            
-            std::size_t const passCollapsed = simplifyMeshPass(minEdgeLength, flatThreshold);
-            totalCollapsed += passCollapsed;
-            
-            if (passCollapsed == 0U)
-            {
-                // No more edges to collapse
-                break;
-            }
-            
-            std::cout << "  Pass " << (pass + 1) << ": collapsed " << passCollapsed << " edges" << std::endl;
-        }
-
-        if (totalCollapsed == 0U)
-        {
-            std::cout << "No edges could be collapsed" << std::endl;
-            return;
-        }
-
+            return evaluateSdfBatchGpu(positions);
+        };
+        
+        // Create and run the QEM simplifier
+        QemMeshSimplifier simplifier;
+        simplifier.setConfig(qemConfig);
+        simplifier.setGpuSdfEvaluator(sdfCallback);
+        
+        // Simplify the mesh in-place
+        std::size_t const collapsedEdges = simplifier.simplify(
+            m_mesh.positions, m_mesh.normals, m_mesh.indices);
+        
         std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
         std::size_t const finalVertices = m_mesh.positions.size();
         
         float const reductionPercent = 100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
                                        static_cast<float>(initialTriangles);
         
-        std::cout << "Mesh simplification complete:" << std::endl;
+        std::cout << "QEM mesh simplification complete:" << std::endl;
         std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
                   << " (removed " << (initialTriangles - finalTriangles) 
                   << ", " << std::fixed << std::setprecision(1) << reductionPercent << "%)" << std::endl;
         std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
                   << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
-        std::cout << "  Total edges collapsed: " << totalCollapsed << std::endl;
+        std::cout << "  Collapsed edges: " << collapsedEdges << std::endl;
     }
     
-    std::size_t ManifoldDualContouringGpu::simplifyMeshPass(float minEdgeLength, float flatThreshold)
+    std::vector<float> ManifoldDualContouringGpu::evaluateSdfBatchGpu(
+        std::vector<Eigen::Vector3f> const & positions) const
     {
-        // Build edge-to-triangles adjacency
-        struct Edge
-        {
-            std::uint32_t v0;
-            std::uint32_t v1;
-            
-            bool operator==(Edge const & other) const
-            {
-                auto const a0 = std::min(v0, v1);
-                auto const a1 = std::max(v0, v1);
-                auto const b0 = std::min(other.v0, other.v1);
-                auto const b1 = std::max(other.v0, other.v1);
-                return a0 == b0 && a1 == b1;
-            }
-        };
+        std::vector<float> results(positions.size(), 0.0F);
         
-        struct EdgeHash
+        if (positions.empty())
         {
-            std::size_t operator()(Edge const & e) const
-            {
-                auto const low = std::min(e.v0, e.v1);
-                auto const high = std::max(e.v0, e.v1);
-                return std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(low) << 32U | high);
-            }
-        };
+            return results;
+        }
 
-        // Map each edge to the triangles that use it
-        std::unordered_map<Edge, std::vector<std::size_t>, EdgeHash> edgeTriangles;
+        // For now, use CPU evaluation via the cached SDF grid
+        // TODO: Add GPU kernel from sdf_mesh_simplification.cl for batch evaluation
+        for (std::size_t i = 0; i < positions.size(); ++i)
+        {
+            results[i] = evaluateSdf(positions[i]);
+        }
+
+        return results;
+    }
+
+    void ManifoldDualContouringGpu::simplifyMeshQem()
+    {
+        std::cout << "Starting QEM-based mesh simplification..." << std::endl;
+        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const initialVertices = m_mesh.positions.size();
         
-        // Map each vertex to its triangles
-        std::vector<std::vector<std::size_t>> vertexTriangles(m_mesh.positions.size());
-        std::size_t const numTriangles = m_mesh.indices.size() / 3U;
+        if (initialTriangles < 2U || initialVertices < 4U)
+        {
+            std::cout << "Mesh too small for simplification" << std::endl;
+            return;
+        }
+
+        // Create and configure the QEM simplifier
+        if (!m_qemSimplifier)
+        {
+            m_qemSimplifier = std::make_unique<QemMeshSimplifier>();
+        }
+
+        QemSimplificationConfig qemConfig;
+        qemConfig.sdfErrorWeight = m_config.simplificationSdfWeight;
+        qemConfig.qemErrorWeight = m_config.simplificationQemWeight;
+        qemConfig.maxSdfError = m_config.simplificationMaxSdfError;
+        qemConfig.maxQemError = m_config.simplificationMaxQemError;
+        qemConfig.sharpEdgeAngleThreshold = m_config.simplificationSharpEdgeThreshold;
+        qemConfig.batchSize = m_config.simplificationBatchSize;
+        qemConfig.maxPasses = m_config.simplificationMaxPasses;
+        qemConfig.targetTriangleCount = m_config.simplificationTargetTriangles;
+        qemConfig.targetReductionPercent = m_config.simplificationTargetReduction;
+        qemConfig.recalculateQuadricsAfterCollapse = true; // Quality over speed
+
+        m_qemSimplifier->setConfig(qemConfig);
+
+        // Set up GPU SDF evaluator
+        m_qemSimplifier->setGpuSdfEvaluator(
+            [this](std::vector<Eigen::Vector3f> const & positions) -> std::vector<float>
+            {
+                return evaluateSdfBatchGpu(positions);
+            });
+
+        // Run simplification
+        std::size_t const collapsedEdges = m_qemSimplifier->simplify(
+            m_mesh.positions, m_mesh.normals, m_mesh.indices);
+
+        std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
         
-        for (std::size_t t = 0U; t < numTriangles; ++t)
+        if (collapsedEdges > 0)
         {
-            std::uint32_t const i0 = m_mesh.indices[t * 3U + 0U];
-            std::uint32_t const i1 = m_mesh.indices[t * 3U + 1U];
-            std::uint32_t const i2 = m_mesh.indices[t * 3U + 2U];
+            float const reductionPercent = 
+                100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
+                static_cast<float>(initialTriangles);
             
-            vertexTriangles[i0].push_back(t);
-            vertexTriangles[i1].push_back(t);
-            vertexTriangles[i2].push_back(t);
-            
-            edgeTriangles[Edge{i0, i1}].push_back(t);
-            edgeTriangles[Edge{i1, i2}].push_back(t);
-            edgeTriangles[Edge{i2, i0}].push_back(t);
+            std::cout << "QEM Simplification summary:" << std::endl;
+            std::cout << "  Initial: " << initialTriangles << " triangles, " 
+                      << initialVertices << " vertices" << std::endl;
+            std::cout << "  Final: " << finalTriangles << " triangles, " 
+                      << m_mesh.positions.size() << " vertices" << std::endl;
+            std::cout << "  Reduction: " << std::fixed << std::setprecision(1) 
+                      << reductionPercent << "%" << std::endl;
         }
-
-        // Collect candidate edges for collapse
-        struct CollapseCandidate
-        {
-            Edge edge;
-            float length;
-            float error; // Combined metric: length + curvature penalty
-        };
-        std::vector<CollapseCandidate> candidates;
-        
-        for (auto const & [edge, triangles] : edgeTriangles)
-        {
-            // Only collapse interior edges (exactly 2 triangles share this edge)
-            if (triangles.size() != 2U)
-            {
-                continue;
-            }
-            
-            auto const & p0 = m_mesh.positions[edge.v0];
-            auto const & p1 = m_mesh.positions[edge.v1];
-            float const length = (p1 - p0).norm();
-            
-            // Skip edges that are too long
-            if (length > minEdgeLength)
-            {
-                continue;
-            }
-            
-            // Check if normals are similar (flat region)
-            auto const & n0 = m_mesh.normals[edge.v0];
-            auto const & n1 = m_mesh.normals[edge.v1];
-            float const normalDot = n0.dot(n1);
-            
-            // Only consider edges in relatively flat regions
-            if (normalDot >= flatThreshold)
-            {
-                // Error metric: shorter edges with more similar normals are better
-                float const curvaturePenalty = 1.0F - normalDot;
-                float const error = length * (1.0F + curvaturePenalty * 10.0F);
-                candidates.push_back({edge, length, error});
-            }
-        }
-        
-        if (candidates.empty())
-        {
-            return 0U;
-        }
-
-        // Sort candidates by error metric (lowest error first)
-        std::sort(candidates.begin(), candidates.end(),
-                  [](CollapseCandidate const & a, CollapseCandidate const & b)
-                  {
-                      return a.error < b.error;
-                  });
-
-        // Track which vertices have been collapsed
-        std::vector<std::uint32_t> vertexRemap(m_mesh.positions.size());
-        std::iota(vertexRemap.begin(), vertexRemap.end(), 0U);
-        
-        // Track which vertices have been touched this pass
-        std::vector<bool> vertexTouched(m_mesh.positions.size(), false);
-        
-        auto getFinalVertex = [&vertexRemap](std::uint32_t v) -> std::uint32_t
-        {
-            while (vertexRemap[v] != v)
-            {
-                v = vertexRemap[v];
-            }
-            return v;
-        };
-
-        std::size_t collapsedCount = 0U;
-
-        for (auto const & candidate : candidates)
-        {
-            std::uint32_t const v0 = getFinalVertex(candidate.edge.v0);
-            std::uint32_t const v1 = getFinalVertex(candidate.edge.v1);
-            
-            if (v0 == v1)
-            {
-                continue;
-            }
-            
-            if (vertexTouched[v0] || vertexTouched[v1])
-            {
-                continue;
-            }
-
-            Eigen::Vector3f const & p0 = m_mesh.positions[v0];
-            Eigen::Vector3f const & p1 = m_mesh.positions[v1];
-            Eigen::Vector3f const midpoint = (p0 + p1) * 0.5F;
-            
-            // Check SDF error at midpoint
-            float const sdfError = std::abs(evaluateSdf(midpoint));
-            if (sdfError > m_config.simplificationMaxError)
-            {
-                continue;
-            }
-
-            // Check for triangle inversions
-            bool wouldInvert = false;
-            
-            auto checkTrianglesForInversion = [&](std::uint32_t vertex) -> bool
-            {
-                for (std::size_t triIdx : vertexTriangles[vertex])
-                {
-                    std::size_t const baseIdx = triIdx * 3U;
-                    std::uint32_t triVerts[3] = {
-                        getFinalVertex(m_mesh.indices[baseIdx + 0U]),
-                        getFinalVertex(m_mesh.indices[baseIdx + 1U]),
-                        getFinalVertex(m_mesh.indices[baseIdx + 2U])
-                    };
-                    
-                    if (triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[2] == triVerts[0])
-                    {
-                        continue;
-                    }
-                    
-                    bool const hasV0 = (triVerts[0] == v0 || triVerts[1] == v0 || triVerts[2] == v0);
-                    bool const hasV1 = (triVerts[0] == v1 || triVerts[1] == v1 || triVerts[2] == v1);
-                    if (hasV0 && hasV1)
-                    {
-                        continue;
-                    }
-
-                    Eigen::Vector3f const & a = m_mesh.positions[triVerts[0]];
-                    Eigen::Vector3f const & b = m_mesh.positions[triVerts[1]];
-                    Eigen::Vector3f const & c = m_mesh.positions[triVerts[2]];
-                    
-                    Eigen::Vector3f const normalBefore = (b - a).cross(c - a);
-                    
-                    auto getNewPos = [&](std::uint32_t idx) -> Eigen::Vector3f
-                    {
-                        if (idx == v0 || idx == v1)
-                        {
-                            return midpoint;
-                        }
-                        return m_mesh.positions[idx];
-                    };
-                    
-                    Eigen::Vector3f const aPrime = getNewPos(triVerts[0]);
-                    Eigen::Vector3f const bPrime = getNewPos(triVerts[1]);
-                    Eigen::Vector3f const cPrime = getNewPos(triVerts[2]);
-                    
-                    Eigen::Vector3f const normalAfter = (bPrime - aPrime).cross(cPrime - aPrime);
-                    
-                    float const normalLenBefore = normalBefore.norm();
-                    float const normalLenAfter = normalAfter.norm();
-                    
-                    if (normalLenBefore > 1e-10F && normalLenAfter > 1e-10F)
-                    {
-                        if (normalBefore.dot(normalAfter) < 0.0F)
-                        {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            };
-            
-            wouldInvert = checkTrianglesForInversion(v0) || checkTrianglesForInversion(v1);
-
-            if (wouldInvert)
-            {
-                continue;
-            }
-
-            // Perform the collapse
-            vertexRemap[v1] = v0;
-            vertexTouched[v0] = true;
-            vertexTouched[v1] = true;
-            
-            m_mesh.positions[v0] = midpoint;
-            
-            Eigen::Vector3f avgNormal = (m_mesh.normals[v0] + m_mesh.normals[v1]).normalized();
-            m_mesh.normals[v0] = avgNormal;
-            
-            ++collapsedCount;
-        }
-
-        if (collapsedCount == 0U)
-        {
-            return 0U;
-        }
-
-        // Rebuild index buffer
-        std::vector<std::uint32_t> newIndices;
-        newIndices.reserve(m_mesh.indices.size());
-        
-        for (std::size_t t = 0U; t < numTriangles; ++t)
-        {
-            std::size_t const baseIdx = t * 3U;
-            std::uint32_t const i0 = getFinalVertex(m_mesh.indices[baseIdx + 0U]);
-            std::uint32_t const i1 = getFinalVertex(m_mesh.indices[baseIdx + 1U]);
-            std::uint32_t const i2 = getFinalVertex(m_mesh.indices[baseIdx + 2U]);
-            
-            if (i0 != i1 && i1 != i2 && i2 != i0)
-            {
-                newIndices.push_back(i0);
-                newIndices.push_back(i1);
-                newIndices.push_back(i2);
-            }
-        }
-
-        m_mesh.indices = std::move(newIndices);
-
-        // Compact vertex buffer
-        std::vector<bool> vertexUsed(m_mesh.positions.size(), false);
-        for (auto idx : m_mesh.indices)
-        {
-            vertexUsed[idx] = true;
-        }
-
-        std::vector<std::uint32_t> newVertexIndices(m_mesh.positions.size(), 0U);
-        std::vector<Eigen::Vector3f> newPositions;
-        std::vector<Eigen::Vector3f> newNormals;
-        newPositions.reserve(m_mesh.positions.size());
-        newNormals.reserve(m_mesh.normals.size());
-
-        std::uint32_t newIdx = 0U;
-        for (std::size_t i = 0U; i < m_mesh.positions.size(); ++i)
-        {
-            if (vertexUsed[i])
-            {
-                newVertexIndices[i] = newIdx++;
-                newPositions.push_back(m_mesh.positions[i]);
-                if (i < m_mesh.normals.size())
-                {
-                    newNormals.push_back(m_mesh.normals[i]);
-                }
-            }
-        }
-
-        for (auto & idx : m_mesh.indices)
-        {
-            idx = newVertexIndices[idx];
-        }
-
-        m_mesh.positions = std::move(newPositions);
-        m_mesh.normals = std::move(newNormals);
-
-        return collapsedCount;
     }
 
     // ============================================================================
