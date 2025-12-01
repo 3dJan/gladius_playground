@@ -15,13 +15,22 @@ namespace gladius::compute
     /// Configuration for QEM-based mesh simplification with GPU SDF error evaluation
     struct QemSimplificationConfig
     {
-        // Error metric weights (must sum to 1.0 for normalized comparison)
-        float sdfErrorWeight{0.7F};              ///< Weight for GPU-evaluated SDF deviation error
-        float qemErrorWeight{0.3F};              ///< Weight for quadric error metric
+        // Error metric weights (should sum to ~1.0 for normalized comparison)
+        float sdfErrorWeight{0.5F};              ///< Weight for GPU-evaluated SDF deviation error
+        float qemErrorWeight{0.2F};              ///< Weight for quadric error metric
+        float normalDeviationWeight{0.3F};       ///< Weight for triangle normal vs SDF gradient deviation
         
         // Error bounds
         float maxSdfError{0.01F};                ///< Maximum allowed SDF deviation (world units)
         float maxQemError{1e-4F};                ///< Maximum allowed QEM error (squared distance)
+        float maxNormalDeviation{0.5F};          ///< Maximum allowed normal deviation (1 - dot product, 0.5 = ~60°)
+        
+        // Edge length constraint
+        float maxEdgeLengthRatio{2.5F};          ///< Max ratio of new edge length to neighbor average (prevents long thin triangles)
+        
+        // Multi-point SDF sampling for curved surfaces
+        std::size_t edgeSdfSampleCount{5U};      ///< Number of points to sample along edge for SDF error
+        float edgeSdfErrorWeight{0.3F};          ///< Weight for edge SDF error (max deviation along edge)
         
         // Batch processing for GPU efficiency
         std::size_t batchSize{100000U};          ///< Number of edges to evaluate per GPU batch
@@ -96,7 +105,11 @@ namespace gladius::compute
         Eigen::Vector3f targetPosition;       ///< Optimal collapse position
         float qemError{0.0F};                 ///< Quadric error at target position
         float sdfError{0.0F};                 ///< SDF deviation at target position (filled by GPU)
+        float edgeSdfError{0.0F};            ///< Maximum SDF deviation along edge (for curved surfaces)
+        float normalDeviation{0.0F};          ///< Max triangle normal vs SDF gradient deviation (filled by GPU)
         float combinedError{0.0F};            ///< Weighted combination of errors
+        float edgeLength{0.0F};              ///< Length of this edge
+        float maxNeighborEdgeLength{0.0F};   ///< Maximum length of neighbor edges
         bool isBoundaryEdge{false};           ///< True if edge is on mesh boundary
         bool isSharpFeatureEdge{false};       ///< True if edge is on a sharp feature
         bool isValid{true};                   ///< False if candidate was invalidated by previous collapse
@@ -111,6 +124,10 @@ namespace gladius::compute
     /// Takes array of positions, returns array of SDF values
     using GpuSdfEvaluator = std::function<std::vector<float>(std::vector<Eigen::Vector3f> const & positions)>;
 
+    /// GPU SDF gradient evaluation function type
+    /// Takes array of positions, returns array of normalized gradient vectors (surface normals)
+    using GpuSdfGradientEvaluator = std::function<std::vector<Eigen::Vector3f>(std::vector<Eigen::Vector3f> const & positions)>;
+
     /// QEM-based mesh simplifier with GPU SDF error evaluation
     class QemMeshSimplifier
     {
@@ -122,6 +139,9 @@ namespace gladius::compute
 
         /// Set GPU SDF evaluation function (must be set before simplify())
         void setGpuSdfEvaluator(GpuSdfEvaluator evaluator);
+
+        /// Set GPU SDF gradient evaluation function (must be set before simplify() for normal deviation check)
+        void setGpuSdfGradientEvaluator(GpuSdfGradientEvaluator evaluator);
 
         /// Set progress callback (optional)
         void setProgressCallback(SimplificationProgressCallback callback);
@@ -135,6 +155,7 @@ namespace gladius::compute
       private:
         QemSimplificationConfig m_config{};
         GpuSdfEvaluator m_gpuSdfEvaluator{nullptr};
+        GpuSdfGradientEvaluator m_gpuSdfGradientEvaluator{nullptr};
         SimplificationProgressCallback m_progressCallback{nullptr};
 
         // Per-vertex quadrics
@@ -157,7 +178,10 @@ namespace gladius::compute
             std::vector<std::uint32_t> const & indices) const;
 
         // Evaluate SDF errors for a batch of candidates using GPU
-        void evaluateSdfErrorsGpu(std::vector<CollapseCandidate> & candidates);
+        void evaluateSdfErrorsGpu(std::vector<CollapseCandidate> & candidates,
+                                  std::vector<Eigen::Vector3f> const & positions,
+                                  std::vector<std::uint32_t> const & indices,
+                                  std::vector<std::vector<std::size_t>> const & vertexToTriangles);
 
         // Perform a single edge collapse
         bool performCollapse(CollapseCandidate const & candidate,

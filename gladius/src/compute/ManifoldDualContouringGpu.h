@@ -49,8 +49,10 @@ namespace gladius::compute
         bool enableSimplification{false};           ///< Enable QEM-based edge-collapse simplification
         float simplificationMaxSdfError{0.01F};     ///< Maximum SDF deviation allowed for edge collapse (world units)
         float simplificationMaxQemError{1e-4F};     ///< Maximum QEM error allowed for edge collapse
-        float simplificationSdfWeight{0.7F};        ///< Weight for SDF error in combined metric [0,1]
-        float simplificationQemWeight{0.3F};        ///< Weight for QEM error in combined metric [0,1]
+        float simplificationMaxNormalDeviation{0.3F}; ///< Maximum normal deviation allowed (1 - dot, 0.3 ≈ ~45°)
+        float simplificationSdfWeight{0.5F};        ///< Weight for SDF error in combined metric [0,1]
+        float simplificationQemWeight{0.2F};        ///< Weight for QEM error in combined metric [0,1]
+        float simplificationNormalWeight{0.3F};     ///< Weight for normal deviation in combined metric [0,1]
         float simplificationSharpEdgeThreshold{0.7F}; ///< Cosine threshold for sharp edges (0.7 ≈ 45°)
         std::size_t simplificationBatchSize{100000U}; ///< Number of edges per GPU evaluation batch
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
@@ -126,6 +128,7 @@ namespace gladius::compute
         void simplifyMesh();
         void simplifyMeshQem();
         [[nodiscard]] std::vector<float> evaluateSdfBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
+        [[nodiscard]] std::vector<Eigen::Vector3f> evaluateSdfGradientBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;
         std::unique_ptr<QemMeshSimplifier> m_qemSimplifier;
         

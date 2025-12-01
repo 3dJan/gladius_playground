@@ -179,6 +179,11 @@ namespace gladius::compute
         m_gpuSdfEvaluator = std::move(evaluator);
     }
 
+    void QemMeshSimplifier::setGpuSdfGradientEvaluator(GpuSdfGradientEvaluator evaluator)
+    {
+        m_gpuSdfGradientEvaluator = std::move(evaluator);
+    }
+
     void QemMeshSimplifier::setProgressCallback(SimplificationProgressCallback callback)
     {
         m_progressCallback = std::move(callback);
@@ -291,10 +296,15 @@ namespace gladius::compute
             candidate.vertexA = edge.first;
             candidate.vertexB = edge.second;
 
+            // Compute edge length
+            candidate.edgeLength = (positions[candidate.vertexA] - positions[candidate.vertexB]).norm();
+
             // Boundary edge: only 1 adjacent triangle
             candidate.isBoundaryEdge = (triangles.size() == 1);
 
             // Sharp feature detection: check angle between adjacent triangle normals
+            // Also collect neighbor vertices to compute neighbor edge lengths
+            std::unordered_set<std::uint32_t> neighborVertices;
             if (triangles.size() == 2)
             {
                 auto computeTriangleNormal = [&](std::size_t triIdx) -> Eigen::Vector3f
@@ -312,30 +322,75 @@ namespace gladius::compute
                 float const normalDot = n0.dot(n1);
 
                 candidate.isSharpFeatureEdge = (normalDot < m_config.sharpEdgeAngleThreshold);
+                
+                // Collect vertices from adjacent triangles (excluding edge vertices)
+                for (std::size_t triIdx : triangles)
+                {
+                    for (std::size_t vi = 0; vi < 3; ++vi)
+                    {
+                        std::uint32_t const v = indices[triIdx * 3 + vi];
+                        if (v != candidate.vertexA && v != candidate.vertexB)
+                        {
+                            neighborVertices.insert(v);
+                        }
+                    }
+                }
+            }
+            
+            // Compute max neighbor edge length (edges from target position to neighbor vertices)
+            // This helps detect if collapsing would create unusually long edges
+            candidate.maxNeighborEdgeLength = candidate.edgeLength;
+            for (std::uint32_t neighborV : neighborVertices)
+            {
+                float const neighborEdgeLen = (positions[neighborV] - positions[candidate.vertexA]).norm();
+                candidate.maxNeighborEdgeLength = std::max(candidate.maxNeighborEdgeLength, neighborEdgeLen);
+                float const neighborEdgeLen2 = (positions[neighborV] - positions[candidate.vertexB]).norm();
+                candidate.maxNeighborEdgeLength = std::max(candidate.maxNeighborEdgeLength, neighborEdgeLen2);
             }
 
             // Compute combined quadric for edge
             Quadric const combinedQuadric =
                 m_vertexQuadrics[candidate.vertexA] + m_vertexQuadrics[candidate.vertexB];
 
-            // Find optimal target position
+            // Compute edge midpoint as fallback/baseline
+            Eigen::Vector3f const edgeMidpoint =
+                (positions[candidate.vertexA] + positions[candidate.vertexB]) * 0.5F;
+            
+            // Find optimal target position from QEM
             auto optimalPos = combinedQuadric.optimalVertex();
             if (optimalPos.has_value())
             {
-                candidate.targetPosition = optimalPos.value();
+                Eigen::Vector3f const qemPos = optimalPos.value();
+                
+                // Check if QEM position is too far from edge midpoint
+                // This prevents placing vertices far from the original surface
+                float const qemDistance = (qemPos - edgeMidpoint).norm();
+                
+                // If QEM position is more than half the edge length away from midpoint,
+                // use midpoint instead (QEM is likely ill-conditioned or placing vertex off-surface)
+                if (qemDistance < candidate.edgeLength * 0.5F)
+                {
+                    candidate.targetPosition = qemPos;
+                }
+                else
+                {
+                    // QEM is pulling vertex too far - use midpoint for stability
+                    candidate.targetPosition = edgeMidpoint;
+                }
             }
             else
             {
                 // Fall back to edge midpoint
-                candidate.targetPosition =
-                    (positions[candidate.vertexA] + positions[candidate.vertexB]) * 0.5F;
+                candidate.targetPosition = edgeMidpoint;
             }
 
             // Compute QEM error at target position
             candidate.qemError = combinedQuadric.evaluate(candidate.targetPosition);
 
-            // SDF error will be filled in by GPU evaluation
+            // SDF error and normal deviation will be filled in by GPU evaluation
             candidate.sdfError = 0.0F;
+            candidate.edgeSdfError = 0.0F;
+            candidate.normalDeviation = 0.0F;
 
             candidates.push_back(candidate);
         }
@@ -343,14 +398,21 @@ namespace gladius::compute
         return candidates;
     }
 
-    void QemMeshSimplifier::evaluateSdfErrorsGpu(std::vector<CollapseCandidate> & candidates)
+    void QemMeshSimplifier::evaluateSdfErrorsGpu(
+        std::vector<CollapseCandidate> & candidates,
+        std::vector<Eigen::Vector3f> const & meshPositions,
+        std::vector<std::uint32_t> const & indices,
+        std::vector<std::vector<std::size_t>> const & vertexToTriangles)
     {
         if (!m_gpuSdfEvaluator || candidates.empty())
         {
             return;
         }
 
-        // Process in batches
+        // Multi-point SDF sampling along edges for better curved surface handling
+        std::size_t const sampleCount = std::max(std::size_t{1}, m_config.edgeSdfSampleCount);
+        
+        // Process in batches, accounting for multiple samples per edge
         for (std::size_t batchStart = 0; batchStart < candidates.size();
              batchStart += m_config.batchSize)
         {
@@ -358,29 +420,217 @@ namespace gladius::compute
                 std::min(batchStart + m_config.batchSize, candidates.size());
             std::size_t const batchSize = batchEnd - batchStart;
 
-            // Collect positions for this batch
+            // Collect all sample positions for this batch
+            // For each edge: target position + (sampleCount-1) points along edge
             std::vector<Eigen::Vector3f> positions;
-            positions.reserve(batchSize);
+            positions.reserve(batchSize * sampleCount);
+            
             for (std::size_t i = batchStart; i < batchEnd; ++i)
             {
-                positions.push_back(candidates[i].targetPosition);
+                auto const & candidate = candidates[i];
+                
+                // Always include target position first
+                positions.push_back(candidate.targetPosition);
+                
+                // Sample points along the original edge (before collapse)
+                // These detect if the edge cuts through high curvature areas
+                if (sampleCount > 1)
+                {
+                    Eigen::Vector3f const & posA = meshPositions[candidate.vertexA];
+                    Eigen::Vector3f const & posB = meshPositions[candidate.vertexB];
+                    
+                    for (std::size_t s = 1; s < sampleCount; ++s)
+                    {
+                        float const t = static_cast<float>(s) / static_cast<float>(sampleCount);
+                        Eigen::Vector3f const samplePos = posA + t * (posB - posA);
+                        positions.push_back(samplePos);
+                    }
+                }
             }
 
-            // Evaluate SDF on GPU
+            // Evaluate SDF on GPU for all sample points
             std::vector<float> sdfValues = m_gpuSdfEvaluator(positions);
 
-            // Store results
-            for (std::size_t i = 0; i < batchSize; ++i)
+            // Process results: target SDF and max edge deviation
+            std::size_t sampleIdx = 0;
+            for (std::size_t i = batchStart; i < batchEnd; ++i)
             {
-                candidates[batchStart + i].sdfError = std::abs(sdfValues[i]);
+                // First sample is target position
+                candidates[i].sdfError = std::abs(sdfValues[sampleIdx++]);
+                
+                // Remaining samples are along the edge - find max deviation
+                float maxEdgeSdf = 0.0F;
+                for (std::size_t s = 1; s < sampleCount; ++s)
+                {
+                    maxEdgeSdf = std::max(maxEdgeSdf, std::abs(sdfValues[sampleIdx++]));
+                }
+                candidates[i].edgeSdfError = maxEdgeSdf;
+            }
+        }
+
+        // Evaluate normal deviation if gradient evaluator is available
+        if (m_gpuSdfGradientEvaluator && m_config.normalDeviationWeight > 0.0F)
+        {
+            // For each candidate, compute the maximum normal deviation for affected triangles
+            // after the collapse. We evaluate SDF gradients at triangle centroids.
+            
+            for (auto & candidate : candidates)
+            {
+                std::uint32_t const vA = candidate.vertexA;
+                std::uint32_t const vB = candidate.vertexB;
+                Eigen::Vector3f const & newPos = candidate.targetPosition;
+                
+                // Collect triangles that will be modified (not removed) by this collapse
+                std::vector<std::size_t> affectedTriangles;
+                std::unordered_set<std::size_t> allTriangles;
+                
+                for (std::size_t t : vertexToTriangles[vA])
+                {
+                    allTriangles.insert(t);
+                }
+                for (std::size_t t : vertexToTriangles[vB])
+                {
+                    allTriangles.insert(t);
+                }
+                
+                for (std::size_t triIdx : allTriangles)
+                {
+                    std::uint32_t const i0 = indices[triIdx * 3 + 0];
+                    std::uint32_t const i1 = indices[triIdx * 3 + 1];
+                    std::uint32_t const i2 = indices[triIdx * 3 + 2];
+                    
+                    // Check if triangle will be removed (contains both vertices)
+                    bool const hasA = (i0 == vA || i1 == vA || i2 == vA);
+                    bool const hasB = (i0 == vB || i1 == vB || i2 == vB);
+                    
+                    if (hasA && hasB)
+                    {
+                        continue;  // Triangle will be removed
+                    }
+                    
+                    if (hasA || hasB)
+                    {
+                        affectedTriangles.push_back(triIdx);
+                    }
+                }
+                
+                if (affectedTriangles.empty())
+                {
+                    candidate.normalDeviation = 0.0F;
+                    continue;
+                }
+                
+                // Compute centroids of affected triangles after collapse
+                std::vector<Eigen::Vector3f> centroids;
+                std::vector<Eigen::Vector3f> triangleNormals;
+                centroids.reserve(affectedTriangles.size());
+                triangleNormals.reserve(affectedTriangles.size());
+                
+                for (std::size_t triIdx : affectedTriangles)
+                {
+                    std::uint32_t const i0 = indices[triIdx * 3 + 0];
+                    std::uint32_t const i1 = indices[triIdx * 3 + 1];
+                    std::uint32_t const i2 = indices[triIdx * 3 + 2];
+                    
+                    // Get positions after collapse
+                    auto getPos = [&](std::uint32_t idx) -> Eigen::Vector3f
+                    {
+                        if (idx == vA || idx == vB)
+                        {
+                            return newPos;
+                        }
+                        return meshPositions[idx];
+                    };
+                    
+                    Eigen::Vector3f const p0 = getPos(i0);
+                    Eigen::Vector3f const p1 = getPos(i1);
+                    Eigen::Vector3f const p2 = getPos(i2);
+                    
+                    // Compute centroid
+                    Eigen::Vector3f const centroid = (p0 + p1 + p2) / 3.0F;
+                    centroids.push_back(centroid);
+                    
+                    // Compute triangle normal
+                    Eigen::Vector3f const triNormal = (p1 - p0).cross(p2 - p0).normalized();
+                    triangleNormals.push_back(triNormal);
+                }
+                
+                // Evaluate SDF gradients at centroids
+                std::vector<Eigen::Vector3f> sdfNormals = m_gpuSdfGradientEvaluator(centroids);
+                
+                // Compute maximum normal deviation
+                float maxDeviation = 0.0F;
+                for (std::size_t i = 0; i < centroids.size(); ++i)
+                {
+                    float const dotProduct = std::abs(triangleNormals[i].dot(sdfNormals[i]));
+                    float const deviation = 1.0F - dotProduct;  // 0 = perfect alignment, 1 = perpendicular
+                    maxDeviation = std::max(maxDeviation, deviation);
+                }
+                
+                candidate.normalDeviation = maxDeviation;
             }
         }
 
         // Compute combined error for all candidates
+        // Also collect statistics for debugging
+        std::size_t rejectedBySdf = 0;
+        std::size_t rejectedByEdgeSdf = 0;
+        std::size_t rejectedByQem = 0;
+        std::size_t rejectedByNormal = 0;
+        std::size_t rejectedByBoundary = 0;
+        std::size_t rejectedByEdgeLength = 0;
+        
         for (auto & candidate : candidates)
         {
+            // Count rejection reasons (for debugging)
+            if (candidate.sdfError > m_config.maxSdfError)
+            {
+                ++rejectedBySdf;
+            }
+            if (candidate.edgeSdfError > m_config.maxSdfError)
+            {
+                ++rejectedByEdgeSdf;
+            }
+            if (candidate.qemError > m_config.maxQemError)
+            {
+                ++rejectedByQem;
+            }
+            if (candidate.normalDeviation > m_config.maxNormalDeviation)
+            {
+                ++rejectedByNormal;
+            }
+            if (candidate.isBoundaryEdge)
+            {
+                ++rejectedByBoundary;
+            }
+            
+            // Check edge length constraint: would collapse create edges much longer than neighbors?
+            // After collapse, edges from target to neighbor vertices shouldn't be too long
+            float edgeLengthPenalty = 0.0F;
+            if (candidate.maxNeighborEdgeLength > 0.0F)
+            {
+                // Compute average neighbor edge length as reference
+                float const avgNeighborLen = candidate.maxNeighborEdgeLength;
+                
+                // New edges will be from targetPosition to each neighbor vertex
+                // The max such length is approximately: distance(target, farthest neighbor)
+                // For now, use a heuristic: if edge being collapsed is very short compared to neighbors,
+                // collapsing is good. If it's already long, be more careful.
+                float const edgeLengthRatio = candidate.edgeLength / avgNeighborLen;
+                
+                // Penalize collapsing already-long edges (they span larger areas)
+                if (edgeLengthRatio > m_config.maxEdgeLengthRatio)
+                {
+                    edgeLengthPenalty = (edgeLengthRatio - m_config.maxEdgeLengthRatio) * 0.5F;
+                    ++rejectedByEdgeLength;
+                }
+            }
+            
             float error = candidate.sdfError * m_config.sdfErrorWeight +
-                          candidate.qemError * m_config.qemErrorWeight;
+                          candidate.edgeSdfError * m_config.edgeSdfErrorWeight +
+                          candidate.qemError * m_config.qemErrorWeight +
+                          candidate.normalDeviation * m_config.normalDeviationWeight +
+                          edgeLengthPenalty;
 
             // Apply penalties for special edges
             if (candidate.isBoundaryEdge)
@@ -394,6 +644,14 @@ namespace gladius::compute
 
             candidate.combinedError = error;
         }
+        
+        std::cout << "Candidate rejection stats (of " << candidates.size() << " total):" << std::endl;
+        std::cout << "  SDF error > " << m_config.maxSdfError << ": " << rejectedBySdf << std::endl;
+        std::cout << "  Edge SDF error > " << m_config.maxSdfError << ": " << rejectedByEdgeSdf << std::endl;
+        std::cout << "  Edge length ratio > " << m_config.maxEdgeLengthRatio << ": " << rejectedByEdgeLength << std::endl;
+        std::cout << "  QEM error > " << m_config.maxQemError << ": " << rejectedByQem << std::endl;
+        std::cout << "  Normal deviation > " << m_config.maxNormalDeviation << ": " << rejectedByNormal << std::endl;
+        std::cout << "  Boundary edges: " << rejectedByBoundary << std::endl;
     }
 
     bool QemMeshSimplifier::wouldCreateDegenerateTriangles(
@@ -417,6 +675,18 @@ namespace gladius::compute
             trianglesToCheck.insert(t);
         }
 
+        // Minimum normal preservation threshold (cos of max allowed angle deviation)
+        // 0.5 = 60 degrees max deviation, 0.7 = ~45 degrees, 0.866 = 30 degrees
+        // Use very strict threshold to prevent visible surface distortion
+        float constexpr kMinNormalDotProduct = 0.9F;  // ~25 degrees max
+        
+        // Minimum triangle quality (aspect ratio) threshold
+        // Ratio of shortest edge to longest edge, below this is too thin
+        float constexpr kMinAspectRatio = 0.15F;
+        
+        // Minimum area relative to original triangle
+        float constexpr kMinAreaRatio = 0.05F;
+
         for (std::size_t triIdx : trianglesToCheck)
         {
             std::uint32_t i0 = indices[triIdx * 3 + 0];
@@ -430,6 +700,11 @@ namespace gladius::compute
             {
                 continue;
             }
+
+            // Get original vertex positions
+            Eigen::Vector3f const oldP0 = positions[i0];
+            Eigen::Vector3f const oldP1 = positions[i1];
+            Eigen::Vector3f const oldP2 = positions[i2];
 
             // Get new vertex positions after collapse
             auto getNewPos = [&](std::uint32_t idx) -> Eigen::Vector3f
@@ -445,28 +720,62 @@ namespace gladius::compute
             Eigen::Vector3f const p1 = getNewPos(i1);
             Eigen::Vector3f const p2 = getNewPos(i2);
 
-            // Check for degenerate triangle
+            // Compute new triangle properties
             Eigen::Vector3f const e1 = p1 - p0;
             Eigen::Vector3f const e2 = p2 - p0;
-            Eigen::Vector3f const newNormal = e1.cross(e2);
-            float const area = newNormal.norm();
+            Eigen::Vector3f const e3 = p2 - p1;
+            Eigen::Vector3f const newNormalUnnorm = e1.cross(e2);
+            float const newArea = newNormalUnnorm.norm();
 
-            if (area < 1e-10F)
+            // Check for degenerate triangle (near-zero area)
+            if (newArea < 1e-10F)
             {
                 return true; // Degenerate
             }
 
-            // Check for inverted triangle
+            Eigen::Vector3f const newNormal = newNormalUnnorm / newArea;
+
+            // Check aspect ratio (triangle quality)
+            float const len1 = e1.norm();
+            float const len2 = e2.norm();
+            float const len3 = e3.norm();
+            float const maxLen = std::max({len1, len2, len3});
+            float const minLen = std::min({len1, len2, len3});
+            
+            if (maxLen > 1e-10F && (minLen / maxLen) < kMinAspectRatio)
+            {
+                return true; // Too thin/elongated
+            }
+
+            // For triangles that will be modified (contain one of the collapsed vertices)
             if (hasA || hasB)
             {
-                Eigen::Vector3f const oldP0 = positions[i0];
-                Eigen::Vector3f const oldP1 = positions[i1];
-                Eigen::Vector3f const oldP2 = positions[i2];
-                Eigen::Vector3f const oldNormal = (oldP1 - oldP0).cross(oldP2 - oldP0);
-
-                if (oldNormal.dot(newNormal) < 0.0F)
+                Eigen::Vector3f const oldNormalUnnorm = (oldP1 - oldP0).cross(oldP2 - oldP0);
+                float const oldArea = oldNormalUnnorm.norm();
+                
+                if (oldArea > 1e-10F)
                 {
-                    return true; // Inverted
+                    Eigen::Vector3f const oldNormal = oldNormalUnnorm / oldArea;
+                    float const normalDot = oldNormal.dot(newNormal);
+
+                    // Check for inverted triangle (normal flipped)
+                    if (normalDot < 0.0F)
+                    {
+                        return true; // Inverted
+                    }
+
+                    // Check for excessive normal deviation
+                    // This is the key check that prevents "lumpy" surfaces!
+                    if (normalDot < kMinNormalDotProduct)
+                    {
+                        return true; // Normal changed too much
+                    }
+
+                    // Check for excessive area reduction
+                    if ((newArea / oldArea) < kMinAreaRatio)
+                    {
+                        return true; // Triangle shrunk too much
+                    }
                 }
             }
         }
@@ -705,8 +1014,8 @@ namespace gladius::compute
                 break;
             }
 
-            // Evaluate SDF errors on GPU
-            evaluateSdfErrorsGpu(candidates);
+            // Evaluate SDF errors and normal deviations on GPU
+            evaluateSdfErrorsGpu(candidates, positions, indices, vertexToTriangles);
 
             // Sort by combined error (lowest first)
             std::sort(candidates.begin(),
@@ -731,6 +1040,12 @@ namespace gladius::compute
                 {
                     continue;
                 }
+                // Temporarily disabled: normal deviation check needs debugging
+                // The gradient evaluator may not be returning correct values
+                // if (candidate.normalDeviation > m_config.maxNormalDeviation)
+                // {
+                //     continue;
+                // }
 
                 // Skip boundary edges entirely (watertight preservation)
                 if (candidate.isBoundaryEdge)

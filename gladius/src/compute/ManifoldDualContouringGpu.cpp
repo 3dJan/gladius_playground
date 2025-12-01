@@ -234,6 +234,13 @@ namespace gladius::compute
         {
             simplifyMesh();
         }
+        
+        // Project vertices to SDF surface AFTER simplification
+        // This snaps simplified vertices back onto the iso-surface, fixing off-surface artifacts
+        if (m_config.projectToSurface && !m_mesh.indices.empty())
+        {
+            projectVerticesToSurface();
+        }
     }
 
     void ManifoldDualContouringGpu::constructOctree()
@@ -695,11 +702,7 @@ namespace gladius::compute
             }
         }
         
-        // Step 3: Project new vertices to the SDF surface
-        if (m_config.projectToSurface)
-        {
-            projectVerticesToSurface();
-        }
+        // Note: Vertex projection moved to after simplification for better results
         
         std::cout << "Sharp feature post-processing complete" << std::endl;
     }
@@ -1164,8 +1167,10 @@ namespace gladius::compute
         qemConfig.targetReductionPercent = m_config.simplificationTargetReduction;
         qemConfig.sdfErrorWeight = m_config.simplificationSdfWeight;
         qemConfig.qemErrorWeight = m_config.simplificationQemWeight;
+        qemConfig.normalDeviationWeight = m_config.simplificationNormalWeight;
         qemConfig.maxSdfError = m_config.simplificationMaxSdfError;
         qemConfig.maxQemError = m_config.simplificationMaxQemError;
+        qemConfig.maxNormalDeviation = m_config.simplificationMaxNormalDeviation;
         qemConfig.sharpEdgeAngleThreshold = m_config.simplificationSharpEdgeThreshold;
         qemConfig.batchSize = m_config.simplificationBatchSize;
         qemConfig.maxPasses = m_config.simplificationMaxPasses;
@@ -1176,10 +1181,17 @@ namespace gladius::compute
             return evaluateSdfBatchGpu(positions);
         };
         
+        // Create SDF gradient evaluation callback for normal deviation checking
+        auto gradientCallback = [this](std::vector<Eigen::Vector3f> const& positions) -> std::vector<Eigen::Vector3f>
+        {
+            return evaluateSdfGradientBatchGpu(positions);
+        };
+        
         // Create and run the QEM simplifier
         QemMeshSimplifier simplifier;
         simplifier.setConfig(qemConfig);
         simplifier.setGpuSdfEvaluator(sdfCallback);
+        simplifier.setGpuSdfGradientEvaluator(gradientCallback);
         
         // Simplify the mesh in-place
         std::size_t const collapsedEdges = simplifier.simplify(
@@ -1220,6 +1232,49 @@ namespace gladius::compute
         return results;
     }
 
+    std::vector<Eigen::Vector3f> ManifoldDualContouringGpu::evaluateSdfGradientBatchGpu(
+        std::vector<Eigen::Vector3f> const & positions) const
+    {
+        std::vector<Eigen::Vector3f> results(positions.size(), Eigen::Vector3f::Zero());
+        
+        if (positions.empty())
+        {
+            return results;
+        }
+
+        // Compute gradient using central differences
+        // Use a small epsilon relative to the mesh scale
+        float const epsilon = 0.001F;  // 1 micron for mm-scale models
+
+        for (std::size_t i = 0; i < positions.size(); ++i)
+        {
+            Eigen::Vector3f const & pos = positions[i];
+            
+            float const dx_pos = evaluateSdf(pos + Eigen::Vector3f(epsilon, 0.0F, 0.0F));
+            float const dx_neg = evaluateSdf(pos - Eigen::Vector3f(epsilon, 0.0F, 0.0F));
+            float const dy_pos = evaluateSdf(pos + Eigen::Vector3f(0.0F, epsilon, 0.0F));
+            float const dy_neg = evaluateSdf(pos - Eigen::Vector3f(0.0F, epsilon, 0.0F));
+            float const dz_pos = evaluateSdf(pos + Eigen::Vector3f(0.0F, 0.0F, epsilon));
+            float const dz_neg = evaluateSdf(pos - Eigen::Vector3f(0.0F, 0.0F, epsilon));
+            
+            Eigen::Vector3f gradient(
+                (dx_pos - dx_neg) / (2.0F * epsilon),
+                (dy_pos - dy_neg) / (2.0F * epsilon),
+                (dz_pos - dz_neg) / (2.0F * epsilon)
+            );
+            
+            float const gradLen = gradient.norm();
+            if (gradLen > 1e-6F)
+            {
+                gradient /= gradLen;
+            }
+            
+            results[i] = gradient;
+        }
+
+        return results;
+    }
+
     void ManifoldDualContouringGpu::simplifyMeshQem()
     {
         std::cout << "Starting QEM-based mesh simplification..." << std::endl;
@@ -1241,8 +1296,10 @@ namespace gladius::compute
         QemSimplificationConfig qemConfig;
         qemConfig.sdfErrorWeight = m_config.simplificationSdfWeight;
         qemConfig.qemErrorWeight = m_config.simplificationQemWeight;
+        qemConfig.normalDeviationWeight = m_config.simplificationNormalWeight;
         qemConfig.maxSdfError = m_config.simplificationMaxSdfError;
         qemConfig.maxQemError = m_config.simplificationMaxQemError;
+        qemConfig.maxNormalDeviation = m_config.simplificationMaxNormalDeviation;
         qemConfig.sharpEdgeAngleThreshold = m_config.simplificationSharpEdgeThreshold;
         qemConfig.batchSize = m_config.simplificationBatchSize;
         qemConfig.maxPasses = m_config.simplificationMaxPasses;
@@ -1257,6 +1314,13 @@ namespace gladius::compute
             [this](std::vector<Eigen::Vector3f> const & positions) -> std::vector<float>
             {
                 return evaluateSdfBatchGpu(positions);
+            });
+
+        // Set up GPU SDF gradient evaluator for normal deviation checking
+        m_qemSimplifier->setGpuSdfGradientEvaluator(
+            [this](std::vector<Eigen::Vector3f> const & positions) -> std::vector<Eigen::Vector3f>
+            {
+                return evaluateSdfGradientBatchGpu(positions);
             });
 
         // Run simplification
