@@ -533,8 +533,27 @@ namespace gladius::ui
                 ImGui::Separator();
                 ImGui::Text("Mesh Simplification");
                 
-                ImGui::Checkbox("Enable simplification", &m_manifoldEnableSimplification);
-                if (m_manifoldEnableSimplification)
+                // Simplification method selection
+                char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)", "MeshOptimizer (fast)"};
+                int const numMethods = 3;
+                if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
+                {
+                    for (int i = 0; i < numMethods; ++i)
+                    {
+                        bool const isSelected = (m_manifoldSimplificationMethod == i);
+                        if (ImGui::Selectable(simplificationMethods[i], isSelected))
+                        {
+                            m_manifoldSimplificationMethod = i;
+                        }
+                        if (isSelected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                
+                if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
                 {
                     ImGui::Indent();
                     
@@ -550,7 +569,31 @@ namespace gladius::ui
                                        0.0F, 1.0F, 
                                        "%.2f");
                     ImGui::SameLine();
-                    ImGui::TextDisabled("SDF vs QEM balance (higher = more accurate)");
+                    ImGui::TextDisabled("weight for position error");
+                    
+                    ImGui::SliderFloat("Normal weight", 
+                                       &m_manifoldSimplificationNormalWeight, 
+                                       0.0F, 1.0F, 
+                                       "%.2f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("weight for triangle orientation error");
+                    
+                    ImGui::Unindent();
+                }
+                else if (m_manifoldSimplificationMethod == 2)  // MeshOptimizer
+                {
+                    ImGui::Indent();
+                    
+                    ImGui::SliderFloat("Target error", 
+                                       &m_meshOptimizerTargetError, 
+                                       0.001F, 0.1F, 
+                                       "%.3f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("maximum geometric error");
+                    
+                    ImGui::Checkbox("Use fast (sloppy) mode", &m_meshOptimizerUseSloppy);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("faster but less accurate");
                     
                     ImGui::Unindent();
                 }
@@ -865,11 +908,19 @@ namespace gladius::ui
             options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
             options.subdivisionIterations = m_manifoldSubdivisionIterations;
             options.projectToSurface = m_manifoldProjectToSurface;
-            // Mesh simplification options (QEM-based with GPU SDF evaluation)
-            options.enableSimplification = m_manifoldEnableSimplification;
+            // Mesh simplification options
+            options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
+            options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
+            // QEM SDF-aware options
             options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
             options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-            options.simplificationQemWeight = 1.0F - m_manifoldSimplificationSdfWeight;
+            options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
+            // QEM weight is the remainder after SDF and normal weights
+            options.simplificationQemWeight = std::max(0.0F, 
+                1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+            // MeshOptimizer options
+            options.meshOptimizerTargetError = m_meshOptimizerTargetError;
+            options.meshOptimizerUseSloppy = m_meshOptimizerUseSloppy;
 
             m_manifoldExporter.setOptions(options);
             // Set output format and document for 3MF support

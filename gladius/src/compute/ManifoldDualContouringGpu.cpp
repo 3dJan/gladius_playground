@@ -230,7 +230,12 @@ namespace gladius::compute
         }
         
         // Mesh simplification (after sharp feature processing)
-        if (m_config.enableSimplification && !m_mesh.indices.empty())
+        // Support both legacy enableSimplification flag and new simplificationMethod enum
+        bool const shouldSimplify = 
+            (m_config.simplificationMethod != SimplificationMethod::None) ||
+            m_config.enableSimplification;
+            
+        if (shouldSimplify && !m_mesh.indices.empty())
         {
             simplifyMesh();
         }
@@ -1151,7 +1156,6 @@ namespace gladius::compute
 
     void ManifoldDualContouringGpu::simplifyMesh()
     {
-        std::cout << "Starting QEM mesh simplification..." << std::endl;
         std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
         std::size_t const initialVertices = m_mesh.positions.size();
         
@@ -1160,6 +1164,38 @@ namespace gladius::compute
             std::cout << "Mesh too small for simplification" << std::endl;
             return;
         }
+
+        // Determine which method to use
+        SimplificationMethod method = m_config.simplificationMethod;
+        
+        // Legacy support: if enableSimplification is set but method is None, use QEM
+        if (method == SimplificationMethod::None && m_config.enableSimplification)
+        {
+            method = SimplificationMethod::QemSdfAware;
+        }
+        
+        switch (method)
+        {
+            case SimplificationMethod::QemSdfAware:
+                simplifyMeshQemSdfAware();
+                break;
+                
+            case SimplificationMethod::MeshOptimizer:
+                simplifyMeshMeshOptimizer();
+                break;
+                
+            case SimplificationMethod::None:
+            default:
+                // Should not reach here due to caller check, but handle gracefully
+                break;
+        }
+    }
+    
+    void ManifoldDualContouringGpu::simplifyMeshQemSdfAware()
+    {
+        std::cout << "Starting QEM SDF-aware mesh simplification..." << std::endl;
+        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const initialVertices = m_mesh.positions.size();
 
         // Configure QEM simplifier
         QemSimplificationConfig qemConfig;
@@ -1210,6 +1246,55 @@ namespace gladius::compute
         std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
                   << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
         std::cout << "  Collapsed edges: " << collapsedEdges << std::endl;
+    }
+    
+    void ManifoldDualContouringGpu::simplifyMeshMeshOptimizer()
+    {
+        std::cout << "Starting MeshOptimizer simplification..." << std::endl;
+        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
+        std::size_t const initialVertices = m_mesh.positions.size();
+        
+        // Configure MeshOptimizer
+        MeshOptimizerConfig config;
+        
+        // Compute target ratio from various config options
+        if (m_config.simplificationTargetTriangles.has_value())
+        {
+            config.targetReductionRatio = 
+                static_cast<float>(m_config.simplificationTargetTriangles.value()) / 
+                static_cast<float>(initialTriangles);
+        }
+        else if (m_config.simplificationTargetReduction.has_value())
+        {
+            config.targetReductionRatio = 1.0F - m_config.simplificationTargetReduction.value();
+        }
+        else
+        {
+            config.targetReductionRatio = 0.5F;  // Default 50% reduction
+        }
+        
+        config.targetError = m_config.meshOptimizerTargetError;
+        config.preserveBorders = true;  // Always preserve for watertight meshes
+        config.useSloppy = m_config.meshOptimizerUseSloppy;
+        
+        // Create and run MeshOptimizer simplifier
+        MeshOptimizerSimplifier simplifier;
+        simplifier.setConfig(config);
+        
+        std::size_t const finalTriangles = simplifier.simplify(
+            m_mesh.positions, m_mesh.normals, m_mesh.indices);
+        
+        std::size_t const finalVertices = m_mesh.positions.size();
+        
+        float const reductionPercent = 100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
+                                       static_cast<float>(initialTriangles);
+        
+        std::cout << "MeshOptimizer simplification complete:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
+                  << " (removed " << (initialTriangles - finalTriangles) 
+                  << ", " << std::fixed << std::setprecision(1) << reductionPercent << "%)" << std::endl;
+        std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
+                  << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
     }
     
     std::vector<float> ManifoldDualContouringGpu::evaluateSdfBatchGpu(
@@ -1273,76 +1358,6 @@ namespace gladius::compute
         }
 
         return results;
-    }
-
-    void ManifoldDualContouringGpu::simplifyMeshQem()
-    {
-        std::cout << "Starting QEM-based mesh simplification..." << std::endl;
-        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
-        std::size_t const initialVertices = m_mesh.positions.size();
-        
-        if (initialTriangles < 2U || initialVertices < 4U)
-        {
-            std::cout << "Mesh too small for simplification" << std::endl;
-            return;
-        }
-
-        // Create and configure the QEM simplifier
-        if (!m_qemSimplifier)
-        {
-            m_qemSimplifier = std::make_unique<QemMeshSimplifier>();
-        }
-
-        QemSimplificationConfig qemConfig;
-        qemConfig.sdfErrorWeight = m_config.simplificationSdfWeight;
-        qemConfig.qemErrorWeight = m_config.simplificationQemWeight;
-        qemConfig.normalDeviationWeight = m_config.simplificationNormalWeight;
-        qemConfig.maxSdfError = m_config.simplificationMaxSdfError;
-        qemConfig.maxQemError = m_config.simplificationMaxQemError;
-        qemConfig.maxNormalDeviation = m_config.simplificationMaxNormalDeviation;
-        qemConfig.sharpEdgeAngleThreshold = m_config.simplificationSharpEdgeThreshold;
-        qemConfig.batchSize = m_config.simplificationBatchSize;
-        qemConfig.maxPasses = m_config.simplificationMaxPasses;
-        qemConfig.targetTriangleCount = m_config.simplificationTargetTriangles;
-        qemConfig.targetReductionPercent = m_config.simplificationTargetReduction;
-        qemConfig.recalculateQuadricsAfterCollapse = true; // Quality over speed
-
-        m_qemSimplifier->setConfig(qemConfig);
-
-        // Set up GPU SDF evaluator
-        m_qemSimplifier->setGpuSdfEvaluator(
-            [this](std::vector<Eigen::Vector3f> const & positions) -> std::vector<float>
-            {
-                return evaluateSdfBatchGpu(positions);
-            });
-
-        // Set up GPU SDF gradient evaluator for normal deviation checking
-        m_qemSimplifier->setGpuSdfGradientEvaluator(
-            [this](std::vector<Eigen::Vector3f> const & positions) -> std::vector<Eigen::Vector3f>
-            {
-                return evaluateSdfGradientBatchGpu(positions);
-            });
-
-        // Run simplification
-        std::size_t const collapsedEdges = m_qemSimplifier->simplify(
-            m_mesh.positions, m_mesh.normals, m_mesh.indices);
-
-        std::size_t const finalTriangles = m_mesh.indices.size() / 3U;
-        
-        if (collapsedEdges > 0)
-        {
-            float const reductionPercent = 
-                100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
-                static_cast<float>(initialTriangles);
-            
-            std::cout << "QEM Simplification summary:" << std::endl;
-            std::cout << "  Initial: " << initialTriangles << " triangles, " 
-                      << initialVertices << " vertices" << std::endl;
-            std::cout << "  Final: " << finalTriangles << " triangles, " 
-                      << m_mesh.positions.size() << " vertices" << std::endl;
-            std::cout << "  Reduction: " << std::fixed << std::setprecision(1) 
-                      << reductionPercent << "%" << std::endl;
-        }
     }
 
     // ============================================================================

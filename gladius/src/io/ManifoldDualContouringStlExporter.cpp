@@ -187,16 +187,33 @@ namespace gladius::io
         config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
         config.subdivisionIterations = m_options.subdivisionIterations;
         config.projectToSurface = m_options.projectToSurface;
-        config.enableSimplification = m_options.enableSimplification;
+        // Simplification method mapping
+        switch (m_options.simplificationMethod)
+        {
+            case SimplificationMethod::None:
+                config.simplificationMethod = compute::SimplificationMethod::None;
+                break;
+            case SimplificationMethod::QemSdfAware:
+                config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
+                break;
+            case SimplificationMethod::MeshOptimizer:
+                config.simplificationMethod = compute::SimplificationMethod::MeshOptimizer;
+                break;
+        }
+        config.enableSimplification = m_options.enableSimplification;  // Legacy support
         config.simplificationMaxSdfError = m_options.simplificationMaxSdfError;
         config.simplificationMaxQemError = m_options.simplificationMaxQemError;
+        config.simplificationMaxNormalDeviation = m_options.simplificationMaxNormalDeviation;
         config.simplificationSdfWeight = m_options.simplificationSdfWeight;
         config.simplificationQemWeight = m_options.simplificationQemWeight;
+        config.simplificationNormalWeight = m_options.simplificationNormalWeight;
         config.simplificationSharpEdgeThreshold = m_options.simplificationSharpEdgeThreshold;
         config.simplificationBatchSize = m_options.simplificationBatchSize;
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
+        config.meshOptimizerTargetError = m_options.meshOptimizerTargetError;
+        config.meshOptimizerUseSloppy = m_options.meshOptimizerUseSloppy;
         gpuPipeline.setConfig(config);
         gpuPipeline.generateMesh();
 

@@ -19,6 +19,14 @@
 
 namespace gladius::compute
 {
+    /// Simplification algorithm selection
+    enum class SimplificationMethod
+    {
+        None,           ///< No simplification
+        QemSdfAware,    ///< QEM with GPU SDF error evaluation (slower but SDF-aware)
+        MeshOptimizer   ///< MeshOptimizer library (fast, production-quality, not SDF-aware)
+    };
+
     struct ManifoldDualContouringConfig
     {
         std::size_t initialDepth{5U};            ///< Initial octree depth (determines starting cell size: rootSize / 2^initialDepth)
@@ -45,8 +53,10 @@ namespace gladius::compute
         std::size_t subdivisionIterations{1U};      ///< Number of subdivision passes on sharp triangles
         bool projectToSurface{true};                ///< Project vertices to SDF surface after subdivision
         
-        // Mesh simplification (QEM-based with GPU SDF error evaluation)
-        bool enableSimplification{false};           ///< Enable QEM-based edge-collapse simplification
+        // Mesh simplification
+        SimplificationMethod simplificationMethod{SimplificationMethod::None}; ///< Which simplification algorithm to use
+        
+        // QEM SDF-aware simplification options
         float simplificationMaxSdfError{0.01F};     ///< Maximum SDF deviation allowed for edge collapse (world units)
         float simplificationMaxQemError{1e-4F};     ///< Maximum QEM error allowed for edge collapse
         float simplificationMaxNormalDeviation{0.3F}; ///< Maximum normal deviation allowed (1 - dot, 0.3 ≈ ~45°)
@@ -58,6 +68,13 @@ namespace gladius::compute
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
         std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
+        
+        // MeshOptimizer-specific options
+        float meshOptimizerTargetError{0.01F};      ///< Maximum geometric error for MeshOptimizer
+        bool meshOptimizerUseSloppy{false};         ///< Use faster but less accurate sloppy mode
+        
+        // Legacy compatibility
+        bool enableSimplification{false};           ///< DEPRECATED: Use simplificationMethod instead
     };
 
     struct ManifoldDualContouringMesh
@@ -124,9 +141,10 @@ namespace gladius::compute
         void subdivideTriangles(std::vector<std::size_t> const & triangleIndices);
         void projectVerticesToSurface();
         
-        // Mesh simplification (QEM-based with GPU SDF)
-        void simplifyMesh();
-        void simplifyMeshQem();
+        // Mesh simplification
+        void simplifyMesh();                    ///< Dispatch to appropriate simplification method
+        void simplifyMeshQemSdfAware();         ///< QEM with GPU SDF error evaluation
+        void simplifyMeshMeshOptimizer();       ///< MeshOptimizer library (fast, not SDF-aware)
         [[nodiscard]] std::vector<float> evaluateSdfBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] std::vector<Eigen::Vector3f> evaluateSdfGradientBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;

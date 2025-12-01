@@ -1,5 +1,7 @@
 #include "MeshSimplification.h"
 
+#include <meshoptimizer.h>
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -676,9 +678,10 @@ namespace gladius::compute
         }
 
         // Minimum normal preservation threshold (cos of max allowed angle deviation)
-        // 0.5 = 60 degrees max deviation, 0.7 = ~45 degrees, 0.866 = 30 degrees
-        // Use very strict threshold to prevent visible surface distortion
-        float constexpr kMinNormalDotProduct = 0.9F;  // ~25 degrees max
+        // PrusaSlicer uses 0.2 (~80 degrees), but we use a more conservative value
+        // to prevent visible normal discontinuities on smooth surfaces.
+        // 0.2 = ~80 degrees, 0.5 = 60 degrees, 0.7 = ~45 degrees
+        float constexpr kMinNormalDotProduct = 0.5F;  // ~60 degrees max (relaxed from 0.9)
         
         // Minimum triangle quality (aspect ratio) threshold
         // Ratio of shortest edge to longest edge, below this is too thin
@@ -746,6 +749,38 @@ namespace gladius::compute
             {
                 return true; // Too thin/elongated
             }
+            
+            // PrusaSlicer "triangle beauty" check:
+            // Check for very thin triangles by looking at edge angles.
+            // If normalized edge vectors are nearly parallel (high dot product),
+            // the triangle is degenerate/very thin.
+            // threshold of 0.999 corresponds to ~2.5 degree angle between edges
+            float constexpr kTriangleBeautyThreshold = 0.999F;
+            
+            if (len1 > 1e-10F && len2 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e1.normalized().dot(e2.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
+            if (len1 > 1e-10F && len3 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e1.normalized().dot(e3.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
+            if (len2 > 1e-10F && len3 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e2.normalized().dot(e3.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
 
             // For triangles that will be modified (contain one of the collapsed vertices)
             if (hasA || hasB)
@@ -775,6 +810,87 @@ namespace gladius::compute
                     if ((newArea / oldArea) < kMinAreaRatio)
                     {
                         return true; // Triangle shrunk too much
+                    }
+                }
+            }
+        }
+
+        // PrusaSlicer-inspired "create_no_volume" check:
+        // After collapse, check that no two triangles that share an edge would form
+        // a zero-volume fold (i.e., triangles with opposite orientations sharing an edge).
+        // This prevents the mesh from folding onto itself.
+        
+        // Build a map of edges to triangles that will exist after collapse
+        std::unordered_map<std::uint64_t, std::vector<std::pair<std::size_t, Eigen::Vector3f>>> edgeToTriangleNormals;
+        
+        auto makeEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+        {
+            if (a > b) std::swap(a, b);
+            return (static_cast<std::uint64_t>(a) << 32) | b;
+        };
+        
+        for (std::size_t triIdx : trianglesToCheck)
+        {
+            std::uint32_t i0 = indices[triIdx * 3 + 0];
+            std::uint32_t i1 = indices[triIdx * 3 + 1];
+            std::uint32_t i2 = indices[triIdx * 3 + 2];
+            
+            // Map collapsed vertices
+            if (i0 == vB) i0 = vA;
+            if (i1 == vB) i1 = vA;
+            if (i2 == vB) i2 = vA;
+            
+            // Skip degenerate triangles (those that collapse because they contain both vA and vB)
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+            
+            // Get positions after collapse
+            auto getPosAfterCollapse = [&](std::uint32_t idx) -> Eigen::Vector3f
+            {
+                if (idx == vA || idx == vB)
+                {
+                    return newPos;
+                }
+                return positions[idx];
+            };
+            
+            Eigen::Vector3f const p0 = getPosAfterCollapse(i0);
+            Eigen::Vector3f const p1 = getPosAfterCollapse(i1);
+            Eigen::Vector3f const p2 = getPosAfterCollapse(i2);
+            
+            Eigen::Vector3f const normal = (p1 - p0).cross(p2 - p0).normalized();
+            
+            // Add each edge of this triangle to the map
+            std::uint64_t const edge01 = makeEdgeKey(i0, i1);
+            std::uint64_t const edge12 = makeEdgeKey(i1, i2);
+            std::uint64_t const edge20 = makeEdgeKey(i2, i0);
+            
+            edgeToTriangleNormals[edge01].emplace_back(triIdx, normal);
+            edgeToTriangleNormals[edge12].emplace_back(triIdx, normal);
+            edgeToTriangleNormals[edge20].emplace_back(triIdx, normal);
+        }
+        
+        // Check for zero-volume folds: if two triangles share an edge and have
+        // nearly opposite normals, they form a fold
+        float constexpr kNoVolumeDotThreshold = -0.5F; // normals more opposite than ~120 degrees
+        
+        for (auto const & [edge, triangles] : edgeToTriangleNormals)
+        {
+            if (triangles.size() >= 2)
+            {
+                // Check all pairs of triangles sharing this edge
+                for (std::size_t i = 0; i < triangles.size(); ++i)
+                {
+                    for (std::size_t j = i + 1; j < triangles.size(); ++j)
+                    {
+                        float const dot = triangles[i].second.dot(triangles[j].second);
+                        if (dot < kNoVolumeDotThreshold)
+                        {
+                            // These triangles would form a fold
+                            return true;
+                        }
                     }
                 }
             }
@@ -1107,6 +1223,159 @@ namespace gladius::compute
         std::cout << "  Total edges collapsed: " << totalCollapsed << std::endl;
 
         return totalCollapsed;
+    }
+
+    //==========================================================================
+    // MeshOptimizerSimplifier implementation
+    //==========================================================================
+
+    void MeshOptimizerSimplifier::setConfig(MeshOptimizerConfig const & config)
+    {
+        m_config = config;
+    }
+
+    void MeshOptimizerSimplifier::setProgressCallback(SimplificationProgressCallback callback)
+    {
+        m_progressCallback = std::move(callback);
+    }
+
+    std::size_t MeshOptimizerSimplifier::simplify(std::vector<Eigen::Vector3f> & positions,
+                                                   std::vector<Eigen::Vector3f> & normals,
+                                                   std::vector<std::uint32_t> & indices)
+    {
+        if (indices.empty() || positions.empty())
+        {
+            return 0;
+        }
+
+        std::size_t const initialTriangles = indices.size() / 3;
+        std::size_t const initialVertices = positions.size();
+        std::size_t const targetIndexCount = 
+            static_cast<std::size_t>(indices.size() * m_config.targetReductionRatio);
+
+        std::cout << "MeshOptimizer Simplification starting:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << std::endl;
+        std::cout << "  Vertices: " << initialVertices << std::endl;
+        std::cout << "  Target reduction ratio: " << m_config.targetReductionRatio << std::endl;
+        std::cout << "  Target error: " << m_config.targetError << std::endl;
+
+        // Prepare output buffer
+        std::vector<std::uint32_t> newIndices(indices.size());
+
+        // Set options
+        unsigned int options = 0;
+        if (m_config.preserveBorders)
+        {
+            options |= meshopt_SimplifyLockBorder;
+        }
+
+        std::size_t newIndexCount = 0;
+        
+        if (m_config.useSloppy)
+        {
+            // Faster but less accurate
+            newIndexCount = meshopt_simplifySloppy(
+                newIndices.data(),
+                indices.data(),
+                indices.size(),
+                reinterpret_cast<float const *>(positions.data()),
+                positions.size(),
+                sizeof(Eigen::Vector3f),
+                targetIndexCount,
+                m_config.targetError,
+                nullptr);  // No result error output
+        }
+        else
+        {
+            // Standard high-quality simplification
+            newIndexCount = meshopt_simplify(
+                newIndices.data(),
+                indices.data(),
+                indices.size(),
+                reinterpret_cast<float const *>(positions.data()),
+                positions.size(),
+                sizeof(Eigen::Vector3f),
+                targetIndexCount,
+                m_config.targetError,
+                options,
+                nullptr);  // No result error output
+        }
+
+        // Resize to actual result
+        newIndices.resize(newIndexCount);
+
+        // Optimize vertex cache for GPU performance
+        meshopt_optimizeVertexCache(
+            newIndices.data(),
+            newIndices.data(),
+            newIndexCount,
+            positions.size());
+
+        // Remap vertices to remove unused ones
+        std::vector<unsigned int> remap(positions.size());
+        std::size_t const newVertexCount = meshopt_optimizeVertexFetchRemap(
+            remap.data(),
+            newIndices.data(),
+            newIndexCount,
+            positions.size());
+
+        // Apply vertex remap to indices
+        meshopt_remapIndexBuffer(
+            newIndices.data(),
+            newIndices.data(),
+            newIndexCount,
+            remap.data());
+
+        // Remap positions
+        std::vector<Eigen::Vector3f> newPositions(newVertexCount);
+        meshopt_remapVertexBuffer(
+            newPositions.data(),
+            positions.data(),
+            positions.size(),
+            sizeof(Eigen::Vector3f),
+            remap.data());
+
+        // Remap normals if available
+        std::vector<Eigen::Vector3f> newNormals;
+        if (!normals.empty() && normals.size() == positions.size())
+        {
+            newNormals.resize(newVertexCount);
+            meshopt_remapVertexBuffer(
+                newNormals.data(),
+                normals.data(),
+                normals.size(),
+                sizeof(Eigen::Vector3f),
+                remap.data());
+        }
+
+        // Update output
+        indices = std::move(newIndices);
+        positions = std::move(newPositions);
+        if (!newNormals.empty())
+        {
+            normals = std::move(newNormals);
+        }
+
+        std::size_t const finalTriangles = indices.size() / 3;
+        float const reductionPercent =
+            100.0F * static_cast<float>(initialTriangles - finalTriangles) /
+            static_cast<float>(initialTriangles);
+
+        std::cout << "MeshOptimizer Simplification complete:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles << " ("
+                  << std::fixed << std::setprecision(1) << reductionPercent << "% reduction)"
+                  << std::endl;
+        std::cout << "  Vertices: " << initialVertices << " -> " << positions.size() << std::endl;
+
+        // Progress callback
+        if (m_progressCallback)
+        {
+            m_progressCallback(finalTriangles, 
+                              static_cast<std::size_t>(initialTriangles * m_config.targetReductionRatio),
+                              initialTriangles - finalTriangles);
+        }
+
+        return finalTriangles;
     }
 
 } // namespace gladius::compute

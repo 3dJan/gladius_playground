@@ -107,10 +107,14 @@ namespace gladius::ui
         float m_manifoldSharpFeatureAngleThreshold = 0.5F;
         std::size_t m_manifoldSubdivisionIterations = 1U;
         bool m_manifoldProjectToSurface = true;
-        // Mesh simplification (QEM-based with GPU SDF evaluation)
+        // Mesh simplification
         bool m_manifoldEnableSimplification = false;
+        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemSdfAware, 2=MeshOptimizer
         float m_manifoldSimplificationMaxSdfError = 0.01F;
-        float m_manifoldSimplificationSdfWeight = 0.7F;
+        float m_manifoldSimplificationSdfWeight = 0.5F;
+        float m_manifoldSimplificationNormalWeight = 0.3F;
+        float m_meshOptimizerTargetError = 0.01F;
+        bool m_meshOptimizerUseSloppy = false;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
         
