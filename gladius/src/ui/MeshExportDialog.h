@@ -81,7 +81,7 @@ namespace gladius::ui
         Document const * m_document = nullptr;
         MeshOutputFormat m_outputFormat = MeshOutputFormat::ThreeMF;
         io::SurfaceExtractionMethod m_selectedMethod =
-          io::SurfaceExtractionMethod::ManifoldDualContouring;
+          io::SurfaceExtractionMethod::LayeredMarchingCubes;
         std::size_t m_marchingCubesQuality = 1U;
         io::DualContouringQuality m_dualQualityPreset = io::DualContouringQuality::Balanced;
         bool m_dualForceUniform = false;
