@@ -947,10 +947,10 @@ namespace gladius::compute::tests
         exportOptions.enableCpuFallback = true;
         exportOptions.enableCaching = true;
         exportOptions.isoValue = 0.0F;
-        // Enable simplification
+        // Enable simplification (QEM-based with GPU SDF evaluation)
         exportOptions.enableSimplification = true;
-        exportOptions.simplificationMaxError = 0.01F;
-        exportOptions.simplificationFlatThreshold = 0.95F;
+        exportOptions.simplificationMaxSdfError = 0.01F;
+        exportOptions.simplificationSharpEdgeThreshold = 0.7F;
         exporter.setOptions(exportOptions);
 
         exporter.beginExport(tempFile, *bundle.core);

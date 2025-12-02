@@ -46,7 +46,10 @@ set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD_REQUIRED ON)
 
 target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../components/nanovdb)
 
-set(DEPENDENCIES ${CMAKE_PROJECT_NAME}_lib GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main ${FMT_LIBRARY} ${OPENMESH_LIBRARIES} Eigen3::Eigen lodepng Boost::boost unofficial::minizip::minizip OpenVDB::openvdb)
+# OpenGL is needed because gladius_lib links imgui which uses OpenGL
+find_package(OpenGL REQUIRED)
+
+set(DEPENDENCIES ${CMAKE_PROJECT_NAME}_lib GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main ${FMT_LIBRARY} ${OPENMESH_LIBRARIES} Eigen3::Eigen lodepng Boost::boost unofficial::minizip::minizip OpenVDB::openvdb OpenGL::GL)
 
 # Add MCP-only dependencies for tests that use MCP
 list(APPEND DEPENDENCIES httplib::httplib nlohmann_json::nlohmann_json)
