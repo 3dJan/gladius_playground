@@ -45,7 +45,7 @@ namespace gladius::ui
                     return static_cast<int>(i);
                 }
             }
-            return 1; // Default to manifold DC
+            return 0; // Default to marching cubes
         }
 
         constexpr std::array<char const *, 4> QUALITY_LABELS{
