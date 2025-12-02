@@ -73,6 +73,11 @@ namespace gladius::compute
         float meshOptimizerTargetError{0.01F};      ///< Maximum geometric error for MeshOptimizer
         bool meshOptimizerUseSloppy{false};         ///< Use faster but less accurate sloppy mode
         
+        // Mesh quality improvement (post-processing)
+        bool enableQualityImprovement{true};        ///< Enable edge flipping to improve triangle quality
+        std::size_t qualityImprovementPasses{3U};   ///< Number of edge flip optimization passes
+        float qualityMinAngleThreshold{15.0F};      ///< Target minimum angle threshold (degrees)
+        
         // Legacy compatibility
         bool enableSimplification{false};           ///< DEPRECATED: Use simplificationMethod instead
     };
@@ -145,6 +150,7 @@ namespace gladius::compute
         void simplifyMesh();                    ///< Dispatch to appropriate simplification method
         void simplifyMeshQemSdfAware();         ///< QEM with GPU SDF error evaluation
         void simplifyMeshMeshOptimizer();       ///< MeshOptimizer library (fast, not SDF-aware)
+        void improveMeshQuality();              ///< Edge flipping to improve triangle aspect ratios
         [[nodiscard]] std::vector<float> evaluateSdfBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] std::vector<Eigen::Vector3f> evaluateSdfGradientBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] float evaluateSdf(Eigen::Vector3f const & pos) const;

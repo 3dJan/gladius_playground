@@ -1,6 +1,7 @@
 #include "ManifoldDualContouringGpu.h"
 #include "ManifoldDualContouringProgram.h"
 #include "MeshSimplification.h"
+#include "MeshQualityMetrics.h"
 #include "../Primitives.h"
 #include "../SlicerProgram.h"
 #include "../Buffer.h"
@@ -240,7 +241,13 @@ namespace gladius::compute
             simplifyMesh();
         }
         
-        // Project vertices to SDF surface AFTER simplification
+        // Mesh quality improvement (edge flipping to improve triangle aspect ratios)
+        if (m_config.enableQualityImprovement && !m_mesh.indices.empty())
+        {
+            improveMeshQuality();
+        }
+        
+        // Project vertices to SDF surface AFTER simplification and quality improvement
         // This snaps simplified vertices back onto the iso-surface, fixing off-surface artifacts
         if (m_config.projectToSurface && !m_mesh.indices.empty())
         {
@@ -1295,6 +1302,65 @@ namespace gladius::compute
                   << ", " << std::fixed << std::setprecision(1) << reductionPercent << "%)" << std::endl;
         std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
                   << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
+    }
+    
+    void ManifoldDualContouringGpu::improveMeshQuality()
+    {
+        std::size_t const triangleCount = m_mesh.indices.size() / 3U;
+        if (triangleCount < 2U)
+        {
+            return;
+        }
+        
+        MeshQualityImprover::Config config;
+        config.minAngleThreshold = m_config.qualityMinAngleThreshold;
+        config.maxEdgeFlipPasses = m_config.qualityImprovementPasses;
+        MeshQualityImprover improver(config);
+        
+        // Measure quality before
+        auto const beforeStats = improver.computeQualityStats(m_mesh.positions, m_mesh.indices);
+        
+        std::cout << "Mesh quality improvement starting..." << std::endl;
+        std::cout << "  Before: min angle " << std::fixed << std::setprecision(1) 
+                  << beforeStats.minAngle << "°, avg min angle " 
+                  << beforeStats.avgMinAngle << "°, avg aspect ratio " 
+                  << std::setprecision(2) << beforeStats.avgAspectRatio << std::endl;
+        
+        // Run quality improvement passes with SDF projection
+        std::size_t const flipsTotal = improver.improveQualityWithSdf(
+            m_mesh.positions, 
+            m_mesh.normals,
+            m_mesh.indices,
+            [this](Eigen::Vector3f const& pos) { return evaluateSdf(pos); },
+            [this](Eigen::Vector3f const& pos) -> Eigen::Vector3f
+            { 
+                // Compute gradient using central differences
+                float const epsilon = 0.001F;
+                float const dx = evaluateSdf(pos + Eigen::Vector3f(epsilon, 0.0F, 0.0F)) -
+                                 evaluateSdf(pos - Eigen::Vector3f(epsilon, 0.0F, 0.0F));
+                float const dy = evaluateSdf(pos + Eigen::Vector3f(0.0F, epsilon, 0.0F)) -
+                                 evaluateSdf(pos - Eigen::Vector3f(0.0F, epsilon, 0.0F));
+                float const dz = evaluateSdf(pos + Eigen::Vector3f(0.0F, 0.0F, epsilon)) -
+                                 evaluateSdf(pos - Eigen::Vector3f(0.0F, 0.0F, epsilon));
+                Eigen::Vector3f gradient(dx, dy, dz);
+                float const len = gradient.norm();
+                if (len > 1e-6F)
+                {
+                    return (gradient / len).eval();
+                }
+                return Eigen::Vector3f::Zero();
+            },
+            m_config.qualityImprovementPasses
+        );
+        
+        // Measure quality after
+        auto const afterStats = improver.computeQualityStats(m_mesh.positions, m_mesh.indices);
+        
+        std::cout << "  After:  min angle " << std::fixed << std::setprecision(1) 
+                  << afterStats.minAngle << "°, avg min angle " 
+                  << afterStats.avgMinAngle << "°, avg aspect ratio " 
+                  << std::setprecision(2) << afterStats.avgAspectRatio << std::endl;
+        std::cout << "  Edge flips: " << flipsTotal << std::endl;
     }
     
     std::vector<float> ManifoldDualContouringGpu::evaluateSdfBatchGpu(
