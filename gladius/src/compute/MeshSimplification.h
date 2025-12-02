@@ -205,37 +205,4 @@ namespace gladius::compute
                          std::vector<bool> const & vertexRemoved);
     };
 
-    /// Configuration for MeshOptimizer-based simplification
-    struct MeshOptimizerConfig
-    {
-        float targetReductionRatio{0.5F};     ///< Target triangle count as ratio of original (0.5 = 50%)
-        float targetError{0.01F};             ///< Maximum geometric error threshold
-        bool preserveBorders{true};           ///< Lock boundary edges for watertight preservation
-        bool useSloppy{false};                ///< Use faster but less accurate algorithm
-    };
-
-    /// MeshOptimizer-based mesh simplifier (alternative to QEM)
-    /// Fast, production-quality simplification without SDF awareness
-    class MeshOptimizerSimplifier
-    {
-      public:
-        MeshOptimizerSimplifier() = default;
-
-        /// Set configuration
-        void setConfig(MeshOptimizerConfig const & config);
-
-        /// Set progress callback (optional)
-        void setProgressCallback(SimplificationProgressCallback callback);
-
-        /// Simplify mesh in-place
-        /// Returns number of triangles after simplification
-        std::size_t simplify(std::vector<Eigen::Vector3f> & positions,
-                             std::vector<Eigen::Vector3f> & normals,
-                             std::vector<std::uint32_t> & indices);
-
-      private:
-        MeshOptimizerConfig m_config{};
-        SimplificationProgressCallback m_progressCallback{nullptr};
-    };
-
 } // namespace gladius::compute

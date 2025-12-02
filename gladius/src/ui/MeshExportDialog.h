@@ -109,12 +109,10 @@ namespace gladius::ui
         bool m_manifoldProjectToSurface = true;
         // Mesh simplification
         bool m_manifoldEnableSimplification = false;
-        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemSdfAware, 2=MeshOptimizer
+        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemSdfAware
         float m_manifoldSimplificationMaxSdfError = 0.01F;
         float m_manifoldSimplificationSdfWeight = 0.5F;
         float m_manifoldSimplificationNormalWeight = 0.3F;
-        float m_meshOptimizerTargetError = 0.01F;
-        bool m_meshOptimizerUseSloppy = false;
         bool m_exportInProgress = false;
         std::string m_errorMessage;
         

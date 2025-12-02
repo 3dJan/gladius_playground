@@ -1187,10 +1187,6 @@ namespace gladius::compute
                 simplifyMeshQemSdfAware();
                 break;
                 
-            case SimplificationMethod::MeshOptimizer:
-                simplifyMeshMeshOptimizer();
-                break;
-                
             case SimplificationMethod::None:
             default:
                 // Should not reach here due to caller check, but handle gracefully
@@ -1253,55 +1249,6 @@ namespace gladius::compute
         std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
                   << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
         std::cout << "  Collapsed edges: " << collapsedEdges << std::endl;
-    }
-    
-    void ManifoldDualContouringGpu::simplifyMeshMeshOptimizer()
-    {
-        std::cout << "Starting MeshOptimizer simplification..." << std::endl;
-        std::size_t const initialTriangles = m_mesh.indices.size() / 3U;
-        std::size_t const initialVertices = m_mesh.positions.size();
-        
-        // Configure MeshOptimizer
-        MeshOptimizerConfig config;
-        
-        // Compute target ratio from various config options
-        if (m_config.simplificationTargetTriangles.has_value())
-        {
-            config.targetReductionRatio = 
-                static_cast<float>(m_config.simplificationTargetTriangles.value()) / 
-                static_cast<float>(initialTriangles);
-        }
-        else if (m_config.simplificationTargetReduction.has_value())
-        {
-            config.targetReductionRatio = 1.0F - m_config.simplificationTargetReduction.value();
-        }
-        else
-        {
-            config.targetReductionRatio = 0.5F;  // Default 50% reduction
-        }
-        
-        config.targetError = m_config.meshOptimizerTargetError;
-        config.preserveBorders = true;  // Always preserve for watertight meshes
-        config.useSloppy = m_config.meshOptimizerUseSloppy;
-        
-        // Create and run MeshOptimizer simplifier
-        MeshOptimizerSimplifier simplifier;
-        simplifier.setConfig(config);
-        
-        std::size_t const finalTriangles = simplifier.simplify(
-            m_mesh.positions, m_mesh.normals, m_mesh.indices);
-        
-        std::size_t const finalVertices = m_mesh.positions.size();
-        
-        float const reductionPercent = 100.0F * static_cast<float>(initialTriangles - finalTriangles) / 
-                                       static_cast<float>(initialTriangles);
-        
-        std::cout << "MeshOptimizer simplification complete:" << std::endl;
-        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles 
-                  << " (removed " << (initialTriangles - finalTriangles) 
-                  << ", " << std::fixed << std::setprecision(1) << reductionPercent << "%)" << std::endl;
-        std::cout << "  Vertices: " << initialVertices << " -> " << finalVertices 
-                  << " (removed " << (initialVertices - finalVertices) << ")" << std::endl;
     }
     
     void ManifoldDualContouringGpu::improveMeshQuality()

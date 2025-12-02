@@ -19,8 +19,7 @@ namespace gladius::io
     enum class SimplificationMethod
     {
         None,           ///< No simplification
-        QemSdfAware,    ///< QEM with GPU SDF error evaluation (slower but SDF-aware)
-        MeshOptimizer   ///< MeshOptimizer library (fast, production-quality, not SDF-aware)
+        QemSdfAware     ///< QEM with GPU SDF error evaluation (SDF-aware)
     };
 
     /// Quality presets for dual contouring mesh generation
@@ -110,10 +109,6 @@ namespace gladius::io
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
         std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
-        
-        // MeshOptimizer options
-        float meshOptimizerTargetError{0.01F};      ///< Maximum geometric error for MeshOptimizer
-        bool meshOptimizerUseSloppy{false};         ///< Use faster but less accurate sloppy mode
 
         void applyPreset();
     };

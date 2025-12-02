@@ -196,9 +196,6 @@ namespace gladius::io
             case SimplificationMethod::QemSdfAware:
                 config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
                 break;
-            case SimplificationMethod::MeshOptimizer:
-                config.simplificationMethod = compute::SimplificationMethod::MeshOptimizer;
-                break;
         }
         config.enableSimplification = m_options.enableSimplification;  // Legacy support
         config.simplificationMaxSdfError = m_options.simplificationMaxSdfError;
@@ -212,8 +209,6 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
-        config.meshOptimizerTargetError = m_options.meshOptimizerTargetError;
-        config.meshOptimizerUseSloppy = m_options.meshOptimizerUseSloppy;
         gpuPipeline.setConfig(config);
         gpuPipeline.generateMesh();
 

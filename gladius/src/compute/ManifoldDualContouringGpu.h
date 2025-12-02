@@ -23,8 +23,7 @@ namespace gladius::compute
     enum class SimplificationMethod
     {
         None,           ///< No simplification
-        QemSdfAware,    ///< QEM with GPU SDF error evaluation (slower but SDF-aware)
-        MeshOptimizer   ///< MeshOptimizer library (fast, production-quality, not SDF-aware)
+        QemSdfAware     ///< QEM with GPU SDF error evaluation (SDF-aware)
     };
 
     struct ManifoldDualContouringConfig
@@ -68,10 +67,6 @@ namespace gladius::compute
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
         std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
-        
-        // MeshOptimizer-specific options
-        float meshOptimizerTargetError{0.01F};      ///< Maximum geometric error for MeshOptimizer
-        bool meshOptimizerUseSloppy{false};         ///< Use faster but less accurate sloppy mode
         
         // Mesh quality improvement (post-processing)
         bool enableQualityImprovement{true};        ///< Enable edge flipping to improve triangle quality
@@ -149,7 +144,6 @@ namespace gladius::compute
         // Mesh simplification
         void simplifyMesh();                    ///< Dispatch to appropriate simplification method
         void simplifyMeshQemSdfAware();         ///< QEM with GPU SDF error evaluation
-        void simplifyMeshMeshOptimizer();       ///< MeshOptimizer library (fast, not SDF-aware)
         void improveMeshQuality();              ///< Edge flipping to improve triangle aspect ratios
         [[nodiscard]] std::vector<float> evaluateSdfBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;
         [[nodiscard]] std::vector<Eigen::Vector3f> evaluateSdfGradientBatchGpu(std::vector<Eigen::Vector3f> const & positions) const;

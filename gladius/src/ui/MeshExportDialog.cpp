@@ -534,8 +534,8 @@ namespace gladius::ui
                 ImGui::Text("Mesh Simplification");
                 
                 // Simplification method selection
-                char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)", "MeshOptimizer (fast)"};
-                int const numMethods = 3;
+                char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
+                int const numMethods = 2;
                 if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
                 {
                     for (int i = 0; i < numMethods; ++i)
@@ -577,23 +577,6 @@ namespace gladius::ui
                                        "%.2f");
                     ImGui::SameLine();
                     ImGui::TextDisabled("weight for triangle orientation error");
-                    
-                    ImGui::Unindent();
-                }
-                else if (m_manifoldSimplificationMethod == 2)  // MeshOptimizer
-                {
-                    ImGui::Indent();
-                    
-                    ImGui::SliderFloat("Target error", 
-                                       &m_meshOptimizerTargetError, 
-                                       0.001F, 0.1F, 
-                                       "%.3f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("maximum geometric error");
-                    
-                    ImGui::Checkbox("Use fast (sloppy) mode", &m_meshOptimizerUseSloppy);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("faster but less accurate");
                     
                     ImGui::Unindent();
                 }
@@ -918,9 +901,6 @@ namespace gladius::ui
             // QEM weight is the remainder after SDF and normal weights
             options.simplificationQemWeight = std::max(0.0F, 
                 1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
-            // MeshOptimizer options
-            options.meshOptimizerTargetError = m_meshOptimizerTargetError;
-            options.meshOptimizerUseSloppy = m_meshOptimizerUseSloppy;
 
             m_manifoldExporter.setOptions(options);
             // Set output format and document for 3MF support

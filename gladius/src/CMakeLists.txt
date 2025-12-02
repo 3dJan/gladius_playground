@@ -68,7 +68,6 @@ set(DEPENDENCIES_CORE
     lodepng
     pugixml::pugixml
     ${OPENMESH_LIBRARIES}
-    meshoptimizer::meshoptimizer
     lib3mf::lib3mf
     unofficial::minizip::minizip
     imgui::imgui
