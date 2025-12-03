@@ -189,4 +189,66 @@ namespace gladius
             outGradients[i] = Eigen::Vector3f{clGradients[i].s[0], clGradients[i].s[1], clGradients[i].s[2]};
         }
     }
+
+    void DualContouringSamplingProgram::sampleColors(
+      std::vector<Eigen::Vector3f> const & positions,
+      std::vector<Eigen::Vector3f> & outColors,
+      Primitives const & primitives)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outColors.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outColors.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer colorBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              positions.size() * sizeof(cl_float4));
+
+        // Run kernel
+        m_programFront->run("sampleColors",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           colorBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS);
+
+        // Read results
+        std::vector<cl_float4> clColors(positions.size());
+
+        m_ComputeContext->GetQueue().enqueueReadBuffer(colorBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       clColors.size() * sizeof(cl_float4),
+                                                       clColors.data());
+
+        // Convert back to Eigen
+        for (std::size_t i = 0U; i < clColors.size(); ++i)
+        {
+            outColors[i] = Eigen::Vector3f{clColors[i].s[0], clColors[i].s[1], clColors[i].s[2]};
+        }
+    }
 }

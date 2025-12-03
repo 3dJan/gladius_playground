@@ -42,6 +42,14 @@ namespace gladius
                           float isoValue,
                           float gradientEpsilon = 0.001F);
 
+        /// Sample volumetric colors at positions
+        /// @param positions Input positions to sample
+        /// @param outColors Output RGB colors in linear sRGB [0,1]
+        /// @param primitives Model primitives for color evaluation
+        void sampleColors(std::vector<Eigen::Vector3f> const & positions,
+                         std::vector<Eigen::Vector3f> & outColors,
+                         Primitives const & primitives);
+
       private:
         void ensureCompiled();
     };

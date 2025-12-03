@@ -161,6 +161,80 @@ namespace gladius::io
         }
     }
 
+    void MeshWriter3mf::exportMeshWithColors(std::filesystem::path const & filePath,
+                                             Mesh const & mesh,
+                                             std::string const & meshName,
+                                             FaceColors const & faceColors,
+                                             Document const * sourceDocument,
+                                             bool writeThumbnail)
+    {
+        if (!validateMesh(mesh))
+        {
+            throw std::runtime_error("Invalid mesh for export");
+        }
+
+        if (faceColors.size() != mesh.getNumberOfFaces())
+        {
+            throw std::runtime_error(
+              fmt::format("Face color count ({}) does not match face count ({})",
+                          faceColors.size(),
+                          mesh.getNumberOfFaces()));
+        }
+
+        try
+        {
+            // Create new 3MF model
+            auto model3mf = m_wrapper->CreateModel();
+
+            // Add default metadata
+            addDefaultMetadata(model3mf);
+
+            // Copy metadata from source document if available
+            if (sourceDocument)
+            {
+                copyMetadata(*sourceDocument, model3mf);
+            }
+
+            // Add mesh with colors to model
+            auto [meshObject, colorGroupId] =
+              addMeshWithColorsToModel(model3mf, mesh, meshName, faceColors);
+
+            // Create build item
+            createBuildItem(model3mf, meshObject, meshName);
+
+            // Add thumbnail if requested and source document is available
+            if (writeThumbnail && sourceDocument)
+            {
+                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
+            }
+
+            // Write to file
+            auto writer = model3mf->QueryWriter("3mf");
+            writer->WriteToFile(filePath.string());
+
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Successfully exported colored mesh to {} ({} faces, {} colors)",
+                               filePath.string(),
+                               mesh.getNumberOfFaces(),
+                               faceColors.size()),
+                   events::Severity::Info});
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent({fmt::format("Failed to export colored mesh to {}: {}",
+                                                filePath.string(),
+                                                e.what()),
+                                    events::Severity::Error});
+            }
+            throw;
+        }
+    }
+
     void MeshWriter3mf::exportMeshFromDocument(std::filesystem::path const & filePath,
                                                Document & document,
                                                ResourceKey const & resourceKey,
@@ -317,6 +391,139 @@ namespace gladius::io
         }
 
         return meshObject;
+    }
+
+    std::pair<Lib3MF::PMeshObject, Lib3MF_uint32>
+    MeshWriter3mf::addMeshWithColorsToModel(Lib3MF::PModel model3mf,
+                                            Mesh const & mesh,
+                                            std::string const & meshName,
+                                            FaceColors const & faceColors)
+    {
+        auto meshObject = model3mf->AddMeshObject();
+        meshObject->SetName(meshName);
+
+        size_t const numFaces = mesh.getNumberOfFaces();
+        if (numFaces == 0)
+        {
+            throw std::runtime_error("Mesh has no faces to export");
+        }
+
+        // Create color group for per-face colors
+        auto colorGroup = model3mf->AddColorGroup();
+        Lib3MF_uint32 const colorGroupId = colorGroup->GetUniqueResourceID();
+
+        // Build a map of unique colors to their property IDs to avoid duplicates
+        std::map<std::uint32_t, Lib3MF_uint32> colorToPropertyId;
+
+        auto getOrCreateColorProperty = [&](Color8 const & color) -> Lib3MF_uint32
+        {
+            // Pack color into a single uint32 for map lookup
+            std::uint32_t colorKey = (static_cast<std::uint32_t>(color.r) << 24) |
+                                     (static_cast<std::uint32_t>(color.g) << 16) |
+                                     (static_cast<std::uint32_t>(color.b) << 8) |
+                                     static_cast<std::uint32_t>(color.a);
+
+            auto it = colorToPropertyId.find(colorKey);
+            if (it != colorToPropertyId.end())
+            {
+                return it->second;
+            }
+
+            // Add new color to the color group
+            Lib3MF::sColor lib3mfColor{color.r, color.g, color.b, color.a};
+            Lib3MF_uint32 const propertyId = colorGroup->AddColor(lib3mfColor);
+            colorToPropertyId[colorKey] = propertyId;
+            return propertyId;
+        };
+
+        // Track unique vertices to avoid duplicates
+        std::map<std::tuple<float, float, float>, Lib3MF_uint32> vertexMap;
+        auto const tolerance = 1e-6f;
+
+        auto getOrCreateVertex = [&](Vector3 const & vertex) -> Lib3MF_uint32
+        {
+            auto x = std::round(vertex.x() / tolerance) * tolerance;
+            auto y = std::round(vertex.y() / tolerance) * tolerance;
+            auto z = std::round(vertex.z() / tolerance) * tolerance;
+
+            auto key = std::make_tuple(x, y, z);
+            auto it = vertexMap.find(key);
+
+            if (it != vertexMap.end())
+            {
+                return it->second;
+            }
+
+            auto vertexIndex = meshObject->AddVertex({x, y, z});
+            vertexMap[key] = vertexIndex;
+            return vertexIndex;
+        };
+
+        auto const & vertexBuffer = mesh.getVertices();
+        auto const vertexData = const_cast<Buffer<cl_float4> &>(vertexBuffer).getDataCopy();
+
+        // Prepare triangle properties for batch assignment
+        std::vector<Lib3MF::sTriangleProperties> triangleProperties;
+        triangleProperties.reserve(numFaces);
+
+        // Add all triangles with color properties
+        for (size_t i = 0; i < numFaces; ++i)
+        {
+            size_t const vertexOffset = i * 3;
+
+            if (vertexOffset + 2 >= vertexData.size())
+            {
+                throw std::runtime_error(
+                  fmt::format("Invalid vertex data: face {} requires vertices at indices {}-{}, "
+                              "but buffer only has {} vertices",
+                              i,
+                              vertexOffset,
+                              vertexOffset + 2,
+                              vertexData.size()));
+            }
+
+            // Extract the three vertices of this triangle
+            auto const & v1 = vertexData[vertexOffset];
+            auto const & v2 = vertexData[vertexOffset + 1];
+            auto const & v3 = vertexData[vertexOffset + 2];
+
+            Vector3 const vertex1(v1.x, v1.y, v1.z);
+            Vector3 const vertex2(v2.x, v2.y, v2.z);
+            Vector3 const vertex3(v3.x, v3.y, v3.z);
+
+            auto const v1Index = getOrCreateVertex(vertex1);
+            auto const v2Index = getOrCreateVertex(vertex2);
+            auto const v3Index = getOrCreateVertex(vertex3);
+
+            meshObject->AddTriangle({v1Index, v2Index, v3Index});
+
+            // Get color property ID for this face (same color for all 3 vertices = flat shading)
+            Lib3MF_uint32 const colorPropertyId = getOrCreateColorProperty(faceColors[i]);
+
+            // Set the same color for all three vertices of the triangle
+            Lib3MF::sTriangleProperties props{};
+            props.m_ResourceID = colorGroupId;
+            props.m_PropertyIDs[0] = colorPropertyId;
+            props.m_PropertyIDs[1] = colorPropertyId;
+            props.m_PropertyIDs[2] = colorPropertyId;
+            triangleProperties.push_back(props);
+        }
+
+        // Apply all triangle properties at once
+        meshObject->SetAllTriangleProperties(triangleProperties);
+
+        if (m_logger)
+        {
+            m_logger->addEvent(
+              {fmt::format("Added colored mesh '{}' with {} vertices, {} triangles, {} unique colors",
+                           meshName,
+                           meshObject->GetVertexCount(),
+                           meshObject->GetTriangleCount(),
+                           colorToPropertyId.size()),
+               events::Severity::Info});
+        }
+
+        return {meshObject, colorGroupId};
     }
 
     void MeshWriter3mf::createBuildItem(Lib3MF::PModel model3mf,

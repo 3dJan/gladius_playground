@@ -130,6 +130,34 @@ __kernel void sampleHermite(
     gradients[gid] = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);
 }
 
+// Color sampling kernel
+// Evaluates volumetric color at a batch of 3D positions
+// model() returns float4: .xyz = RGB color (linear), .w = signed distance
+__kernel void sampleColors(
+    __global const float4* positions,    // Input: array of (x,y,z,_) positions
+    __global float4* colors,             // Output: RGB colors at positions (linear sRGB)
+    const unsigned int count,            // Number of positions to sample
+    PAYLOAD_ARGS)
+{
+    const int gid = get_global_id(0);
+    
+    if (gid >= count)
+    {
+        return;
+    }
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Evaluate model at this position - returns float4(color.rgb, distance)
+    const float4 result = model(worldPos, PASS_PAYLOAD_ARGS);
+    
+    // Extract and clamp color to valid range (linear RGB)
+    const float3 color = clamp(result.xyz, 0.0f, 1.0f);
+    
+    colors[gid] = (float4)(color.x, color.y, color.z, 1.0f);
+}
+
 // Zero-crossing refinement kernel
 // Refines edge crossing positions using secant/bisection method
 __kernel void refineZeroCrossings(
