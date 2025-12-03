@@ -1,4 +1,5 @@
 #include "MeshExportDialog.h"
+#include "Document.h"
 #include "FileDialogService.h"
 
 #include "imgui.h"
@@ -273,317 +274,23 @@ namespace gladius::ui
             renderFileSelection();
             
             ImGui::Separator();
-
-            // Settings are only shown when not exporting
-            ImGui::TextUnformatted("Select surface extraction method for mesh export.");
-
-            int methodIndex = getMethodIndex(m_selectedMethod);
-            if (ImGui::BeginCombo("Method", METHOD_LABELS.at(static_cast<std::size_t>(methodIndex))))
+            
+            // Tab bar for settings
+            if (ImGui::BeginTabBar("ExportSettingsTabs"))
             {
-                for (int i = 0; i < static_cast<int>(METHOD_LABELS.size()); ++i)
+                if (ImGui::BeginTabItem("Mesh Extraction"))
                 {
-                    bool const selected = (i == methodIndex);
-                    if (ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected))
-                    {
-                        methodIndex = i;
-                        m_selectedMethod = METHOD_VALUES[static_cast<std::size_t>(i)];
-                    }
-                    if (selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            if (m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes)
-            {
-                int qualityIndex = static_cast<int>(m_marchingCubesQuality);
-                qualityIndex =
-                  std::clamp(qualityIndex, 0, static_cast<int>(QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo("Quality",
-                                       QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
-                {
-                    for (int i = 0; i < static_cast<int>(QUALITY_LABELS.size()); ++i)
-                    {
-                        bool const selected = (i == qualityIndex);
-                        if (ImGui::Selectable(QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
-                        {
-                            qualityIndex = i;
-                            m_marchingCubesQuality = static_cast<std::size_t>(i);
-                        }
-                        if (selected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::TextWrapped(
-                  "Uses OpenVDB volume-to-mesh extraction. Higher quality settings take more time and memory.");
-            }
-            else if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
-            {
-                int qualityIndex = static_cast<int>(m_dualQualityPreset);
-                qualityIndex =
-                  std::clamp(qualityIndex, 0, static_cast<int>(DUAL_QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo("Quality",
-                                       DUAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
-                {
-                    for (int i = 0; i < static_cast<int>(DUAL_QUALITY_LABELS.size()); ++i)
-                    {
-                        bool const selected = (i == qualityIndex);
-                        if (ImGui::Selectable(DUAL_QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
-                        {
-                            qualityIndex = i;
-                            m_dualQualityPreset = static_cast<io::DualContouringQuality>(i);
-                        }
-                        if (selected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::Checkbox("Force uniform octree", &m_dualForceUniform);
-                if (m_dualForceUniform)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("all octree leaves will have the same size");
-                }
-                ImGui::TextWrapped(
-                  "Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
-            }
-            else if (m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring)
-            {
-                int qualityIndex = static_cast<int>(m_hierarchicalQualityPreset);
-                qualityIndex = std::clamp(
-                  qualityIndex, 0, static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo(
-                      "Quality",
-                      HIERARCHICAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
-                {
-                    for (int i = 0; i < static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()); ++i)
-                    {
-                        bool const selected = (i == qualityIndex);
-                        if (ImGui::Selectable(HIERARCHICAL_QUALITY_LABELS[static_cast<std::size_t>(i)],
-                                              selected))
-                        {
-                            qualityIndex = i;
-                            m_hierarchicalQualityPreset =
-                              static_cast<io::HierarchicalDualContouringQuality>(i);
-
-                            if (m_hierarchicalQualityPreset !=
-                                io::HierarchicalDualContouringQuality::Custom)
-                            {
-                                switch (m_hierarchicalQualityPreset)
-                                {
-                                case io::HierarchicalDualContouringQuality::Draft:
-                                    m_hierarchicalEnableProgressiveRefinement = false;
-                                    break;
-                                case io::HierarchicalDualContouringQuality::Balanced:
-                                case io::HierarchicalDualContouringQuality::Fine:
-                                case io::HierarchicalDualContouringQuality::UltraFine:
-                                    m_hierarchicalEnableProgressiveRefinement = true;
-                                    break;
-                                case io::HierarchicalDualContouringQuality::Custom:
-                                    break;
-                                }
-                            }
-                        }
-                        if (selected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::Checkbox("Enable GPU acceleration", &m_hierarchicalEnableGpu);
-                ImGui::Checkbox("Enable progressive refinement",
-                                &m_hierarchicalEnableProgressiveRefinement);
-
-                if (!m_hierarchicalEnableProgressiveRefinement)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("refinement passes will be skipped");
-                }
-
-                ImGui::Checkbox("Project vertices to surface", &m_hierarchicalProjectToSurface);
-                if (m_hierarchicalProjectToSurface)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("GPU post-processing for smoother surfaces");
-                }
-
-                ImGui::Separator();
-                ImGui::Checkbox("Enable coarsening (experimental)", &m_hierarchicalEnableCoarsening);
-                if (m_hierarchicalEnableCoarsening)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("merge cells where safe to reduce triangles");
-                }
-
-                ImGui::BeginDisabled(!m_hierarchicalEnableCoarsening);
-                ImGui::InputFloat("Minimum feature size", &m_hierarchicalMinFeatureSize, 0.1F, 1.0F, "%.3f");
-                if (m_hierarchicalMinFeatureSize < 0.0F)
-                {
-                    m_hierarchicalMinFeatureSize = 0.0F;
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("world units; smaller features may be simplified");
-                ImGui::EndDisabled();
-
-                ImGui::TextWrapped(
-                  "Hierarchical dual contouring incrementally refines an adaptive octree. "
-                  "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
-            }
-            else if (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring)
-            {
-                int qualityIndex = static_cast<int>(m_manifoldQualityPreset);
-                qualityIndex = std::clamp(
-                  qualityIndex, 0, static_cast<int>(MANIFOLD_QUALITY_LABELS.size()) - 1);
-                if (ImGui::BeginCombo("Quality",
-                                       MANIFOLD_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
-                {
-                    for (int i = 0; i < static_cast<int>(MANIFOLD_QUALITY_LABELS.size()); ++i)
-                    {
-                        bool const selected = (i == qualityIndex);
-                        if (ImGui::Selectable(MANIFOLD_QUALITY_LABELS[static_cast<std::size_t>(i)],
-                                              selected))
-                        {
-                            qualityIndex = i;
-                            m_manifoldQualityPreset =
-                              static_cast<io::ManifoldDualContouringQuality>(i);
-                            
-                            // Sync maxDepth with the selected preset
-                            io::ManifoldDualContouringOptions tempOpts{};
-                            tempOpts.qualityPreset = m_manifoldQualityPreset;
-                            tempOpts.applyPreset();
-                            m_manifoldMaxDepth = tempOpts.maxDepth;
-                        }
-                        if (selected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::Checkbox("Enable GPU acceleration", &m_manifoldEnableGpu);
-                ImGui::Checkbox("Allow CPU fallback", &m_manifoldAllowCpuFallback);
-                ImGui::Checkbox("Enable Morton caching", &m_manifoldEnableCaching);
-
-                ImGui::InputFloat("ISO value", &m_manifoldIsoValue, 0.01F, 0.1F, "%.4f");
-
-                int depthInput = static_cast<int>(m_manifoldMaxDepth);
-                if (ImGui::InputInt("Maximum depth", &depthInput))
-                {
-                    depthInput = std::max(depthInput, 1);
-                    m_manifoldMaxDepth = static_cast<std::size_t>(depthInput);
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("higher values capture more detail");
-
-                ImGui::Separator();
-                ImGui::Text("Minimum Feature Size (Thin Walls)");
-                
-                ImGui::InputFloat("Min feature size", &m_manifoldMinFeatureSize, 0.1F, 1.0F, "%.3f");
-                if (m_manifoldMinFeatureSize < 0.0F)
-                {
-                    m_manifoldMinFeatureSize = 0.0F;
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("world units; 0 = disabled");
-                
-                if (m_manifoldMinFeatureSize > 0.0F)
-                {
-                    ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("divide-and-conquer for memory efficiency");
-                }
-
-                ImGui::Separator();
-                ImGui::Text("Sharp Feature Post-Processing");
-                
-                ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
-                if (m_manifoldEnableSharpFeaturePostProcess)
-                {
-                    ImGui::Indent();
-                    
-                    ImGui::SliderFloat("Angle threshold", 
-                                       &m_manifoldSharpFeatureAngleThreshold, 
-                                       0.0F, 1.0F, 
-                                       "cos(angle) = %.2f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("lower = more sensitive (0.5 = ~60°)");
-                    
-                    int subdivIters = static_cast<int>(m_manifoldSubdivisionIterations);
-                    if (ImGui::SliderInt("Subdivision iterations", &subdivIters, 1, 3))
-                    {
-                        m_manifoldSubdivisionIterations = static_cast<std::size_t>(subdivIters);
-                    }
-                    
-                    ImGui::Checkbox("Project to surface", &m_manifoldProjectToSurface);
-                    
-                    ImGui::Unindent();
-                }
-
-                ImGui::Separator();
-                ImGui::Text("Mesh Simplification");
-                
-                // Simplification method selection
-                char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
-                int const numMethods = 2;
-                if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
-                {
-                    for (int i = 0; i < numMethods; ++i)
-                    {
-                        bool const isSelected = (m_manifoldSimplificationMethod == i);
-                        if (ImGui::Selectable(simplificationMethods[i], isSelected))
-                        {
-                            m_manifoldSimplificationMethod = i;
-                        }
-                        if (isSelected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
+                    renderMeshExtractionTab();
+                    ImGui::EndTabItem();
                 }
                 
-                if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
+                if (ImGui::BeginTabItem("Color / Material"))
                 {
-                    ImGui::Indent();
-                    
-                    ImGui::SliderFloat("Max SDF error", 
-                                       &m_manifoldSimplificationMaxSdfError, 
-                                       0.001F, 0.1F, 
-                                       "%.3f mm");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("maximum deviation from surface");
-                    
-                    ImGui::SliderFloat("SDF weight", 
-                                       &m_manifoldSimplificationSdfWeight, 
-                                       0.0F, 1.0F, 
-                                       "%.2f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("weight for position error");
-                    
-                    ImGui::SliderFloat("Normal weight", 
-                                       &m_manifoldSimplificationNormalWeight, 
-                                       0.0F, 1.0F, 
-                                       "%.2f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("weight for triangle orientation error");
-                    
-                    ImGui::Unindent();
+                    renderColorMaterialTab();
+                    ImGui::EndTabItem();
                 }
-
-                ImGui::TextWrapped(
-                  "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
-                  "while the kernels are under active development.");
+                
+                ImGui::EndTabBar();
             }
             
             ImGui::Separator();
@@ -645,6 +352,411 @@ namespace gladius::ui
         {
             resetState();
         }
+    }
+    
+    void MeshExportDialog::renderMeshExtractionTab()
+    {
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Select surface extraction method for mesh export.");
+
+        int methodIndex = getMethodIndex(m_selectedMethod);
+        if (ImGui::BeginCombo("Method", METHOD_LABELS.at(static_cast<std::size_t>(methodIndex))))
+        {
+            for (int i = 0; i < static_cast<int>(METHOD_LABELS.size()); ++i)
+            {
+                bool const selected = (i == methodIndex);
+                if (ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected))
+                {
+                    methodIndex = i;
+                    m_selectedMethod = METHOD_VALUES[static_cast<std::size_t>(i)];
+                }
+                if (selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes)
+        {
+            int qualityIndex = static_cast<int>(m_marchingCubesQuality);
+            qualityIndex =
+              std::clamp(qualityIndex, 0, static_cast<int>(QUALITY_LABELS.size()) - 1);
+            if (ImGui::BeginCombo("Quality",
+                                   QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+            {
+                for (int i = 0; i < static_cast<int>(QUALITY_LABELS.size()); ++i)
+                {
+                    bool const selected = (i == qualityIndex);
+                    if (ImGui::Selectable(QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
+                    {
+                        qualityIndex = i;
+                        m_marchingCubesQuality = static_cast<std::size_t>(i);
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextWrapped(
+              "Uses OpenVDB volume-to-mesh extraction. Higher quality settings take more time and memory.");
+        }
+        else if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
+        {
+            int qualityIndex = static_cast<int>(m_dualQualityPreset);
+            qualityIndex =
+              std::clamp(qualityIndex, 0, static_cast<int>(DUAL_QUALITY_LABELS.size()) - 1);
+            if (ImGui::BeginCombo("Quality",
+                                   DUAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+            {
+                for (int i = 0; i < static_cast<int>(DUAL_QUALITY_LABELS.size()); ++i)
+                {
+                    bool const selected = (i == qualityIndex);
+                    if (ImGui::Selectable(DUAL_QUALITY_LABELS[static_cast<std::size_t>(i)], selected))
+                    {
+                        qualityIndex = i;
+                        m_dualQualityPreset = static_cast<io::DualContouringQuality>(i);
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Checkbox("Force uniform octree", &m_dualForceUniform);
+            if (m_dualForceUniform)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("all octree leaves will have the same size");
+            }
+            ImGui::TextWrapped(
+              "Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
+        }
+        else if (m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring)
+        {
+            int qualityIndex = static_cast<int>(m_hierarchicalQualityPreset);
+            qualityIndex = std::clamp(
+              qualityIndex, 0, static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()) - 1);
+            if (ImGui::BeginCombo(
+                  "Quality",
+                  HIERARCHICAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+            {
+                for (int i = 0; i < static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()); ++i)
+                {
+                    bool const selected = (i == qualityIndex);
+                    if (ImGui::Selectable(HIERARCHICAL_QUALITY_LABELS[static_cast<std::size_t>(i)],
+                                          selected))
+                    {
+                        qualityIndex = i;
+                        m_hierarchicalQualityPreset =
+                          static_cast<io::HierarchicalDualContouringQuality>(i);
+
+                        if (m_hierarchicalQualityPreset !=
+                            io::HierarchicalDualContouringQuality::Custom)
+                        {
+                            switch (m_hierarchicalQualityPreset)
+                            {
+                            case io::HierarchicalDualContouringQuality::Draft:
+                                m_hierarchicalEnableProgressiveRefinement = false;
+                                break;
+                            case io::HierarchicalDualContouringQuality::Balanced:
+                            case io::HierarchicalDualContouringQuality::Fine:
+                            case io::HierarchicalDualContouringQuality::UltraFine:
+                                m_hierarchicalEnableProgressiveRefinement = true;
+                                break;
+                            case io::HierarchicalDualContouringQuality::Custom:
+                                break;
+                            }
+                        }
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Checkbox("Enable GPU acceleration", &m_hierarchicalEnableGpu);
+            ImGui::Checkbox("Enable progressive refinement",
+                            &m_hierarchicalEnableProgressiveRefinement);
+
+            if (!m_hierarchicalEnableProgressiveRefinement)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("refinement passes will be skipped");
+            }
+
+            ImGui::Checkbox("Project vertices to surface", &m_hierarchicalProjectToSurface);
+            if (m_hierarchicalProjectToSurface)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("GPU post-processing for smoother surfaces");
+            }
+
+            ImGui::Separator();
+            ImGui::Checkbox("Enable coarsening (experimental)", &m_hierarchicalEnableCoarsening);
+            if (m_hierarchicalEnableCoarsening)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("merge cells where safe to reduce triangles");
+            }
+
+            ImGui::BeginDisabled(!m_hierarchicalEnableCoarsening);
+            ImGui::InputFloat("Minimum feature size", &m_hierarchicalMinFeatureSize, 0.1F, 1.0F, "%.3f");
+            if (m_hierarchicalMinFeatureSize < 0.0F)
+            {
+                m_hierarchicalMinFeatureSize = 0.0F;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("world units; smaller features may be simplified");
+            ImGui::EndDisabled();
+
+            ImGui::TextWrapped(
+              "Hierarchical dual contouring incrementally refines an adaptive octree. "
+              "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
+        }
+        else if (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring)
+        {
+            int qualityIndex = static_cast<int>(m_manifoldQualityPreset);
+            qualityIndex = std::clamp(
+              qualityIndex, 0, static_cast<int>(MANIFOLD_QUALITY_LABELS.size()) - 1);
+            if (ImGui::BeginCombo("Quality",
+                                   MANIFOLD_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
+            {
+                for (int i = 0; i < static_cast<int>(MANIFOLD_QUALITY_LABELS.size()); ++i)
+                {
+                    bool const selected = (i == qualityIndex);
+                    if (ImGui::Selectable(MANIFOLD_QUALITY_LABELS[static_cast<std::size_t>(i)],
+                                          selected))
+                    {
+                        qualityIndex = i;
+                        m_manifoldQualityPreset =
+                          static_cast<io::ManifoldDualContouringQuality>(i);
+                        
+                        // Sync maxDepth with the selected preset
+                        io::ManifoldDualContouringOptions tempOpts{};
+                        tempOpts.qualityPreset = m_manifoldQualityPreset;
+                        tempOpts.applyPreset();
+                        m_manifoldMaxDepth = tempOpts.maxDepth;
+                    }
+                    if (selected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Checkbox("Enable GPU acceleration", &m_manifoldEnableGpu);
+            ImGui::Checkbox("Allow CPU fallback", &m_manifoldAllowCpuFallback);
+            ImGui::Checkbox("Enable Morton caching", &m_manifoldEnableCaching);
+
+            ImGui::InputFloat("ISO value", &m_manifoldIsoValue, 0.01F, 0.1F, "%.4f");
+
+            int depthInput = static_cast<int>(m_manifoldMaxDepth);
+            if (ImGui::InputInt("Maximum depth", &depthInput))
+            {
+                depthInput = std::max(depthInput, 1);
+                m_manifoldMaxDepth = static_cast<std::size_t>(depthInput);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("higher values capture more detail");
+
+            ImGui::Separator();
+            ImGui::Text("Minimum Feature Size (Thin Walls)");
+            
+            ImGui::InputFloat("Min feature size", &m_manifoldMinFeatureSize, 0.1F, 1.0F, "%.3f");
+            if (m_manifoldMinFeatureSize < 0.0F)
+            {
+                m_manifoldMinFeatureSize = 0.0F;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("world units; 0 = disabled");
+            
+            if (m_manifoldMinFeatureSize > 0.0F)
+            {
+                ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
+                ImGui::SameLine();
+                ImGui::TextDisabled("divide-and-conquer for memory efficiency");
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Sharp Feature Post-Processing");
+            
+            ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
+            if (m_manifoldEnableSharpFeaturePostProcess)
+            {
+                ImGui::Indent();
+                
+                ImGui::SliderFloat("Angle threshold", 
+                                   &m_manifoldSharpFeatureAngleThreshold, 
+                                   0.0F, 1.0F, 
+                                   "cos(angle) = %.2f");
+                ImGui::SameLine();
+                ImGui::TextDisabled("lower = more sensitive (0.5 = ~60°)");
+                
+                int subdivIters = static_cast<int>(m_manifoldSubdivisionIterations);
+                if (ImGui::SliderInt("Subdivision iterations", &subdivIters, 1, 3))
+                {
+                    m_manifoldSubdivisionIterations = static_cast<std::size_t>(subdivIters);
+                }
+                
+                ImGui::Checkbox("Project to surface", &m_manifoldProjectToSurface);
+                
+                ImGui::Unindent();
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Mesh Simplification");
+            
+            // Simplification method selection
+            char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
+            int const numMethods = 2;
+            if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
+            {
+                for (int i = 0; i < numMethods; ++i)
+                {
+                    bool const isSelected = (m_manifoldSimplificationMethod == i);
+                    if (ImGui::Selectable(simplificationMethods[i], isSelected))
+                    {
+                        m_manifoldSimplificationMethod = i;
+                    }
+                    if (isSelected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            
+            if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
+            {
+                ImGui::Indent();
+                
+                ImGui::SliderFloat("Max SDF error", 
+                                   &m_manifoldSimplificationMaxSdfError, 
+                                   0.001F, 0.1F, 
+                                   "%.3f mm");
+                ImGui::SameLine();
+                ImGui::TextDisabled("maximum deviation from surface");
+                
+                ImGui::SliderFloat("SDF weight", 
+                                   &m_manifoldSimplificationSdfWeight, 
+                                   0.0F, 1.0F, 
+                                   "%.2f");
+                ImGui::SameLine();
+                ImGui::TextDisabled("weight for position error");
+                
+                ImGui::SliderFloat("Normal weight", 
+                                   &m_manifoldSimplificationNormalWeight, 
+                                   0.0F, 1.0F, 
+                                   "%.2f");
+                ImGui::SameLine();
+                ImGui::TextDisabled("weight for triangle orientation error");
+                
+                ImGui::Unindent();
+            }
+
+            ImGui::TextWrapped(
+              "Manifold dual contouring is an experimental GPU path. Results may be incomplete "
+              "while the kernels are under active development.");
+        }
+    }
+    
+    void MeshExportDialog::renderColorMaterialTab()
+    {
+        ImGui::Spacing();
+        
+        // Check model for volumetric color output when document is available
+        if (m_document != nullptr)
+        {
+            auto assembly = m_document->getAssembly();
+            if (assembly != nullptr)
+            {
+                auto& model = assembly->assemblyModel();
+                if (model != nullptr)
+                {
+                    m_modelHasVolumetricColor = io::FaceColorSampler::hasVolumetricColor(*model);
+                }
+            }
+        }
+        
+        bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
+        bool const colorExportAvailable = is3mf && m_modelHasVolumetricColor;
+        
+        // Color export section
+        ImGui::Text("Volumetric Color Export");
+        ImGui::Separator();
+        
+        if (!is3mf)
+        {
+            ImGui::TextDisabled("Color export is only available for 3MF format.");
+            ImGui::TextDisabled("Select 3MF format to enable color options.");
+        }
+        else if (!m_modelHasVolumetricColor)
+        {
+            ImGui::TextDisabled("The current model does not have volumetric color output.");
+            ImGui::TextDisabled("Connect a color source to the End node's Color input to enable.");
+        }
+        else
+        {
+            ImGui::TextWrapped(
+                "Export per-face colors sampled from the volumetric model. "
+                "Colors are sampled at face centroids using the GPU.");
+        }
+        
+        ImGui::Spacing();
+        
+        ImGui::BeginDisabled(!colorExportAvailable);
+        
+        ImGui::Checkbox("Export with colors", &m_exportWithColors);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !colorExportAvailable)
+        {
+            if (!is3mf)
+            {
+                ImGui::SetTooltip("Select 3MF format to enable color export");
+            }
+            else
+            {
+                ImGui::SetTooltip("Model has no volumetric color output");
+            }
+        }
+        
+        // Only show color options when color export is enabled
+        if (m_exportWithColors && colorExportAvailable)
+        {
+            ImGui::Indent();
+            
+            ImGui::Checkbox("Convert to sRGB", &m_convertToSrgb);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(recommended for display)");
+            
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip(
+                    "Apply gamma correction for accurate display on monitors.\n"
+                    "Disable if colors are already in sRGB or for raw linear output.");
+            }
+            
+            ImGui::Unindent();
+        }
+        
+        ImGui::EndDisabled();
+        
+        ImGui::Spacing();
+        ImGui::Spacing();
+        
+        // Future: Material settings placeholder
+        ImGui::Text("Material Properties");
+        ImGui::Separator();
+        ImGui::TextDisabled("Material property export is not yet implemented.");
+        ImGui::TextDisabled("Future versions will support PBR materials.");
     }
     
     void MeshExportDialog::renderFileSelection()
@@ -814,6 +926,10 @@ namespace gladius::ui
             if (is3mf)
             {
                 m_layeredExporter3mf.setQualityLevel(quality);
+                // Enable color export if checkbox is checked and model has color
+                bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
+                m_layeredExporter3mf.setExportWithColors(exportColors);
+                m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -907,6 +1023,10 @@ namespace gladius::ui
             m_manifoldExporter.setOutputFormat(is3mf ? io::MeshOutputFileFormat::ThreeMF 
                                                       : io::MeshOutputFileFormat::STL);
             m_manifoldExporter.setDocument(m_document);
+            // Enable color export if checkbox is checked and model has color (3MF only)
+            bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
+            m_manifoldExporter.setExportWithColors(exportColors);
+            m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;

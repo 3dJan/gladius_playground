@@ -153,7 +153,40 @@ __kernel void sampleColors(
     const float4 result = model(worldPos, PASS_PAYLOAD_ARGS);
     
     // Extract and clamp color to valid range (linear RGB)
-    const float3 color = clamp(result.xyz, 0.0f, 1.0f);
+    float3 color = clamp(result.xyz, 0.0f, 1.0f);
+    
+    // If color is nearly black (possibly invalid/undefined), try sampling slightly inside the surface
+    // This handles cases where mesh vertices are slightly outside the true SDF surface
+    const float colorMagnitude = color.x + color.y + color.z;
+    if (colorMagnitude < 0.01f && result.w > -0.5f && result.w < 0.5f)
+    {
+        // Near the surface but got black color - try moving slightly inward (negative SDF direction)
+        // Compute gradient to find surface normal direction
+        const float eps = 0.01f;
+        const float dx = model(worldPos + (float3)(eps, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w 
+                       - model(worldPos - (float3)(eps, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w;
+        const float dy = model(worldPos + (float3)(0.0f, eps, 0.0f), PASS_PAYLOAD_ARGS).w 
+                       - model(worldPos - (float3)(0.0f, eps, 0.0f), PASS_PAYLOAD_ARGS).w;
+        const float dz = model(worldPos + (float3)(0.0f, 0.0f, eps), PASS_PAYLOAD_ARGS).w 
+                       - model(worldPos - (float3)(0.0f, 0.0f, eps), PASS_PAYLOAD_ARGS).w;
+        
+        float3 gradient = (float3)(dx, dy, dz);
+        const float gradLen = length(gradient);
+        if (gradLen > 0.001f)
+        {
+            gradient = gradient / gradLen;
+            // Sample slightly inside the surface (move in negative gradient direction)
+            const float3 insidePos = worldPos - gradient * 0.1f;
+            const float4 insideResult = model(insidePos, PASS_PAYLOAD_ARGS);
+            const float3 insideColor = clamp(insideResult.xyz, 0.0f, 1.0f);
+            
+            // Use inside color if it's more valid
+            if ((insideColor.x + insideColor.y + insideColor.z) > colorMagnitude)
+            {
+                color = insideColor;
+            }
+        }
+    }
     
     colors[gid] = (float4)(color.x, color.y, color.z, 1.0f);
 }

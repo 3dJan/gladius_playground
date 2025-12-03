@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace gladius::io
 {
@@ -46,7 +47,8 @@ namespace gladius::io
         std::vector<std::array<std::uint32_t, 3>> const& faces,
         DualContouringSamplingProgram& samplingProgram,
         Primitives const& primitives,
-        ProgressCallback progressCallback)
+        ProgressCallback progressCallback,
+        bool convertToSrgbFlag)
     {
         if (faces.empty())
         {
@@ -88,8 +90,11 @@ namespace gladius::io
             }
         }
 
-        // Step 4: Convert linear RGB to sRGB
-        convertToSrgb(colors);
+        // Step 4: Optionally convert linear RGB to sRGB
+        if (convertToSrgbFlag)
+        {
+            convertToSrgb(colors);
+        }
 
         return colors;
     }
@@ -99,10 +104,101 @@ namespace gladius::io
         std::vector<std::array<std::uint32_t, 3>> const& faces,
         DualContouringSamplingProgram& samplingProgram,
         Primitives const& primitives,
-        ProgressCallback progressCallback)
+        ProgressCallback progressCallback,
+        bool convertToSrgb)
     {
-        auto const colors = sampleFaceColors(vertices, faces, samplingProgram, primitives, progressCallback);
+        auto const colors = sampleFaceColors(vertices, faces, samplingProgram, primitives, progressCallback, convertToSrgb);
         return FaceColors::fromVector3f(colors);
+    }
+
+    VertexColors FaceColorSampler::sampleVertexColors(
+        std::vector<Eigen::Vector3f> const& vertices,
+        std::vector<std::array<std::uint32_t, 3>> const& faces,
+        DualContouringSamplingProgram& samplingProgram,
+        Primitives const& primitives,
+        ProgressCallback progressCallback,
+        bool convertToSrgbFlag)
+    {
+        if (faces.empty())
+        {
+            return {};
+        }
+
+        std::size_t const numFaces = faces.size();
+
+        // Collect all unique vertex indices that we need to sample
+        // Use a map to track which vertices we need and deduplicate
+        std::vector<std::uint32_t> uniqueVertexIndices;
+        std::unordered_map<std::uint32_t, std::size_t> vertexIndexToSampleIndex;
+
+        for (auto const& face : faces)
+        {
+            for (std::uint32_t idx : face)
+            {
+                if (vertexIndexToSampleIndex.find(idx) == vertexIndexToSampleIndex.end())
+                {
+                    vertexIndexToSampleIndex[idx] = uniqueVertexIndices.size();
+                    uniqueVertexIndices.push_back(idx);
+                }
+            }
+        }
+
+        // Build positions for unique vertices
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(uniqueVertexIndices.size());
+        for (std::uint32_t idx : uniqueVertexIndices)
+        {
+            positions.push_back(vertices[idx]);
+        }
+
+        // Sample colors at all unique vertex positions in batches
+        std::size_t const numVertices = positions.size();
+        std::vector<Eigen::Vector3f> vertexColors(numVertices);
+
+        std::size_t processed = 0;
+        while (processed < numVertices)
+        {
+            std::size_t const batchCount = std::min(s_batchSize, numVertices - processed);
+
+            std::vector<Eigen::Vector3f> batchPositions(
+                positions.begin() + static_cast<std::ptrdiff_t>(processed),
+                positions.begin() + static_cast<std::ptrdiff_t>(processed + batchCount));
+
+            std::vector<Eigen::Vector3f> batchColors;
+            samplingProgram.sampleColors(batchPositions, batchColors, primitives);
+
+            for (std::size_t i = 0; i < batchCount; ++i)
+            {
+                vertexColors[processed + i] = batchColors[i];
+            }
+
+            processed += batchCount;
+
+            if (progressCallback)
+            {
+                progressCallback(static_cast<float>(processed) / static_cast<float>(numVertices));
+            }
+        }
+
+        // Optionally convert linear RGB to sRGB
+        if (convertToSrgbFlag)
+        {
+            convertToSrgb(vertexColors);
+        }
+
+        // Build per-face vertex colors from sampled data
+        VertexColors result(numFaces);
+        for (std::size_t faceIdx = 0; faceIdx < numFaces; ++faceIdx)
+        {
+            auto const& face = faces[faceIdx];
+            for (std::size_t vertIdx = 0; vertIdx < 3; ++vertIdx)
+            {
+                std::size_t sampleIdx = vertexIndexToSampleIndex[face[vertIdx]];
+                result[faceIdx][vertIdx] = Color8::fromVector3f(vertexColors[sampleIdx]);
+            }
+        }
+
+        return result;
     }
 
     void FaceColorSampler::setBatchSize(std::size_t batchSize)

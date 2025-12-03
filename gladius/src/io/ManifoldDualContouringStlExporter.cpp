@@ -1,11 +1,13 @@
 #include "ManifoldDualContouringStlExporter.h"
 
+#include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
 #include "MeshExporter.h"
 
 #include "ComputeContext.h"
 #include "ComputeCore.h"
 #include "../compute/ManifoldDualContouringGpu.h"
+#include "../compute/ProgramManager.h"
 #include "../types.h"
 
 #include <Eigen/Geometry>
@@ -59,6 +61,16 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setDocument(Document const * doc)
     {
         m_document = doc;
+    }
+    
+    void ManifoldDualContouringStlExporter::setExportWithColors(bool exportWithColors)
+    {
+        m_exportWithColors = exportWithColors;
+    }
+    
+    void ManifoldDualContouringStlExporter::setConvertToSrgb(bool convertToSrgb)
+    {
+        m_convertToSrgb = convertToSrgb;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -312,7 +324,52 @@ namespace gladius::io
         if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
         {
             MeshWriter3mf writer(m_logger);
-            writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+            
+            if (m_exportWithColors)
+            {
+                // Build faces array from indices
+                std::size_t const numFaces = indices.size() / 3;
+                std::vector<std::array<std::uint32_t, 3>> facesForSampling;
+                facesForSampling.reserve(numFaces);
+                for (std::size_t i = 0; i < indices.size(); i += 3)
+                {
+                    facesForSampling.push_back({indices[i], indices[i + 1], indices[i + 2]});
+                }
+                
+                // Sample face colors using GPU
+                auto* samplingProgram = generator.getProgramManager().getDualContouringSamplingProgram();
+                auto primitives = generator.getPrimitives();
+                
+                if (samplingProgram != nullptr && primitives != nullptr)
+                {
+                    auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
+                        positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                    
+                    writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                    
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
+                           events::Severity::Info});
+                    }
+                }
+                else
+                {
+                    // Fallback to non-colored export if sampling is unavailable
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {"Color sampling unavailable, exporting without colors",
+                           events::Severity::Warning});
+                    }
+                    writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+                }
+            }
+            else
+            {
+                writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+            }
         }
         else
         {

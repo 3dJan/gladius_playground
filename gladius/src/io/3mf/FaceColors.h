@@ -11,6 +11,7 @@
 
 #include <eigen3/Eigen/Core>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -95,59 +96,131 @@ namespace gladius::io
     };
 
     /**
-     * @brief Per-face color data for mesh export
-     *
-     * Stores a color for each face (triangle) of a mesh. The number of colors
-     * must match the number of faces in the mesh being exported.
-     */
-    struct FaceColors
+ * @brief Per-face color data for mesh export (single color per face)
+ *
+ * Stores a color for each face (triangle) of a mesh. The number of colors
+ * must match the number of faces in the mesh being exported.
+ * This results in flat shading (same color for all 3 vertices of each triangle).
+ */
+struct FaceColors
+{
+    std::vector<Color8> colors; ///< One color per face
+
+    FaceColors() = default;
+
+    explicit FaceColors(std::size_t numFaces)
+        : colors(numFaces)
     {
-        std::vector<Color8> colors; ///< One color per face
+    }
 
-        FaceColors() = default;
+    explicit FaceColors(std::vector<Color8> faceColors)
+        : colors(std::move(faceColors))
+    {
+    }
 
-        explicit FaceColors(std::size_t numFaces)
-            : colors(numFaces)
+    /// Create from floating point colors (Eigen vectors)
+    static FaceColors fromVector3f(std::vector<Eigen::Vector3f> const& rgbColors)
+    {
+        FaceColors result;
+        result.colors.reserve(rgbColors.size());
+        for (auto const& c : rgbColors)
         {
+            result.colors.push_back(Color8::fromVector3f(c));
         }
+        return result;
+    }
 
-        explicit FaceColors(std::vector<Color8> faceColors)
-            : colors(std::move(faceColors))
-        {
-        }
+    [[nodiscard]] std::size_t size() const
+    {
+        return colors.size();
+    }
 
-        /// Create from floating point colors (Eigen vectors)
-        static FaceColors fromVector3f(std::vector<Eigen::Vector3f> const& rgbColors)
-        {
-            FaceColors result;
-            result.colors.reserve(rgbColors.size());
-            for (auto const& c : rgbColors)
-            {
-                result.colors.push_back(Color8::fromVector3f(c));
-            }
-            return result;
-        }
+    [[nodiscard]] bool empty() const
+    {
+        return colors.empty();
+    }
 
-        [[nodiscard]] std::size_t size() const
-        {
-            return colors.size();
-        }
+    Color8& operator[](std::size_t index)
+    {
+        return colors[index];
+    }
 
-        [[nodiscard]] bool empty() const
-        {
-            return colors.empty();
-        }
+    Color8 const& operator[](std::size_t index) const
+    {
+        return colors[index];
+    }
+};
 
-        Color8& operator[](std::size_t index)
-        {
-            return colors[index];
-        }
+/**
+ * @brief Per-vertex color data for a single face (triangle)
+ *
+ * Stores colors for each of the 3 vertices of a triangle.
+ */
+struct TriangleVertexColors
+{
+    std::array<Color8, 3> colors; ///< Colors for vertices 0, 1, 2
 
-        Color8 const& operator[](std::size_t index) const
-        {
-            return colors[index];
-        }
-    };
+    constexpr TriangleVertexColors() = default;
+
+    constexpr TriangleVertexColors(Color8 c0, Color8 c1, Color8 c2)
+        : colors{c0, c1, c2}
+    {
+    }
+
+    Color8& operator[](std::size_t index)
+    {
+        return colors[index];
+    }
+
+    Color8 const& operator[](std::size_t index) const
+    {
+        return colors[index];
+    }
+};
+
+/**
+ * @brief Per-vertex color data for mesh export (3 colors per face)
+ *
+ * Stores a color for each vertex of each face (triangle) of a mesh.
+ * This allows smooth color interpolation across faces in 3MF export
+ * using p1, p2, p3 property indices per triangle.
+ */
+struct VertexColors
+{
+    std::vector<TriangleVertexColors> faceVertexColors; ///< 3 colors per face
+
+    VertexColors() = default;
+
+    explicit VertexColors(std::size_t numFaces)
+        : faceVertexColors(numFaces)
+    {
+    }
+
+    explicit VertexColors(std::vector<TriangleVertexColors> colors)
+        : faceVertexColors(std::move(colors))
+    {
+    }
+
+    [[nodiscard]] std::size_t size() const
+    {
+        return faceVertexColors.size();
+    }
+
+    [[nodiscard]] bool empty() const
+    {
+        return faceVertexColors.empty();
+    }
+
+    TriangleVertexColors& operator[](std::size_t faceIndex)
+    {
+        return faceVertexColors[faceIndex];
+    }
+
+    TriangleVertexColors const& operator[](std::size_t faceIndex) const
+    {
+        return faceVertexColors[faceIndex];
+    }
+};
 
 } // namespace gladius::io
 

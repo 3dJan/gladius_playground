@@ -67,14 +67,15 @@ namespace gladius::io
          * @brief Sample face colors from a volumetric model
          *
          * Evaluates the volumetric color function at face centroids using batched
-         * GPU evaluation. Colors are converted from linear RGB to sRGB.
+         * GPU evaluation.
          *
          * @param vertices Mesh vertices
          * @param faces Triangle indices (3 indices per face)
          * @param samplingProgram Compiled sampling program for GPU evaluation
          * @param primitives Compiled model primitives for evaluation
          * @param progressCallback Optional callback for progress updates
-         * @return Per-face colors in sRGB, one per triangle
+         * @param convertToSrgb If true (default), convert from linear RGB to sRGB
+         * @return Per-face colors, optionally converted to sRGB
          * @throws std::runtime_error if GPU evaluation fails
          */
         static std::vector<Eigen::Vector3f> sampleFaceColors(
@@ -82,7 +83,8 @@ namespace gladius::io
             std::vector<std::array<std::uint32_t, 3>> const& faces,
             DualContouringSamplingProgram& samplingProgram,
             Primitives const& primitives,
-            ProgressCallback progressCallback = nullptr);
+            ProgressCallback progressCallback = nullptr,
+            bool convertToSrgb = true);
 
         /**
          * @brief Sample face colors and return as FaceColors structure
@@ -94,14 +96,40 @@ namespace gladius::io
          * @param samplingProgram Compiled sampling program
          * @param primitives Compiled model primitives
          * @param progressCallback Optional progress callback
-         * @return FaceColors structure with sRGB Color8 values
+         * @param convertToSrgb If true (default), convert from linear RGB to sRGB
+         * @return FaceColors structure with Color8 values
          */
         static FaceColors sampleFaceColorsAsColor8(
             std::vector<Eigen::Vector3f> const& vertices,
             std::vector<std::array<std::uint32_t, 3>> const& faces,
             DualContouringSamplingProgram& samplingProgram,
             Primitives const& primitives,
-            ProgressCallback progressCallback = nullptr);
+            ProgressCallback progressCallback = nullptr,
+            bool convertToSrgb = true);
+
+    /**
+     * @brief Sample colors at vertex positions for per-vertex coloring
+     *
+     * Evaluates the volumetric color function at each vertex position of each
+     * face. This enables proper color interpolation in 3MF exports using
+     * p1, p2, p3 property indices.
+     *
+     * @param vertices Mesh vertices
+     * @param faces Triangle indices (3 indices per face)
+     * @param samplingProgram Compiled sampling program for GPU evaluation
+     * @param primitives Compiled model primitives for evaluation
+     * @param progressCallback Optional callback for progress updates
+     * @param convertToSrgb If true (default), convert from linear RGB to sRGB
+     * @return Per-vertex colors for each face
+     * @throws std::runtime_error if GPU evaluation fails
+     */
+    static VertexColors sampleVertexColors(
+        std::vector<Eigen::Vector3f> const& vertices,
+        std::vector<std::array<std::uint32_t, 3>> const& faces,
+        DualContouringSamplingProgram& samplingProgram,
+        Primitives const& primitives,
+        ProgressCallback progressCallback = nullptr,
+        bool convertToSrgb = true);
 
         /// Configure batch size for GPU evaluation (faces per dispatch)
         static void setBatchSize(std::size_t batchSize);

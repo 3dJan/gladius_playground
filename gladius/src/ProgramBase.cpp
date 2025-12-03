@@ -71,6 +71,9 @@ namespace gladius
                 return;
             }
 
+            // Clear the model kernel changed flag since we're now compiling with the new kernel
+            m_modelKernelChanged = false;
+
             // Configure optional features (like VDB) and include headers accordingly
             if (m_enableVdb)
             {
@@ -154,6 +157,9 @@ namespace gladius
             return;
         }
 
+        // Clear the model kernel changed flag since we're now compiling with the new kernel
+        m_modelKernelChanged = false;
+
         if (m_enableVdb)
         {
             m_programFront->addSymbol("ENABLE_VDB");
@@ -225,12 +231,23 @@ namespace gladius
             return false;
         }
 
+        // If model kernel changed, need recompilation
+        if (m_modelKernelChanged)
+        {
+            return false;
+        }
+
         return m_programFront->isValid();
     }
 
     void ProgramBase::setModelKernel(const std::string & newModelKernelSource)
     {
-        m_modelKernel = newModelKernelSource;
+        // If model kernel changed, mark for recompilation
+        if (m_modelKernel != newModelKernelSource)
+        {
+            m_modelKernel = newModelKernelSource;
+            m_modelKernelChanged = true;
+        }
     }
 
     void ProgramBase::setEnableVdb(bool enableVdb)

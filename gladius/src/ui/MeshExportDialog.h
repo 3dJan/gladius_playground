@@ -2,6 +2,7 @@
 #include "BaseExportDialog.h"
 #include "ExportState.h"
 #include "FileDialogService.h"
+#include "io/3mf/FaceColorSampler.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
@@ -65,6 +66,8 @@ namespace gladius::ui
       private:
         void renderConfiguration(ComputeCore & core);
         void renderFileSelection();
+        void renderMeshExtractionTab();
+        void renderColorMaterialTab();
         void renderStatusArea();
         void startExport(ComputeCore & core);
         void resetState();
@@ -126,5 +129,10 @@ namespace gladius::ui
         
         // Export state for blocking UI modifications during export
         ExportState * m_exportState = nullptr;
+        
+        // Color export options
+        bool m_exportWithColors = true;  ///< Export with volumetric colors (3MF only)
+        bool m_convertToSrgb = true;  ///< Convert linear RGB to sRGB for display
+        bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
     };
 } // namespace gladius::ui

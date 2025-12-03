@@ -52,6 +52,14 @@ namespace gladius::io
                                   Document const * sourceDocument = nullptr,
                                   bool writeThumbnail = false);
 
+        /// Export mesh with per-vertex colors (smooth color interpolation)
+        void exportMeshWithVertexColors(std::filesystem::path const & filePath,
+                                        Mesh const & mesh,
+                                        std::string const & meshName,
+                                        VertexColors const & vertexColors,
+                                        Document const * sourceDocument = nullptr,
+                                        bool writeThumbnail = false);
+
         void exportMeshes(std::filesystem::path const & filePath,
                           std::vector<std::pair<std::shared_ptr<Mesh>, std::string>> const & meshes,
                           Document const * sourceDocument = nullptr,
@@ -74,6 +82,13 @@ namespace gladius::io
                                  Mesh const & mesh,
                                  std::string const & meshName,
                                  FaceColors const & faceColors);
+
+        /// Add mesh with per-vertex colors and return the mesh object and color group resource ID
+        std::pair<Lib3MF::PMeshObject, Lib3MF_uint32>
+        addMeshWithVertexColorsToModel(Lib3MF::PModel model3mf,
+                                       Mesh const & mesh,
+                                       std::string const & meshName,
+                                       VertexColors const & vertexColors);
 
         void createBuildItem(Lib3MF::PModel model3mf,
                              Lib3MF::PMeshObject meshObject,
