@@ -12,76 +12,6 @@
 #define CNANOVDB_DATA_ALIGNMENT 32
 #define CNANOVDB_ALIGNMENT_PADDING(x, n) (-(x) & ((n) - 1))
 
-#if defined(__OPENCL_VERSION__)
-#define CNANOVDB_DECLARE_PADDING(name, byteCount, scalarType)
-#else
-#define CNANOVDB_DECLARE_PADDING(name, byteCount, scalarType)                                     \
-    scalarType name[(byteCount) / sizeof(scalarType)]
-#endif
-
-#if defined(_MSC_VER) && !defined(__OPENCL_VERSION__)
-#define CNANOVDB_ALIGNED_STRUCT(ALIGN) __declspec(align(ALIGN)) struct
-#else
-#define CNANOVDB_ALIGNED_STRUCT(ALIGN) struct __attribute__((aligned(ALIGN)))
-#endif
-
-#define CNANOVDB_LEAF_HEADER_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)                                 \
-    (sizeof(cnanovdb_mask##LOG2DIM) + 2 * sizeof(VALUETYPE) + 2 * sizeof(STATSTYPE) +             \
-     sizeof(cnanovdb_coord) + sizeof(uint8_t[3]) + sizeof(uint8_t))
-
-#define CNANOVDB_LEAF_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)                                \
-    CNANOVDB_ALIGNMENT_PADDING(CNANOVDB_LEAF_HEADER_BYTES(LOG2DIM, VALUETYPE, STATSTYPE),         \
-                               CNANOVDB_DATA_ALIGNMENT)
-
-#define CNANOVDB_LEAF_VOXEL_COUNT(LOG2DIM) (1u << (3 * (LOG2DIM)))
-
-#define CNANOVDB_LEAF_STORAGE_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)                                \
-    (CNANOVDB_LEAF_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE) +                                 \
-     CNANOVDB_LEAF_VOXEL_COUNT(LOG2DIM) * sizeof(VALUETYPE))
-
-#define CNANOVDB_INTERNAL_HEADER_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)                             \
-    (sizeof(cnanovdb_mask##LOG2DIM) + sizeof(VALUETYPE) * 2 + sizeof(STATSTYPE) * 2 +             \
-     sizeof(cnanovdb_coord) * 2 + sizeof(int32_t) + sizeof(uint32_t))
-
-#define CNANOVDB_INTERNAL_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)                            \
-    CNANOVDB_ALIGNMENT_PADDING(CNANOVDB_INTERNAL_HEADER_BYTES(LOG2DIM, VALUETYPE, STATSTYPE),     \
-                               CNANOVDB_DATA_ALIGNMENT)
-
-#define CNANOVDB_INTERNAL_TABLE_COUNT(LOG2DIM) CNANOVDB_LEAF_VOXEL_COUNT(LOG2DIM)
-
-#define CNANOVDB_INTERNAL_STORAGE_BYTES(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                    \
-    (CNANOVDB_INTERNAL_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE) +                             \
-     CNANOVDB_INTERNAL_TABLE_COUNT(LOG2DIM) * sizeof(cnanovdb_tileentry##SUFFIX))
-
-#ifdef __OPENCL_VERSION__
-#define CNANOVDB_DEFINE_LEAF_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE)                               \
-    uint8_t mVoxelStorage[CNANOVDB_LEAF_STORAGE_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)];
-
-#define CNANOVDB_LEAF_VOXELS_PTR(NODE, LOG2DIM, VALUETYPE, STATSTYPE)                             \
-    ((CNANOVDB_GLOBAL VALUETYPE*) ((NODE)->mVoxelStorage +                                        \
-                                   CNANOVDB_LEAF_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)))
-
-#define CNANOVDB_DEFINE_INTERNAL_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                   \
-    uint8_t mTableStorage[CNANOVDB_INTERNAL_STORAGE_BYTES(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)];
-
-#define CNANOVDB_INTERNAL_TABLE_PTR(NODE, LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                  \
-    ((CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX*)                                                \
-       ((NODE)->mTableStorage +                                                                   \
-        CNANOVDB_INTERNAL_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)))
-#else
-#define CNANOVDB_DEFINE_LEAF_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE)                               \
-    uint32_t _reserved[CNANOVDB_LEAF_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE) / 4];           \
-    VALUETYPE mVoxels[CNANOVDB_LEAF_VOXEL_COUNT(LOG2DIM)];
-
-#define CNANOVDB_LEAF_VOXELS_PTR(NODE, LOG2DIM, VALUETYPE, STATSTYPE) ((NODE)->mVoxels)
-
-#define CNANOVDB_DEFINE_INTERNAL_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                   \
-    uint8_t _reserved[CNANOVDB_INTERNAL_PADDING_BYTES(LOG2DIM, VALUETYPE, STATSTYPE)];            \
-    cnanovdb_tileentry##SUFFIX mTable[CNANOVDB_INTERNAL_TABLE_COUNT(LOG2DIM)];
-
-#define CNANOVDB_INTERNAL_TABLE_PTR(NODE, LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX) ((NODE)->mTable)
-#endif
-
 #define USE_SINGLE_ROOT_KEY
 
 #ifdef __OPENCL_VERSION__
@@ -273,7 +203,7 @@ static void cnanovdb_map_applyIJT(cnanovdb_Vec3F* dst,
     dst->mVec[2] = sx * map->mInvMatF[2] + sy * map->mInvMatF[5] + sz * map->mInvMatF[8];
 }
 
-typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
+typedef struct
 {
     int64_t mByteOffset;    // byte offset to the blind data, relative to the GridData.
     uint64_t mElementCount; // number of elements, e.g. point count
@@ -281,17 +211,14 @@ typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
     uint32_t mSemantic;     // semantic meaning of the data.
     uint32_t mDataClass;    // 4 bytes
     uint32_t mDataType;     // 4 bytes
-        char mName[256];
-        CNANOVDB_DECLARE_PADDING(_reserved,
-                                                         CNANOVDB_ALIGNMENT_PADDING(sizeof(int64_t) + sizeof(uint64_t) +
-                                                                                                                     2 * sizeof(uint32_t) +
-                                                                                                                     2 * sizeof(uint32_t) +
-                                                                                                                     256 * sizeof(char),
-                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
-                                                         uint8_t);
+    char mName[256];
+    uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(int64_t) + sizeof(uint64_t) +
+                                                   2 * sizeof(uint32_t) + 2 * sizeof(uint32_t) +
+                                                   256 * sizeof(char),
+                                                 CNANOVDB_DATA_ALIGNMENT)];
 } cnanovdb_gridblindmetadata;
 
-typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
+typedef struct
 {
     uint64_t mMagic;     // 8B magic to validate it is valid grid data.
     uint64_t mChecksum;  // 8B. Checksum of grid buffer.
@@ -308,13 +235,11 @@ typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
     uint32_t mGridClass;           // 4B.
     uint32_t mGridType;            // 4B.
     uint64_t mBlindMetadataOffset; // 8B. offset of GridBlindMetaData structures.
-        int32_t mBlindMetadataCount;   // 4B. count of GridBlindMetaData structures.
-        CNANOVDB_DECLARE_PADDING(_reserved,
-                                                         CNANOVDB_ALIGNMENT_PADDING(8 + 8 + 4 + 4 + 4 + 4 + 8 + 256 + 24 +
-                                                                                                                     24 + sizeof(cnanovdb_map) + 24 + 4 +
-                                                                                                                     4 + 8 + 4,
-                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
-                                                         uint32_t);
+    int32_t mBlindMetadataCount;   // 4B. count of GridBlindMetaData structures.
+    uint32_t _reserved[CNANOVDB_ALIGNMENT_PADDING(8 + 8 + 4 + 4 + 4 + 4 + 8 + 256 + 24 + 24 +
+                                                    sizeof(cnanovdb_map) + 24 + 4 + 4 + 8 + 4,
+                                                  CNANOVDB_DATA_ALIGNMENT) /
+                       4];
 } cnanovdb_griddata;
 
 static void cnanovdb_griddata_worldToIndex(cnanovdb_Vec3F* dst,
@@ -354,18 +279,15 @@ static void cnanovdb_griddata_applyIJT(cnanovdb_Vec3F* dst,
     cnanovdb_map_applyIJT(dst, &grid->mMap, src);
 }
 
-typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)
+typedef struct
 {
     uint64_t mNodeOffset[ROOT_LEVEL + 1];
     uint32_t mNodeCount[ROOT_LEVEL];
-        uint32_t mTileCount[ROOT_LEVEL];
-        uint64_t mVoxelCount;
-        CNANOVDB_DECLARE_PADDING(_reserved,
-                                                         CNANOVDB_ALIGNMENT_PADDING(4 * sizeof(uint64_t) +
-                                                                                                                     (3 + 3) * sizeof(uint32_t) +
-                                                                                                                     sizeof(uint64_t),
-                                                                                                                 CNANOVDB_DATA_ALIGNMENT),
-                                                         uint8_t);
+    uint32_t mTileCount[ROOT_LEVEL];
+    uint64_t mVoxelCount;
+    uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(4 * sizeof(uint64_t) + (3 + 3) * sizeof(uint32_t) +
+                                                   sizeof(uint64_t),
+                                                 CNANOVDB_DATA_ALIGNMENT)];
 } cnanovdb_treedata;
 
 static const CNANOVDB_GLOBAL cnanovdb_treedata*
@@ -400,87 +322,86 @@ static void cnanovdb_readaccessor_insert(cnanovdb_readaccessor* RESTRICT acc,
 }
 
 #define CREATE_LEAF_NODE_int(                                                                      \
-    LEVEL, LOG2DIM, CHILDTOTAL, TOTAL, MASK, VALUETYPE, STATSTYPE, SUFFIX)                           \
-        typedef struct                                                                                 \
-        {                                                                                              \
-                cnanovdb_coord mBBox_min;                                                                  \
-                uint8_t mBBoxDif[3];                                                                       \
-                uint8_t mFlags;                                                                            \
-                cnanovdb_mask##LOG2DIM mValueMask;                                                         \
-                VALUETYPE mMinimum;                                                                        \
-                VALUETYPE mMaximum;                                                                        \
-                STATSTYPE mAverage;                                                                        \
-                STATSTYPE mStdDevi;                                                                        \
-                CNANOVDB_DEFINE_LEAF_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE)                                \
-        } cnanovdb_node##LEVEL##SUFFIX;                                                                \
-                                                                                                                                                                                                     \
-        static inline CNANOVDB_GLOBAL VALUETYPE*                                                       \
-            cnanovdb_node##LEVEL##SUFFIX##_voxels(                                                       \
-                const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node)                         \
-        {                                                                                              \
-                return CNANOVDB_LEAF_VOXELS_PTR(node, LOG2DIM, VALUETYPE, STATSTYPE);                      \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static uint32_t cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(                                  \
-            const cnanovdb_coord* RESTRICT ijk)                                                          \
-        {                                                                                              \
-                return (((ijk->mVec[0] & MASK) >> CHILDTOTAL) << (2 * LOG2DIM)) +                          \
-                             (((ijk->mVec[1] & MASK) >> CHILDTOTAL) << (LOG2DIM)) +                              \
-                             ((ijk->mVec[2] & MASK) >> CHILDTOTAL);                                              \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValue(                                      \
-            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-            const cnanovdb_coord* RESTRICT ijk)                                                          \
-        {                                                                                              \
-                uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                return cnanovdb_node##LEVEL##SUFFIX##_voxels(node)[n];                                     \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValueAndCache(                              \
-            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-            const cnanovdb_coord* RESTRICT ijk,                                                          \
-            cnanovdb_readaccessor* RESTRICT /* DO NOT REMOVE: Required for C99 compliance */ acc)        \
-        {                                                                                              \
-                (void) (acc);                                                                              \
-                uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                return cnanovdb_node##LEVEL##SUFFIX##_voxels(node)[n];                                     \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static bool cnanovdb_node##LEVEL##SUFFIX##_isActive(                                           \
-            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-            const cnanovdb_coord* RESTRICT ijk)                                                          \
-        {                                                                                              \
-                uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                if (cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n))                                   \
-                        return true;                                                                           \
-                return false;                                                                              \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static bool cnanovdb_node##LEVEL##SUFFIX##_isActiveAndCache(                                   \
-            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-            const cnanovdb_coord* RESTRICT ijk,                                                          \
-            cnanovdb_readaccessor* RESTRICT /* DO NOT REMOVE: Required for C99 compliance */ acc)        \
-        {                                                                                              \
-                (void) (acc);                                                                              \
-                uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                if (cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n))                                   \
-                        return true;                                                                           \
-                return false;                                                                              \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        static const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX*                                     \
-            cnanovdb_tree_getNode##LEVEL##SUFFIX(const CNANOVDB_GLOBAL cnanovdb_treedata* RESTRICT tree, \
-                                                                                     uint64_t i)                                             \
-        {                                                                                              \
-                const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* basenode =                             \
-                    (const CNANOVDB_GLOBAL                                                                   \
-                         cnanovdb_node##LEVEL##SUFFIX*) ((CNANOVDB_GLOBAL uint8_t*) (tree) +                   \
-                                                                                         tree->mNodeOffset[LEVEL]);                            \
-                return basenode + i;                                                                       \
-        }                                                                                              \
-                                                                                                                                                                                                     \
-        /**/
+  LEVEL, LOG2DIM, CHILDTOTAL, TOTAL, MASK, VALUETYPE, STATSTYPE, SUFFIX)                           \
+    typedef struct                                                                                 \
+    {                                                                                              \
+        cnanovdb_coord mBBox_min;                                                                  \
+        uint8_t mBBoxDif[3];                                                                       \
+        uint8_t mFlags;                                                                            \
+        cnanovdb_mask##LOG2DIM mValueMask;                                                         \
+        VALUETYPE mMinimum;                                                                        \
+        VALUETYPE mMaximum;                                                                        \
+        STATSTYPE mAverage;                                                                        \
+        STATSTYPE mStdDevi;                                                                        \
+        uint32_t _reserved[CNANOVDB_ALIGNMENT_PADDING(                                             \
+                             sizeof(cnanovdb_mask##LOG2DIM) + 2 * sizeof(VALUETYPE) +              \
+                               2 * sizeof(STATSTYPE) + sizeof(cnanovdb_coord) +                    \
+                               sizeof(uint8_t[3]) + sizeof(uint8_t),                               \
+                             CNANOVDB_DATA_ALIGNMENT) /                                            \
+                           4];                                                                     \
+        VALUETYPE mVoxels[1u << (3 * LOG2DIM)];                                                    \
+    } cnanovdb_node##LEVEL##SUFFIX;                                                                \
+                                                                                                   \
+    static uint32_t cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(                                  \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        return (((ijk->mVec[0] & MASK) >> CHILDTOTAL) << (2 * LOG2DIM)) +                          \
+               (((ijk->mVec[1] & MASK) >> CHILDTOTAL) << (LOG2DIM)) +                              \
+               ((ijk->mVec[2] & MASK) >> CHILDTOTAL);                                              \
+    }                                                                                              \
+                                                                                                   \
+    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValue(                                      \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        return node->mVoxels[n];                                                                   \
+    }                                                                                              \
+                                                                                                   \
+    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValueAndCache(                              \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk,                                                          \
+      cnanovdb_readaccessor* RESTRICT /* DO NOT REMOVE: Required for C99 compliance */ acc)        \
+    {                                                                                              \
+        (void) (acc);                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        return node->mVoxels[n];                                                                   \
+    }                                                                                              \
+                                                                                                   \
+    static bool cnanovdb_node##LEVEL##SUFFIX##_isActive(                                           \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n))                                   \
+            return true;                                                                           \
+        return false;                                                                              \
+    }                                                                                              \
+                                                                                                   \
+    static bool cnanovdb_node##LEVEL##SUFFIX##_isActiveAndCache(                                   \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk,                                                          \
+      cnanovdb_readaccessor* RESTRICT /* DO NOT REMOVE: Required for C99 compliance */ acc)        \
+    {                                                                                              \
+        (void) (acc);                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n))                                   \
+            return true;                                                                           \
+        return false;                                                                              \
+    }                                                                                              \
+                                                                                                   \
+    static const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX*                                     \
+      cnanovdb_tree_getNode##LEVEL##SUFFIX(const CNANOVDB_GLOBAL cnanovdb_treedata* RESTRICT tree, \
+                                           uint64_t i)                                             \
+    {                                                                                              \
+        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* basenode =                             \
+          (const CNANOVDB_GLOBAL                                                                   \
+             cnanovdb_node##LEVEL##SUFFIX*) ((CNANOVDB_GLOBAL uint8_t*) (tree) +                   \
+                                             tree->mNodeOffset[LEVEL]);                            \
+        return basenode + i;                                                                       \
+    }                                                                                              \
+                                                                                                   \
+    /**/
 
 #define CREATE_LEAF_NODE(LEVEL, LOG2DIM, TOTAL, VALUETYPE, STATSTYPE, SUFFIX)                      \
     CREATE_LEAF_NODE_int(LEVEL,                                                                    \
@@ -502,127 +423,116 @@ static void cnanovdb_readaccessor_insert(cnanovdb_readaccessor* RESTRICT acc,
         cnanovdb_mask##LOG2DIM mValueMask, mChildMask;                                             \
         VALUETYPE mMinimum, mMaximum;                                                              \
         STATSTYPE mAverage, mStdDevi;                                                              \
-                CNANOVDB_DEFINE_INTERNAL_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                    \
+        uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(                                              \
+          sizeof(cnanovdb_mask##LOG2DIM) + sizeof(VALUETYPE) * 2 + sizeof(STATSTYPE) * 2 +         \
+            sizeof(cnanovdb_coord) * 2 + sizeof(int32_t) + sizeof(uint32_t),                       \
+          CNANOVDB_DATA_ALIGNMENT)];                                                               \
+        cnanovdb_tileentry##SUFFIX mTable[1u << (3 * LOG2DIM)];                                    \
     } cnanovdb_node##LEVEL##SUFFIX;                                                                \
-                                                                                                                                                                                                     \
-        static inline CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX*                                      \
-            #define CREATE_INTERNAL_NODE_int(                                                                  \
-                CHILDLEVEL, LEVEL, LOG2DIM, CHILDTOTAL, TOTAL, MASK, VALUETYPE, STATSTYPE, SUFFIX)               \
-                    typedef struct                                                                                 \
-                    {                                                                                              \
-                            cnanovdb_coord mBBox_min, mBBox_max;                                                       \
-                            int32_t mOffset;                                                                           \
-                            uint32_t mFlags;                                                                           \
-                            cnanovdb_mask##LOG2DIM mValueMask, mChildMask;                                             \
-                            VALUETYPE mMinimum, mMaximum;                                                              \
-                            STATSTYPE mAverage, mStdDevi;                                                              \
-                            CNANOVDB_DEFINE_INTERNAL_STORAGE(LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX)                    \
-                    } cnanovdb_node##LEVEL##SUFFIX;                                                                \
-                                                                                                                                                                                                                 \
-                    static inline CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX*                                      \
-                        cnanovdb_node##LEVEL##SUFFIX##_table(                                                        \
-                            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node)                         \
-                    {                                                                                              \
-                            return CNANOVDB_INTERNAL_TABLE_PTR(node, LOG2DIM, VALUETYPE, STATSTYPE, SUFFIX);           \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static uint32_t cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(                                  \
-                        const cnanovdb_coord* RESTRICT ijk)                                                          \
-                    {                                                                                              \
-                            return (((ijk->mVec[0] & MASK) >> CHILDTOTAL) << (2 * LOG2DIM)) +                          \
-                                         (((ijk->mVec[1] & MASK) >> CHILDTOTAL) << (LOG2DIM)) +                              \
-                                         ((ijk->mVec[2] & MASK) >> CHILDTOTAL);                                              \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX*                                \
-                        cnanovdb_node##LEVEL##SUFFIX##_getChild(                                                     \
-                            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node, uint32_t n)             \
-                    {                                                                                              \
-                            const CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX* table =                                  \
-                                cnanovdb_node##LEVEL##SUFFIX##_table(node);                                              \
-                            const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* childnode =                       \
-                                (const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX*) (((CNANOVDB_GLOBAL uint8_t*)  \
-                                                                                                                                                             node) +                   \
-                                                                                                                                                        table[n].child);             \
-                            return childnode;                                                                          \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValue(                                      \
-                        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-                        const cnanovdb_coord* RESTRICT ijk)                                                          \
-                    {                                                                                              \
-                            uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                            if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
-                            {                                                                                          \
-                                    const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
-                                        cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
-                                    return cnanovdb_node##CHILDLEVEL##SUFFIX##_getValue(child, ijk);                       \
-                            }                                                                                          \
-                            const CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX* table =                                  \
-                                cnanovdb_node##LEVEL##SUFFIX##_table(node);                                              \
-                            return table[n].value;                                                                     \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValueAndCache(                              \
-                        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-                        const cnanovdb_coord* RESTRICT ijk,                                                          \
-                        cnanovdb_readaccessor* RESTRICT acc)                                                         \
-                    {                                                                                              \
-                            uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                            const CNANOVDB_GLOBAL cnanovdb_tileentry##SUFFIX* table =                                  \
-                                cnanovdb_node##LEVEL##SUFFIX##_table(node);                                              \
-                            if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
-                            {                                                                                          \
-                                    const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
-                                        cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
-                                    cnanovdb_readaccessor_insert(acc, CHILDLEVEL, child, ijk);                             \
-                                    return cnanovdb_node##CHILDLEVEL##SUFFIX##_getValueAndCache(child, ijk, acc);          \
-                            }                                                                                          \
-                            return table[n].value;                                                                     \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static bool cnanovdb_node##LEVEL##SUFFIX##_isActive(                                           \
-                        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-                        const cnanovdb_coord* RESTRICT ijk)                                                          \
-                    {                                                                                              \
-                            uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                            if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
-                            {                                                                                          \
-                                    const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
-                                        cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
-                                    return cnanovdb_node##CHILDLEVEL##SUFFIX##_isActive(child, ijk);                       \
-                            }                                                                                          \
-                            return cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n) ? true : false;                 \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static bool cnanovdb_node##LEVEL##SUFFIX##_isActiveAndCache(                                   \
-                        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
-                        const cnanovdb_coord* RESTRICT ijk,                                                          \
-                        cnanovdb_readaccessor* RESTRICT acc)                                                         \
-                    {                                                                                              \
-                            uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
-                            if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
-                            {                                                                                          \
-                                    const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
-                                        cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
-                                    cnanovdb_readaccessor_insert(acc, CHILDLEVEL, child, ijk);                             \
-                                    return cnanovdb_node##CHILDLEVEL##SUFFIX##_isActiveAndCache(child, ijk, acc);          \
-                            }                                                                                          \
-                            return cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n) ? true : false;                 \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    static const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX*                                     \
-                        cnanovdb_tree_getNode##LEVEL##SUFFIX(const CNANOVDB_GLOBAL cnanovdb_treedata* RESTRICT tree, \
-                                                                                                 uint64_t i)                                             \
-                    {                                                                                              \
-                            const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* basenode =                             \
-                                (const CNANOVDB_GLOBAL                                                                   \
-                                     cnanovdb_node##LEVEL##SUFFIX*) ((CNANOVDB_GLOBAL uint8_t*) (tree) +                   \
-                                                                                                     tree->mNodeOffset[LEVEL]);                            \
-                            return basenode + i;                                                                       \
-                    }                                                                                              \
-                                                                                                                                                                                                                 \
-                    /**/
+                                                                                                   \
+    static uint32_t cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(                                  \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        return (((ijk->mVec[0] & MASK) >> CHILDTOTAL) << (2 * LOG2DIM)) +                          \
+               (((ijk->mVec[1] & MASK) >> CHILDTOTAL) << (LOG2DIM)) +                              \
+               ((ijk->mVec[2] & MASK) >> CHILDTOTAL);                                              \
+    }                                                                                              \
+                                                                                                   \
+    static const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX*                                \
+      cnanovdb_node##LEVEL##SUFFIX##_getChild(                                                     \
+        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node, uint32_t n)             \
+    {                                                                                              \
+        const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* childnode =                       \
+          (const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX*) (((CNANOVDB_GLOBAL uint8_t*)  \
+                                                                         node) +                   \
+                                                                      node->mTable[n].child);      \
+        return childnode;                                                                          \
+    }                                                                                              \
+                                                                                                   \
+    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValue(                                      \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
+        {                                                                                          \
+            const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
+              cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
+            return cnanovdb_node##CHILDLEVEL##SUFFIX##_getValue(child, ijk);                       \
+        }                                                                                          \
+        return node->mTable[n].value;                                                              \
+    }                                                                                              \
+                                                                                                   \
+    static VALUETYPE cnanovdb_node##LEVEL##SUFFIX##_getValueAndCache(                              \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk,                                                          \
+      cnanovdb_readaccessor* RESTRICT acc)                                                         \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
+        {                                                                                          \
+            const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
+              cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
+            cnanovdb_readaccessor_insert(acc, CHILDLEVEL, child, ijk);                             \
+            return cnanovdb_node##CHILDLEVEL##SUFFIX##_getValueAndCache(child, ijk, acc);          \
+        }                                                                                          \
+        return node->mTable[n].value;                                                              \
+    }                                                                                              \
+                                                                                                   \
+    static bool cnanovdb_node##LEVEL##SUFFIX##_isActive(                                           \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk)                                                          \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
+        {                                                                                          \
+            const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
+              cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
+            return cnanovdb_node##CHILDLEVEL##SUFFIX##_isActive(child, ijk);                       \
+        }                                                                                          \
+        return cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n) ? true : false;                 \
+    }                                                                                              \
+                                                                                                   \
+    static bool cnanovdb_node##LEVEL##SUFFIX##_isActiveAndCache(                                   \
+      const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* RESTRICT node,                           \
+      const cnanovdb_coord* RESTRICT ijk,                                                          \
+      cnanovdb_readaccessor* RESTRICT acc)                                                         \
+    {                                                                                              \
+        uint32_t n = cnanovdb_node##LEVEL##SUFFIX##_CoordToOffset(ijk);                            \
+        if (cnanovdb_mask##LOG2DIM##_isOn(&node->mChildMask, n))                                   \
+        {                                                                                          \
+            const CNANOVDB_GLOBAL cnanovdb_node##CHILDLEVEL##SUFFIX* child =                       \
+              cnanovdb_node##LEVEL##SUFFIX##_getChild(node, n);                                    \
+            cnanovdb_readaccessor_insert(acc, CHILDLEVEL, child, ijk);                             \
+            return cnanovdb_node##CHILDLEVEL##SUFFIX##_isActiveAndCache(child, ijk, acc);          \
+        }                                                                                          \
+        return cnanovdb_mask##LOG2DIM##_isOn(&node->mValueMask, n) ? true : false;                 \
+    }                                                                                              \
+                                                                                                   \
+    static const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX*                                     \
+      cnanovdb_tree_getNode##LEVEL##SUFFIX(const CNANOVDB_GLOBAL cnanovdb_treedata* RESTRICT tree, \
+                                           uint64_t i)                                             \
+    {                                                                                              \
+        const CNANOVDB_GLOBAL cnanovdb_node##LEVEL##SUFFIX* basenode =                             \
+          (const CNANOVDB_GLOBAL                                                                   \
+             cnanovdb_node##LEVEL##SUFFIX*) ((CNANOVDB_GLOBAL uint8_t*) (tree) +                   \
+                                             tree->mNodeOffset[LEVEL]);                            \
+        return basenode + i;                                                                       \
+    }                                                                                              \
+                                                                                                   \
+    /**/
+
+#define CREATE_INTERNAL_NODE(CHILDLEVEL, LEVEL, LOG2DIM, TOTAL, VALUETYPE, STATSTYPE, SUFFIX)      \
+    CREATE_INTERNAL_NODE_int(CHILDLEVEL,                                                           \
+                             LEVEL,                                                                \
+                             LOG2DIM,                                                              \
+                             (TOTAL - LOG2DIM),                                                    \
+                             TOTAL,                                                                \
+                             ((1u << TOTAL) - 1u),                                                 \
+                             VALUETYPE,                                                            \
+                             STATSTYPE,                                                            \
+                             SUFFIX)
+
 #ifdef USE_SINGLE_ROOT_KEY
 #define DEFINE_KEY(KEY) uint64_t KEY;
 #define KEYSIZE sizeof(uint64_t)
@@ -665,33 +575,29 @@ static void cnanovdb_readaccessor_insert(cnanovdb_readaccessor* RESTRICT acc,
 #endif
 
 #define CREATE_ROOTDATA(VALUETYPE, STATSTYPE, SUFFIX)                                              \
-    typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)                                       \
+    typedef struct                                                                                 \
     {                                                                                              \
         DEFINE_KEY(key);                                                                           \
         int64_t child;                                                                             \
         uint32_t state;                                                                            \
         VALUETYPE value;                                                                           \
-        CNANOVDB_DECLARE_PADDING(_reserved,                                                        \
-                     CNANOVDB_ALIGNMENT_PADDING(sizeof(KEYSIZE) + sizeof(VALUETYPE) +  \
-                                   sizeof(int64_t) + sizeof(uint32_t),     \
-                                 CNANOVDB_DATA_ALIGNMENT),                 \
-                     uint8_t);                                                         \
+        uint8_t _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(KEYSIZE) + sizeof(VALUETYPE) +         \
+                                                       sizeof(int64_t) + sizeof(uint32_t),         \
+                                                     CNANOVDB_DATA_ALIGNMENT)];                    \
     } cnanovdb_rootdata_tile##SUFFIX;                                                              \
                                                                                                    \
-    typedef CNANOVDB_ALIGNED_STRUCT(CNANOVDB_DATA_ALIGNMENT)                                       \
+    typedef struct                                                                                 \
     {                                                                                              \
         cnanovdb_coord mBBox_min, mBBox_max;                                                       \
         uint32_t mTableSize;                                                                       \
         VALUETYPE mBackground;                                                                     \
         VALUETYPE mMinimum, mMaximum;                                                              \
-                STATSTYPE mAverage, mStdDevi;                                                              \
-                CNANOVDB_DECLARE_PADDING(_reserved,                                                        \
-                                                                 CNANOVDB_ALIGNMENT_PADDING(sizeof(cnanovdb_coord) * 2 +          \
-                                                                                                                     sizeof(uint32_t) +                     \
-                                                                                                                     sizeof(VALUETYPE) * 3 +                \
-                                                                                                                     sizeof(STATSTYPE) * 2,                 \
-                                                                                                                 CNANOVDB_DATA_ALIGNMENT),                \
-                                                                 uint32_t);                                                        \
+        STATSTYPE mAverage, mStdDevi;                                                              \
+        uint32_t                                                                                   \
+          _reserved[CNANOVDB_ALIGNMENT_PADDING(sizeof(cnanovdb_coord) * 2 + sizeof(uint32_t) +     \
+                                                 sizeof(VALUETYPE) * 3 + sizeof(STATSTYPE) * 2,    \
+                                               CNANOVDB_DATA_ALIGNMENT) /                          \
+                    4];                                                                            \
     } cnanovdb_rootdata##SUFFIX;                                                                   \
                                                                                                    \
     static const CNANOVDB_GLOBAL cnanovdb_rootdata##SUFFIX* cnanovdb_treedata_root##SUFFIX(        \

@@ -18,7 +18,9 @@ namespace gladius
                          "sdf.h",
                          "sampler.h",
                          "rendering.h",
-                         "CNanoVDB.h",
+                         "PNanoVDB_OpenCL.h",
+                         "PNanoVDB.h",
+                         "PNanoVDB_OpenCL_Helpers.h",
                          "sdf.cl",
                          "rendering.cl",
                          "renderer.cl"};
@@ -30,12 +32,7 @@ namespace gladius
                                     size_t startHeight,
                                     size_t endHeight)
     {
-        renderScene(m_ComputeContext->GetQueue(),
-                    lines,
-                    targetImage,
-                    z_mm,
-                    startHeight,
-                    endHeight);
+        renderScene(m_ComputeContext->GetQueue(), lines, targetImage, z_mm, startHeight, endHeight);
     }
 
     void RenderProgram::renderScene(cl::CommandQueue const & queue,
@@ -47,12 +44,8 @@ namespace gladius
     {
         try
         {
-            cl::Event const event = renderSceneAsync(queue,
-                                                     lines,
-                                                     targetImage,
-                                                     z_mm,
-                                                     startHeight,
-                                                     endHeight);
+            cl::Event const event =
+              renderSceneAsync(queue, lines, targetImage, z_mm, startHeight, endHeight);
             if (event())
             {
                 queue.flush();
@@ -115,24 +108,25 @@ namespace gladius
 
         try
         {
-            kernelEvent = m_programFront->runNonBlocking(queue,
-                                                         "renderScene",
-                                                         origin,
-                                                         globalRange,
-                                                         targetImage.getBuffer(),
-                                                         m_resoures->getBuildArea(),
-                                                         lines.primitives.getBuffer(),
-                                                         cl_int(lines.primitives.getSize()),
-                                                         lines.data.getBuffer(),
-                                                         cl_int(lines.data.getSize()),
-                                                         m_resoures->getRenderingSettings(),
-                                                         m_resoures->getPrecompSdfBuffer().getBuffer(),
-                                                         m_resoures->getParameterBuffer().getBuffer(),
-                                                         m_resoures->getCommandBuffer().getBuffer(),
-                                                         cl_int(m_resoures->getCommandBuffer().getData().size()),
-                                                         m_resoures->getPreCompSdfBBox(),
-                                                         m_resoures->getEyePosition(),
-                                                         m_resoures->getModelViewPerspectiveMat());
+            kernelEvent = m_programFront->runNonBlocking(
+              queue,
+              "renderScene",
+              origin,
+              globalRange,
+              targetImage.getBuffer(),
+              m_resoures->getBuildArea(),
+              lines.primitives.getBuffer(),
+              cl_int(lines.primitives.getSize()),
+              lines.data.getBuffer(),
+              cl_int(lines.data.getSize()),
+              m_resoures->getRenderingSettings(),
+              m_resoures->getPrecompSdfBuffer().getBuffer(),
+              m_resoures->getParameterBuffer().getBuffer(),
+              m_resoures->getCommandBuffer().getBuffer(),
+              cl_int(m_resoures->getCommandBuffer().getData().size()),
+              m_resoures->getPreCompSdfBBox(),
+              m_resoures->getEyePosition(),
+              m_resoures->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {

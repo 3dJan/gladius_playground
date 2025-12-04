@@ -207,9 +207,9 @@ namespace gladius::vdb
         memcpy(dstPtr, handle.data(), handle.size());
 
         // Add buffer alignment padding to prevent memory corruption between NanoVDB grids and
-        // subsequent data NanoVDB requires CNANOVDB_DATA_ALIGNMENT (32-byte) alignment for proper
+        // subsequent data NanoVDB requires PNANOVDB_DATA_ALIGNMENT (32-byte) alignment for proper
         // GPU access
-        constexpr size_t BUFFER_ALIGNMENT = 32; // Match CNANOVDB_DATA_ALIGNMENT
+        constexpr size_t BUFFER_ALIGNMENT = 32; // Match PNANOVDB_DATA_ALIGNMENT
         size_t currentByteOffset = primitives.data.size() * sizeof(float);
         size_t alignmentPadding =
           (BUFFER_ALIGNMENT - (currentByteOffset % BUFFER_ALIGNMENT)) % BUFFER_ALIGNMENT;

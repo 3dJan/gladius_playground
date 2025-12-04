@@ -19,14 +19,14 @@ namespace gladius
         }
 
         // Base source files that are always required for kernels
-        // CNanoVDB.h is conditionally added in the (re)compile methods when VDB is enabled
+        // PNanoVDB_OpenCL.h is conditionally added in the (re)compile methods when VDB is enabled
         m_sourceFiles = {"arguments.h",
                          "types.h",
                          "sdf.h",
                          "sampler.h",
                          "rendering.h",
                          "sdf_generator.h",
-                         //"CNanoVDB.h",
+                         //"PNanoVDB_OpenCL.h",
                          "sdf.cl",
                          "rendering.cl",
                          "sdf_generator.cl"};
@@ -78,20 +78,43 @@ namespace gladius
             if (m_enableVdb)
             {
                 m_programFront->addSymbol("ENABLE_VDB");
-                // Ensure CNanoVDB header is present when VDB is enabled
-                auto hasNano = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h") != m_sourceFiles.end();
+                // Ensure PNanoVDB OpenCL headers are present when VDB is enabled
+                // Order: PNanoVDB_OpenCL.h -> PNanoVDB.h -> PNanoVDB_OpenCL_Helpers.h
+                auto hasNano =
+                  std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL.h") !=
+                  m_sourceFiles.end();
                 if (!hasNano)
                 {
-                    // Insert before kernels to keep headers first
-                    auto insertPos = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
-                    m_sourceFiles.insert(insertPos, "CNanoVDB.h");
+                    // Insert before kernels to keep headers first (insert in reverse order)
+                    auto insertPos =
+                      std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
+                    m_sourceFiles.insert(insertPos, "PNanoVDB_OpenCL_Helpers.h");
+                    insertPos = std::find(m_sourceFiles.begin(),
+                                          m_sourceFiles.end(),
+                                          std::string("PNanoVDB_OpenCL_Helpers.h"));
+                    m_sourceFiles.insert(insertPos, "PNanoVDB.h");
+                    insertPos = std::find(
+                      m_sourceFiles.begin(), m_sourceFiles.end(), std::string("PNanoVDB.h"));
+                    m_sourceFiles.insert(insertPos, "PNanoVDB_OpenCL.h");
                 }
             }
             else
             {
                 m_programFront->removeSymbol("ENABLE_VDB");
-                // Remove CNanoVDB header when VDB is disabled to improve compatibility
-                auto it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h");
+                // Remove PNanoVDB headers when VDB is disabled to improve compatibility
+                auto it =
+                  std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL.h");
+                if (it != m_sourceFiles.end())
+                {
+                    m_sourceFiles.erase(it);
+                }
+                it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB.h");
+                if (it != m_sourceFiles.end())
+                {
+                    m_sourceFiles.erase(it);
+                }
+                it = std::find(
+                  m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL_Helpers.h");
                 if (it != m_sourceFiles.end())
                 {
                     m_sourceFiles.erase(it);
@@ -112,8 +135,8 @@ namespace gladius
 
                 swapProgramsIfNeeded();
 
-                                m_programFront->buildFromSourceAndLinkWithLib(
-                                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+                m_programFront->buildFromSourceAndLinkWithLib(
+                  m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
                 m_programSwapRequired = true;
 
                 // Mark as complete after blocking build
@@ -135,8 +158,8 @@ namespace gladius
                                                  std::memory_order_release);
                 };
 
-                                m_programFront->buildFromSourceAndLinkWithLibNonBlocking(
-                                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+                m_programFront->buildFromSourceAndLinkWithLibNonBlocking(
+                  m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
             }
         }
         catch (OpenCLError & e)
@@ -163,26 +186,46 @@ namespace gladius
         if (m_enableVdb)
         {
             m_programFront->addSymbol("ENABLE_VDB");
-            auto hasNano = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h") != m_sourceFiles.end();
+            auto hasNano =
+              std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL.h") !=
+              m_sourceFiles.end();
             if (!hasNano)
             {
-                auto insertPos = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
-                m_sourceFiles.insert(insertPos, "CNanoVDB.h");
+                auto insertPos =
+                  std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("sdf.cl"));
+                m_sourceFiles.insert(insertPos, "PNanoVDB_OpenCL_Helpers.h");
+                insertPos = std::find(m_sourceFiles.begin(),
+                                      m_sourceFiles.end(),
+                                      std::string("PNanoVDB_OpenCL_Helpers.h"));
+                m_sourceFiles.insert(insertPos, "PNanoVDB.h");
+                insertPos =
+                  std::find(m_sourceFiles.begin(), m_sourceFiles.end(), std::string("PNanoVDB.h"));
+                m_sourceFiles.insert(insertPos, "PNanoVDB_OpenCL.h");
             }
         }
         else
         {
             m_programFront->removeSymbol("ENABLE_VDB");
-            auto it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "CNanoVDB.h");
+            auto it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL.h");
+            if (it != m_sourceFiles.end())
+            {
+                m_sourceFiles.erase(it);
+            }
+            it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB.h");
+            if (it != m_sourceFiles.end())
+            {
+                m_sourceFiles.erase(it);
+            }
+            it = std::find(m_sourceFiles.begin(), m_sourceFiles.end(), "PNanoVDB_OpenCL_Helpers.h");
             if (it != m_sourceFiles.end())
             {
                 m_sourceFiles.erase(it);
             }
         }
 
-                m_programFront->clearSources();
-                m_programFront->buildFromSourceAndLinkWithLib(
-                    m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
+        m_programFront->clearSources();
+        m_programFront->buildFromSourceAndLinkWithLib(
+          m_sourceFiles, m_modelKernel, m_buildFinishedCallBack);
         m_programSwapRequired = true;
         swapProgramsIfNeeded();
         m_isFirstBuild = false;
@@ -196,15 +239,33 @@ namespace gladius
         auto sourceFiles = m_sourceFiles;
         if (m_enableVdb)
         {
-            if (std::find(sourceFiles.begin(), sourceFiles.end(), "CNanoVDB.h") == sourceFiles.end())
+            if (std::find(sourceFiles.begin(), sourceFiles.end(), "PNanoVDB_OpenCL.h") ==
+                sourceFiles.end())
             {
-                auto insertPos = std::find(sourceFiles.begin(), sourceFiles.end(), std::string("sdf.cl"));
-                sourceFiles.insert(insertPos, "CNanoVDB.h");
+                auto insertPos =
+                  std::find(sourceFiles.begin(), sourceFiles.end(), std::string("sdf.cl"));
+                sourceFiles.insert(insertPos, "PNanoVDB_OpenCL_Helpers.h");
+                insertPos = std::find(
+                  sourceFiles.begin(), sourceFiles.end(), std::string("PNanoVDB_OpenCL_Helpers.h"));
+                sourceFiles.insert(insertPos, "PNanoVDB.h");
+                insertPos =
+                  std::find(sourceFiles.begin(), sourceFiles.end(), std::string("PNanoVDB.h"));
+                sourceFiles.insert(insertPos, "PNanoVDB_OpenCL.h");
             }
         }
         else
         {
-            auto it = std::find(sourceFiles.begin(), sourceFiles.end(), "CNanoVDB.h");
+            auto it = std::find(sourceFiles.begin(), sourceFiles.end(), "PNanoVDB_OpenCL.h");
+            if (it != sourceFiles.end())
+            {
+                sourceFiles.erase(it);
+            }
+            it = std::find(sourceFiles.begin(), sourceFiles.end(), "PNanoVDB.h");
+            if (it != sourceFiles.end())
+            {
+                sourceFiles.erase(it);
+            }
+            it = std::find(sourceFiles.begin(), sourceFiles.end(), "PNanoVDB_OpenCL_Helpers.h");
             if (it != sourceFiles.end())
             {
                 sourceFiles.erase(it);

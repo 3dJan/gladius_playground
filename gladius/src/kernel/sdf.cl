@@ -537,6 +537,14 @@ float meshPrimitive(float3 pos, int index, PAYLOAD_ARGS)
 
 #ifdef ENABLE_VDB
 
+// Helper: Create a pnanovdb buffer from the global data array at the specified offset
+static inline pnanovdb_buf_t make_vdb_buf(__global float* data, int start)
+{
+    pnanovdb_buf_t buf;
+    buf.data = (__global uint32_t*)(&data[start]);
+    return buf;
+}
+
 float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[index];
@@ -546,48 +554,45 @@ float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
     {
 
         // Trilinear interpolation, see https://en.wikipedia.org/wiki/Trilinear_interpolation
-        cnanovdb_readaccessor acc;
-
-        global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-        cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
+        pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+        pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+        pnanovdb_readaccessor_t acc;
+        pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
         float3 posVoxel = pos * node.scaling;
         int3 coordVoxel = convert_int3(floor(posVoxel));
 
-        cnanovdb_coord coordCenter;
-        coordCenter.mVec[0] = coordVoxel.x;
-        coordCenter.mVec[1] = coordVoxel.y;
-        coordCenter.mVec[2] = coordVoxel.z;
+        pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coordVoxel.x, coordVoxel.y, coordVoxel.z);
 
         float3 relPos = (posVoxel - floor(posVoxel));
-        cnanovdb_coord coords[8];
+        pnanovdb_coord_t coords[8];
         coords[0] = coordCenter; // 000
 
         coords[1] = coordCenter; // 100
-        coords[1].mVec[0] += 1;
+        coords[1].x += 1;
 
         coords[2] = coordCenter; // 110
-        coords[2].mVec[0] += 1;
-        coords[2].mVec[1] += 1;
+        coords[2].x += 1;
+        coords[2].y += 1;
 
         coords[3] = coordCenter; // 010
-        coords[3].mVec[1] += 1;
+        coords[3].y += 1;
 
         coords[4] = coordCenter; // 001
-        coords[4].mVec[2] += 1;
+        coords[4].z += 1;
 
         coords[5] = coordCenter; // 101
-        coords[5].mVec[0] += 1;
-        coords[5].mVec[2] += 1;
+        coords[5].x += 1;
+        coords[5].z += 1;
 
         coords[6] = coordCenter; // 111
-        coords[6].mVec[0] += 1;
-        coords[6].mVec[1] += 1;
-        coords[6].mVec[2] += 1;
+        coords[6].x += 1;
+        coords[6].y += 1;
+        coords[6].z += 1;
 
         coords[7] = coordCenter; // 011
-        coords[7].mVec[1] += 1;
-        coords[7].mVec[2] += 1;
+        coords[7].y += 1;
+        coords[7].z += 1;
 
         float c[8];
 
@@ -595,7 +600,7 @@ float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
         // __attribute__((opencl_unroll_hint(1))) // compile error on some platforms
         for (int i = zero; i < 8; ++i)
         {
-            c[i] = cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coords[i]);
+            c[i] = pnanovdb_read_float_value(buf, &acc, coords[i]);
         }
 
         float const c00 = mix(c[0], c[1], relPos.x);
@@ -618,20 +623,16 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
     // float const bandwidth = 50.f;
     // if (boundingBox < bandwidth)
     {
-        struct PrimitiveMeta node = primitives[index];
-        cnanovdb_readaccessor acc;
+        pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+        pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+        pnanovdb_readaccessor_t acc;
+        pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
-        global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-        cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
         pos *= node.scaling;
-        cnanovdb_coord coordCenter;
-        
         int3 coord = convert_int3(pos);
-        coordCenter.mVec[0] = coord.x;
-        coordCenter.mVec[1] = coord.y;
-        coordCenter.mVec[2] = coord.z;
+        pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
 
-        return cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coordCenter);
+        return pnanovdb_read_float_value(buf, &acc, coordCenter);
     }
     // return boundingBox + bandwidth;
 }
@@ -639,33 +640,29 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
 float vdbValue(int3 coord, int index, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[index];
-    cnanovdb_readaccessor acc;
+    pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+    pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
-    global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-    cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
-    cnanovdb_coord coordCenter;
-    coordCenter.mVec[0] = coord.x;
-    coordCenter.mVec[1] = coord.y;
-    coordCenter.mVec[2] = coord.z;
-
-    return cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coordCenter);
+    pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
+    return pnanovdb_read_float_value(buf, &acc, coordCenter);
 }
 
 int faceIndexFromGrid(float3 pos, int primitiveIndex, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[primitiveIndex];
 
-    cnanovdb_readaccessor acc;
-    global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-    cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootI32(cnanovdb_griddata_tree(grid)));
-    pos *= node.scaling;
-    cnanovdb_coord coordCenter;
-    int3 coord = convert_int3(pos);
-    coordCenter.mVec[0] = coord.x;
-    coordCenter.mVec[1] = coord.y;
-    coordCenter.mVec[2] = coord.z;
+    pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+    pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init_int32(&acc, buf, grid);
 
-    return cnanovdb_readaccessor_getValueI32((cnanovdb_readaccessor *) &acc, &coordCenter);
+    pos *= node.scaling;
+    int3 coord = convert_int3(pos);
+    pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
+
+    return pnanovdb_read_int32_value(buf, &acc, coordCenter);
 }
 
 float meshDist(float3 pos, int meshIndex, int faceIndex, PAYLOAD_ARGS)
