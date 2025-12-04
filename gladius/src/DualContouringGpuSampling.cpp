@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include <fmt/format.h>
+#include <numeric>
 
 namespace gladius::dual_contouring
 {
@@ -63,9 +64,7 @@ namespace gladius::dual_contouring
         bool buffersAllocated{false};
         std::size_t allocatedBufferSize{0U};
 
-        void ensureBuffers(ComputeContext & context,
-                           std::size_t positionCount,
-                           bool needGradients)
+        void ensureBuffers(ComputeContext & context, std::size_t positionCount, bool needGradients)
         {
             std::size_t const requiredSize = positionCount;
             if (buffersAllocated && requiredSize <= allocatedBufferSize)
@@ -78,19 +77,16 @@ namespace gladius::dual_contouring
                 // Allocate with some headroom
                 std::size_t const allocSize = requiredSize + (requiredSize / 4U);
 
-                positionBuffer = cl::Buffer(context.GetContext(),
-                                            CL_MEM_READ_ONLY,
-                                            allocSize * sizeof(cl_float4));
+                positionBuffer =
+                  cl::Buffer(context.GetContext(), CL_MEM_READ_ONLY, allocSize * sizeof(cl_float4));
 
-                valueBuffer = cl::Buffer(context.GetContext(),
-                                         CL_MEM_WRITE_ONLY,
-                                         allocSize * sizeof(cl_float));
+                valueBuffer =
+                  cl::Buffer(context.GetContext(), CL_MEM_WRITE_ONLY, allocSize * sizeof(cl_float));
 
                 if (needGradients)
                 {
-                    gradientBuffer = cl::Buffer(context.GetContext(),
-                                                CL_MEM_WRITE_ONLY,
-                                                allocSize * sizeof(cl_float4));
+                    gradientBuffer = cl::Buffer(
+                      context.GetContext(), CL_MEM_WRITE_ONLY, allocSize * sizeof(cl_float4));
                 }
 
                 allocatedBufferSize = allocSize;
@@ -203,10 +199,8 @@ namespace gladius::dual_contouring
 
             // Batch GPU sampling
             std::vector<float> batchValues;
-            program->sampleCorners(batchPositions,
-                                  batchValues,
-                                  *m_core->getPrimitives(),
-                                  m_config.isoValue);
+            program->sampleCorners(
+              batchPositions, batchValues, *m_core->getPrimitives(), m_config.isoValue);
 
             // Populate output and cache
             for (std::size_t i = 0U; i < uncachedIndices.size(); ++i)
@@ -313,11 +307,11 @@ namespace gladius::dual_contouring
             std::vector<float> batchValues;
             std::vector<Eigen::Vector3f> batchGradients;
             program->sampleHermite(batchPositions,
-                                  batchValues,
-                                  batchGradients,
-                                  *m_core->getPrimitives(),
-                                  m_config.isoValue,
-                                  epsilon);
+                                   batchValues,
+                                   batchGradients,
+                                   *m_core->getPrimitives(),
+                                   m_config.isoValue,
+                                   epsilon);
 
             // Populate output and cache
             for (std::size_t i = 0U; i < uncachedIndices.size(); ++i)

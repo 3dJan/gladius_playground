@@ -29,7 +29,8 @@ namespace gladius::ui::tests
         void setupInstantDialog(std::filesystem::path resultPath)
         {
             m_dialog.setTestDialogFunc(
-              [this, resultPath](FilePatterns, std::filesystem::path) -> QueriedFilename {
+              [this, resultPath](FilePatterns, std::filesystem::path) -> QueriedFilename
+              {
                   ++m_dialogCallCount;
                   return resultPath;
               });
@@ -39,7 +40,8 @@ namespace gladius::ui::tests
         void setupCancelledDialog()
         {
             m_dialog.setTestDialogFunc(
-              [this](FilePatterns, std::filesystem::path) -> QueriedFilename {
+              [this](FilePatterns, std::filesystem::path) -> QueriedFilename
+              {
                   ++m_dialogCallCount;
                   return std::nullopt;
               });
@@ -49,7 +51,8 @@ namespace gladius::ui::tests
         void setupBlockingDialog(std::filesystem::path resultPath)
         {
             m_dialog.setTestDialogFunc(
-              [this, resultPath](FilePatterns, std::filesystem::path) -> QueriedFilename {
+              [this, resultPath](FilePatterns, std::filesystem::path) -> QueriedFilename
+              {
                   ++m_dialogCallCount;
                   while (m_dialogShouldBlock && !m_dialogCanProceed)
                   {
@@ -154,8 +157,8 @@ namespace gladius::ui::tests
         std::this_thread::sleep_for(50ms);
 
         auto result = m_dialog.checkResult();
-        ASSERT_TRUE(result.has_value());    // We got a result
-        EXPECT_FALSE(result->has_value());  // But it's nullopt (cancelled)
+        ASSERT_TRUE(result.has_value());   // We got a result
+        EXPECT_FALSE(result->has_value()); // But it's nullopt (cancelled)
     }
 
     TEST_F(AsyncFileDialogTest, CheckResult_OnlyReturnsOnce)
@@ -169,7 +172,7 @@ namespace gladius::ui::tests
         auto result2 = m_dialog.checkResult();
 
         EXPECT_TRUE(result1.has_value());
-        EXPECT_FALSE(result2.has_value());  // Second call returns nothing
+        EXPECT_FALSE(result2.has_value()); // Second call returns nothing
     }
 
     TEST_F(AsyncFileDialogTest, IsActive_FalseAfterResultConsumed)
@@ -182,9 +185,9 @@ namespace gladius::ui::tests
         // Future is ready, but result not consumed - should still be "active"
         EXPECT_TRUE(m_dialog.isActive());
 
-        m_dialog.checkResult();  // Consume result
+        (void) m_dialog.checkResult(); // Consume result
 
-        EXPECT_FALSE(m_dialog.isActive());  // Now truly inactive
+        EXPECT_FALSE(m_dialog.isActive()); // Now truly inactive
     }
 
     TEST_F(AsyncFileDialogTest, CanStartNewDialogAfterResultConsumed)
@@ -193,7 +196,7 @@ namespace gladius::ui::tests
 
         m_dialog.saveFile({"*.stl"}, "first.stl");
         std::this_thread::sleep_for(50ms);
-        m_dialog.checkResult();
+        (void) m_dialog.checkResult();
 
         // Should be able to start a new dialog
         m_dialog.saveFile({"*.stl"}, "second.stl");
@@ -209,24 +212,24 @@ namespace gladius::ui::tests
         setupInstantDialog("/selected/file.stl");
 
         // Frame 1: User clicks button, dialog starts
-        EXPECT_FALSE(m_dialog.isActive());  // Initially not active
+        EXPECT_FALSE(m_dialog.isActive()); // Initially not active
         m_dialog.saveFile({"*.stl"}, "test.stl");
-        
+
         // Wait for async to execute
         std::this_thread::sleep_for(50ms);
         EXPECT_EQ(1, m_dialogCallCount.load());
 
         // Frame 2: Dialog just completed. isActive() should still be true
         // because we haven't consumed the result yet.
-        EXPECT_TRUE(m_dialog.isActive());  // Still "active" until result consumed
+        EXPECT_TRUE(m_dialog.isActive()); // Still "active" until result consumed
 
         // Simulate button check - should be disabled
         bool const dialogActive = m_dialog.isActive();
         if (!dialogActive)
         {
-            m_dialog.saveFile({"*.stl"}, "second.stl");  // This should NOT happen
+            m_dialog.saveFile({"*.stl"}, "second.stl"); // This should NOT happen
         }
-        
+
         // Now consume the result
         auto result = m_dialog.checkResult();
         EXPECT_TRUE(result.has_value());
@@ -237,7 +240,7 @@ namespace gladius::ui::tests
         // Frame 3: Now truly inactive, user can click again
         EXPECT_FALSE(m_dialog.isActive());
         m_dialog.saveFile({"*.stl"}, "third.stl");
-        
+
         std::this_thread::sleep_for(50ms);
         EXPECT_EQ(2, m_dialogCallCount.load());
     }
@@ -253,13 +256,13 @@ namespace gladius::ui::tests
         // At this point, future is ready but not consumed
         // isActive() should return TRUE because we have an unconsumed result
         bool activeBeforeCheck = m_dialog.isActive();
-        EXPECT_TRUE(activeBeforeCheck);  // FIXED: Should be true to prevent double-click
+        EXPECT_TRUE(activeBeforeCheck); // FIXED: Should be true to prevent double-click
 
         auto result = m_dialog.checkResult();
         EXPECT_TRUE(result.has_value());
 
         bool activeAfterCheck = m_dialog.isActive();
-        EXPECT_FALSE(activeAfterCheck);  // Now inactive after consuming result
+        EXPECT_FALSE(activeAfterCheck); // Now inactive after consuming result
     }
 
     // This test demonstrates the fix for the bug scenario
@@ -274,7 +277,7 @@ namespace gladius::ui::tests
         // Now with the fix, isActive() should return TRUE even when future is ready
         // because we haven't consumed the result yet
         bool const dialogActive = m_dialog.isActive();
-        EXPECT_TRUE(dialogActive);  // FIXED: Button should be disabled!
+        EXPECT_TRUE(dialogActive); // FIXED: Button should be disabled!
 
         // If we check the button state correctly, we won't start a new dialog
         if (!dialogActive)
@@ -288,7 +291,7 @@ namespace gladius::ui::tests
 
         // Now we should only have one dialog call
         std::this_thread::sleep_for(50ms);
-        EXPECT_EQ(1, m_dialogCallCount.load());  // FIXED: Only one dialog!
+        EXPECT_EQ(1, m_dialogCallCount.load()); // FIXED: Only one dialog!
     }
 
 } // namespace gladius::ui::tests

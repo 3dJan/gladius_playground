@@ -1,12 +1,12 @@
-#include <gtest/gtest.h>
-#include "compute/ManifoldDualContouringGpu.h"
 #include "ComputeContext.h"
 #include "ComputeCore.h"
-#include "EventLogger.h"
 #include "Document.h"
-#include "io/ManifoldDualContouringStlExporter.h"
+#include "EventLogger.h"
 #include "ResourceContext.h"
 #include "SurfaceExtractionOptions.h"
+#include "compute/ManifoldDualContouringGpu.h"
+#include "io/ManifoldDualContouringStlExporter.h"
+#include <gtest/gtest.h>
 
 #include <Eigen/Core>
 #include <algorithm>
@@ -80,7 +80,7 @@ namespace gladius::compute::tests
             stats.totalEdges = usage.size();
             for (auto const & [key, count] : usage)
             {
-                (void)key;
+                (void) key;
                 if (count == 1U)
                 {
                     ++stats.openEdges;
@@ -103,7 +103,7 @@ namespace gladius::compute::tests
             std::size_t outwardFacingCount{0U};
             std::size_t inwardFacingCount{0U};
             std::size_t degenerateCount{0U};
-            
+
             [[nodiscard]] double outwardFraction() const
             {
                 if (outwardFacingCount + inwardFacingCount == 0U)
@@ -115,54 +115,54 @@ namespace gladius::compute::tests
             }
         };
 
-        [[nodiscard]] NormalAnalysis analyzeNormalDirections(
-            ManifoldDualContouringMesh const & mesh,
-            Eigen::Vector3f const & centroid)
+        [[nodiscard]] NormalAnalysis
+        analyzeNormalDirections(ManifoldDualContouringMesh const & mesh,
+                                Eigen::Vector3f const & centroid)
         {
             NormalAnalysis result;
-            
+
             if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
             {
                 return result;
             }
-            
+
             result.triangleCount = mesh.indices.size() / 3U;
-            
+
             for (std::size_t tri = 0U; tri + 2U < mesh.indices.size(); tri += 3U)
             {
                 std::uint32_t const a = mesh.indices[tri + 0U];
                 std::uint32_t const b = mesh.indices[tri + 1U];
                 std::uint32_t const c = mesh.indices[tri + 2U];
-                
+
                 if (a >= mesh.positions.size() || b >= mesh.positions.size() ||
                     c >= mesh.positions.size())
                 {
                     ++result.degenerateCount;
                     continue;
                 }
-                
+
                 Eigen::Vector3f const & va = mesh.positions[a];
                 Eigen::Vector3f const & vb = mesh.positions[b];
                 Eigen::Vector3f const & vc = mesh.positions[c];
-                
+
                 // Compute face normal via cross product
                 Eigen::Vector3f const edge1 = vb - va;
                 Eigen::Vector3f const edge2 = vc - va;
                 Eigen::Vector3f const faceNormal = edge1.cross(edge2);
-                
+
                 float const normalLen = faceNormal.norm();
                 if (normalLen < 1e-12F)
                 {
                     ++result.degenerateCount;
                     continue;
                 }
-                
+
                 // Compute face centroid
                 Eigen::Vector3f const faceCentroid = (va + vb + vc) / 3.0F;
-                
+
                 // Vector from mesh centroid to face centroid
                 Eigen::Vector3f const toFace = faceCentroid - centroid;
-                
+
                 // If normal points same direction as toFace, it's outward-facing
                 float const dotProduct = faceNormal.dot(toFace);
                 if (dotProduct > 0.0F)
@@ -174,14 +174,14 @@ namespace gladius::compute::tests
                     ++result.inwardFacingCount;
                 }
             }
-            
+
             return result;
         }
 
         // ============================================================================
         // Admesh validation helpers
         // ============================================================================
-        
+
         [[nodiscard]] bool isAdmeshAvailable()
         {
             int const result = std::system("command -v admesh >/dev/null 2>&1");
@@ -193,8 +193,8 @@ namespace gladius::compute::tests
         {
             auto tempDir = std::filesystem::temp_directory_path();
             auto const timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now().time_since_epoch())
-                                   .count();
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
 
             std::string filename{stem};
             filename += "_";
@@ -204,13 +204,16 @@ namespace gladius::compute::tests
             return tempDir / filename;
         }
 
-        [[nodiscard]] std::string runCommandAndCapture(std::string const & command,
-                                                       int & exitCode)
+        [[nodiscard]] std::string runCommandAndCapture(std::string const & command, int & exitCode)
         {
             std::array<char, 512> buffer{};
             std::string output;
 
+#ifdef _WIN32
+            FILE * pipe = _popen(command.c_str(), "r");
+#else
             FILE * pipe = popen(command.c_str(), "r");
+#endif
             if (pipe == nullptr)
             {
                 exitCode = -1;
@@ -222,6 +225,10 @@ namespace gladius::compute::tests
                 output.append(buffer.data());
             }
 
+#ifdef _WIN32
+            int const status = _pclose(pipe);
+            exitCode = status;
+#else
             int const status = pclose(pipe);
             if (status == -1)
             {
@@ -241,6 +248,7 @@ namespace gladius::compute::tests
             {
                 exitCode = status;
             }
+#endif
 #endif
 
             return output;
@@ -270,9 +278,8 @@ namespace gladius::compute::tests
             int normalsFixed{0};
         };
 
-        [[nodiscard]] std::optional<double> parseAdmeshValue(std::string const & text,
-                                                             std::string_view label,
-                                                             std::size_t columnIndex)
+        [[nodiscard]] std::optional<double>
+        parseAdmeshValue(std::string const & text, std::string_view label, std::size_t columnIndex)
         {
             auto const labelPos = text.find(label);
             if (labelPos == std::string::npos)
@@ -314,8 +321,8 @@ namespace gladius::compute::tests
             if (!value.has_value())
             {
                 std::ostringstream message;
-                message << "Failed to parse admesh metric '" << label << "' (column "
-                        << columnIndex << ")";
+                message << "Failed to parse admesh metric '" << label << "' (column " << columnIndex
+                        << ")";
                 throw std::runtime_error(message.str());
             }
 
@@ -343,14 +350,19 @@ namespace gladius::compute::tests
               parseTwoColumnMetric(text, "Facets with 3 disconnected edges");
             metrics.totalDisconnectedFacets =
               parseTwoColumnMetric(text, "Total disconnected facets");
-            metrics.numberOfParts = static_cast<int>(requireAdmeshValue(text, "Number of parts", 0U));
+            metrics.numberOfParts =
+              static_cast<int>(requireAdmeshValue(text, "Number of parts", 0U));
             metrics.volume = requireAdmeshValue(text, "Volume", 0U);
-            metrics.degenerateFacets = static_cast<int>(requireAdmeshValue(text, "Degenerate facets", 0U));
+            metrics.degenerateFacets =
+              static_cast<int>(requireAdmeshValue(text, "Degenerate facets", 0U));
             metrics.edgesFixed = static_cast<int>(requireAdmeshValue(text, "Edges fixed", 0U));
-            metrics.facetsRemoved = static_cast<int>(requireAdmeshValue(text, "Facets removed", 0U));
+            metrics.facetsRemoved =
+              static_cast<int>(requireAdmeshValue(text, "Facets removed", 0U));
             metrics.facetsAdded = static_cast<int>(requireAdmeshValue(text, "Facets added", 0U));
-            metrics.facetsReversed = static_cast<int>(requireAdmeshValue(text, "Facets reversed", 0U));
-            metrics.backwardsEdges = static_cast<int>(requireAdmeshValue(text, "Backwards edges", 0U));
+            metrics.facetsReversed =
+              static_cast<int>(requireAdmeshValue(text, "Facets reversed", 0U));
+            metrics.backwardsEdges =
+              static_cast<int>(requireAdmeshValue(text, "Backwards edges", 0U));
             metrics.normalsFixed = static_cast<int>(requireAdmeshValue(text, "Normals fixed", 0U));
 
             return metrics;
@@ -404,8 +416,8 @@ namespace gladius::compute::tests
 
         DocumentBundle loadDocument(std::filesystem::path const & path)
         {
-            auto core = std::make_shared<ComputeCore>(
-              m_context, RequiredCapabilities::ComputeOnly, m_logger);
+            auto core =
+              std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
             auto document = std::make_shared<Document>(core);
             document->load(path);
             return DocumentBundle{std::move(core), std::move(document)};
@@ -413,8 +425,8 @@ namespace gladius::compute::tests
 
         /// Exports mesh to STL and validates with admesh, returning metrics
         AdmeshMetrics exportAndValidateWithAdmesh(
-            ComputeCore & core,
-            gladius::io::ManifoldDualContouringOptions const & exportOptions)
+          ComputeCore & core,
+          gladius::io::ManifoldDualContouringOptions const & exportOptions)
         {
             auto tempFile = makeUniqueTempFile("mdc_admesh_test_", ".stl");
             TempFileGuard guard(tempFile);
@@ -437,10 +449,12 @@ namespace gladius::compute::tests
 
             // Run admesh
             int exitCode = 0;
-            std::string const output = runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+            std::string const output =
+              runCommandAndCapture("admesh " + tempFile.string(), exitCode);
             if (exitCode != 0)
             {
-                throw std::runtime_error("admesh returned non-zero exit code: " + std::to_string(exitCode));
+                throw std::runtime_error("admesh returned non-zero exit code: " +
+                                         std::to_string(exitCode));
             }
             return parseAdmeshMetrics(output);
         }
@@ -464,44 +478,45 @@ namespace gladius::compute::tests
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_RunsWithoutError)
     {
-        auto core = std::make_shared<ComputeCore>(
-          m_context, RequiredCapabilities::ComputeOnly, m_logger);
-        
+        auto core =
+          std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
+
         ManifoldDualContouringGpu gpu(*core);
-        
+
         ManifoldDualContouringConfig config;
         config.enableGpu = true;
         gpu.setConfig(config);
-        
+
         gpu.generateMesh();
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid)
     {
         auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
-        
+
         // Update bounding box after loading the document
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
-        
+
         auto const bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available after update";
-        
-        std::cout << "Bounding Box: Min(" << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z 
-                  << ") Max(" << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << ")" << std::endl;
-        
+
+        std::cout << "Bounding Box: Min(" << bbox->min.x << ", " << bbox->min.y << ", "
+                  << bbox->min.z << ") Max(" << bbox->max.x << ", " << bbox->max.y << ", "
+                  << bbox->max.z << ")" << std::endl;
+
         ManifoldDualContouringGpu gpu(*bundle.core);
-        
+
         ManifoldDualContouringConfig config;
         config.enableGpu = true;
         config.initialDepth = 5;
         config.maxDepth = 7;
         gpu.setConfig(config);
-        
+
         gpu.generateMesh();
-        
-        auto const& mesh = gpu.getMesh();
+
+        auto const & mesh = gpu.getMesh();
         std::cout << "Generated mesh with " << mesh.positions.size() << " vertices" << std::endl;
-        
+
         // We expect some vertices to be generated
         EXPECT_GT(mesh.positions.size(), 0U);
         EXPECT_EQ(mesh.positions.size(), mesh.normals.size());
@@ -565,8 +580,8 @@ namespace gladius::compute::tests
 
         std::cout << "Normal direction analysis:" << std::endl;
         std::cout << "  Total triangles: " << analysis.triangleCount << std::endl;
-        std::cout << "  Outward facing: " << analysis.outwardFacingCount 
-                  << " (" << (analysis.outwardFraction() * 100.0) << "%)" << std::endl;
+        std::cout << "  Outward facing: " << analysis.outwardFacingCount << " ("
+                  << (analysis.outwardFraction() * 100.0) << "%)" << std::endl;
         std::cout << "  Inward facing: " << analysis.inwardFacingCount << std::endl;
         std::cout << "  Degenerate: " << analysis.degenerateCount << std::endl;
 
@@ -575,18 +590,17 @@ namespace gladius::compute::tests
         // This is expected because a gyroid is a sheet/surface, not a closed solid.
         // The important validation is that the mesh is manifold with consistent
         // local winding (tested by AdmeshValidation), not global normal direction.
-        
+
         // Verify we have a valid mesh with non-degenerate triangles
-        double const degenerateFraction = static_cast<double>(analysis.degenerateCount) 
-                                         / static_cast<double>(analysis.triangleCount);
-        EXPECT_LT(degenerateFraction, 0.01)
-            << "Should have less than 1% degenerate triangles";
-        
+        double const degenerateFraction = static_cast<double>(analysis.degenerateCount) /
+                                          static_cast<double>(analysis.triangleCount);
+        EXPECT_LT(degenerateFraction, 0.01) << "Should have less than 1% degenerate triangles";
+
         // For a gyroid, expect roughly balanced normal directions (sheet surface)
         // This verifies the sign-based winding is working correctly
         double const balance = std::abs(analysis.outwardFraction() - 0.5);
         EXPECT_LT(balance, 0.1)
-            << "For a gyroid sheet surface, normals should be roughly 50/50 outward/inward";
+          << "For a gyroid sheet surface, normals should be roughly 50/50 outward/inward";
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid_TriangleQuality)
@@ -632,10 +646,11 @@ namespace gladius::compute::tests
         }
 
         std::size_t const triangleCount = mesh.indices.size() / 3U;
-        float const degenerateRatio = triangleCount == 0U
-                                        ? 0.0F
-                                        : static_cast<float>(degenerateCount) / static_cast<float>(triangleCount);
-        EXPECT_LT(degenerateRatio, 0.02F) << "Too many degenerate triangles (" << degenerateCount << ")";
+        float const degenerateRatio = triangleCount == 0U ? 0.0F
+                                                          : static_cast<float>(degenerateCount) /
+                                                              static_cast<float>(triangleCount);
+        EXPECT_LT(degenerateRatio, 0.02F)
+          << "Too many degenerate triangles (" << degenerateCount << ")";
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid_WatertightTopology)
@@ -657,44 +672,60 @@ namespace gladius::compute::tests
         ASSERT_EQ(mesh.indices.size() % 3U, 0U);
 
         auto const stats = analyzeMeshEdges(mesh);
-        if (std::getenv("GLADIUS_REQUIRE_WATERTIGHT") == nullptr)
+        bool requireWatertight = false;
+#ifdef _WIN32
+        char * envValue = nullptr;
+        size_t envLen = 0;
+        if (_dupenv_s(&envValue, &envLen, "GLADIUS_REQUIRE_WATERTIGHT") == 0 && envValue != nullptr)
         {
-            GTEST_SUCCEED() << "Watertightness enforcement disabled (set GLADIUS_REQUIRE_WATERTIGHT=1 to enable). "
-                             << "Open edges: " << stats.openEdges << ", non-manifold edges: " << stats.nonManifoldEdges
-                             << ", total unique edges: " << stats.totalEdges;
+            requireWatertight = true;
+            free(envValue);
+        }
+#else
+        requireWatertight = std::getenv("GLADIUS_REQUIRE_WATERTIGHT") != nullptr;
+#endif
+        if (!requireWatertight)
+        {
+            GTEST_SUCCEED() << "Watertightness enforcement disabled (set "
+                               "GLADIUS_REQUIRE_WATERTIGHT=1 to enable). "
+                            << "Open edges: " << stats.openEdges
+                            << ", non-manifold edges: " << stats.nonManifoldEdges
+                            << ", total unique edges: " << stats.totalEdges;
             return;
         }
 
-        EXPECT_EQ(stats.openEdges, 0U) << "Mesh contains " << stats.openEdges << " open edges out of "
-                                       << stats.totalEdges << " unique edges";
-        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Mesh contains " << stats.nonManifoldEdges
-                                              << " non-manifold edges";
+        EXPECT_EQ(stats.openEdges, 0U)
+          << "Mesh contains " << stats.openEdges << " open edges out of " << stats.totalEdges
+          << " unique edges";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U)
+          << "Mesh contains " << stats.nonManifoldEdges << " non-manifold edges";
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid_ExportSTL)
     {
         auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
-        
+
         // Update bounding box after loading the document
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
-        
+
         auto const bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available after update";
-        
-        std::cout << "Bounding Box: Min(" << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z 
-                  << ") Max(" << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << ")" << std::endl;
-        
+
+        std::cout << "Bounding Box: Min(" << bbox->min.x << ", " << bbox->min.y << ", "
+                  << bbox->min.z << ") Max(" << bbox->max.x << ", " << bbox->max.y << ", "
+                  << bbox->max.z << ")" << std::endl;
+
         // Setup export path
         auto const testOutputDir = std::filesystem::temp_directory_path() / "gladius_test_output";
         std::filesystem::create_directories(testOutputDir);
         auto const outputFile = testOutputDir / "manifold_dc_test.stl";
-        
+
         std::cout << "Exporting to: " << outputFile << std::endl;
-        
+
         // Setup exporter
         gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
-    // Export the mesh to STL
-    gladius::io::ManifoldDualContouringOptions exportOptions;
+        // Export the mesh to STL
+        gladius::io::ManifoldDualContouringOptions exportOptions;
         exportOptions.initialDepth = 5;
         exportOptions.maxDepth = 7;
         exportOptions.enableGpu = true;
@@ -702,7 +733,7 @@ namespace gladius::compute::tests
         exportOptions.enableCaching = true;
         exportOptions.isoValue = 0.0F;
         exporter.setOptions(exportOptions);
-        
+
         // Export
         exporter.beginExport(outputFile, *bundle.core);
         bool stillRunning = true;
@@ -711,11 +742,11 @@ namespace gladius::compute::tests
             stillRunning = exporter.advanceExport(*bundle.core);
         }
         exporter.finalize();
-        
+
         // Check results
         EXPECT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
         EXPECT_TRUE(std::filesystem::exists(outputFile)) << "STL file should exist";
-        
+
         if (std::filesystem::exists(outputFile))
         {
             auto fileSize = std::filesystem::file_size(outputFile);
@@ -725,21 +756,21 @@ namespace gladius::compute::tests
     }
 
     /// Test admesh validation for ImplicitGyroid.
-    /// 
+    ///
     /// KNOWN LIMITATION: This model uses a gyroid surface clipped by a bounding box
     /// (via max() CSG operation). The intersection creates sharp edges where the gyroid
-    /// meets the box faces. Dual contouring has difficulty with these sharp CSG 
+    /// meets the box faces. Dual contouring has difficulty with these sharp CSG
     /// intersections, resulting in holes at the boundary (~2500 disconnected facets).
-    /// 
-    /// The winding/normal direction issue (admesh reports "negative volume") is a 
+    ///
+    /// The winding/normal direction issue (admesh reports "negative volume") is a
     /// consequence of these holes - with gaps in the mesh, the volume calculation
     /// and normal consistency checks become unreliable.
-    /// 
+    ///
     /// For production use of gyroid infill, consider:
     /// 1. Using SimpleGyroid pattern (abs() + offset) for volumetric shells
     /// 2. Adding explicit boundary capping geometry
     /// 3. Using post-processing tools like admesh to auto-repair holes
-    /// 
+    ///
     /// The mesh IS usable after auto-repair (as shown in PrusaSlicer), but the raw
     /// output has holes at CSG intersection boundaries.
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid_AdmeshValidation)
@@ -753,33 +784,34 @@ namespace gladius::compute::tests
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         // Document the known issue with CSG intersection boundaries
         // The mesh has holes where the gyroid intersects the bounding box
         std::cout << "ImplicitGyroid Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
-        std::cout << "  Disconnected facets (holes): " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Disconnected facets (holes): " << metrics.totalDisconnectedFacets.original
+                  << std::endl;
         std::cout << "  Facets after repair: " << metrics.numberOfFacets.final << std::endl;
         std::cout << "  Volume (after repair): " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
-        
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
+
         // After admesh repair, the mesh should be usable
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Mesh should have no disconnected facets after admesh repair";
-        EXPECT_EQ(metrics.numberOfParts, 1) 
-            << "Repaired mesh should be a single connected component";
-        
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Mesh should have no disconnected facets after admesh repair";
+        EXPECT_EQ(metrics.numberOfParts, 1)
+          << "Repaired mesh should be a single connected component";
+
         // Document the known hole count at CSG boundaries
         // This is a limitation of dual contouring with sharp CSG intersections
         std::cout << std::endl;
-        std::cout << "NOTE: " << metrics.totalDisconnectedFacets.original 
-                  << " holes at gyroid/box intersection boundaries (known DC limitation)" << std::endl;
+        std::cout << "NOTE: " << metrics.totalDisconnectedFacets.original
+                  << " holes at gyroid/box intersection boundaries (known DC limitation)"
+                  << std::endl;
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_AdmeshValidation)
@@ -795,42 +827,37 @@ namespace gladius::compute::tests
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         // For a closed solid mesh, we expect very few reversed facets
         // The sphere and cage should both have outward-facing normals
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Mesh should have no disconnected facets after processing";
-        EXPECT_EQ(metrics.degenerateFacets, 0) 
-            << "Mesh should have no degenerate facets";
-        EXPECT_EQ(metrics.edgesFixed, 0) 
-            << "Mesh should require no edge fixes";
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Mesh should have no disconnected facets after processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) << "Mesh should have no degenerate facets";
+        EXPECT_EQ(metrics.edgesFixed, 0) << "Mesh should require no edge fixes";
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
         double const maxReversedRatio = 0.01; // 1% tolerance
-        EXPECT_LE(reversedRatio, maxReversedRatio) 
-            << "Too many facets reversed: " << metrics.facetsReversed 
-            << " out of " << metrics.numberOfFacets.original 
-            << " (" << (reversedRatio * 100.0) << "%)";
-        
-        EXPECT_EQ(metrics.backwardsEdges, 0) 
-            << "Mesh should have no backwards edges";
-        
+        EXPECT_LE(reversedRatio, maxReversedRatio)
+          << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+          << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
+
+        EXPECT_EQ(metrics.backwardsEdges, 0) << "Mesh should have no backwards edges";
+
         // For a solid, expect positive volume (normals pointing outward)
-        EXPECT_GT(metrics.volume, 0.0) 
-            << "Volume should be positive for outward-facing normals";
+        EXPECT_GT(metrics.volume, 0.0) << "Volume should be positive for outward-facing normals";
 
         // Log summary info
         std::cout << "SphereInACage Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
-    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_ChunkedMeshAdmeshValidation)
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithSphereInACage_ChunkedMeshAdmeshValidation)
     {
         if (!isAdmeshAvailable())
         {
@@ -850,11 +877,8 @@ namespace gladius::compute::tests
         // Calculate a minFeatureSize that will trigger chunking:
         // With maxDepth=7, we get 128 voxels per axis
         // Setting minFeatureSize small enough will require higher depth, forcing chunking
-        float const bboxDiag = std::max({
-            bbox->max.x - bbox->min.x,
-            bbox->max.y - bbox->min.y,
-            bbox->max.z - bbox->min.z
-        });
+        float const bboxDiag = std::max(
+          {bbox->max.x - bbox->min.x, bbox->max.y - bbox->min.y, bbox->max.z - bbox->min.z});
         // Target: require depth 9, so minFeatureSize = bboxDiag / 512
         float const minFeatureSize = bboxDiag / 512.0F;
 
@@ -879,50 +903,47 @@ namespace gladius::compute::tests
         // Accept up to 50 parts as a reasonable threshold for chunked processing
         // TODO: Improve chunk stitching to achieve exactly 2 parts
         int constexpr maxAcceptableParts = 50;
-        EXPECT_LE(metrics.numberOfParts, maxAcceptableParts) 
-            << "Chunked mesh has too many disconnected parts (" << metrics.numberOfParts 
-            << "), suggesting severe stitching problems";
-        
+        EXPECT_LE(metrics.numberOfParts, maxAcceptableParts)
+          << "Chunked mesh has too many disconnected parts (" << metrics.numberOfParts
+          << "), suggesting severe stitching problems";
+
         if (metrics.numberOfParts > 2)
         {
-            std::cout << "NOTE: Chunked mesh has " << metrics.numberOfParts 
+            std::cout << "NOTE: Chunked mesh has " << metrics.numberOfParts
                       << " parts instead of 2. This is a known limitation of the current "
                       << "chunking implementation." << std::endl;
         }
 
         // The mesh should be watertight with no disconnected facets
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Chunked mesh should have no disconnected facets after processing";
-        
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Chunked mesh should have no disconnected facets after processing";
+
         // Allow a small number of degenerate facets from gap-filling bridge triangles
         // (Some bridge triangles may collapse to degenerate when vertices are very close)
-        EXPECT_LE(metrics.degenerateFacets, 50) 
-            << "Mesh should have minimal degenerate facets";
-        
+        EXPECT_LE(metrics.degenerateFacets, 50) << "Mesh should have minimal degenerate facets";
+
         // Check for reasonable winding consistency
         // Allow higher threshold for chunked processing due to boundary artifacts
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
         double const maxReversedRatio = 0.05; // 5% tolerance for chunked mesh
-        EXPECT_LE(reversedRatio, maxReversedRatio) 
-            << "Too many facets reversed: " << metrics.facetsReversed 
-            << " out of " << metrics.numberOfFacets.original 
-            << " (" << (reversedRatio * 100.0) << "%)";
+        EXPECT_LE(reversedRatio, maxReversedRatio)
+          << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+          << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
 
         // For a solid, expect positive volume (normals pointing outward)
-        EXPECT_GT(metrics.volume, 0.0) 
-            << "Volume should be positive for outward-facing normals";
+        EXPECT_GT(metrics.volume, 0.0) << "Volume should be positive for outward-facing normals";
 
         // Log summary info
         std::cout << "Chunked SphereInACage Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.final << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.final
+                  << std::endl;
         std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_SimplificationValidation)
@@ -966,39 +987,34 @@ namespace gladius::compute::tests
         int exitCode = 0;
         std::string const output = runCommandAndCapture("admesh " + tempFile.string(), exitCode);
         ASSERT_EQ(exitCode, 0) << "admesh returned non-zero exit code";
-        
+
         auto const metrics = parseAdmeshMetrics(output);
-        
+
         // For a valid simplified mesh, expect no disconnected facets
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Mesh should have no disconnected facets after processing";
-        EXPECT_EQ(metrics.degenerateFacets, 0) 
-            << "Mesh should have no degenerate facets";
-        EXPECT_EQ(metrics.edgesFixed, 0) 
-            << "Mesh should require no edge fixes";
-        
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Mesh should have no disconnected facets after processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) << "Mesh should have no degenerate facets";
+        EXPECT_EQ(metrics.edgesFixed, 0) << "Mesh should require no edge fixes";
+
         // Should still have 2 parts (sphere + cage)
-        EXPECT_EQ(metrics.numberOfParts, 2) 
-            << "Simplified mesh should still have 2 parts (sphere + cage)";
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
+        EXPECT_EQ(metrics.numberOfParts, 2)
+          << "Simplified mesh should still have 2 parts (sphere + cage)";
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
         double const maxReversedRatio = 0.01; // 1% tolerance
-        EXPECT_LE(reversedRatio, maxReversedRatio) 
-            << "Too many facets reversed: " << metrics.facetsReversed 
-            << " out of " << metrics.numberOfFacets.original 
-            << " (" << (reversedRatio * 100.0) << "%)";
-        
-        EXPECT_GT(metrics.volume, 0.0) 
-            << "Volume should be positive for outward-facing normals";
+        EXPECT_LE(reversedRatio, maxReversedRatio)
+          << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+          << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
+
+        EXPECT_GT(metrics.volume, 0.0) << "Volume should be positive for outward-facing normals";
 
         std::cout << "SphereInACage Simplified Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 
     /// Test for webcam mount model - documents known issue with holes in complex geometry
@@ -1007,9 +1023,10 @@ namespace gladius::compute::tests
     /// the surface has complex topology with missing neighbors.
     /// Root cause: emit_indices kernel requires all 4 cells around an edge to emit a quad.
     /// If any neighbor cell doesn't intersect the surface, the quad is skipped entirely.
-    /// 
+    ///
     /// This test currently documents the issue and checks that admesh can auto-repair it.
-    /// A proper fix would require kernel changes to emit partial geometry when neighbors are missing.
+    /// A proper fix would require kernel changes to emit partial geometry when neighbors are
+    /// missing.
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWebcamMount_AdmeshValidation)
     {
         if (!isAdmeshAvailable())
@@ -1024,49 +1041,44 @@ namespace gladius::compute::tests
 
         auto const bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
-        
-        std::cout << "Webcam mount bounding box: [" 
-                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
-                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
+
+        std::cout << "Webcam mount bounding box: [" << bbox->min.x << ", " << bbox->min.y << ", "
+                  << bbox->min.z << "] to [" << bbox->max.x << ", " << bbox->max.y << ", "
+                  << bbox->max.z << "]" << std::endl;
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         // After admesh auto-repair, mesh should be connected
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Mesh should have no disconnected facets after admesh processing";
-        EXPECT_EQ(metrics.degenerateFacets, 0) 
-            << "Mesh should have no degenerate facets";
-        
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Mesh should have no disconnected facets after admesh processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) << "Mesh should have no degenerate facets";
+
         // Should be a single part after repair
-        EXPECT_EQ(metrics.numberOfParts, 1) 
-            << "Webcam mount should be a single part after repair";
-        
+        EXPECT_EQ(metrics.numberOfParts, 1) << "Webcam mount should be a single part after repair";
+
         // Mesh should be watertight with proper winding after bounding box margin fix
         std::cout << "Webcam mount Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Disconnected facets (original): "
+                  << metrics.totalDisconnectedFacets.original << std::endl;
         std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
-        
+
         // Strict validation: mesh should be watertight
-        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0) 
-            << "Mesh should have no disconnected facets";
-        EXPECT_EQ(metrics.facetsAdded, 0) 
-            << "No facets should need to be added for gap filling";
-        EXPECT_EQ(metrics.backwardsEdges, 0) 
-            << "Mesh should have no backwards edges (boundary edges)";
-        EXPECT_LT(reversedRatio, 0.01) 
-            << "Less than 1% of facets should be reversed";
-        EXPECT_GT(metrics.volume, 0.0) 
-            << "Volume should be positive for outward-facing normals";
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+          << "Mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.facetsAdded, 0) << "No facets should need to be added for gap filling";
+        EXPECT_EQ(metrics.backwardsEdges, 0)
+          << "Mesh should have no backwards edges (boundary edges)";
+        EXPECT_LT(reversedRatio, 0.01) << "Less than 1% of facets should be reversed";
+        EXPECT_GT(metrics.volume, 0.0) << "Volume should be positive for outward-facing normals";
     }
 
     /// Test mesh generation with wristsupport model (gyroid lattice structure)
@@ -1083,56 +1095,56 @@ namespace gladius::compute::tests
 
         auto const bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
-        
-        std::cout << "Wristsupport bounding box: [" 
-                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
-                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
-        std::cout << "Wristsupport extents: " 
-                  << (bbox->max.x - bbox->min.x) << " x " 
-                  << (bbox->max.y - bbox->min.y) << " x "
-                  << (bbox->max.z - bbox->min.z) << " mm" << std::endl;
+
+        std::cout << "Wristsupport bounding box: [" << bbox->min.x << ", " << bbox->min.y << ", "
+                  << bbox->min.z << "] to [" << bbox->max.x << ", " << bbox->max.y << ", "
+                  << bbox->max.z << "]" << std::endl;
+        std::cout << "Wristsupport extents: " << (bbox->max.x - bbox->min.x) << " x "
+                  << (bbox->max.y - bbox->min.y) << " x " << (bbox->max.z - bbox->min.z) << " mm"
+                  << std::endl;
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         std::cout << "Wristsupport Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
-        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
-        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
-        std::cout << "  Facets with 3 disconnected edges: " << metrics.facetsWith3DisconnectedEdges.original << std::endl;
+        std::cout << "  Disconnected facets (original): "
+                  << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: "
+                  << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: "
+                  << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets with 3 disconnected edges: "
+                  << metrics.facetsWith3DisconnectedEdges.original << std::endl;
         std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
         std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
         std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
         std::cout << "  Edges fixed: " << metrics.edgesFixed << std::endl;
         std::cout << "  Normals fixed: " << metrics.normalsFixed << std::endl;
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
-        
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
+
         // Report on boundary edges - these indicate holes
         std::cout << "\n=== HOLE ANALYSIS ===" << std::endl;
         if (metrics.totalDisconnectedFacets.original > 0)
         {
-            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original 
+            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original
                       << " disconnected facets indicating holes" << std::endl;
             std::cout << "  This gyroid lattice may have holes at:" << std::endl;
             std::cout << "  - Thin wall intersections where cells meet" << std::endl;
             std::cout << "  - High curvature regions of the gyroid surface" << std::endl;
             std::cout << "  - Boundary between the gyroid and solid outer shell" << std::endl;
         }
-        
+
         // For now, just document the current state - don't fail the test
         // We want to understand the pattern before fixing
-        EXPECT_GT(metrics.numberOfFacets.original, 0) 
-            << "Should produce facets";
-        EXPECT_NE(metrics.volume, 0.0) 
-            << "Volume should be non-zero";
+        EXPECT_GT(metrics.numberOfFacets.original, 0) << "Should produce facets";
+        EXPECT_NE(metrics.volume, 0.0) << "Volume should be non-zero";
     }
 
     /// Test wristsupport with higher resolution to check if holes are resolution-related
@@ -1152,24 +1164,28 @@ namespace gladius::compute::tests
         // Use higher resolution (depth 8 instead of 7)
         gladius::io::ManifoldDualContouringOptions exportOptions;
         exportOptions.initialDepth = 5;
-        exportOptions.maxDepth = 8;  // Higher depth = smaller voxels
+        exportOptions.maxDepth = 8; // Higher depth = smaller voxels
         exportOptions.enableGpu = true;
         exportOptions.enableCpuFallback = true;
         exportOptions.enableCaching = true;
         exportOptions.isoValue = 0.0F;
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
-        
+
         std::cout << "=== WRISTSUPPORT HIGH-RES (maxDepth=8) ===" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
-        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
-        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original
+                  << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: "
+                  << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: "
+                  << metrics.facetsWith2DisconnectedEdges.original << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
-        
+
         // Compare with standard resolution in the output
-        std::cout << "\nIf holes decreased, the issue is likely voxel resolution vs wall thickness" << std::endl;
+        std::cout << "\nIf holes decreased, the issue is likely voxel resolution vs wall thickness"
+                  << std::endl;
         std::cout << "If holes stayed same/increased, the issue is algorithmic" << std::endl;
     }
 
@@ -1195,22 +1211,26 @@ namespace gladius::compute::tests
         exportOptions.enableCpuFallback = true;
         exportOptions.enableCaching = true;
         exportOptions.isoValue = 0.0F;
-        exportOptions.enableHierarchicalOctree = true;  // Enable hierarchical octree
+        exportOptions.enableHierarchicalOctree = true; // Enable hierarchical octree
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
-        
+
         std::cout << "=== WRISTSUPPORT HIERARCHICAL OCTREE ===" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
-        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
-        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original
+                  << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: "
+                  << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: "
+                  << metrics.facetsWith2DisconnectedEdges.original << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
-        
+
         // Report comparison
         std::cout << "\nCompare with standard sparse octree approach:" << std::endl;
-        std::cout << "  If disconnected facets are lower, hierarchical approach is working" << std::endl;
+        std::cout << "  If disconnected facets are lower, hierarchical approach is working"
+                  << std::endl;
     }
 
     /// Test mesh generation with filamentholder model
@@ -1227,52 +1247,52 @@ namespace gladius::compute::tests
 
         auto const bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value()) << "Bounding box should be available";
-        
+
         std::cout << "=== FILAMENTHOLDER MODEL ===" << std::endl;
-        std::cout << "Bounding box: [" 
-                  << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z << "] to ["
-                  << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]" << std::endl;
-        std::cout << "Extents: " 
-                  << (bbox->max.x - bbox->min.x) << " x " 
-                  << (bbox->max.y - bbox->min.y) << " x "
-                  << (bbox->max.z - bbox->min.z) << " mm" << std::endl;
+        std::cout << "Bounding box: [" << bbox->min.x << ", " << bbox->min.y << ", " << bbox->min.z
+                  << "] to [" << bbox->max.x << ", " << bbox->max.y << ", " << bbox->max.z << "]"
+                  << std::endl;
+        std::cout << "Extents: " << (bbox->max.x - bbox->min.x) << " x "
+                  << (bbox->max.y - bbox->min.y) << " x " << (bbox->max.z - bbox->min.z) << " mm"
+                  << std::endl;
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         std::cout << "\nAdmesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets (original): " << metrics.totalDisconnectedFacets.original << std::endl;
-        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
-        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
-        std::cout << "  Facets with 3 disconnected edges: " << metrics.facetsWith3DisconnectedEdges.original << std::endl;
+        std::cout << "  Disconnected facets (original): "
+                  << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: "
+                  << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: "
+                  << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Facets with 3 disconnected edges: "
+                  << metrics.facetsWith3DisconnectedEdges.original << std::endl;
         std::cout << "  Facets added (gap filling): " << metrics.facetsAdded << std::endl;
         std::cout << "  Facets removed: " << metrics.facetsRemoved << std::endl;
         std::cout << "  Degenerate facets: " << metrics.degenerateFacets << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
         std::cout << "  Edges fixed: " << metrics.edgesFixed << std::endl;
         std::cout << "  Normals fixed: " << metrics.normalsFixed << std::endl;
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
-        
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
+
         // Report on boundary edges - these indicate holes
         std::cout << "\n=== HOLE ANALYSIS ===" << std::endl;
         if (metrics.totalDisconnectedFacets.original > 0)
         {
-            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original 
+            std::cout << "WARNING: Mesh has " << metrics.totalDisconnectedFacets.original
                       << " disconnected facets indicating holes" << std::endl;
         }
-        
+
         // For now, just document the current state
-        EXPECT_GT(metrics.numberOfFacets.original, 0) 
-            << "Should produce facets";
-        EXPECT_NE(metrics.volume, 0.0) 
-            << "Volume should be non-zero";
+        EXPECT_GT(metrics.numberOfFacets.original, 0) << "Should produce facets";
+        EXPECT_NE(metrics.volume, 0.0) << "Volume should be non-zero";
     }
 
     /// Test filamentholder with hierarchical octree
@@ -1297,33 +1317,37 @@ namespace gladius::compute::tests
         exportOptions.enableCpuFallback = true;
         exportOptions.enableCaching = true;
         exportOptions.isoValue = 0.0F;
-        exportOptions.enableHierarchicalOctree = true;  // Enable hierarchical octree
+        exportOptions.enableHierarchicalOctree = true; // Enable hierarchical octree
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
-        
+
         std::cout << "=== FILAMENTHOLDER HIERARCHICAL OCTREE ===" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original << std::endl;
-        std::cout << "  Facets with 1 disconnected edge: " << metrics.facetsWith1DisconnectedEdge.original << std::endl;
-        std::cout << "  Facets with 2 disconnected edges: " << metrics.facetsWith2DisconnectedEdges.original << std::endl;
+        std::cout << "  Disconnected facets: " << metrics.totalDisconnectedFacets.original
+                  << std::endl;
+        std::cout << "  Facets with 1 disconnected edge: "
+                  << metrics.facetsWith1DisconnectedEdge.original << std::endl;
+        std::cout << "  Facets with 2 disconnected edges: "
+                  << metrics.facetsWith2DisconnectedEdges.original << std::endl;
         std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
-        
+
         // Report comparison
         std::cout << "\nCompare with standard sparse octree approach above." << std::endl;
     }
 
-
     // ============================================================================
     // Implicit Surface Validation Tests
     // ============================================================================
-    
+
     /// Helper class to sample SDF values at arbitrary positions using ComputeCore
     class SdfSampler
     {
       public:
-        explicit SdfSampler(ComputeCore & core, BoundingBox const & bounds, std::size_t resolution = 256)
+        explicit SdfSampler(ComputeCore & core,
+                            BoundingBox const & bounds,
+                            std::size_t resolution = 256)
             : m_core(core)
             , m_bounds(bounds)
             , m_resolution(resolution)
@@ -1331,7 +1355,10 @@ namespace gladius::compute::tests
             initialize();
         }
 
-        [[nodiscard]] bool initialized() const { return m_initialized; }
+        [[nodiscard]] bool initialized() const
+        {
+            return m_initialized;
+        }
 
         /// Sample SDF at a world position using trilinear interpolation
         [[nodiscard]] float sample(Eigen::Vector3f const & worldPos) const
@@ -1345,7 +1372,7 @@ namespace gladius::compute::tests
             Eigen::Vector3f const extent = m_max - m_min;
             Eigen::Vector3f const safeExtent = extent.cwiseMax(Eigen::Vector3f::Constant(1e-6F));
             Eigen::Vector3f normalized = (worldPos - m_min).cwiseQuotient(safeExtent);
-            
+
             // Clamp to valid range
             normalized = normalized.cwiseMax(Eigen::Vector3f::Zero());
             normalized = normalized.cwiseMin(Eigen::Vector3f::Ones());
@@ -1475,20 +1502,25 @@ namespace gladius::compute::tests
             std::cout << "  Mean: " << meanVertexDeviation << " mm\n";
             std::cout << "  RMS: " << rmsVertexDeviation << " mm\n";
             std::cout << "  Within tolerance: " << verticesWithinTolerance << "/" << vertexCount
-                      << " (" << (100.0 * verticesWithinTolerance / std::max<std::size_t>(vertexCount, 1U)) << "%)\n";
+                      << " ("
+                      << (100.0 * verticesWithinTolerance / std::max<std::size_t>(vertexCount, 1U))
+                      << "%)\n";
             std::cout << "\nFace Center SDF Deviation:\n";
             std::cout << "  Max: " << maxFaceCenterDeviation << " mm\n";
             std::cout << "  Mean: " << meanFaceCenterDeviation << " mm\n";
-            std::cout << "  Within tolerance: " << faceCentersWithinTolerance << "/" << triangleCount
-                      << " (" << (100.0 * faceCentersWithinTolerance / std::max<std::size_t>(triangleCount, 1U)) << "%)\n";
+            std::cout << "  Within tolerance: " << faceCentersWithinTolerance << "/"
+                      << triangleCount << " ("
+                      << (100.0 * faceCentersWithinTolerance /
+                          std::max<std::size_t>(triangleCount, 1U))
+                      << "%)\n";
         }
     };
 
     /// Validate mesh vertices and face centers against implicit SDF
-    [[nodiscard]] MeshImplicitValidation validateMeshAgainstImplicit(
-        ManifoldDualContouringMesh const & mesh,
-        SdfSampler const & sampler,
-        float toleranceFactor = 1.5F)
+    [[nodiscard]] MeshImplicitValidation
+    validateMeshAgainstImplicit(ManifoldDualContouringMesh const & mesh,
+                                SdfSampler const & sampler,
+                                float toleranceFactor = 1.5F)
     {
         MeshImplicitValidation result;
         result.voxelSize = sampler.getVoxelSize();
@@ -1517,7 +1549,8 @@ namespace gladius::compute::tests
             }
         }
         result.meanVertexDeviation = static_cast<float>(sumDeviation / mesh.positions.size());
-        result.rmsVertexDeviation = static_cast<float>(std::sqrt(sumDeviationSq / mesh.positions.size()));
+        result.rmsVertexDeviation =
+          static_cast<float>(std::sqrt(sumDeviationSq / mesh.positions.size()));
 
         // Validate face centers
         if (mesh.indices.size() >= 3U)
@@ -1529,12 +1562,14 @@ namespace gladius::compute::tests
                 std::uint32_t const b = mesh.indices[tri + 1U];
                 std::uint32_t const c = mesh.indices[tri + 2U];
 
-                if (a >= mesh.positions.size() || b >= mesh.positions.size() || c >= mesh.positions.size())
+                if (a >= mesh.positions.size() || b >= mesh.positions.size() ||
+                    c >= mesh.positions.size())
                 {
                     continue;
                 }
 
-                Eigen::Vector3f const center = (mesh.positions[a] + mesh.positions[b] + mesh.positions[c]) / 3.0F;
+                Eigen::Vector3f const center =
+                  (mesh.positions[a] + mesh.positions[b] + mesh.positions[c]) / 3.0F;
                 float const sdfValue = sampler.sample(center);
                 float const deviation = std::abs(sdfValue);
                 result.maxFaceCenterDeviation = std::max(result.maxFaceCenterDeviation, deviation);
@@ -1544,7 +1579,8 @@ namespace gladius::compute::tests
                     ++result.faceCentersWithinTolerance;
                 }
             }
-            result.meanFaceCenterDeviation = static_cast<float>(sumFaceDeviation / result.triangleCount);
+            result.meanFaceCenterDeviation =
+              static_cast<float>(sumFaceDeviation / result.triangleCount);
         }
 
         return result;
@@ -1559,8 +1595,8 @@ namespace gladius::compute::tests
         float meanEdgeLength{0.0F};
         float medianEdgeLength{0.0F};
         float stdDevEdgeLength{0.0F};
-        std::size_t suspiciousTriangles{0U};  // Triangles with edges > 5x median
-        std::size_t veryLongEdgeCount{0U};    // Individual edges > 10x median
+        std::size_t suspiciousTriangles{0U}; // Triangles with edges > 5x median
+        std::size_t veryLongEdgeCount{0U};   // Individual edges > 10x median
         float voxelSize{0.0F};
 
         void print() const
@@ -1574,16 +1610,17 @@ namespace gladius::compute::tests
             std::cout << "  Mean: " << meanEdgeLength << "\n";
             std::cout << "  Median: " << medianEdgeLength << "\n";
             std::cout << "  StdDev: " << stdDevEdgeLength << "\n";
-            std::cout << "  Max/Median ratio: " << (maxEdgeLength / std::max(medianEdgeLength, 0.001F)) << "\n";
-            std::cout << "Suspicious triangles (edge > 5x median): " << suspiciousTriangles 
-                      << " (" << (100.0 * suspiciousTriangles / std::max<std::size_t>(triangleCount, 1U)) << "%)\n";
+            std::cout << "  Max/Median ratio: "
+                      << (maxEdgeLength / std::max(medianEdgeLength, 0.001F)) << "\n";
+            std::cout << "Suspicious triangles (edge > 5x median): " << suspiciousTriangles << " ("
+                      << (100.0 * suspiciousTriangles / std::max<std::size_t>(triangleCount, 1U))
+                      << "%)\n";
             std::cout << "Very long edges (> 10x median): " << veryLongEdgeCount << "\n";
         }
     };
 
-    [[nodiscard]] TriangleEdgeAnalysis analyzeTriangleEdges(
-        ManifoldDualContouringMesh const & mesh,
-        float voxelSize)
+    [[nodiscard]] TriangleEdgeAnalysis analyzeTriangleEdges(ManifoldDualContouringMesh const & mesh,
+                                                            float voxelSize)
     {
         TriangleEdgeAnalysis result;
         result.voxelSize = voxelSize;
@@ -1603,7 +1640,8 @@ namespace gladius::compute::tests
             std::uint32_t const b = mesh.indices[tri + 1U];
             std::uint32_t const c = mesh.indices[tri + 2U];
 
-            if (a >= mesh.positions.size() || b >= mesh.positions.size() || c >= mesh.positions.size())
+            if (a >= mesh.positions.size() || b >= mesh.positions.size() ||
+                c >= mesh.positions.size())
             {
                 continue;
             }
@@ -1657,7 +1695,8 @@ namespace gladius::compute::tests
             std::uint32_t const b = mesh.indices[tri + 1U];
             std::uint32_t const c = mesh.indices[tri + 2U];
 
-            if (a >= mesh.positions.size() || b >= mesh.positions.size() || c >= mesh.positions.size())
+            if (a >= mesh.positions.size() || b >= mesh.positions.size() ||
+                c >= mesh.positions.size())
             {
                 continue;
             }
@@ -1671,9 +1710,12 @@ namespace gladius::compute::tests
                 ++result.suspiciousTriangles;
             }
 
-            if (e1 > veryLongThreshold) ++result.veryLongEdgeCount;
-            if (e2 > veryLongThreshold) ++result.veryLongEdgeCount;
-            if (e3 > veryLongThreshold) ++result.veryLongEdgeCount;
+            if (e1 > veryLongThreshold)
+                ++result.veryLongEdgeCount;
+            if (e2 > veryLongThreshold)
+                ++result.veryLongEdgeCount;
+            if (e3 > veryLongThreshold)
+                ++result.veryLongEdgeCount;
         }
 
         return result;
@@ -1712,26 +1754,29 @@ namespace gladius::compute::tests
         // Assertions: vertices should be close to the implicit surface
         float const maxAcceptableDeviation = validation.voxelSize * 2.0F;
         EXPECT_LE(validation.maxVertexDeviation, maxAcceptableDeviation)
-            << "Max vertex deviation should be within 2x voxel size";
+          << "Max vertex deviation should be within 2x voxel size";
 
         float const minVertexRatio = 0.95F;
-        float const actualRatio = static_cast<float>(validation.verticesWithinTolerance) / 
-                                   static_cast<float>(validation.vertexCount);
+        float const actualRatio = static_cast<float>(validation.verticesWithinTolerance) /
+                                  static_cast<float>(validation.vertexCount);
         EXPECT_GE(actualRatio, minVertexRatio)
-            << "At least 95% of vertices should be within tolerance";
+          << "At least 95% of vertices should be within tolerance";
 
         // Face centers: Dual contouring produces vertices on the surface but triangles
         // connecting them may cut through. This is informational, not a failure condition.
         // However, for quality meshes, face centers should be reasonably close.
-        float const faceCenterRatio = static_cast<float>(validation.faceCentersWithinTolerance) / 
-                                       static_cast<float>(validation.triangleCount);
-        std::cout << "\nNote: " << (faceCenterRatio * 100.0F) << "% of face centers within tolerance.\n";
-        std::cout << "  (Expected: face centers may deviate more than vertices in dual contouring)\n";
-        
+        float const faceCenterRatio = static_cast<float>(validation.faceCentersWithinTolerance) /
+                                      static_cast<float>(validation.triangleCount);
+        std::cout << "\nNote: " << (faceCenterRatio * 100.0F)
+                  << "% of face centers within tolerance.\n";
+        std::cout
+          << "  (Expected: face centers may deviate more than vertices in dual contouring)\n";
+
         // Soft assertion: warn if very few face centers are on surface
         if (faceCenterRatio < 0.5F)
         {
-            std::cout << "  WARNING: Low face center conformity may indicate mesh quality issues.\n";
+            std::cout
+              << "  WARNING: Low face center conformity may indicate mesh quality issues.\n";
         }
     }
 
@@ -1772,17 +1817,17 @@ namespace gladius::compute::tests
         // Vertices should still be on the implicit surface
         float const maxAcceptableDeviation = validation.voxelSize * 3.0F;
         EXPECT_LE(validation.maxVertexDeviation, maxAcceptableDeviation)
-            << "Max vertex deviation should be within 3x voxel size for complex geometry";
+          << "Max vertex deviation should be within 3x voxel size for complex geometry";
 
         float const minVertexRatio = 0.90F;
-        float const actualRatio = static_cast<float>(validation.verticesWithinTolerance) / 
-                                   static_cast<float>(validation.vertexCount);
+        float const actualRatio = static_cast<float>(validation.verticesWithinTolerance) /
+                                  static_cast<float>(validation.vertexCount);
         EXPECT_GE(actualRatio, minVertexRatio)
-            << "At least 90% of vertices should be within tolerance";
+          << "At least 90% of vertices should be within tolerance";
 
         // Check for cross-surface triangles (very long edges indicate connectivity bugs)
         // In a correct mesh, max edge should be at most a few voxels long
-        float const maxReasonableEdge = validation.voxelSize * 10.0F;  // Conservative threshold
+        float const maxReasonableEdge = validation.voxelSize * 10.0F; // Conservative threshold
         if (edgeAnalysis.maxEdgeLength > maxReasonableEdge)
         {
             std::cout << "\n*** WARNING: Detected very long edges! ***\n";
@@ -1790,13 +1835,13 @@ namespace gladius::compute::tests
             std::cout << "Expected max: ~" << maxReasonableEdge << " mm\n";
             std::cout << "This indicates triangles connecting different surfaces.\n";
         }
-        
+
         // Fail if there are too many suspicious triangles
-        float const maxSuspiciousRatio = 0.01F;  // Allow max 1% suspicious triangles
-        float const actualSuspiciousRatio = static_cast<float>(edgeAnalysis.suspiciousTriangles) / 
-                                             static_cast<float>(edgeAnalysis.triangleCount);
+        float const maxSuspiciousRatio = 0.01F; // Allow max 1% suspicious triangles
+        float const actualSuspiciousRatio = static_cast<float>(edgeAnalysis.suspiciousTriangles) /
+                                            static_cast<float>(edgeAnalysis.triangleCount);
         EXPECT_LE(actualSuspiciousRatio, maxSuspiciousRatio)
-            << "Too many triangles with abnormally long edges (possible cross-surface connections)";
+          << "Too many triangles with abnormally long edges (possible cross-surface connections)";
     }
 
     // ============================================================================
@@ -1806,28 +1851,28 @@ namespace gladius::compute::tests
     /// Information about a boundary edge (edge with only 1 adjacent triangle)
     struct BoundaryEdgeInfo
     {
-        std::uint32_t v0;                   ///< First vertex index
-        std::uint32_t v1;                   ///< Second vertex index
-        Eigen::Vector3f pos0;               ///< Position of v0
-        Eigen::Vector3f pos1;               ///< Position of v1
-        Eigen::Vector3f midpoint;           ///< Midpoint of edge
-        float length;                       ///< Edge length
-        std::uint32_t triangleIndex;        ///< Triangle that owns this edge
-        std::size_t clusterIndex{0U};       ///< Which hole cluster this belongs to
+        std::uint32_t v0;             ///< First vertex index
+        std::uint32_t v1;             ///< Second vertex index
+        Eigen::Vector3f pos0;         ///< Position of v0
+        Eigen::Vector3f pos1;         ///< Position of v1
+        Eigen::Vector3f midpoint;     ///< Midpoint of edge
+        float length;                 ///< Edge length
+        std::uint32_t triangleIndex;  ///< Triangle that owns this edge
+        std::size_t clusterIndex{0U}; ///< Which hole cluster this belongs to
     };
 
     /// Cluster of connected boundary edges (represents a hole)
     struct HoleCluster
     {
-        std::vector<std::size_t> edgeIndices;  ///< Indices into boundary edges vector
-        Eigen::Vector3f centroid;               ///< Centroid of hole
+        std::vector<std::size_t> edgeIndices; ///< Indices into boundary edges vector
+        Eigen::Vector3f centroid;             ///< Centroid of hole
         float averageEdgeLength{0.0F};
-        float perimeter{0.0F};                  ///< Total length of hole boundary
+        float perimeter{0.0F}; ///< Total length of hole boundary
     };
 
     /// Analyze mesh to find all boundary edges and cluster them into holes
     [[nodiscard]] std::pair<std::vector<BoundaryEdgeInfo>, std::vector<HoleCluster>>
-    analyzeMeshHoles(ManifoldDualContouringMesh const& mesh)
+    analyzeMeshHoles(ManifoldDualContouringMesh const & mesh)
     {
         std::vector<BoundaryEdgeInfo> boundaryEdges;
         std::vector<HoleCluster> clusters;
@@ -1849,17 +1894,14 @@ namespace gladius::compute::tests
         {
             std::uint32_t const triIdx = static_cast<std::uint32_t>(tri / 3U);
             std::array<std::uint32_t, 3> const verts = {
-                mesh.indices[tri + 0U],
-                mesh.indices[tri + 1U],
-                mesh.indices[tri + 2U]
-            };
+              mesh.indices[tri + 0U], mesh.indices[tri + 1U], mesh.indices[tri + 2U]};
 
             for (std::size_t e = 0U; e < 3U; ++e)
             {
                 std::uint32_t const i0 = verts[e];
                 std::uint32_t const i1 = verts[(e + 1U) % 3U];
                 EdgeKey const key{std::min(i0, i1), std::max(i0, i1)};
-                auto& data = edgeUsage[key];
+                auto & data = edgeUsage[key];
                 ++data.count;
                 if (data.count == 1U)
                 {
@@ -1869,7 +1911,7 @@ namespace gladius::compute::tests
         }
 
         // Collect boundary edges (edges with count == 1)
-        for (auto const& [key, data] : edgeUsage)
+        for (auto const & [key, data] : edgeUsage)
         {
             if (data.count == 1U)
             {
@@ -1892,7 +1934,7 @@ namespace gladius::compute::tests
 
         // Cluster boundary edges by vertex connectivity (edges sharing a vertex are in same hole)
         std::vector<bool> visited(boundaryEdges.size(), false);
-        
+
         // Build vertex-to-edge adjacency
         std::unordered_map<std::uint32_t, std::vector<std::size_t>> vertexToEdges;
         for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
@@ -1918,7 +1960,7 @@ namespace gladius::compute::tests
             {
                 std::size_t const current = queue.back();
                 queue.pop_back();
-                
+
                 cluster.edgeIndices.push_back(current);
                 boundaryEdges[current].clusterIndex = clusters.size();
                 cluster.perimeter += boundaryEdges[current].length;
@@ -1944,14 +1986,16 @@ namespace gladius::compute::tests
                 sum += boundaryEdges[edgeIdx].midpoint;
             }
             cluster.centroid = sum / static_cast<float>(cluster.edgeIndices.size());
-            cluster.averageEdgeLength = cluster.perimeter / static_cast<float>(cluster.edgeIndices.size());
+            cluster.averageEdgeLength =
+              cluster.perimeter / static_cast<float>(cluster.edgeIndices.size());
 
             clusters.push_back(std::move(cluster));
         }
 
         // Sort clusters by size (largest holes first)
-        std::sort(clusters.begin(), clusters.end(),
-                  [](HoleCluster const& a, HoleCluster const& b)
+        std::sort(clusters.begin(),
+                  clusters.end(),
+                  [](HoleCluster const & a, HoleCluster const & b)
                   { return a.edgeIndices.size() > b.edgeIndices.size(); });
 
         return {boundaryEdges, clusters};
@@ -1978,17 +2022,15 @@ namespace gladius::compute::tests
 
         // Generate mesh
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = exportOptions.initialDepth,
-            .maxDepth = exportOptions.maxDepth,
-            .enableGpu = exportOptions.enableGpu,
-            .enableCpuFallback = exportOptions.enableCpuFallback,
-            .enableCaching = exportOptions.enableCaching,
-            .isoValue = exportOptions.isoValue,
-            .enableHierarchicalOctree = exportOptions.enableHierarchicalOctree
-        });
+        mesher.setConfig({.initialDepth = exportOptions.initialDepth,
+                          .maxDepth = exportOptions.maxDepth,
+                          .enableGpu = exportOptions.enableGpu,
+                          .enableCpuFallback = exportOptions.enableCpuFallback,
+                          .enableCaching = exportOptions.enableCaching,
+                          .isoValue = exportOptions.isoValue,
+                          .enableHierarchicalOctree = exportOptions.enableHierarchicalOctree});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         ASSERT_FALSE(mesh.positions.empty()) << "Mesh should have vertices";
         ASSERT_FALSE(mesh.indices.empty()) << "Mesh should have triangles";
@@ -2010,16 +2052,18 @@ namespace gladius::compute::tests
         Eigen::Vector3f bboxMin(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
         Eigen::Vector3f bboxMax(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
         Eigen::Vector3f bboxSize = bboxMax - bboxMin;
-        float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << exportOptions.maxDepth);
+        float const voxelSize =
+          bboxSize.maxCoeff() / static_cast<float>(1U << exportOptions.maxDepth);
 
-        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]"
+                  << std::endl;
         std::cout << "Voxel size at maxDepth: " << voxelSize << " mm" << std::endl;
         std::cout << std::endl;
 
         // Report statistics on clusters
         std::cout << "=== CLUSTER SIZE DISTRIBUTION ===" << std::endl;
         std::map<std::size_t, std::size_t> sizeDistribution;
-        for (auto const& cluster : clusters)
+        for (auto const & cluster : clusters)
         {
             std::size_t sizeCategory = 0;
             if (cluster.edgeIndices.size() <= 3)
@@ -2034,7 +2078,7 @@ namespace gladius::compute::tests
                 sizeCategory = 1000;
             ++sizeDistribution[sizeCategory];
         }
-        for (auto const& [size, count] : sizeDistribution)
+        for (auto const & [size, count] : sizeDistribution)
         {
             std::cout << "  Holes with <= " << size << " edges: " << count << std::endl;
         }
@@ -2044,11 +2088,11 @@ namespace gladius::compute::tests
         std::size_t const maxReport = std::min<std::size_t>(10U, clusters.size());
         for (std::size_t i = 0U; i < maxReport; ++i)
         {
-            auto const& cluster = clusters[i];
-            
+            auto const & cluster = clusters[i];
+
             // Compute relative position (0-1 range within bbox)
             Eigen::Vector3f relPos = (cluster.centroid - bboxMin).cwiseQuotient(bboxSize);
-            
+
             std::cout << "Hole #" << (i + 1) << ":" << std::endl;
             std::cout << "  Edges: " << cluster.edgeIndices.size() << std::endl;
             std::cout << "  Perimeter: " << cluster.perimeter << " mm" << std::endl;
@@ -2056,15 +2100,15 @@ namespace gladius::compute::tests
                       << " (" << (cluster.averageEdgeLength / voxelSize) << " voxels)" << std::endl;
             std::cout << "  Centroid: [" << cluster.centroid.transpose() << "]" << std::endl;
             std::cout << "  Relative position: [" << relPos.transpose() << "]" << std::endl;
-            
+
             // Report a few sample edges from this cluster
             std::cout << "  Sample edges:" << std::endl;
             std::size_t const maxEdges = std::min<std::size_t>(3U, cluster.edgeIndices.size());
             for (std::size_t j = 0U; j < maxEdges; ++j)
             {
-                auto const& edge = boundaryEdges[cluster.edgeIndices[j]];
-                std::cout << "    Edge " << edge.v0 << "-" << edge.v1 
-                          << " at [" << edge.midpoint.transpose() << "]"
+                auto const & edge = boundaryEdges[cluster.edgeIndices[j]];
+                std::cout << "    Edge " << edge.v0 << "-" << edge.v1 << " at ["
+                          << edge.midpoint.transpose() << "]"
                           << " len=" << edge.length << " mm"
                           << " (tri " << edge.triangleIndex << ")" << std::endl;
             }
@@ -2075,21 +2119,24 @@ namespace gladius::compute::tests
         float minLen = std::numeric_limits<float>::max();
         float maxLen = 0.0F;
         float sumLen = 0.0F;
-        for (auto const& edge : boundaryEdges)
+        for (auto const & edge : boundaryEdges)
         {
             minLen = std::min(minLen, edge.length);
             maxLen = std::max(maxLen, edge.length);
             sumLen += edge.length;
         }
         float const avgLen = sumLen / static_cast<float>(boundaryEdges.size());
-        std::cout << "  Min edge length: " << minLen << " mm (" << (minLen / voxelSize) << " voxels)" << std::endl;
-        std::cout << "  Max edge length: " << maxLen << " mm (" << (maxLen / voxelSize) << " voxels)" << std::endl;
-        std::cout << "  Avg edge length: " << avgLen << " mm (" << (avgLen / voxelSize) << " voxels)" << std::endl;
+        std::cout << "  Min edge length: " << minLen << " mm (" << (minLen / voxelSize)
+                  << " voxels)" << std::endl;
+        std::cout << "  Max edge length: " << maxLen << " mm (" << (maxLen / voxelSize)
+                  << " voxels)" << std::endl;
+        std::cout << "  Avg edge length: " << avgLen << " mm (" << (avgLen / voxelSize)
+                  << " voxels)" << std::endl;
 
         // Count edges by length category (in voxel units)
         std::cout << "\n=== EDGE LENGTH DISTRIBUTION (in voxels) ===" << std::endl;
         std::map<std::size_t, std::size_t> lengthDistribution;
-        for (auto const& edge : boundaryEdges)
+        for (auto const & edge : boundaryEdges)
         {
             float const lenInVoxels = edge.length / voxelSize;
             std::size_t category = 0;
@@ -2115,18 +2162,21 @@ namespace gladius::compute::tests
         std::cout << "\n=== SPATIAL DISTRIBUTION (holes per octant) ===" << std::endl;
         std::array<std::size_t, 8> octantCounts{};
         Eigen::Vector3f const bboxCenter = (bboxMin + bboxMax) * 0.5F;
-        for (auto const& cluster : clusters)
+        for (auto const & cluster : clusters)
         {
-            int const octant =
-                (cluster.centroid.x() > bboxCenter.x() ? 1 : 0) +
-                (cluster.centroid.y() > bboxCenter.y() ? 2 : 0) +
-                (cluster.centroid.z() > bboxCenter.z() ? 4 : 0);
+            int const octant = (cluster.centroid.x() > bboxCenter.x() ? 1 : 0) +
+                               (cluster.centroid.y() > bboxCenter.y() ? 2 : 0) +
+                               (cluster.centroid.z() > bboxCenter.z() ? 4 : 0);
             ++octantCounts[static_cast<std::size_t>(octant)];
         }
-        char const* octantNames[] = {
-            "(-X,-Y,-Z)", "(+X,-Y,-Z)", "(-X,+Y,-Z)", "(+X,+Y,-Z)",
-            "(-X,-Y,+Z)", "(+X,-Y,+Z)", "(-X,+Y,+Z)", "(+X,+Y,+Z)"
-        };
+        char const * octantNames[] = {"(-X,-Y,-Z)",
+                                      "(+X,-Y,-Z)",
+                                      "(-X,+Y,-Z)",
+                                      "(+X,+Y,-Z)",
+                                      "(-X,-Y,+Z)",
+                                      "(+X,-Y,+Z)",
+                                      "(-X,+Y,+Z)",
+                                      "(+X,+Y,+Z)"};
         for (std::size_t o = 0U; o < 8U; ++o)
         {
             std::cout << "  " << octantNames[o] << ": " << octantCounts[o] << " holes" << std::endl;
@@ -2163,25 +2213,23 @@ namespace gladius::compute::tests
         // Test sparse octree
         {
             ManifoldDualContouringGpu mesher(*bundle.core);
-            mesher.setConfig({
-                .initialDepth = 5,
-                .maxDepth = 7,
-                .enableGpu = true,
-                .enableCpuFallback = true,
-                .enableCaching = true,
-                .isoValue = 0.0F,
-                .enableHierarchicalOctree = false
-            });
+            mesher.setConfig({.initialDepth = 5,
+                              .maxDepth = 7,
+                              .enableGpu = true,
+                              .enableCpuFallback = true,
+                              .enableCaching = true,
+                              .isoValue = 0.0F,
+                              .enableHierarchicalOctree = false});
             mesher.generateMesh();
-            auto const& mesh = mesher.getMesh();
+            auto const & mesh = mesher.getMesh();
             auto [edges, clusters] = analyzeMeshHoles(mesh);
-            
+
             std::cout << "\nSPARSE OCTREE:" << std::endl;
             std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
             std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
             std::cout << "  Boundary edges: " << edges.size() << std::endl;
             std::cout << "  Hole clusters: " << clusters.size() << std::endl;
-            
+
             if (!clusters.empty())
             {
                 std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges at ["
@@ -2192,25 +2240,23 @@ namespace gladius::compute::tests
         // Test hierarchical octree
         {
             ManifoldDualContouringGpu mesher(*bundle.core);
-            mesher.setConfig({
-                .initialDepth = 5,
-                .maxDepth = 7,
-                .enableGpu = true,
-                .enableCpuFallback = true,
-                .enableCaching = true,
-                .isoValue = 0.0F,
-                .enableHierarchicalOctree = true
-            });
+            mesher.setConfig({.initialDepth = 5,
+                              .maxDepth = 7,
+                              .enableGpu = true,
+                              .enableCpuFallback = true,
+                              .enableCaching = true,
+                              .isoValue = 0.0F,
+                              .enableHierarchicalOctree = true});
             mesher.generateMesh();
-            auto const& mesh = mesher.getMesh();
+            auto const & mesh = mesher.getMesh();
             auto [edges, clusters] = analyzeMeshHoles(mesh);
-            
+
             std::cout << "\nHIERARCHICAL OCTREE:" << std::endl;
             std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
             std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
             std::cout << "  Boundary edges: " << edges.size() << std::endl;
             std::cout << "  Hole clusters: " << clusters.size() << std::endl;
-            
+
             if (!clusters.empty())
             {
                 std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges at ["
@@ -2225,33 +2271,38 @@ namespace gladius::compute::tests
 
     /// Helper to convert world position to octree cell coordinates
     [[nodiscard]] std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>
-    worldToCellCoords(Eigen::Vector3f const& worldPos,
-                      Eigen::Vector3f const& bboxMin,
-                      Eigen::Vector3f const& bboxSize,
+    worldToCellCoords(Eigen::Vector3f const & worldPos,
+                      Eigen::Vector3f const & bboxMin,
+                      Eigen::Vector3f const & bboxSize,
                       std::uint32_t depth)
     {
         Eigen::Vector3f const relPos = (worldPos - bboxMin).cwiseQuotient(bboxSize);
         std::uint32_t const gridSize = 1U << depth;
-        
+
         // Clamp to valid range [0, gridSize-1]
-        auto clampCoord = [gridSize](float v) -> std::uint32_t {
-            if (v < 0.0F) return 0U;
-            if (v >= 1.0F) return gridSize - 1U;
+        auto clampCoord = [gridSize](float v) -> std::uint32_t
+        {
+            if (v < 0.0F)
+                return 0U;
+            if (v >= 1.0F)
+                return gridSize - 1U;
             return static_cast<std::uint32_t>(v * static_cast<float>(gridSize));
         };
-        
+
         return {clampCoord(relPos.x()), clampCoord(relPos.y()), clampCoord(relPos.z())};
     }
 
     /// Encode cell coordinates to Morton code (matching GPU kernel)
-    [[nodiscard]] std::uint64_t encodeMortonFromCoords(std::uint32_t x, std::uint32_t y, std::uint32_t z)
+    [[nodiscard]] std::uint64_t
+    encodeMortonFromCoords(std::uint32_t x, std::uint32_t y, std::uint32_t z)
     {
-        auto expandBits = [](std::uint64_t v) -> std::uint64_t {
+        auto expandBits = [](std::uint64_t v) -> std::uint64_t
+        {
             v = (v | (v << 32)) & 0x1f00000000ffffUL;
             v = (v | (v << 16)) & 0x1f0000ff0000ffUL;
-            v = (v | (v << 8))  & 0x100f00f00f00f00fUL;
-            v = (v | (v << 4))  & 0x10c30c30c30c30c3UL;
-            v = (v | (v << 2))  & 0x1249249249249249UL;
+            v = (v | (v << 8)) & 0x100f00f00f00f00fUL;
+            v = (v | (v << 4)) & 0x10c30c30c30c30c3UL;
+            v = (v | (v << 2)) & 0x1249249249249249UL;
             return v;
         };
         return (expandBits(z) << 2) | (expandBits(y) << 1) | expandBits(x);
@@ -2261,11 +2312,12 @@ namespace gladius::compute::tests
     [[nodiscard]] std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>
     decodeMortonToCoords(std::uint64_t morton)
     {
-        auto compactBits = [](std::uint64_t v) -> std::uint32_t {
+        auto compactBits = [](std::uint64_t v) -> std::uint32_t
+        {
             v &= 0x1249249249249249UL;
-            v = (v | (v >> 2))  & 0x10c30c30c30c30c3UL;
-            v = (v | (v >> 4))  & 0x100f00f00f00f00fUL;
-            v = (v | (v >> 8))  & 0x1f0000ff0000ffUL;
+            v = (v | (v >> 2)) & 0x10c30c30c30c30c3UL;
+            v = (v | (v >> 4)) & 0x100f00f00f00f00fUL;
+            v = (v | (v >> 8)) & 0x1f0000ff0000ffUL;
             v = (v | (v >> 16)) & 0x1f00000000ffffUL;
             v = (v | (v >> 32)) & 0x1fffffUL;
             return static_cast<std::uint32_t>(v);
@@ -2275,9 +2327,18 @@ namespace gladius::compute::tests
 
     /// Edge corner indices (matching GPU kernel EDGE_CORNERS)
     constexpr int EDGE_CORNERS_TEST[12][2] = {
-        {0,1}, {1,3}, {3,2}, {2,0},  // Bottom face (edges 0-3)
-        {4,5}, {5,7}, {7,6}, {6,4},  // Top face (edges 4-7)
-        {0,4}, {1,5}, {3,7}, {2,6}   // Vertical edges (8-11)
+      {0, 1},
+      {1, 3},
+      {3, 2},
+      {2, 0}, // Bottom face (edges 0-3)
+      {4, 5},
+      {5, 7},
+      {7, 6},
+      {6, 4}, // Top face (edges 4-7)
+      {0, 4},
+      {1, 5},
+      {3, 7},
+      {2, 6} // Vertical edges (8-11)
     };
 
     /// Test analyzing octree structure at specific hole locations
@@ -2295,67 +2356,69 @@ namespace gladius::compute::tests
         Eigen::Vector3f const bboxSize = bboxMax - bboxMin;
 
         std::uint32_t constexpr maxDepth = 7U;
-        std::uint32_t constexpr gridSize = 1U << maxDepth;  // 128
+        std::uint32_t constexpr gridSize = 1U << maxDepth; // 128
         std::uint32_t constexpr maxCoord = gridSize - 1U;
         float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(gridSize);
 
         // Generate mesh using sparse octree
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze holes
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
 
         std::cout << "\n=== OCTREE CELL ANALYSIS AT HOLE LOCATIONS ===" << std::endl;
-        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
-        std::cout << "Grid size: " << gridSize << " x " << gridSize << " x " << gridSize << std::endl;
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]"
+                  << std::endl;
+        std::cout << "Grid size: " << gridSize << " x " << gridSize << " x " << gridSize
+                  << std::endl;
         std::cout << "Voxel size: " << voxelSize << " mm" << std::endl;
         std::cout << "Total holes: " << clusters.size() << std::endl;
         std::cout << std::endl;
 
         // For the top N largest holes, analyze the octree cells around them
         std::size_t const maxAnalyze = std::min<std::size_t>(5U, clusters.size());
-        
+
         for (std::size_t i = 0U; i < maxAnalyze; ++i)
         {
-            auto const& cluster = clusters[i];
-            
+            auto const & cluster = clusters[i];
+
             std::cout << "=== HOLE #" << (i + 1) << " ===" << std::endl;
             std::cout << "  Edges: " << cluster.edgeIndices.size() << std::endl;
             std::cout << "  Centroid: [" << cluster.centroid.transpose() << "]" << std::endl;
-            
+
             // Convert centroid to cell coordinates
             auto [cx, cy, cz] = worldToCellCoords(cluster.centroid, bboxMin, bboxSize, maxDepth);
             std::cout << "  Cell coords: (" << cx << ", " << cy << ", " << cz << ")" << std::endl;
-            std::cout << "  Morton code: 0x" << std::hex << encodeMortonFromCoords(cx, cy, cz) 
+            std::cout << "  Morton code: 0x" << std::hex << encodeMortonFromCoords(cx, cy, cz)
                       << std::dec << std::endl;
 
             // Analyze the first few boundary edges in this cluster
-            std::size_t const maxEdgeAnalyze = std::min<std::size_t>(3U, cluster.edgeIndices.size());
+            std::size_t const maxEdgeAnalyze =
+              std::min<std::size_t>(3U, cluster.edgeIndices.size());
             for (std::size_t j = 0U; j < maxEdgeAnalyze; ++j)
             {
-                auto const& edge = boundaryEdges[cluster.edgeIndices[j]];
-                
+                auto const & edge = boundaryEdges[cluster.edgeIndices[j]];
+
                 std::cout << "  Boundary edge " << j << ":" << std::endl;
                 std::cout << "    Vertices: " << edge.v0 << " - " << edge.v1 << std::endl;
                 std::cout << "    Midpoint: [" << edge.midpoint.transpose() << "]" << std::endl;
-                std::cout << "    Length: " << edge.length << " mm (" 
-                          << (edge.length / voxelSize) << " voxels)" << std::endl;
-                
+                std::cout << "    Length: " << edge.length << " mm (" << (edge.length / voxelSize)
+                          << " voxels)" << std::endl;
+
                 // Get cell at edge midpoint
                 auto [ex, ey, ez] = worldToCellCoords(edge.midpoint, bboxMin, bboxSize, maxDepth);
-                std::cout << "    Edge cell: (" << ex << ", " << ey << ", " << ez << ")" << std::endl;
-                
+                std::cout << "    Edge cell: (" << ex << ", " << ey << ", " << ez << ")"
+                          << std::endl;
+
                 // Check if this is at the boundary of the grid
                 bool const atXMin = (ex == 0U);
                 bool const atYMin = (ey == 0U);
@@ -2363,14 +2426,13 @@ namespace gladius::compute::tests
                 bool const atXMax = (ex == maxCoord);
                 bool const atYMax = (ey == maxCoord);
                 bool const atZMax = (ez == maxCoord);
-                
+
                 if (atXMin || atYMin || atZMin || atXMax || atYMax || atZMax)
                 {
-                    std::cout << "    AT GRID BOUNDARY: "
-                              << (atXMin ? "-X " : "") << (atXMax ? "+X " : "")
-                              << (atYMin ? "-Y " : "") << (atYMax ? "+Y " : "")
-                              << (atZMin ? "-Z " : "") << (atZMax ? "+Z " : "")
-                              << std::endl;
+                    std::cout << "    AT GRID BOUNDARY: " << (atXMin ? "-X " : "")
+                              << (atXMax ? "+X " : "") << (atYMin ? "-Y " : "")
+                              << (atYMax ? "+Y " : "") << (atZMin ? "-Z " : "")
+                              << (atZMax ? "+Z " : "") << std::endl;
                 }
             }
             std::cout << std::endl;
@@ -2379,12 +2441,12 @@ namespace gladius::compute::tests
         // Track which edges are at grid boundary vs interior
         std::size_t boundaryCount = 0U;
         std::size_t interiorCount = 0U;
-        
-        for (auto const& edge : boundaryEdges)
+
+        for (auto const & edge : boundaryEdges)
         {
             auto [ex, ey, ez] = worldToCellCoords(edge.midpoint, bboxMin, bboxSize, maxDepth);
-            bool const atBoundary = (ex == 0U || ey == 0U || ez == 0U ||
-                                     ex == maxCoord || ey == maxCoord || ez == maxCoord);
+            bool const atBoundary = (ex == 0U || ey == 0U || ez == 0U || ex == maxCoord ||
+                                     ey == maxCoord || ez == maxCoord);
             if (atBoundary)
                 ++boundaryCount;
             else
@@ -2392,16 +2454,17 @@ namespace gladius::compute::tests
         }
 
         std::cout << "\n=== BOUNDARY vs INTERIOR HOLES ===" << std::endl;
-        std::cout << "  Edges at grid boundary: " << boundaryCount 
-                  << " (" << (100.0 * boundaryCount / boundaryEdges.size()) << "%)" << std::endl;
-        std::cout << "  Edges in interior: " << interiorCount 
-                  << " (" << (100.0 * interiorCount / boundaryEdges.size()) << "%)" << std::endl;
+        std::cout << "  Edges at grid boundary: " << boundaryCount << " ("
+                  << (100.0 * boundaryCount / boundaryEdges.size()) << "%)" << std::endl;
+        std::cout << "  Edges in interior: " << interiorCount << " ("
+                  << (100.0 * interiorCount / boundaryEdges.size()) << "%)" << std::endl;
 
         // Interior holes are the ones we need to investigate - they shouldn't exist
         // Boundary holes can occur where the surface exits the bounding box
         if (interiorCount > 0U)
         {
-            std::cout << "\n!!! WARNING: " << interiorCount << " interior boundary edges found !!!" << std::endl;
+            std::cout << "\n!!! WARNING: " << interiorCount << " interior boundary edges found !!!"
+                      << std::endl;
             std::cout << "These indicate missing quads in the mesh interior." << std::endl;
         }
 
@@ -2428,22 +2491,21 @@ namespace gladius::compute::tests
         float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << maxDepth);
 
         std::cout << "\n=== BASELINE: SPHERE IN A CAGE ===" << std::endl;
-        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]"
+                  << std::endl;
         std::cout << "Voxel size: " << voxelSize << " mm" << std::endl;
 
         // Generate mesh
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze holes
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
@@ -2455,13 +2517,13 @@ namespace gladius::compute::tests
 
         if (!clusters.empty())
         {
-            std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges" << std::endl;
+            std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges"
+                      << std::endl;
         }
 
         // For a simple sphere + cage, we expect very few or no holes
         // The cage has sharp edges which may cause some boundary issues
-        EXPECT_LT(boundaryEdges.size(), 500U) 
-            << "Simple geometry should have minimal holes";
+        EXPECT_LT(boundaryEdges.size(), 500U) << "Simple geometry should have minimal holes";
 
         // The mesh should have reasonable vertex count
         EXPECT_GT(mesh.positions.size(), 1000U) << "Sphere should have many vertices";
@@ -2489,17 +2551,15 @@ namespace gladius::compute::tests
 
         // Generate mesh and track statistics
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze the mesh
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
@@ -2518,7 +2578,7 @@ namespace gladius::compute::tests
         // (each quad has 4 edges, but boundary edges are shared by 2 triangles,
         // so roughly 2 boundary edges per missing quad)
         std::size_t const estimatedMissingQuads = boundaryEdges.size() / 2U;
-        
+
         std::cout << "\nEstimated missing quads: ~" << estimatedMissingQuads << std::endl;
         std::cout << "(Based on boundary edge count / 2)" << std::endl;
 
@@ -2526,7 +2586,7 @@ namespace gladius::compute::tests
         // Note: 1281 non-manifold edges found, likely from bridge triangles
         if (edgeStats.nonManifoldEdges > 100U)
         {
-            std::cout << "Note: " << edgeStats.nonManifoldEdges 
+            std::cout << "Note: " << edgeStats.nonManifoldEdges
                       << " non-manifold edges (likely from gap-filling bridges)" << std::endl;
         }
 
@@ -2558,17 +2618,15 @@ namespace gladius::compute::tests
 
         // Generate mesh
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze holes
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
@@ -2595,13 +2653,13 @@ namespace gladius::compute::tests
 
         // This analysis would require reading back the octree buffer from GPU
         // For now, we just verify the hole analysis is working
-        
+
         std::cout << "\nEdge correspondence table:" << std::endl;
         std::cout << "  Edge 6 (X @ y+,z+) <-> Edge 0 (X @ y-,z-) in (+Y+Z neighbor)" << std::endl;
         std::cout << "  Edge 5 (Y @ x+,z+) <-> Edge 3 (Y @ x-,z-) in (+X+Z neighbor)" << std::endl;
         std::cout << "  Edge 10 (Z @ x+,y+) <-> Edge 8 (Z @ x-,y-) in (+X+Y neighbor)" << std::endl;
         std::cout << std::endl;
-        
+
         std::cout << "To verify consistency, we would need to:" << std::endl;
         std::cout << "  1. Read back the octree buffer from GPU" << std::endl;
         std::cout << "  2. For each cell with edge mask bit N set," << std::endl;
@@ -2629,22 +2687,21 @@ namespace gladius::compute::tests
         float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << maxDepth);
 
         std::cout << "\n=== BASELINE: IMPLICIT GYROID ===" << std::endl;
-        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]"
+                  << std::endl;
         std::cout << "Voxel size: " << voxelSize << " mm" << std::endl;
 
         // Generate mesh
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze holes
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
@@ -2665,16 +2722,17 @@ namespace gladius::compute::tests
             std::size_t const maxReport = std::min<std::size_t>(5U, clusters.size());
             for (std::size_t i = 0U; i < maxReport; ++i)
             {
-                auto const& cluster = clusters[i];
-                std::cout << "  #" << (i+1) << ": " << cluster.edgeIndices.size() 
-                          << " edges at [" << cluster.centroid.transpose() << "]" << std::endl;
+                auto const & cluster = clusters[i];
+                std::cout << "  #" << (i + 1) << ": " << cluster.edgeIndices.size() << " edges at ["
+                          << cluster.centroid.transpose() << "]" << std::endl;
             }
         }
 
         // Document hole count (gyroid has boundary holes at the clipping planes)
         // The largest holes are at the X boundaries where the gyroid exits the bounding box
-        std::cout << "\nNote: Holes are concentrated at X-boundary (bounding box edges)" << std::endl;
-        
+        std::cout << "\nNote: Holes are concentrated at X-boundary (bounding box edges)"
+                  << std::endl;
+
         EXPECT_GT(mesh.positions.size(), 1000U);
     }
 
@@ -2693,7 +2751,8 @@ namespace gladius::compute::tests
         Eigen::Vector3f const bboxSize = bboxMax - bboxMin;
 
         std::cout << "\n=== HOLE COUNT VS OCTREE DEPTH ===" << std::endl;
-        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]" << std::endl;
+        std::cout << "BBox: [" << bboxMin.transpose() << "] to [" << bboxMax.transpose() << "]"
+                  << std::endl;
         std::cout << std::endl;
 
         // Test different depths
@@ -2702,17 +2761,15 @@ namespace gladius::compute::tests
             float const voxelSize = bboxSize.maxCoeff() / static_cast<float>(1U << depth);
 
             ManifoldDualContouringGpu mesher(*bundle.core);
-            mesher.setConfig({
-                .initialDepth = std::min(5U, depth),
-                .maxDepth = depth,
-                .enableGpu = true,
-                .enableCpuFallback = true,
-                .enableCaching = true,
-                .isoValue = 0.0F,
-                .enableHierarchicalOctree = false
-            });
+            mesher.setConfig({.initialDepth = std::min(5U, depth),
+                              .maxDepth = depth,
+                              .enableGpu = true,
+                              .enableCpuFallback = true,
+                              .enableCaching = true,
+                              .isoValue = 0.0F,
+                              .enableHierarchicalOctree = false});
             mesher.generateMesh();
-            auto const& mesh = mesher.getMesh();
+            auto const & mesh = mesher.getMesh();
 
             auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
 
@@ -2721,10 +2778,11 @@ namespace gladius::compute::tests
             std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
             std::cout << "  Boundary edges: " << boundaryEdges.size() << std::endl;
             std::cout << "  Hole clusters: " << clusters.size() << std::endl;
-            
+
             if (!clusters.empty())
             {
-                std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges" << std::endl;
+                std::cout << "  Largest hole: " << clusters[0].edgeIndices.size() << " edges"
+                          << std::endl;
             }
             std::cout << std::endl;
         }
@@ -2733,9 +2791,9 @@ namespace gladius::compute::tests
         EXPECT_TRUE(true);
     }
 
-    /// Root cause analysis: Test the hypothesis that holes appear because halo nodes 
+    /// Root cause analysis: Test the hypothesis that holes appear because halo nodes
     /// need their own neighbors (cascading halo problem)
-    /// 
+    ///
     /// The hypothesis is:
     /// 1. Surface cell A needs halo H at position (x+1, y, z) for edge 5
     /// 2. Halo H gets edgeMask=0x20 (edge 5) from A's contribution
@@ -2768,17 +2826,15 @@ namespace gladius::compute::tests
 
         // Generate mesh
         ManifoldDualContouringGpu mesher(*bundle.core);
-        mesher.setConfig({
-            .initialDepth = 5,
-            .maxDepth = maxDepth,
-            .enableGpu = true,
-            .enableCpuFallback = true,
-            .enableCaching = true,
-            .isoValue = 0.0F,
-            .enableHierarchicalOctree = false
-        });
+        mesher.setConfig({.initialDepth = 5,
+                          .maxDepth = maxDepth,
+                          .enableGpu = true,
+                          .enableCpuFallback = true,
+                          .enableCaching = true,
+                          .isoValue = 0.0F,
+                          .enableHierarchicalOctree = false});
         mesher.generateMesh();
-        auto const& mesh = mesher.getMesh();
+        auto const & mesh = mesher.getMesh();
 
         // Analyze holes
         auto [boundaryEdges, clusters] = analyzeMeshHoles(mesh);
@@ -2789,44 +2845,49 @@ namespace gladius::compute::tests
 
         // For the largest holes, analyze the local structure
         std::size_t const maxAnalyze = std::min<std::size_t>(3U, clusters.size());
-        
+
         for (std::size_t i = 0U; i < maxAnalyze; ++i)
         {
-            auto const& cluster = clusters[i];
-            
-            std::cout << "=== HOLE #" << (i + 1) << " (edges: " << cluster.edgeIndices.size() << ") ===" << std::endl;
-            
+            auto const & cluster = clusters[i];
+
+            std::cout << "=== HOLE #" << (i + 1) << " (edges: " << cluster.edgeIndices.size()
+                      << ") ===" << std::endl;
+
             // Convert centroid to cell coordinates
             auto [cx, cy, cz] = worldToCellCoords(cluster.centroid, bboxMin, bboxSize, maxDepth);
-            
+
             std::cout << "  Centroid cell: (" << cx << ", " << cy << ", " << cz << ")" << std::endl;
-            
+
             // Analyze edge orientations in this cluster
             // Edges aligned with X, Y, Z axes might indicate which direction is problematic
             std::size_t xAligned = 0U, yAligned = 0U, zAligned = 0U;
-            
+
             for (std::size_t edgeIdx : cluster.edgeIndices)
             {
-                auto const& edge = boundaryEdges[edgeIdx];
+                auto const & edge = boundaryEdges[edgeIdx];
                 Eigen::Vector3f const dir = (edge.pos1 - edge.pos0).normalized();
-                
-                if (std::abs(dir.x()) > 0.9F) ++xAligned;
-                else if (std::abs(dir.y()) > 0.9F) ++yAligned;
-                else if (std::abs(dir.z()) > 0.9F) ++zAligned;
+
+                if (std::abs(dir.x()) > 0.9F)
+                    ++xAligned;
+                else if (std::abs(dir.y()) > 0.9F)
+                    ++yAligned;
+                else if (std::abs(dir.z()) > 0.9F)
+                    ++zAligned;
             }
-            
+
             std::cout << "  Edge orientation distribution:" << std::endl;
             std::cout << "    X-aligned: " << xAligned << std::endl;
             std::cout << "    Y-aligned: " << yAligned << std::endl;
             std::cout << "    Z-aligned: " << zAligned << std::endl;
-            std::cout << "    Diagonal: " << (cluster.edgeIndices.size() - xAligned - yAligned - zAligned) << std::endl;
-            
+            std::cout << "    Diagonal: "
+                      << (cluster.edgeIndices.size() - xAligned - yAligned - zAligned) << std::endl;
+
             // Analyze if this hole is near a surface boundary
             // (where surface cells become sparse)
             Eigen::Vector3f const relPos = (cluster.centroid - bboxMin).cwiseQuotient(bboxSize);
-            
+
             std::cout << "  Relative position in bbox: [" << relPos.transpose() << "]" << std::endl;
-            
+
             // Check if near model boundary
             bool const nearXMin = relPos.x() < 0.05F;
             bool const nearXMax = relPos.x() > 0.95F;
@@ -2834,12 +2895,12 @@ namespace gladius::compute::tests
             bool const nearYMax = relPos.y() > 0.95F;
             bool const nearZMin = relPos.z() < 0.05F;
             bool const nearZMax = relPos.z() > 0.95F;
-            
+
             if (nearXMin || nearXMax || nearYMin || nearYMax || nearZMin || nearZMax)
             {
                 std::cout << "  ** NEAR MODEL BOUNDARY **" << std::endl;
             }
-            
+
             std::cout << std::endl;
         }
 
@@ -2847,14 +2908,18 @@ namespace gladius::compute::tests
         std::cout << "=== HYPOTHESIS SUMMARY ===" << std::endl;
         std::cout << "The halo cascading problem occurs when:" << std::endl;
         std::cout << "  1. A surface cell creates a halo node for a missing neighbor" << std::endl;
-        std::cout << "  2. That halo node has edgeMask bits set (inherited from surface)" << std::endl;
-        std::cout << "  3. The halo node tries to emit quads but needs its own neighbors" << std::endl;
-        std::cout << "  4. Those secondary neighbors don't exist -> skipped quad -> hole" << std::endl;
+        std::cout << "  2. That halo node has edgeMask bits set (inherited from surface)"
+                  << std::endl;
+        std::cout << "  3. The halo node tries to emit quads but needs its own neighbors"
+                  << std::endl;
+        std::cout << "  4. Those secondary neighbors don't exist -> skipped quad -> hole"
+                  << std::endl;
         std::cout << std::endl;
         std::cout << "Solutions:" << std::endl;
         std::cout << "  A) Run halo generation iteratively until convergence" << std::endl;
         std::cout << "  B) Don't let halo nodes emit quads (only surface cells emit)" << std::endl;
-        std::cout << "  C) Change owned edges: emit from MIN corner (edges 0,3,8) instead of MAX" << std::endl;
+        std::cout << "  C) Change owned edges: emit from MIN corner (edges 0,3,8) instead of MAX"
+                  << std::endl;
         std::cout << std::endl;
 
         EXPECT_GT(mesh.positions.size(), 0U);
@@ -2873,28 +2938,25 @@ namespace gladius::compute::tests
         ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
 
         auto const metrics = exportAndValidateWithAdmesh(*bundle.core);
-        
+
         // Validate manifold properties
-        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0) 
-            << "Mesh should have no disconnected facets after processing";
-        EXPECT_EQ(metrics.degenerateFacets, 0) 
-            << "Mesh should have no degenerate facets";
-        
-        double const reversedRatio = 
-            static_cast<double>(metrics.facetsReversed) / 
-            static_cast<double>(metrics.numberOfFacets.original);
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+          << "Mesh should have no disconnected facets after processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0) << "Mesh should have no degenerate facets";
+
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
         double const maxReversedRatio = 0.05; // 5% tolerance (more lenient for complex geometry)
-        EXPECT_LE(reversedRatio, maxReversedRatio) 
-            << "Too many facets reversed: " << metrics.facetsReversed 
-            << " out of " << metrics.numberOfFacets.original 
-            << " (" << (reversedRatio * 100.0) << "%)";
+        EXPECT_LE(reversedRatio, maxReversedRatio)
+          << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+          << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
 
         // Log summary info
         std::cout << "SimpleGyroid Admesh validation:" << std::endl;
         std::cout << "  Facets: " << metrics.numberOfFacets.original << std::endl;
         std::cout << "  Volume: " << metrics.volume << std::endl;
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
-        std::cout << "  Reversed facets: " << metrics.facetsReversed 
-                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
+                  << (reversedRatio * 100.0) << "%)" << std::endl;
     }
 }
