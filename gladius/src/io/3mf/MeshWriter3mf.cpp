@@ -485,6 +485,10 @@ namespace gladius::io
         auto colorGroup = model3mf->AddColorGroup();
         Lib3MF_uint32 const colorGroupId = colorGroup->GetUniqueResourceID();
 
+        // Add a placeholder color at index 0 to avoid lib3mf treating all-zero property IDs as "no properties"
+        // This ensures all actual colors get indices >= 1
+        colorGroup->AddColor({0, 0, 0, 0}); // Transparent black placeholder (index 0)
+
         // Build a map of unique colors to their property IDs to avoid duplicates
         std::map<std::uint32_t, Lib3MF_uint32> colorToPropertyId;
 
@@ -617,6 +621,10 @@ namespace gladius::io
         // Create color group for per-vertex colors
         auto colorGroup = model3mf->AddColorGroup();
         Lib3MF_uint32 const colorGroupId = colorGroup->GetUniqueResourceID();
+
+        // Add a placeholder color at index 0 to avoid lib3mf treating all-zero property IDs as "no properties"
+        // This ensures all actual colors get indices >= 1
+        colorGroup->AddColor({0, 0, 0, 0}); // Transparent black placeholder (index 0)
 
         // Build a map of unique colors to their property IDs to avoid duplicates
         std::map<std::uint32_t, Lib3MF_uint32> colorToPropertyId;
