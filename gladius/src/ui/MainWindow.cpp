@@ -73,6 +73,7 @@ namespace gladius::ui
         initializeShortcuts();
 
         m_renderWindow.initialize(m_core.get(), &m_mainView, m_shortcutManager, m_configManager);
+        m_renderWindow.setDocument(m_doc.get());
         LOG_LOCATION
         m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack([&]()
                                                                     { onPreviewProgramSwap(); });
@@ -282,10 +283,10 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
-            
+
             // Hide welcome screen so error is immediately visible
             m_welcomeScreen.hide();
-            
+
             if (m_logger)
             {
                 m_logger->addEvent(
@@ -297,10 +298,10 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
-            
+
             // Hide welcome screen so error is immediately visible
             m_welcomeScreen.hide();
-            
+
             if (m_logger)
             {
                 m_logger->addEvent(
@@ -325,7 +326,7 @@ namespace gladius::ui
             // Minimal UI: welcome screen, menus, status bar
             m_welcomeScreen.setLogger(m_logger);
             m_welcomeScreen.setRecentFiles(getRecentFiles(100));
-            
+
             // Set up minimal callbacks when compute is disabled
             m_mainView.clearViewCallback();
             m_renderCallback = [&]() { /* no-op when compute disabled */ };
@@ -333,8 +334,6 @@ namespace gladius::ui
             m_mainView.addViewCallBack([&]() { render(); });
             m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
         }
-
-        
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
@@ -588,44 +587,50 @@ namespace gladius::ui
                         auto mode = m_mainView.getFullscreenMode();
                         bool const isWindowed = (mode == FullscreenMode::Windowed);
                         bool const isSpanning = (mode == FullscreenMode::SpanAllSameHeight);
-                        
+
                         // Toggle between windowed and fullscreen (single monitor)
                         if (bigMenuItem(reinterpret_cast<const char *>(
                               isWindowed ? ICON_FA_EXPAND "" : ICON_FA_COMPRESS "")))
                         {
                             m_mainView.setFullscreenMode(isWindowed ? FullscreenMode::SingleMonitor
-                                                                     : FullscreenMode::Windowed);
+                                                                    : FullscreenMode::Windowed);
                         }
                         if (ImGui::IsItemHovered())
                         {
                             ImGui::SetTooltip("%s", isWindowed ? "Fullscreen" : "Windowed");
                         }
-                        
+
                         // Span across monitors button (only show if available)
                         if (m_mainView.isSpanModeAvailable())
                         {
                             // Use different style when span mode is active
                             if (isSpanning)
                             {
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 0.6f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.0f, 0.0f, 0.8f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+                                ImGui::PushStyleColor(ImGuiCol_Button,
+                                                      ImVec4(1.0f, 0.0f, 0.0f, 0.6f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                                      ImVec4(1.0f, 0.0f, 0.0f, 0.8f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                                                      ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
                             }
-                            
-                            if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_ARROWS_ALT_H "")))
+
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_ARROWS_ALT_H "")))
                             {
-                                m_mainView.setFullscreenMode(isSpanning ? FullscreenMode::Windowed
-                                                                         : FullscreenMode::SpanAllSameHeight);
+                                m_mainView.setFullscreenMode(isSpanning
+                                                               ? FullscreenMode::Windowed
+                                                               : FullscreenMode::SpanAllSameHeight);
                             }
-                            
+
                             if (isSpanning)
                             {
                                 ImGui::PopStyleColor(3);
                             }
-                            
+
                             if (ImGui::IsItemHovered())
                             {
-                                ImGui::SetTooltip("%s", isSpanning ? "Exit Span Mode" : "Span Across Displays");
+                                ImGui::SetTooltip(
+                                  "%s", isSpanning ? "Exit Span Mode" : "Span Across Displays");
                             }
                         }
                     }
@@ -678,8 +683,8 @@ namespace gladius::ui
 
             logViewer();
             m_about.render();
-            // Camera update moved to RenderWindow::render() methods where core is guaranteed to be ready
-            // m_renderWindow.updateCamera();
+            // Camera update moved to RenderWindow::render() methods where core is guaranteed to be
+            // ready m_renderWindow.updateCamera();
 
             // Render compute error modal ALWAYS (even when welcome screen is visible)
             // This ensures critical errors are shown immediately
@@ -746,7 +751,8 @@ namespace gladius::ui
             CliWriter writer;
             writer.saveCurrentLayer(filename, *m_core);
 #ifdef WIN32
-            ShellExecuteW(nullptr, L"open", writer.getFilename().c_str(), nullptr, nullptr, SW_SHOW);
+            ShellExecuteW(
+              nullptr, L"open", writer.getFilename().c_str(), nullptr, nullptr, SW_SHOW);
 #endif
             break;
         }
@@ -771,9 +777,7 @@ namespace gladius::ui
             vdb::MeshExporter exporter;
             exporter.setQualityLevel(1);
             exporter.beginExport(filename, *m_core);
-            while (exporter.advanceExport(*m_core))
-            {
-            }
+            while (exporter.advanceExport(*m_core)) {}
             exporter.finalizeExportVdb();
             break;
         }
@@ -782,9 +786,7 @@ namespace gladius::ui
             vdb::MeshExporter exporter;
             exporter.setQualityLevel(1);
             exporter.beginExport(filename, *m_core);
-            while (exporter.advanceExport(*m_core))
-            {
-            }
+            while (exporter.advanceExport(*m_core)) {}
             exporter.finalizeExportNanoVdb();
             break;
         }
@@ -969,6 +971,11 @@ namespace gladius::ui
             }
             return;
         }
+        // Don't allow new model while loading is in progress
+        if (m_doc->isLoadingInProgress())
+        {
+            return;
+        }
         if (m_fileChanged)
         {
             m_pendingFileOperation = PendingFileOperation::NewModel;
@@ -1027,16 +1034,25 @@ namespace gladius::ui
 
         ImGui::SetWindowSize(ImVec2(menuWidth, io.DisplaySize.y - menuBarHeight));
 
-        // Check if export is in progress - disable model-modifying operations
+        // Check if export or file loading is in progress - disable model-modifying operations
         bool const exportInProgress = m_exportState.isExportInProgress();
-        if (exportInProgress)
+        bool const loadingInProgress = m_doc && m_doc->isLoadingInProgress();
+        bool const operationInProgress = exportInProgress || loadingInProgress;
+
+        if (loadingInProgress)
         {
-            ImGui::TextColored(ImVec4{1.0F, 0.6F, 0.2F, 1.0F}, 
-                ICON_FA_HOURGLASS_HALF " Export in progress...");
+            ImGui::TextColored(ImVec4{0.2F, 0.6F, 1.0F, 1.0F},
+                               ICON_FA_HOURGLASS_HALF " Loading file...");
+            ImGui::Separator();
+        }
+        else if (exportInProgress)
+        {
+            ImGui::TextColored(ImVec4{1.0F, 0.6F, 0.2F, 1.0F},
+                               ICON_FA_HOURGLASS_HALF " Export in progress...");
             ImGui::Separator();
         }
 
-        ImGui::BeginDisabled(exportInProgress);
+        ImGui::BeginDisabled(operationInProgress);
         if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_FILE "\tNew")))
         {
             closeMenu();
@@ -1097,10 +1113,10 @@ namespace gladius::ui
 
         ImGui::Separator();
         ImGui::TextUnformatted("Export");
-        
+
         // Disable export menu items if async dialog is active
         bool const dialogActive = m_asyncFileDialog.isActive();
-        
+
         if (m_computeAvailable)
         {
             ImGui::BeginDisabled(dialogActive);
@@ -1148,7 +1164,8 @@ namespace gladius::ui
                 m_asyncFileDialog.saveFile({"*.nvdb"});
             }
 
-            if (ImGui::MenuItem(reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tMesh Export...")))
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tMesh Export...")))
             {
                 closeMenu();
                 // Open dialog with suggested filename based on current assembly
@@ -1162,7 +1179,8 @@ namespace gladius::ui
                     {
                         stem = stem.stem();
                     }
-                    suggestedFilename = suggestedFilename.parent_path() / (stem.string() + ".model.3mf");
+                    suggestedFilename =
+                      suggestedFilename.parent_path() / (stem.string() + ".model.3mf");
                 }
                 else
                 {
@@ -1317,6 +1335,11 @@ namespace gladius::ui
             }
             return;
         }
+        // Don't allow opening while loading is in progress
+        if (m_doc->isLoadingInProgress())
+        {
+            return;
+        }
         if (m_fileChanged)
         {
             m_pendingFileOperation = PendingFileOperation::OpenFile;
@@ -1338,6 +1361,11 @@ namespace gladius::ui
                 m_logger->addEvent(
                   {"Merge is unavailable: compute/renderer disabled", events::Severity::Warning});
             }
+            return;
+        }
+        // Don't allow merge while loading is in progress
+        if (m_doc->isLoadingInProgress())
+        {
             return;
         }
         m_asyncDialogOp = AsyncDialogOperation::Merge;
@@ -1366,6 +1394,11 @@ namespace gladius::ui
                 m_logger->addEvent(
                   {"Open is unavailable: compute/renderer disabled", events::Severity::Warning});
             }
+            return;
+        }
+        // Don't allow opening while loading is in progress
+        if (m_doc->isLoadingInProgress())
+        {
             return;
         }
         if (m_fileChanged)
@@ -1424,8 +1457,8 @@ namespace gladius::ui
             return;
         }
         m_asyncDialogOp = AsyncDialogOperation::SaveAs;
-        m_asyncFileDialog.saveFile(
-          {"*.implicit.3mf"}, m_currentAssemblyFileName.value_or(std::filesystem::path{}));
+        m_asyncFileDialog.saveFile({"*.implicit.3mf"},
+                                   m_currentAssemblyFileName.value_or(std::filesystem::path{}));
     }
 
     void MainWindow::saveCurrentFunction()
@@ -1447,8 +1480,8 @@ namespace gladius::ui
         }
 
         m_asyncDialogOp = AsyncDialogOperation::SaveCurrentFunction;
-        m_asyncFileDialog.saveFile(
-          {"*.3mf"}, m_currentAssemblyFileName.value_or(std::filesystem::path{}));
+        m_asyncFileDialog.saveFile({"*.3mf"},
+                                   m_currentAssemblyFileName.value_or(std::filesystem::path{}));
     }
 
     void MainWindow::importImageStack()
@@ -1723,7 +1756,7 @@ namespace gladius::ui
                 ImGui::TextWrapped("Gladius couldn't initialize OpenCL. The UI stays usable, but "
                                    "rendering and slicing are disabled.");
                 ImGui::Separator();
-                
+
                 if (!m_computeErrorMessage.empty())
                 {
                     ImGui::TextUnformatted("Error Details:");
@@ -1736,22 +1769,23 @@ namespace gladius::ui
                     ImGui::EndChild();
                     ImGui::PopStyleColor(2);
                 }
-                
+
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                
+
                 // Provide helpful troubleshooting guidance
                 ImGui::TextWrapped("Common solutions:");
                 ImGui::BulletText("Install OpenCL drivers for your GPU (NVIDIA, AMD, or Intel)");
-                ImGui::BulletText("On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
+                ImGui::BulletText(
+                  "On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
                 ImGui::BulletText("Check if other OpenCL applications work (e.g., clinfo)");
                 ImGui::BulletText("Restart the application after installing drivers");
-                
+
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                
+
                 if (ImGui::Button("Retry Initialization"))
                 {
                     try
@@ -1770,7 +1804,7 @@ namespace gladius::ui
                             m_core = std::make_shared<ComputeCore>(
                               context, RequiredCapabilities::OpenGLInterop, m_logger);
                             m_doc = std::make_shared<Document>(m_core);
-                            
+
                             // If retry successful, complete the full setup
                             setup(m_core, m_doc, m_logger);
                         }
@@ -1782,36 +1816,35 @@ namespace gladius::ui
                         m_computeErrorMessage.clear();
                         m_showComputeErrorModal = false;
                         loadRenderSettings();
-                        
+
                         if (m_logger)
                         {
-                            m_logger->addEvent({"OpenCL initialized successfully!", 
-                                              events::Severity::Info});
+                            m_logger->addEvent(
+                              {"OpenCL initialized successfully!", events::Severity::Info});
                         }
                     }
                     catch (const std::exception & e)
                     {
                         m_computeAvailable = false;
                         m_computeErrorMessage = e.what();
-                        
+
                         if (m_logger)
                         {
-                            m_logger->addEvent({std::string("Retry failed: ") + e.what(), 
-                                              events::Severity::Error});
+                            m_logger->addEvent(
+                              {std::string("Retry failed: ") + e.what(), events::Severity::Error});
                         }
                     }
                 }
-                
+
                 ImGui::SameLine();
                 if (ImGui::Button("Copy Details"))
                 {
                     std::string details = "Gladius OpenCL Initialization Error\n\n";
-                    details += m_computeErrorMessage.empty()
-                                 ? std::string("No details available")
-                                 : m_computeErrorMessage;
+                    details += m_computeErrorMessage.empty() ? std::string("No details available")
+                                                             : m_computeErrorMessage;
                     ImGui::SetClipboardText(details.c_str());
                 }
-                
+
                 ImGui::SameLine();
                 if (ImGui::Button("Continue Without OpenCL"))
                 {
@@ -1819,7 +1852,7 @@ namespace gladius::ui
                     // Show welcome screen again so user can browse examples or documentation
                     m_welcomeScreen.show();
                 }
-                
+
                 ImGui::EndPopup();
             }
         }
@@ -1848,7 +1881,8 @@ namespace gladius::ui
             ImGui::NewLine();
             ImGui::NewLine();
 
-            // Lambda to handle the "open after" action - starts async dialog or uses pending filename
+            // Lambda to handle the "open after" action - starts async dialog or uses pending
+            // filename
             auto handleOpenAfterAction = [this, dialogActive]() -> bool
             {
                 if (m_pendingFileOperation == PendingFileOperation::NewModel)

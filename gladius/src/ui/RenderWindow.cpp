@@ -9,6 +9,7 @@
 #include "../ComputeContext.h"
 #include "../ConfigManager.h"
 #include "../ContourExtractor.h"
+#include "../Document.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
 #include "../ImageRGBA.h"
 #include "../TimeMeasurement.h"
@@ -134,6 +135,11 @@ namespace gladius::ui
         }
 
         // Don't initialize async rendering here - will be done lazily on first render
+    }
+
+    void RenderWindow::setDocument(Document * doc)
+    {
+        m_document = doc;
     }
 
     void RenderWindow::initializeAsyncRendering()
@@ -533,7 +539,10 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
-        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
+        // Check if file loading is in progress
+        bool const isFileLoading = m_document && m_document->isLoadingInProgress();
+
+        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress() || isFileLoading)
         {
             m_view->startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -550,9 +559,13 @@ namespace gladius::ui
             if (ImGui::Begin("ProgressIndicator", &open, window_flags))
             {
                 ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-                ui::loadingIndicatorCircle("compiling",
+                // Use different color for file loading vs compilation
+                ImVec4 const indicatorColor =
+                  isFileLoading ? ImVec4(0.2f, 0.6f, 1.0f, 0.8f)  // Blue for loading
+                                : ImVec4(1.0f, 0.0f, 0.0f, 0.8f); // Red for compiling
+                ui::loadingIndicatorCircle(isFileLoading ? "loading" : "compiling",
                                            30,
-                                           ImVec4(1.0f, 0.0, 0.0f, 0.8f),
+                                           indicatorColor,
                                            ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
                                            12,
                                            10.0f);
@@ -1535,13 +1548,9 @@ namespace gladius::ui
             {
                 state.isRendering = false;
             }
-            else
-            {
-            }
+            else {}
         }
-        else
-        {
-        }
+        else {}
     }
 
     void RenderWindow::processAsyncResults(RenderWindowState & state)
@@ -1690,7 +1699,7 @@ namespace gladius::ui
         job.startLine = std::min(state.currentLine, height);
         job.stepSize =
           std::max<size_t>(1, std::min(state.renderingStepSize, height - job.startLine));
-                job.precomputeSdf = false;
+        job.precomputeSdf = false;
         job.enableHighQuality = m_enableHQRendering;
 
         ZoneValue(job.startLine);
@@ -2164,9 +2173,8 @@ namespace gladius::ui
             // Get worker queue (or fallback to main queue)
             auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
 
-            cl::CommandQueue const * queuePtr = workerQueue != nullptr
-                                                  ? workerQueue
-                                                  : &m_core->getComputeContext()->GetQueue();
+            cl::CommandQueue const * queuePtr =
+              workerQueue != nullptr ? workerQueue : &m_core->getComputeContext()->GetQueue();
 
             // Launch async SDF precomputation (returns cl::Event)
             cl::Event sdfEvent = m_core->precomputeSdfAsync(*queuePtr);

@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <future>
 #include <mutex>
 #include <optional>
 
@@ -116,6 +117,18 @@ namespace gladius
         void load(std::filesystem::path filename);
         void loadNonBlocking(std::filesystem::path filename);
         void merge(std::filesystem::path filename);
+
+        /**
+         * @brief Check if a file is currently being loaded asynchronously
+         * @return true if a file load is in progress
+         */
+        [[nodiscard]] bool isLoadingInProgress() const;
+
+        /**
+         * @brief Get the last loading error message if any
+         * @return Error message or empty string if no error
+         */
+        [[nodiscard]] std::string getLoadingError() const;
         void saveAs(std::filesystem::path filename, bool writeThumbnail = true);
 
         void newModel();
@@ -129,7 +142,7 @@ namespace gladius
 
         void exportAsStl(std::filesystem::path const & filename);
         void exportAsStl(std::filesystem::path const & filename,
-             io::StlExportOptions const & options);
+                         io::StlExportOptions const & options);
 
         void markFileAsChanged();
         void invalidatePrimitiveData();
@@ -360,6 +373,10 @@ namespace gladius
         Lib3MF::PModel m_3mfmodel;
 
         std::future<void> m_futureModelRefresh;
+        std::future<void> m_futureFileLoad;
+        std::atomic<bool> m_isLoading{false};
+        mutable std::mutex m_loadingErrorMutex;
+        std::string m_loadingError;
 
         nodes::BuildItems m_buildItems;
 
