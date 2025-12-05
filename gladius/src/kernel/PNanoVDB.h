@@ -302,21 +302,27 @@ void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value
 // struct typedef, static const, inout
 #if defined(PNANOVDB_C)
 #define PNANOVDB_STRUCT_TYPEDEF(X) typedef struct X X;
+#ifndef PNANOVDB_STATIC_CONST
 #define PNANOVDB_STATIC_CONST static const
+#endif
 #define PNANOVDB_INOUT(X) X*
 #define PNANOVDB_IN(X) const X*
 #define PNANOVDB_DEREF(X) (*X)
 #define PNANOVDB_REF(X) &X
 #elif defined(PNANOVDB_HLSL)
 #define PNANOVDB_STRUCT_TYPEDEF(X)
+#ifndef PNANOVDB_STATIC_CONST
 #define PNANOVDB_STATIC_CONST static const
+#endif
 #define PNANOVDB_INOUT(X) inout X
 #define PNANOVDB_IN(X) X
 #define PNANOVDB_DEREF(X) X
 #define PNANOVDB_REF(X) X
 #elif defined(PNANOVDB_GLSL)
 #define PNANOVDB_STRUCT_TYPEDEF(X)
+#ifndef PNANOVDB_STATIC_CONST
 #define PNANOVDB_STATIC_CONST const
+#endif
 #define PNANOVDB_INOUT(X) inout X
 #define PNANOVDB_IN(X) X
 #define PNANOVDB_DEREF(X) X
@@ -1363,6 +1369,7 @@ PNANOVDB_FORCE_INLINE void pnanovdb_write_vec3(pnanovdb_buf_t buf,
 #define PNANOVDB_LEAF_TYPE_INDEXMASK 4
 #define PNANOVDB_LEAF_TYPE_POINTINDEX 5
 
+#ifndef PNANOVDB_GLADIUS_MINIMAL  // These arrays are unused by Gladius
 // BuildType = Unknown, float, double, int16_t, int32_t, int64_t, Vec3f, Vec3d, Mask, ...
 // bit count of values in leaf nodes, i.e. 8*sizeof(*nanovdb::LeafNode<BuildType>::mValues) or zero
 // if no values are stored
@@ -1395,6 +1402,7 @@ PNANOVDB_STATIC_CONST pnanovdb_uint32_t
 // one of the 4 leaf types defined above, e.g. PNANOVDB_LEAF_TYPE_INDEX = 3
 PNANOVDB_STATIC_CONST pnanovdb_uint32_t pnanovdb_grid_type_leaf_type[PNANOVDB_GRID_TYPE_END] = {
   0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 2, 2, 2, 2, 0, 0, 3, 3, 4, 4, 5, 0, 0};
+#endif  // PNANOVDB_GLADIUS_MINIMAL
 
 struct pnanovdb_map_t
 {
@@ -2460,6 +2468,31 @@ struct pnanovdb_grid_type_constants_t
 };
 PNANOVDB_STRUCT_TYPEDEF(pnanovdb_grid_type_constants_t)
 
+#ifdef PNANOVDB_GLADIUS_MINIMAL
+// Gladius only uses FLOAT (index 1) and INT32 (index 4) grid types.
+// We provide a minimal array with just 5 entries to reduce constant memory usage.
+// Unused indices (0, 2, 3) are filled with FLOAT data as a safe fallback.
+#undef PNANOVDB_GRID_TYPE_END
+#define PNANOVDB_GRID_TYPE_END 5
+PNANOVDB_STATIC_CONST pnanovdb_grid_type_constants_t
+  pnanovdb_grid_type_constants[PNANOVDB_GRID_TYPE_END] = {
+    // Index 0 (UNKNOWN) - use FLOAT data as fallback
+    {28,   32,     36,   40,   44,   64,   32,   8,     20, 32, 8224, 8228, 8232, 8236,
+     8256, 270400, 1056, 1060, 1064, 1068, 1088, 33856, 80, 84, 88,   92,   96,   2144},
+    // Index 1 (FLOAT) - distance fields
+    {28,   32,     36,   40,   44,   64,   32,   8,     20, 32, 8224, 8228, 8232, 8236,
+     8256, 270400, 1056, 1060, 1064, 1068, 1088, 33856, 80, 84, 88,   92,   96,   2144},
+    // Index 2 (DOUBLE) - use FLOAT data as fallback
+    {28,   32,     36,   40,   44,   64,   32,   8,     20, 32, 8224, 8228, 8232, 8236,
+     8256, 270400, 1056, 1060, 1064, 1068, 1088, 33856, 80, 84, 88,   92,   96,   2144},
+    // Index 3 (INT16) - use INT32 data as fallback
+    {28,   32,     36,   40,   44,   64,   32,   8,     20, 32, 8224, 8228, 8232, 8236,
+     8256, 270400, 1056, 1060, 1064, 1068, 1088, 33856, 80, 84, 88,   92,   96,   2144},
+    // Index 4 (INT32) - triangle index lookup
+    {28,   32,     36,   40,   44,   64,   32,   8,     20, 32, 8224, 8228, 8232, 8236,
+     8256, 270400, 1056, 1060, 1064, 1068, 1088, 33856, 80, 84, 88,   92,   96,   2144},
+};
+#else  // Full grid type constants table
 // The following table with offsets will nedd to be updates as new GridTypes are added in NanoVDB.h
 PNANOVDB_STATIC_CONST pnanovdb_grid_type_constants_t
   pnanovdb_grid_type_constants[PNANOVDB_GRID_TYPE_END] = {
@@ -2516,6 +2549,7 @@ PNANOVDB_STATIC_CONST pnanovdb_grid_type_constants_t
     {28,   34,     40,   48,   52,   64,   48,   8,     20, 32, 8224, 8230, 8236, 8240,
      8256, 270400, 1056, 1062, 1068, 1072, 1088, 33856, 80, 86, 92,   96,   128,  3200},
 };
+#endif  // PNANOVDB_GLADIUS_MINIMAL
 
 // ------------------------------------------------ Basic Lookup
 // -----------------------------------------------------------
@@ -4278,6 +4312,8 @@ PNANOVDB_FORCE_INLINE pnanovdb_vec3_t pnanovdb_grid_index_to_world_dirf(pnanovdb
 // ------------------------------------------------ DitherLUT
 // -----------------------------------------------------------
 
+#ifndef PNANOVDB_GLADIUS_MINIMAL  // Dithering not needed for Gladius distance field/triangle lookup
+
 // This table was generated with
 /**************
 
@@ -4440,6 +4476,8 @@ PNANOVDB_FORCE_INLINE float pnanovdb_dither_lookup(pnanovdb_bool_t enabled, int 
 {
     return enabled ? pnanovdb_dither_lut[offset & 511] : 0.5f;
 }
+
+#endif  // PNANOVDB_GLADIUS_MINIMAL
 
 // ------------------------------------------------ HDDA
 // -----------------------------------------------------------

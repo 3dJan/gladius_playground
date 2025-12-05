@@ -63,9 +63,8 @@ namespace gladius
           std::make_unique<compute::ManifoldDualContouringProgram>(m_ComputeContext, m_resources);
 
         bool const hasFp64 = m_ComputeContext && m_ComputeContext->supportsFp64();
-        bool const isRusticl = m_ComputeContext && m_ComputeContext->getCapabilities().rusticl;
 
-        m_isVdbSupported = hasFp64 && !isRusticl;
+        m_isVdbSupported = hasFp64;
         m_vdbSupportFailureReason.clear();
 
         if (!hasFp64)
@@ -80,20 +79,6 @@ namespace gladius
             else
             {
                 std::cerr << "OpenCL device lacks fp64 support; NanoVDB features will be disabled.\n";
-            }
-        }
-        else if (isRusticl)
-        {
-            m_isVdbSupported = false;
-            m_vdbSupportFailureReason = "NanoVDB is not supported on the rusticl OpenCL runtime";
-            if (m_eventLogger)
-            {
-                m_eventLogger->logWarning(
-                  "NanoVDB is currently disabled for rusticl OpenCL runtimes.");
-            }
-            else
-            {
-                std::cerr << "NanoVDB is currently disabled for rusticl OpenCL runtimes.\n";
             }
         }
         else if (m_eventLogger)

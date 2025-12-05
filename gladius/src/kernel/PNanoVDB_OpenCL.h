@@ -16,6 +16,10 @@
 // OpenCL-specific type definitions (must be defined before including PNanoVDB.h)
 #ifdef __OPENCL_VERSION__
 
+// Gladius only needs FLOAT and INT32 grid types for distance fields and triangle lookups.
+// This significantly reduces compilation time and constant memory usage.
+#define PNANOVDB_GLADIUS_MINIMAL
+
 // Use C mode with custom buffer for OpenCL
 #define PNANOVDB_C
 #define PNANOVDB_BUF_CUSTOM
@@ -80,22 +84,20 @@ typedef uint32_t pnanovdb_grid_type_t;
 // Force inline for OpenCL
 #define PNANOVDB_BUF_FORCE_INLINE static inline
 
-// memcpy replacement for OpenCL
+// OpenCL requires program-scope constants to be in __constant address space
+#define PNANOVDB_STATIC_CONST __constant
+
+// memcpy replacement for OpenCL - uses private address space pointers
 static inline void pnanovdb_memcpy(void* dst, const void* src, size_t n)
 {
-    __global char* d = (__global char*) dst;
-    const __global char* s = (const __global char*) src;
+    char* d = (char*) dst;
+    const char* s = (const char*) src;
     for (size_t i = 0; i < n; ++i)
     {
         d[i] = s[i];
     }
 }
 #define PNANOVDB_MEMCPY_CUSTOM
-
-// Grid type constants
-#define PNANOVDB_GRID_TYPE_FLOAT 1u
-#define PNANOVDB_GRID_TYPE_INT32 4u
-#define PNANOVDB_GRID_TYPE_VEC3F 6u
 
 #endif // __OPENCL_VERSION__
 
