@@ -80,6 +80,52 @@ namespace gladius::io::tests
         EXPECT_FLOAT_EQ(opacity, 0.0f);
     }
 
+    TEST(FrontlitKubelkaMunkTest, ComputeKubelkaMunkRT_UsesTransmissionDistance)
+    {
+        FilamentOpticalProperties filament{
+            "GrayKM",
+            Eigen::Vector3f(0.5f, 0.5f, 0.5f),
+            0.6f,
+            0.4f,
+            Eigen::Vector3f(1.0f, 1.0f, 1.0f)}; // TD = 1mm per channel
+
+        auto const rt = filament.computeKubelkaMunkRT(1.0f);
+
+        // Reflectance should be close to Rinf for moderate thickness with scattering considered
+        EXPECT_NEAR(rt.reflectance.x(), 0.5f, 0.02f);
+        EXPECT_NEAR(rt.reflectance.y(), 0.5f, 0.02f);
+        EXPECT_NEAR(rt.reflectance.z(), 0.5f, 0.02f);
+
+        // Transmittance should be small due to absorption/scattering
+        EXPECT_NEAR(rt.transmittance.x(), 0.04f, 0.02f);
+        EXPECT_NEAR(rt.transmittance.y(), 0.04f, 0.02f);
+        EXPECT_NEAR(rt.transmittance.z(), 0.04f, 0.02f);
+    }
+
+    TEST(FrontlitKubelkaMunkTest, PredictColor_SingleLayerMatchesKMReflectance)
+    {
+        FilamentOpticalProperties filament{
+            "CyanKM",
+            Eigen::Vector3f(0.1f, 0.7f, 0.8f),
+            0.5f,
+            0.4f,
+            Eigen::Vector3f(1.2f, 1.2f, 1.2f)};
+
+        FilamentStack stack;
+        stack.push_back(filament);
+
+        FrontlitThicknessSolver solver{stack};
+
+        std::vector<float> thicknesses = {1.0f};
+        Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
+
+        auto const rt = filament.computeKubelkaMunkRT(1.0f);
+
+        EXPECT_NEAR(predicted.x(), rt.reflectance.x(), 1e-3f);
+        EXPECT_NEAR(predicted.y(), rt.reflectance.y(), 1e-3f);
+        EXPECT_NEAR(predicted.z(), rt.reflectance.z(), 1e-3f);
+    }
+
     // Test FrontlitThicknessSolver::predictColor
     TEST_F(FrontlitThicknessSolverTest, PredictColor_AllZeroThickness_ReturnsBlackOrDefault)
     {
