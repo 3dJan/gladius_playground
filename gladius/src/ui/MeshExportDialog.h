@@ -3,6 +3,7 @@
 #include "ExportState.h"
 #include "FileDialogService.h"
 #include "io/3mf/FaceColorSampler.h"
+#include "ColorToThicknessDialog.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
@@ -134,5 +135,7 @@ namespace gladius::ui
         bool m_exportWithColors = true;  ///< Export with volumetric colors (3MF only)
         bool m_convertToSrgb = true;  ///< Convert linear RGB to sRGB for display
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
+
+        ColorToThicknessDialog m_colorToThicknessDialog;
     };
 } // namespace gladius::ui

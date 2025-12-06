@@ -1,15 +1,18 @@
 #include "MeshExportDialog.h"
 #include "Document.h"
 #include "FileDialogService.h"
+#include "ColorToThicknessDialog.h"
 
 #include "imgui.h"
 
+#include <eigen3/Eigen/Core>
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 #ifdef _WIN32
 #include <shellapi.h>
@@ -74,6 +77,16 @@ namespace gladius::ui
             "Fine",
             "Ultra Fine",
             "Custom"};
+
+        std::vector<Eigen::Vector3f> defaultThicknessPalette()
+        {
+            return {
+                Eigen::Vector3f{1.0F, 0.0F, 0.0F},
+                Eigen::Vector3f{0.0F, 1.0F, 0.0F},
+                Eigen::Vector3f{0.0F, 0.0F, 1.0F},
+                Eigen::Vector3f{1.0F, 1.0F, 1.0F}
+            };
+        }
         
         /// Strips compound extensions like .implicit.3mf or .model.3mf down to base stem
         /// e.g., "mypart.implicit.3mf" -> "mypart", "mypart.model.3mf" -> "mypart"
@@ -123,6 +136,9 @@ namespace gladius::ui
 
         // Always render the configuration dialog (it handles progress internally now)
         renderConfiguration(core);
+
+        // Render auxiliary dialogs
+        m_colorToThicknessDialog.render();
     }
 
     std::string MeshExportDialog::getWindowTitle() const
@@ -747,6 +763,20 @@ namespace gladius::ui
             ImGui::Unindent();
         }
         
+        ImGui::EndDisabled();
+        
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // HueForge-style color → thickness exploration dialog
+        ImGui::BeginDisabled(!colorExportAvailable);
+        if (ImGui::Button("Color \u2192 Shell Thickness..."))
+        {
+            m_colorToThicknessDialog.setPaletteColors(defaultThicknessPalette());
+            m_colorToThicknessDialog.open();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Play with color-to-shell-thickness mapping before export.");
         ImGui::EndDisabled();
         
         ImGui::Spacing();
