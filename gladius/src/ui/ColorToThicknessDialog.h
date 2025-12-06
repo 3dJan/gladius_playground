@@ -82,6 +82,7 @@ namespace gladius::ui
         std::vector<io::ThicknessSolution> m_solutions;
         io::ThicknessConstraints m_constraints{0.2F, 5.0F, 0.0F, 0.0F};
         io::IlluminationMode m_illuminationMode{io::IlluminationMode::Frontlit};
+        std::size_t m_backgroundIndex{0};
     };
 
 } // namespace gladius::ui

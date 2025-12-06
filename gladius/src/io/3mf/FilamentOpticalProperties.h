@@ -209,6 +209,11 @@ namespace gladius::io
          */
         [[nodiscard]] float constrain(float thickness) const
         {
+            if (thickness <= 0.0f)
+            {
+                return 0.0f;
+            }
+
             thickness = std::clamp(thickness, minThickness, maxThickness);
 
             if (layerHeight > 0.0f)

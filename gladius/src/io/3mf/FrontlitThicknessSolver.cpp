@@ -15,11 +15,17 @@ namespace gladius::io
 
     FrontlitThicknessSolver::FrontlitThicknessSolver(FilamentStack const& stack,
                                                      ThicknessConstraints const& constraints,
-                                                     IlluminationMode mode)
+                                                     IlluminationMode mode,
+                                                     std::size_t backgroundIndex)
         : m_stack(stack)
         , m_constraints(constraints)
         , m_mode(mode)
+        , m_backgroundIndex(backgroundIndex)
     {
+        if (m_backgroundIndex >= m_stack.size())
+        {
+            m_backgroundIndex = m_stack.empty() ? std::numeric_limits<std::size_t>::max() : 0ULL;
+        }
     }
 
     ThicknessSolution FrontlitThicknessSolver::solve(Eigen::Vector3f const& targetColor,
@@ -50,13 +56,22 @@ namespace gladius::io
             weights[i] = w;
             weightSum += w;
         }
+        auto quantizeClamp = [this](float value) {
+            float clamped = std::clamp(value, 0.0f, m_constraints.maxThickness);
+            if (m_constraints.layerHeight > 0.0f)
+            {
+                clamped = std::round(clamped / m_constraints.layerHeight) * m_constraints.layerHeight;
+                clamped = std::clamp(clamped, 0.0f, m_constraints.maxThickness);
+            }
+            return clamped;
+        };
+
         for (std::size_t i = 0; i < n; ++i)
         {
-            float const minT = std::max(m_constraints.minThickness, m_stack[i].minThickness);
-            float const maxT = std::min(m_constraints.maxThickness, m_stack[i].maxThickness);
+            float const maxT = m_constraints.maxThickness;
             float bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : 1.0f / static_cast<float>(n);
-            // Bias towards target-dominant layers; start closer to max for high weight, min for low
-            thicknesses[i] = minT + bias * (maxT - minT);
+            float const raw = bias * maxT;
+            thicknesses[i] = quantizeClamp(raw);
         }
 
         // Projected gradient descent
@@ -132,6 +147,12 @@ namespace gladius::io
             return Eigen::Vector3f::Ones(); // White (no filament)
         }
 
+        Eigen::Vector3f backgroundReflectance = Eigen::Vector3f::Ones();
+        if (m_backgroundIndex < n)
+        {
+            backgroundReflectance = m_stack[m_backgroundIndex].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+        }
+
         if (m_mode == IlluminationMode::Backlit)
         {
             // Beer–Lambert transmission per channel; approximate tint via filament reflectanceColor
@@ -142,7 +163,9 @@ namespace gladius::io
                 Eigen::Vector3f const tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
                 transmittance = transmittance.cwiseProduct(T_layer.cwiseProduct(tint));
             }
-            return transmittance.cwiseMax(0.0f).cwiseMin(1.0f);
+            return transmittance.cwiseProduct(backgroundReflectance)
+                .cwiseMax(0.0f)
+                .cwiseMin(1.0f);
         }
         else
         {
@@ -166,22 +189,18 @@ namespace gladius::io
                 return {outR, outT};
             };
 
-            Eigen::Vector3f accumulatedR = Eigen::Vector3f::Zero();
-            Eigen::Vector3f accumulatedT = Eigen::Vector3f::Ones();
+            Eigen::Vector3f accumulatedR = backgroundReflectance;
+            Eigen::Vector3f accumulatedT = Eigen::Vector3f::Zero(); // opaque backing
 
             for (std::size_t idx = 0; idx < n; ++idx)
             {
-                FilamentOpticalProperties::KubelkaMunkRT const rt = m_stack[idx].computeKubelkaMunkRT(thicknesses[idx]);
+                if (thicknesses[idx] <= 0.0f)
+                {
+                    continue;
+                }
 
-                if (idx == 0)
-                {
-                    accumulatedR = rt.reflectance;
-                    accumulatedT = rt.transmittance;
-                }
-                else
-                {
-                    std::tie(accumulatedR, accumulatedT) = combine(rt.reflectance, rt.transmittance, accumulatedR, accumulatedT);
-                }
+                FilamentOpticalProperties::KubelkaMunkRT const rt = m_stack[idx].computeKubelkaMunkRT(thicknesses[idx]);
+                std::tie(accumulatedR, accumulatedT) = combine(rt.reflectance, rt.transmittance, accumulatedR, accumulatedT);
             }
 
             return accumulatedR.cwiseMax(0.0f).cwiseMin(1.0f);
@@ -284,11 +303,14 @@ namespace gladius::io
 
         for (std::size_t i = 0; i < thicknesses.size(); ++i)
         {
-            float const minT = std::max(m_constraints.minThickness, m_stack[i].minThickness);
-            float const maxT = std::min(m_constraints.maxThickness, m_stack[i].maxThickness);
-
-            thicknesses[i] = m_constraints.constrain(thicknesses[i]);
-            thicknesses[i] = std::clamp(thicknesses[i], minT, maxT);
+            if (thicknesses[i] <= 0.0f)
+            {
+                thicknesses[i] = 0.0f;
+            }
+            else
+            {
+                thicknesses[i] = m_constraints.constrain(thicknesses[i]);
+            }
 
             totalThickness += thicknesses[i];
         }
@@ -329,6 +351,23 @@ namespace gladius::io
     IlluminationMode FrontlitThicknessSolver::getIlluminationMode() const
     {
         return m_mode;
+    }
+
+    void FrontlitThicknessSolver::setBackgroundIndex(std::size_t index)
+    {
+        if (index < m_stack.size())
+        {
+            m_backgroundIndex = index;
+        }
+        else
+        {
+            m_backgroundIndex = std::numeric_limits<std::size_t>::max();
+        }
+    }
+
+    std::size_t FrontlitThicknessSolver::getBackgroundIndex() const
+    {
+        return m_backgroundIndex;
     }
 
     FilamentStack const& FrontlitThicknessSolver::getFilamentStack() const

@@ -15,6 +15,7 @@
 #include <eigen3/Eigen/Core>
 
 #include <functional>
+#include <limits>
 #include <vector>
 
 namespace gladius::io
@@ -75,7 +76,8 @@ namespace gladius::io
          * @param constraints Thickness constraints for optimization
          */
         explicit FaceThicknessMapper(FilamentStack const& stack,
-                                     ThicknessConstraints const& constraints = {});
+                                     ThicknessConstraints const& constraints = {},
+                                     std::size_t backgroundIndex = std::numeric_limits<std::size_t>::max());
 
         /**
          * @brief Map per-face colors to per-face thicknesses
@@ -114,6 +116,12 @@ namespace gladius::io
         /// Set acceptable color error threshold for convergence reporting
         void setAcceptableError(float error);
 
+        /// Set background material index (in stack order)
+        void setBackgroundIndex(std::size_t index);
+
+        /// Get background material index
+        [[nodiscard]] std::size_t getBackgroundIndex() const;
+
         /// Get the filament stack
         [[nodiscard]] FilamentStack const& getFilamentStack() const;
 
@@ -128,6 +136,7 @@ namespace gladius::io
 
         FilamentStack m_stack;
         ThicknessConstraints m_constraints;
+        std::size_t m_backgroundIndex{std::numeric_limits<std::size_t>::max()};
         float m_acceptableError = 0.05f; // 5% color error considered acceptable
     };
 

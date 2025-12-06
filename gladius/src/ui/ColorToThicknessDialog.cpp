@@ -123,10 +123,7 @@ namespace gladius::ui
             io::FilamentOpticalProperties filament;
             filament.name = "Material" + std::to_string(m_materials.size() + 1);
             filament.reflectanceColor = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
-            filament.opacity = 0.6F;
-            filament.referenceThickness = 0.4F;
-            filament.minThickness = 0.0F;
-            filament.maxThickness = 5.0F;
+            filament.transmissionDistance = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
             m_materials.push_back(filament);
         }
         ImGui::SameLine();
@@ -155,14 +152,12 @@ namespace gladius::ui
             return;
         }
 
-        if (ImGui::BeginTable("MaterialsTable", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        if (ImGui::BeginTable("MaterialsTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
             ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30.0F);
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Color", ImGuiTableColumnFlags_WidthFixed, 120.0F);
-            ImGui::TableSetupColumn("Opacity", ImGuiTableColumnFlags_WidthFixed, 90.0F);
-            ImGui::TableSetupColumn("Trans. dist (mm)", ImGuiTableColumnFlags_WidthFixed, 120.0F);
-            ImGui::TableSetupColumn("Min/Max (mm)", ImGuiTableColumnFlags_WidthFixed, 140.0F);
+            ImGui::TableSetupColumn("Trans. dist (mm)", ImGuiTableColumnFlags_WidthFixed, 160.0F);
             ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 70.0F);
             ImGui::TableHeadersRow();
 
@@ -193,36 +188,52 @@ namespace gladius::ui
                 }
 
                 ImGui::TableSetColumnIndex(3);
-                ImGui::SetNextItemWidth(90.0F);
-                if (ImGui::InputFloat(("##opacity" + std::to_string(i)).c_str(), &mat.opacity, 0.05F, 0.1F, "%.2f"))
+                ImGui::SetNextItemWidth(120.0F);
+                float tdValue = mat.transmissionDistance.x();
+                if (ImGui::InputFloat(("##td" + std::to_string(i)).c_str(), &tdValue, 0.05F, 0.1F, "%.3f"))
                 {
-                    mat.opacity = clamp01(mat.opacity);
+                    tdValue = std::max(0.0F, tdValue);
+                    mat.transmissionDistance = Eigen::Vector3f{tdValue, tdValue, tdValue};
                 }
 
                 ImGui::TableSetColumnIndex(4);
-                ImGui::SetNextItemWidth(120.0F);
-                ImGui::InputFloat(("##refthick" + std::to_string(i)).c_str(), &mat.referenceThickness, 0.05F, 0.1F, "%.3f");
-
-                ImGui::TableSetColumnIndex(5);
-                ImGui::SetNextItemWidth(65.0F);
-                ImGui::InputFloat(("##minth" + std::to_string(i)).c_str(), &mat.minThickness, 0.05F, 0.1F, "%.3f");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(65.0F);
-                ImGui::InputFloat(("##maxth" + std::to_string(i)).c_str(), &mat.maxThickness, 0.1F, 0.5F, "%.3f");
-                if (mat.maxThickness < mat.minThickness)
-                {
-                    mat.maxThickness = mat.minThickness;
-                }
-
-                ImGui::TableSetColumnIndex(6);
                 if (ImGui::Button(("Delete##" + std::to_string(i)).c_str()))
                 {
                     m_materials.erase(m_materials.begin() + static_cast<std::ptrdiff_t>(i));
+                    if (m_backgroundIndex >= m_materials.size())
+                    {
+                        m_backgroundIndex = m_materials.empty() ? 0 : m_materials.size() - 1;
+                    }
                     --i;
                 }
             }
 
             ImGui::EndTable();
+        }
+
+        if (!m_materials.empty())
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Background material (infill/base):");
+            ImGui::SameLine();
+
+            if (m_backgroundIndex >= m_materials.size())
+            {
+                m_backgroundIndex = 0;
+            }
+
+            std::vector<const char*> names;
+            names.reserve(m_materials.size());
+            for (auto const& mat : m_materials)
+            {
+                names.push_back(mat.name.c_str());
+            }
+
+            int selected = static_cast<int>(m_backgroundIndex);
+            if (ImGui::Combo("##background", &selected, names.data(), static_cast<int>(names.size())))
+            {
+                m_backgroundIndex = static_cast<std::size_t>(selected);
+            }
         }
     }
 
@@ -478,15 +489,13 @@ namespace gladius::ui
             nlohmann::json entry;
             entry["name"] = mat.name;
             entry["reflectanceColor"] = {mat.reflectanceColor.x(), mat.reflectanceColor.y(), mat.reflectanceColor.z()};
-            entry["opacity"] = mat.opacity;
-            entry["referenceThickness"] = mat.referenceThickness;
-            entry["minThickness"] = mat.minThickness;
-            entry["maxThickness"] = mat.maxThickness;
+            entry["transmissionDistance"] = mat.transmissionDistance.x();
             materials.push_back(entry);
         }
         nlohmann::json root;
         root["materials"] = materials;
         root["illuminationMode"] = (m_illuminationMode == io::IlluminationMode::Frontlit) ? "frontlit" : "backlit";
+        root["backgroundIndex"] = m_backgroundIndex;
         return root;
     }
 
@@ -507,13 +516,22 @@ namespace gladius::ui
             {
                 mat.reflectanceColor = Eigen::Vector3f{clamp01(colorArray[0]), clamp01(colorArray[1]), clamp01(colorArray[2])};
             }
-            mat.opacity = clamp01(entry.value("opacity", 0.6F));
-            mat.referenceThickness = entry.value("referenceThickness", 0.4F);
-            mat.minThickness = entry.value("minThickness", 0.0F);
-            mat.maxThickness = entry.value("maxThickness", 5.0F);
-            if (mat.maxThickness < mat.minThickness)
+            if (entry.contains("transmissionDistance"))
             {
-                mat.maxThickness = mat.minThickness;
+                if (entry["transmissionDistance"].is_number_float() || entry["transmissionDistance"].is_number_integer())
+                {
+                    float td = std::max(0.0F, entry["transmissionDistance"].get<float>());
+                    mat.transmissionDistance = Eigen::Vector3f{td, td, td};
+                }
+                else if (entry["transmissionDistance"].is_array())
+                {
+                    auto tdArray = entry.value("transmissionDistance", std::vector<float>{0.0F, 0.0F, 0.0F});
+                    if (tdArray.size() == 3)
+                    {
+                        float td = std::max(0.0F, tdArray[0]);
+                        mat.transmissionDistance = Eigen::Vector3f{td, td, td};
+                    }
+                }
             }
             m_materials.push_back(mat);
         }
@@ -527,6 +545,16 @@ namespace gladius::ui
         {
             m_illuminationMode = io::IlluminationMode::Frontlit;
         }
+
+        m_backgroundIndex = json.value("backgroundIndex", 0u);
+        if (m_materials.empty())
+        {
+            m_backgroundIndex = 0;
+        }
+        else if (m_backgroundIndex >= m_materials.size())
+        {
+            m_backgroundIndex = m_materials.size() - 1;
+        }
     }
 
     void ColorToThicknessDialog::computeThicknessMapping()
@@ -537,7 +565,7 @@ namespace gladius::ui
         }
 
         io::FilamentStack stack{m_materials};
-        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode};
+        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode, m_backgroundIndex};
 
         m_solutions.clear();
         m_solutions.reserve(m_palette.size());

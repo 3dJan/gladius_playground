@@ -7,15 +7,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace gladius::io
 {
 
     FaceThicknessMapper::FaceThicknessMapper(FilamentStack const& stack,
-                                             ThicknessConstraints const& constraints)
+                                             ThicknessConstraints const& constraints,
+                                             std::size_t backgroundIndex)
         : m_stack(stack)
         , m_constraints(constraints)
+        , m_backgroundIndex(backgroundIndex)
     {
+        if (m_backgroundIndex >= m_stack.size())
+        {
+            m_backgroundIndex = m_stack.empty() ? std::numeric_limits<std::size_t>::max() : 0ULL;
+        }
     }
 
     FaceThicknessResult FaceThicknessMapper::mapColors(
@@ -40,7 +47,7 @@ namespace gladius::io
             return result;
         }
 
-        FrontlitThicknessSolver solver(m_stack, m_constraints);
+        FrontlitThicknessSolver solver(m_stack, m_constraints, IlluminationMode::Frontlit, m_backgroundIndex);
 
         std::size_t convergedCount = 0;
         float totalError = 0.0f;
@@ -107,18 +114,25 @@ namespace gladius::io
         // Re-apply constraints after smoothing
         for (std::size_t layerIdx = 0; layerIdx < result.numLayers(); ++layerIdx)
         {
-            float const minT = std::max(m_constraints.minThickness, m_stack[layerIdx].minThickness);
-            float const maxT = std::min(m_constraints.maxThickness, m_stack[layerIdx].maxThickness);
+            float const minT = m_constraints.minThickness;
+            float const maxT = m_constraints.maxThickness;
 
             for (float& t : result.layerThicknesses[layerIdx])
             {
-                t = m_constraints.constrain(t);
-                t = std::clamp(t, minT, maxT);
+                if (t <= 0.0f)
+                {
+                    t = 0.0f;
+                }
+                else
+                {
+                    t = m_constraints.constrain(t);
+                    t = std::clamp(t, minT, maxT);
+                }
             }
         }
 
         // Recompute achieved colors and errors after smoothing
-        FrontlitThicknessSolver solver(m_stack, m_constraints);
+        FrontlitThicknessSolver solver(m_stack, m_constraints, IlluminationMode::Frontlit, m_backgroundIndex);
 
         float totalError = 0.0f;
         float maxError = 0.0f;
@@ -194,6 +208,23 @@ namespace gladius::io
     void FaceThicknessMapper::setAcceptableError(float error)
     {
         m_acceptableError = error;
+    }
+
+    void FaceThicknessMapper::setBackgroundIndex(std::size_t index)
+    {
+        if (index < m_stack.size())
+        {
+            m_backgroundIndex = index;
+        }
+        else
+        {
+            m_backgroundIndex = std::numeric_limits<std::size_t>::max();
+        }
+    }
+
+    std::size_t FaceThicknessMapper::getBackgroundIndex() const
+    {
+        return m_backgroundIndex;
     }
 
     FilamentStack const& FaceThicknessMapper::getFilamentStack() const

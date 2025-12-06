@@ -25,6 +25,7 @@
 
 #include <eigen3/Eigen/Core>
 
+#include <limits>
 #include <functional>
 #include <vector>
 
@@ -55,8 +56,9 @@ namespace gladius::io
          * @param constraints Thickness constraints for optimization
          */
         explicit FrontlitThicknessSolver(FilamentStack const& stack,
-                 ThicknessConstraints const& constraints = {},
-                 IlluminationMode mode = IlluminationMode::Frontlit);
+           ThicknessConstraints const& constraints = {},
+           IlluminationMode mode = IlluminationMode::Frontlit,
+           std::size_t backgroundIndex = std::numeric_limits<std::size_t>::max());
 
         /**
          * @brief Solve for thicknesses to match a target color
@@ -104,6 +106,12 @@ namespace gladius::io
         /// Get illumination mode
         [[nodiscard]] IlluminationMode getIlluminationMode() const;
 
+        /// Set background material index (in stack order); if out of range, background is ignored
+        void setBackgroundIndex(std::size_t index);
+
+        /// Get background material index (or max if none)
+        [[nodiscard]] std::size_t getBackgroundIndex() const;
+
         /// Get the filament stack being used
         [[nodiscard]] FilamentStack const& getFilamentStack() const;
 
@@ -128,6 +136,7 @@ namespace gladius::io
         FilamentStack m_stack;
         ThicknessConstraints m_constraints;
         IlluminationMode m_mode{IlluminationMode::Frontlit};
+        std::size_t m_backgroundIndex{std::numeric_limits<std::size_t>::max()};
         int m_maxIterations = 500;
         float m_convergenceTolerance = 1e-6f;
         float m_stepSize = 0.1f;
