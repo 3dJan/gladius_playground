@@ -50,6 +50,8 @@ target_include_directories(${BINARY}_lib PUBLIC ${INCLUDE_PATHS})
 target_include_directories(${BINARY}_lib_mcp PUBLIC ${INCLUDE_PATHS})
 target_include_directories(${BINARY} PUBLIC ${INCLUDE_PATHS})
 
+find_package(NLopt CONFIG REQUIRED)
+
 # Core dependencies (shared by gladius and gladiusmcp)
 set(DEPENDENCIES_CORE
     OpenCL::OpenCL
@@ -73,6 +75,7 @@ set(DEPENDENCIES_CORE
     imgui::imgui
     unofficial::imgui-node-editor::imgui-node-editor
     PkgConfig::Clipper2
+    NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
 )

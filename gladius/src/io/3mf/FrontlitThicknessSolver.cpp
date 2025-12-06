@@ -7,8 +7,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
+#include <numeric>
 #include <utility>
+
+#include <nlopt.hpp>
 
 namespace gladius::io
 {
@@ -43,35 +47,146 @@ namespace gladius::io
             return solution;
         }
 
-        // Initialize thicknesses with color-biased heuristic to avoid gray equal-thickness
-        std::vector<float> thicknesses(n);
-        Eigen::Vector3f const target = targetColor.cwiseMax(0.0f).cwiseMin(1.0f);
-        // Compute per-layer weight by projecting layer tint onto target color (dot product)
-        std::vector<float> weights(n, 0.0f);
-        float weightSum = 0.0f;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            Eigen::Vector3f tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
-            float w = std::max(0.0f, tint.dot(target));
-            weights[i] = w;
-            weightSum += w;
-        }
-        auto quantizeClamp = [this](float value) {
-            float clamped = std::clamp(value, 0.0f, m_constraints.maxThickness);
-            if (m_constraints.layerHeight > 0.0f)
+        // Helper to quantize/clamp a thickness vector allowing zeros but respecting bounds/quantization and total max
+        auto quantizeClampVec = [this](std::vector<float>& values) {
+            float const maxT = m_constraints.maxThickness;
+            float const minT = m_constraints.minThickness;
+
+            for (float& v : values)
             {
-                clamped = std::round(clamped / m_constraints.layerHeight) * m_constraints.layerHeight;
-                clamped = std::clamp(clamped, 0.0f, m_constraints.maxThickness);
+                if (v <= 0.0f)
+                {
+                    v = 0.0f;
+                    continue;
+                }
+
+                v = std::clamp(v, 0.0f, maxT);
+                if (minT > 0.0f)
+                {
+                    v = std::max(v, minT);
+                }
+                if (m_constraints.layerHeight > 0.0f)
+                {
+                    v = std::round(v / m_constraints.layerHeight) * m_constraints.layerHeight;
+                    v = std::clamp(v, 0.0f, maxT);
+                    if (minT > 0.0f && v > 0.0f)
+                    {
+                        v = std::max(v, minT);
+                    }
+                }
             }
-            return clamped;
+
+            if (m_constraints.totalMaxThickness > 0.0f)
+            {
+                float const sum = std::accumulate(values.begin(), values.end(), 0.0f);
+                if (sum > m_constraints.totalMaxThickness && sum > 0.0f)
+                {
+                    float const scale = m_constraints.totalMaxThickness / sum;
+                    for (float& v : values)
+                    {
+                        v *= scale;
+                    }
+                }
+            }
         };
 
-        for (std::size_t i = 0; i < n; ++i)
+        Eigen::Vector3f const target = targetColor.cwiseMax(0.0f).cwiseMin(1.0f);
+
+        // Attempt global optimization (DIRECT-L + local polish) via NLopt
+        std::vector<float> thicknesses(n, 0.0f);
+        auto tryGlobalOptimize = [&](std::vector<float>& out) -> bool {
+            if (n == 0)
+            {
+                return false;
+            }
+
+            struct NloptContext
+            {
+                FrontlitThicknessSolver const* solver;
+                Eigen::Vector3f targetColor;
+            };
+
+            NloptContext ctx{this, target};
+
+            auto objective = [](std::vector<double> const& x, std::vector<double>& /*grad*/, void* data) {
+                auto* c = static_cast<NloptContext*>(data);
+                std::vector<float> xf(x.begin(), x.end());
+                Eigen::Vector3f const predicted = c->solver->predictColor(xf);
+                double err = static_cast<double>((predicted - c->targetColor).squaredNorm());
+
+                // Penalty for exceeding total thickness if configured
+                float const totalMax = c->solver->m_constraints.totalMaxThickness;
+                if (totalMax > 0.0f)
+                {
+                    double sum = std::accumulate(x.begin(), x.end(), 0.0);
+                    if (sum > static_cast<double>(totalMax))
+                    {
+                        double excess = sum - static_cast<double>(totalMax);
+                        err += 10.0 * excess * excess;
+                    }
+                }
+
+                return err;
+            };
+
+            try
+            {
+                std::vector<double> lb(n, 0.0);
+                std::vector<double> ub(n, static_cast<double>(m_constraints.maxThickness));
+
+                // Global deterministic search
+                nlopt::opt globalOpt(nlopt::GN_DIRECT_L, static_cast<unsigned>(n));
+                globalOpt.set_lower_bounds(lb);
+                globalOpt.set_upper_bounds(ub);
+                globalOpt.set_min_objective(objective, &ctx);
+                globalOpt.set_maxeval(800);
+                globalOpt.set_maxtime(0.5);
+
+                // Seed point: light bias toward target dominant channels
+                std::vector<double> x(n, m_constraints.maxThickness * 0.25);
+                double f = 0.0;
+                globalOpt.optimize(x, f);
+
+                // Local polish
+                nlopt::opt localOpt(nlopt::LN_BOBYQA, static_cast<unsigned>(n));
+                localOpt.set_lower_bounds(lb);
+                localOpt.set_upper_bounds(ub);
+                localOpt.set_min_objective(objective, &ctx);
+                localOpt.set_ftol_rel(1e-6);
+                localOpt.set_xtol_rel(1e-6);
+                localOpt.set_maxeval(500);
+                localOpt.optimize(x, f);
+
+                out.assign(x.begin(), x.end());
+                quantizeClampVec(out);
+                return true;
+            }
+            catch (std::exception const&)
+            {
+                return false;
+            }
+        };
+
+        if (!tryGlobalOptimize(thicknesses))
         {
-            float const maxT = m_constraints.maxThickness;
-            float bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : 1.0f / static_cast<float>(n);
-            float const raw = bias * maxT;
-            thicknesses[i] = quantizeClamp(raw);
+            // Fallback: color-biased heuristic to avoid gray equal-thickness
+            std::vector<float> weights(n, 0.0f);
+            float weightSum = 0.0f;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                Eigen::Vector3f tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+                float w = std::max(0.0f, tint.dot(target));
+                weights[i] = w;
+                weightSum += w;
+            }
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                float const maxT = m_constraints.maxThickness;
+                float bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : 1.0f / static_cast<float>(n);
+                float const raw = bias * maxT;
+                thicknesses[i] = raw;
+            }
+            quantizeClampVec(thicknesses);
         }
 
         // Projected gradient descent
