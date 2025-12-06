@@ -58,6 +58,30 @@ namespace gladius::ui
         m_palette = std::move(colors);
     }
 
+    void ColorToThicknessDialog::setPaletteRequestHandler(std::function<void()> handler)
+    {
+        m_paletteRequestHandler = std::move(handler);
+    }
+
+    void ColorToThicknessDialog::notifyPaletteDeriveStarted()
+    {
+        m_paletteBusy = true;
+        m_paletteStatus = "Deriving palette from mesh...";
+    }
+
+    void ColorToThicknessDialog::notifyPaletteDeriveFailed(std::string message)
+    {
+        m_paletteBusy = false;
+        m_paletteStatus = std::move(message);
+    }
+
+    void ColorToThicknessDialog::notifyPaletteDeriveSucceeded(std::vector<Eigen::Vector3f> colors)
+    {
+        m_paletteBusy = false;
+        m_paletteStatus = "Palette derived from mesh.";
+        setPaletteColors(std::move(colors));
+    }
+
     void ColorToThicknessDialog::render()
     {
         if (!m_visible)
@@ -203,6 +227,27 @@ namespace gladius::ui
     {
         ImGui::Text("Palette (target colors)");
         ImGui::Separator();
+
+        if (m_paletteRequestHandler)
+        {
+            ImGui::BeginDisabled(m_paletteBusy);
+            if (ImGui::Button("Derive from mesh"))
+            {
+                m_paletteBusy = true;
+                m_paletteStatus.clear();
+                m_paletteRequestHandler();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (m_paletteBusy)
+            {
+                ImGui::TextDisabled("Running extraction...");
+            }
+            else if (!m_paletteStatus.empty())
+            {
+                ImGui::TextUnformatted(m_paletteStatus.c_str());
+            }
+        }
 
         if (ImGui::Button("Add color"))
         {

@@ -31,6 +31,18 @@ namespace gladius::ui
         /// Set the palette colors to display (linear RGB [0,1])
         void setPaletteColors(std::vector<Eigen::Vector3f> colors);
 
+        /// Provide a callback to request palette derivation (async)
+        void setPaletteRequestHandler(std::function<void()> handler);
+
+        /// Notify dialog that palette derivation started
+        void notifyPaletteDeriveStarted();
+
+        /// Notify dialog that palette derivation failed
+        void notifyPaletteDeriveFailed(std::string message);
+
+        /// Notify dialog that palette derivation succeeded
+        void notifyPaletteDeriveSucceeded(std::vector<Eigen::Vector3f> colors);
+
         /// Render the dialog contents (call each frame)
         void render();
 
@@ -60,6 +72,10 @@ namespace gladius::ui
         AsyncFileDialog m_fileDialog;
         FileMode m_pendingFileMode = FileMode::None;
         std::filesystem::path m_materialsFile;
+
+        std::function<void()> m_paletteRequestHandler;
+        bool m_paletteBusy = false;
+        std::string m_paletteStatus;
 
         std::vector<io::FilamentOpticalProperties> m_materials;
         std::vector<Eigen::Vector3f> m_palette;

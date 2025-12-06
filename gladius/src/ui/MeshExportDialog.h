@@ -14,6 +14,9 @@
 #include <cstddef>
 #include <filesystem>
 #include <string>
+#include <atomic>
+#include <future>
+#include <vector>
 
 // Forward declaration
 namespace gladius
@@ -70,6 +73,7 @@ namespace gladius::ui
         void renderMeshExtractionTab();
         void renderColorMaterialTab();
         void renderStatusArea();
+          void derivePaletteFromMesh();
         void startExport(ComputeCore & core);
         void resetState();
         void resetExportState();
@@ -137,5 +141,16 @@ namespace gladius::ui
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
 
         ColorToThicknessDialog m_colorToThicknessDialog;
+
+        // Async palette derivation
+        struct PaletteDeriveResult
+        {
+          std::vector<Eigen::Vector3f> palette;
+          std::string error;
+          bool success{false};
+        };
+        std::future<PaletteDeriveResult> m_paletteFuture;
+        std::atomic<bool> m_paletteDeriveInProgress{false};
+        bool m_paletteHandlerBound{false};
     };
 } // namespace gladius::ui

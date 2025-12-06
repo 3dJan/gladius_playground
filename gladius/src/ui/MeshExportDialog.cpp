@@ -2,6 +2,7 @@
 #include "Document.h"
 #include "FileDialogService.h"
 #include "ColorToThicknessDialog.h"
+#include "io/3mf/PaletteExtractor.h"
 
 #include "imgui.h"
 
@@ -9,9 +10,15 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <compute/ManifoldDualContouringGpu.h>
+#include <DualContouringSamplingProgram.h>
+#include <set>
 #include <stdexcept>
+#include <future>
 #include <vector>
 
 #ifdef _WIN32
@@ -133,6 +140,35 @@ namespace gladius::ui
 
         // Store compute core reference for export operations
         m_computeCore = &core;
+
+        if (!m_paletteHandlerBound)
+        {
+            m_colorToThicknessDialog.setPaletteRequestHandler([this]() { derivePaletteFromMesh(); });
+            m_paletteHandlerBound = true;
+        }
+
+        // Poll async palette derivation
+        if (m_paletteDeriveInProgress.load())
+        {
+            if (m_paletteFuture.valid() &&
+                m_paletteFuture.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+            {
+                auto result = m_paletteFuture.get();
+                m_paletteDeriveInProgress = false;
+                if (result.success)
+                {
+                    m_colorToThicknessDialog.notifyPaletteDeriveSucceeded(std::move(result.palette));
+                    m_statusMessage = "Derived palette from mesh colors.";
+                    m_statusIsError = false;
+                }
+                else
+                {
+                    m_colorToThicknessDialog.notifyPaletteDeriveFailed(result.error);
+                    m_statusMessage = std::string("Failed to derive palette: ") + result.error;
+                    m_statusIsError = true;
+                }
+            }
+        }
 
         // Always render the configuration dialog (it handles progress internally now)
         renderConfiguration(core);
@@ -772,8 +808,7 @@ namespace gladius::ui
         ImGui::BeginDisabled(!colorExportAvailable);
         if (ImGui::Button("Color \u2192 Shell Thickness..."))
         {
-            m_colorToThicknessDialog.setPaletteColors(defaultThicknessPalette());
-            m_colorToThicknessDialog.open();
+              m_colorToThicknessDialog.open();
         }
         ImGui::SameLine();
         ImGui::TextDisabled("Play with color-to-shell-thickness mapping before export.");
@@ -928,6 +963,84 @@ namespace gladius::ui
         {
             ImGui::TextDisabled("%s", m_statusMessage.c_str());
         }
+    }
+
+    void MeshExportDialog::derivePaletteFromMesh()
+    {
+        bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
+        bool const colorExportAvailable = is3mf && m_modelHasVolumetricColor;
+        if (!colorExportAvailable || m_computeCore == nullptr)
+        {
+            return;
+        }
+
+        if (m_paletteDeriveInProgress.load())
+        {
+            return;
+        }
+
+        // Only support manifold dual contouring for palette derivation (matches color export path)
+        if (m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring)
+        {
+            m_colorToThicknessDialog.notifyPaletteDeriveFailed(
+              "Palette derivation is only available with manifold dual contouring.");
+            m_statusMessage = "Palette derivation currently supported only for Manifold dual contouring.";
+            m_statusIsError = true;
+            return;
+        }
+
+        io::ManifoldDualContouringOptions options{};
+        options.qualityPreset = m_manifoldQualityPreset;
+        options.applyPreset();
+        options.enableGpu = m_manifoldEnableGpu;
+        options.enableCpuFallback = m_manifoldAllowCpuFallback;
+        options.enableCaching = m_manifoldEnableCaching;
+        options.isoValue = m_manifoldIsoValue;
+        if (m_manifoldMaxDepth > 0U)
+        {
+            options.maxDepth = m_manifoldMaxDepth;
+            if (options.initialDepth > options.maxDepth)
+            {
+                options.initialDepth = options.maxDepth;
+            }
+        }
+        options.minFeatureSize = m_manifoldMinFeatureSize;
+        options.enableChunking = m_manifoldEnableChunking;
+        options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
+        options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
+        options.subdivisionIterations = m_manifoldSubdivisionIterations;
+        options.projectToSurface = m_manifoldProjectToSurface;
+        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
+        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
+        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
+        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
+        options.simplificationQemWeight = std::max(0.0F,
+          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+
+        auto * core = m_computeCore;
+        io::PaletteExtractionOptions paletteOptions{};
+        paletteOptions.manifoldOptions = options;
+        paletteOptions.convertToSrgb = m_convertToSrgb;
+
+        m_paletteDeriveInProgress = true;
+        m_colorToThicknessDialog.notifyPaletteDeriveStarted();
+
+        m_paletteFuture = std::async(std::launch::async, [core, paletteOptions]() {
+            PaletteDeriveResult result;
+            try
+            {
+                auto palette = gladius::io::derivePaletteFromMesh(*core, paletteOptions);
+                result.palette = std::move(palette);
+                result.success = true;
+            }
+            catch (std::exception const & e)
+            {
+                result.error = e.what();
+                result.success = false;
+            }
+            return result;
+        });
     }
 
     void MeshExportDialog::startExport(ComputeCore & core)
