@@ -8,14 +8,17 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace gladius::io
 {
 
     FrontlitThicknessSolver::FrontlitThicknessSolver(FilamentStack const& stack,
-                                                     ThicknessConstraints const& constraints)
+                                                     ThicknessConstraints const& constraints,
+                                                     IlluminationMode mode)
         : m_stack(stack)
         , m_constraints(constraints)
+        , m_mode(mode)
     {
     }
 
@@ -34,13 +37,26 @@ namespace gladius::io
             return solution;
         }
 
-        // Initialize thicknesses to mid-range
+        // Initialize thicknesses with color-biased heuristic to avoid gray equal-thickness
         std::vector<float> thicknesses(n);
+        Eigen::Vector3f const target = targetColor.cwiseMax(0.0f).cwiseMin(1.0f);
+        // Compute per-layer weight by projecting layer tint onto target color (dot product)
+        std::vector<float> weights(n, 0.0f);
+        float weightSum = 0.0f;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            Eigen::Vector3f tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+            float w = std::max(0.0f, tint.dot(target));
+            weights[i] = w;
+            weightSum += w;
+        }
         for (std::size_t i = 0; i < n; ++i)
         {
             float const minT = std::max(m_constraints.minThickness, m_stack[i].minThickness);
             float const maxT = std::min(m_constraints.maxThickness, m_stack[i].maxThickness);
-            thicknesses[i] = (minT + maxT) * 0.5f;
+            float bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : 1.0f / static_cast<float>(n);
+            // Bias towards target-dominant layers; start closer to max for high weight, min for low
+            thicknesses[i] = minT + bias * (maxT - minT);
         }
 
         // Projected gradient descent
@@ -116,17 +132,60 @@ namespace gladius::io
             return Eigen::Vector3f::Ones(); // White (no filament)
         }
 
-        std::vector<float> const visibilities = computeVisibilities(thicknesses);
-
-        Eigen::Vector3f result = Eigen::Vector3f::Zero();
-
-        for (std::size_t i = 0; i < n; ++i)
+        if (m_mode == IlluminationMode::Backlit)
         {
-            result += m_stack[i].reflectanceColor * visibilities[i];
+            // Beer–Lambert transmission per channel; approximate tint via filament reflectanceColor
+            Eigen::Vector3f transmittance = Eigen::Vector3f::Ones();
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                Eigen::Vector3f const T_layer = m_stack[i].computePerChannelTransmittance(thicknesses[i]);
+                Eigen::Vector3f const tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+                transmittance = transmittance.cwiseProduct(T_layer.cwiseProduct(tint));
+            }
+            return transmittance.cwiseMax(0.0f).cwiseMin(1.0f);
         }
+        else
+        {
+            // Frontlit: Kubelka–Munk stacking
+            auto combine = [](Eigen::Vector3f const& topR,
+                              Eigen::Vector3f const& topT,
+                              Eigen::Vector3f const& backingR,
+                              Eigen::Vector3f const& backingT) -> std::pair<Eigen::Vector3f, Eigen::Vector3f>
+            {
+                Eigen::Vector3f outR = Eigen::Vector3f::Zero();
+                Eigen::Vector3f outT = Eigen::Vector3f::Zero();
+                float const epsilon = 1e-6f;
 
-        // Clamp to valid range
-        return result.cwiseMax(0.0f).cwiseMin(1.0f);
+                for (int c = 0; c < 3; ++c)
+                {
+                    float const denom = std::max(1.0f - topR[c] * backingR[c], epsilon);
+                    outR[c] = topR[c] + (topT[c] * topT[c] * backingR[c]) / denom;
+                    outT[c] = (topT[c] * backingT[c]) / denom;
+                }
+
+                return {outR, outT};
+            };
+
+            Eigen::Vector3f accumulatedR = Eigen::Vector3f::Zero();
+            Eigen::Vector3f accumulatedT = Eigen::Vector3f::Ones();
+
+            for (std::size_t idx = 0; idx < n; ++idx)
+            {
+                FilamentOpticalProperties::KubelkaMunkRT const rt = m_stack[idx].computeKubelkaMunkRT(thicknesses[idx]);
+
+                if (idx == 0)
+                {
+                    accumulatedR = rt.reflectance;
+                    accumulatedT = rt.transmittance;
+                }
+                else
+                {
+                    std::tie(accumulatedR, accumulatedT) = combine(rt.reflectance, rt.transmittance, accumulatedR, accumulatedT);
+                }
+            }
+
+            return accumulatedR.cwiseMax(0.0f).cwiseMin(1.0f);
+        }
     }
 
     std::vector<float> FrontlitThicknessSolver::computeVisibilities(
@@ -142,23 +201,29 @@ namespace gladius::io
 
         std::vector<float> const opacities = computeOpacities(thicknesses);
 
-        // For frontlit viewing, we process from top (last) to bottom (first)
-        // The top layer is fully visible based on its opacity
-        // Lower layers are partially occluded by layers above them
-
         float remainingLight = 1.0f;
 
-        // Process from top to bottom
-        for (std::size_t i = n; i > 0; --i)
+        if (m_mode == IlluminationMode::Frontlit)
         {
-            std::size_t const idx = i - 1;
+            // For frontlit viewing, we process from top (last) to bottom (first)
+            // The top layer is fully visible based on its opacity
+            // Lower layers are partially occluded by layers above them
+            for (std::size_t i = n; i > 0; --i)
+            {
+                std::size_t const idx = i - 1;
 
-            // This layer absorbs some of the remaining light proportional to its opacity
-            // The "visible" portion of this layer's color is: opacity * remainingLight
-            visibilities[idx] = opacities[idx] * remainingLight;
-
-            // Light that passes through this layer to lower layers
-            remainingLight *= (1.0f - opacities[idx]);
+                visibilities[idx] = opacities[idx] * remainingLight;
+                remainingLight *= (1.0f - opacities[idx]);
+            }
+        }
+        else
+        {
+            // Backlit: light enters from the bottom of the stack and travels upward
+            for (std::size_t idx = 0; idx < n; ++idx)
+            {
+                visibilities[idx] = opacities[idx] * remainingLight;
+                remainingLight *= (1.0f - opacities[idx]);
+            }
         }
 
         return visibilities;
@@ -254,6 +319,16 @@ namespace gladius::io
     void FrontlitThicknessSolver::setConvergenceTolerance(float tolerance)
     {
         m_convergenceTolerance = tolerance;
+    }
+
+    void FrontlitThicknessSolver::setIlluminationMode(IlluminationMode mode)
+    {
+        m_mode = mode;
+    }
+
+    IlluminationMode FrontlitThicknessSolver::getIlluminationMode() const
+    {
+        return m_mode;
     }
 
     FilamentStack const& FrontlitThicknessSolver::getFilamentStack() const

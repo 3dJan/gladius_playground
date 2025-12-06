@@ -111,7 +111,10 @@ namespace gladius::ui
 
     void ColorToThicknessDialog::renderMaterialsSection()
     {
-        ImGui::Text("Materials");
+        if (!ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            return;
+        }
         ImGui::Separator();
 
         ImGui::BeginDisabled(m_fileDialog.isActive());
@@ -225,7 +228,10 @@ namespace gladius::ui
 
     void ColorToThicknessDialog::renderPaletteSection()
     {
-        ImGui::Text("Palette (target colors)");
+        if (!ImGui::CollapsingHeader("Palette (target colors)", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            return;
+        }
         ImGui::Separator();
 
         if (m_paletteRequestHandler)
@@ -304,8 +310,20 @@ namespace gladius::ui
 
     void ColorToThicknessDialog::renderConstraintsSection()
     {
-        ImGui::Text("Thickness constraints");
+        if (!ImGui::CollapsingHeader("Thickness constraints", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            return;
+        }
         ImGui::Separator();
+
+        ImGui::SetNextItemWidth(180.0F);
+        static char const * MODE_LABELS[] = {"Frontlit", "Backlit"};
+        int modeIndex = (m_illuminationMode == io::IlluminationMode::Frontlit) ? 0 : 1;
+        if (ImGui::Combo("Illumination mode", &modeIndex, MODE_LABELS, IM_ARRAYSIZE(MODE_LABELS)))
+        {
+            m_illuminationMode = (modeIndex == 0) ? io::IlluminationMode::Frontlit : io::IlluminationMode::Backlit;
+            m_solutions.clear();
+        }
 
         ImGui::SetNextItemWidth(140.0F);
         if (ImGui::InputFloat("Min thickness (mm)", &m_constraints.minThickness, 0.05F, 0.1F, "%.3f"))
@@ -345,7 +363,10 @@ namespace gladius::ui
 
     void ColorToThicknessDialog::renderResultsSection()
     {
-        ImGui::Text("Thickness results");
+        if (!ImGui::CollapsingHeader("Thickness results", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            return;
+        }
         ImGui::Separator();
 
         if (m_solutions.empty())
@@ -465,6 +486,7 @@ namespace gladius::ui
         }
         nlohmann::json root;
         root["materials"] = materials;
+        root["illuminationMode"] = (m_illuminationMode == io::IlluminationMode::Frontlit) ? "frontlit" : "backlit";
         return root;
     }
 
@@ -495,6 +517,16 @@ namespace gladius::ui
             }
             m_materials.push_back(mat);
         }
+
+        std::string const modeString = json.value("illuminationMode", std::string("frontlit"));
+        if (modeString == "backlit")
+        {
+            m_illuminationMode = io::IlluminationMode::Backlit;
+        }
+        else
+        {
+            m_illuminationMode = io::IlluminationMode::Frontlit;
+        }
     }
 
     void ColorToThicknessDialog::computeThicknessMapping()
@@ -505,7 +537,7 @@ namespace gladius::ui
         }
 
         io::FilamentStack stack{m_materials};
-        io::FrontlitThicknessSolver solver{stack, m_constraints};
+        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode};
 
         m_solutions.clear();
         m_solutions.reserve(m_palette.size());

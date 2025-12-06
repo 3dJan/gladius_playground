@@ -81,6 +81,7 @@ namespace gladius::ui
         std::vector<Eigen::Vector3f> m_palette;
         std::vector<io::ThicknessSolution> m_solutions;
         io::ThicknessConstraints m_constraints{0.2F, 5.0F, 0.0F, 0.0F};
+        io::IlluminationMode m_illuminationMode{io::IlluminationMode::Frontlit};
     };
 
 } // namespace gladius::ui

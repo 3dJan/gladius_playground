@@ -30,14 +30,19 @@
 
 namespace gladius::io
 {
+  enum class IlluminationMode
+  {
+    Frontlit,
+    Backlit
+  };
 
-    /**
-     * @brief Solver for frontlit color-to-thickness inverse problem
-     *
-     * Given a target color and a stack of filaments, computes optimal thicknesses
-     * for each layer to best reproduce the target color.
-     */
-    class FrontlitThicknessSolver
+  /**
+   * @brief Solver for frontlit color-to-thickness inverse problem
+   *
+   * Given a target color and a stack of filaments, computes optimal thicknesses
+   * for each layer to best reproduce the target color.
+   */
+  class FrontlitThicknessSolver
     {
       public:
         /// Progress callback: receives iteration count and current error
@@ -50,7 +55,8 @@ namespace gladius::io
          * @param constraints Thickness constraints for optimization
          */
         explicit FrontlitThicknessSolver(FilamentStack const& stack,
-                                         ThicknessConstraints const& constraints = {});
+                 ThicknessConstraints const& constraints = {},
+                 IlluminationMode mode = IlluminationMode::Frontlit);
 
         /**
          * @brief Solve for thicknesses to match a target color
@@ -92,6 +98,12 @@ namespace gladius::io
         /// Set convergence tolerance (stops when error change < tolerance)
         void setConvergenceTolerance(float tolerance);
 
+        /// Set illumination mode (frontlit/backlit)
+        void setIlluminationMode(IlluminationMode mode);
+
+        /// Get illumination mode
+        [[nodiscard]] IlluminationMode getIlluminationMode() const;
+
         /// Get the filament stack being used
         [[nodiscard]] FilamentStack const& getFilamentStack() const;
 
@@ -115,6 +127,7 @@ namespace gladius::io
 
         FilamentStack m_stack;
         ThicknessConstraints m_constraints;
+        IlluminationMode m_mode{IlluminationMode::Frontlit};
         int m_maxIterations = 500;
         float m_convergenceTolerance = 1e-6f;
         float m_stepSize = 0.1f;

@@ -35,6 +35,12 @@ namespace gladius::io
      */
     struct FilamentOpticalProperties
     {
+        struct KubelkaMunkRT
+        {
+            Eigen::Vector3f reflectance = Eigen::Vector3f::Zero();
+            Eigen::Vector3f transmittance = Eigen::Vector3f::Ones();
+        };
+
         std::string name; ///< Human-readable name (e.g., "Prusament Galaxy Black")
 
         /// RGB reflectance color in linear space [0,1]
@@ -49,6 +55,10 @@ namespace gladius::io
         /// Typically 0.4mm (one layer) or 1.0mm (a few layers)
         float referenceThickness = 0.4f;
 
+        /// Per-channel Transmission Distance (TD) in mm for backlit modeling
+        /// If any component <= 0, TD is considered unknown and backlit uses opacity mapping.
+        Eigen::Vector3f transmissionDistance = Eigen::Vector3f::Zero();
+
         /// Minimum allowed thickness (mm), typically one layer height
         float minThickness = 0.0f;
 
@@ -60,11 +70,13 @@ namespace gladius::io
         FilamentOpticalProperties(std::string filamentName,
                                   Eigen::Vector3f const& color,
                                   float filamentOpacity,
-                                  float refThickness = 0.4f)
+                                  float refThickness = 0.4f,
+                                  Eigen::Vector3f const& td = Eigen::Vector3f::Zero())
             : name(std::move(filamentName))
             , reflectanceColor(color)
             , opacity(filamentOpacity)
             , referenceThickness(refThickness)
+            , transmissionDistance(td)
         {
         }
 
@@ -94,6 +106,88 @@ namespace gladius::io
             float const alpha = -std::log(oneMinusOpacity) / referenceThickness;
 
             return 1.0f - std::exp(-alpha * thickness);
+        }
+
+        /// Compute per-channel transmittance T_c for a given thickness using TD
+        /// Returns vector where each component is in [0,1]
+        [[nodiscard]] Eigen::Vector3f computePerChannelTransmittance(float thickness) const
+        {
+            if (thickness <= 0.0f)
+            {
+                return Eigen::Vector3f::Ones();
+            }
+            Eigen::Vector3f T = Eigen::Vector3f::Ones();
+            for (int c = 0; c < 3; ++c)
+            {
+                float const td = transmissionDistance[c];
+                if (td > 0.0f)
+                {
+                    T[c] = std::exp(-thickness / td);
+                }
+                else
+                {
+                    // Fallback: derive approximate transmittance from opacity and referenceThickness
+                    float const oneMinusOpacity = std::max(1.0f - opacity, 1e-6f);
+                    float const alpha = -std::log(oneMinusOpacity) / std::max(referenceThickness, 1e-6f);
+                    float const effOpacity = 1.0f - std::exp(-alpha * thickness);
+                    T[c] = 1.0f - effOpacity;
+                }
+            }
+            return T.cwiseMax(0.0f).cwiseMin(1.0f);
+        }
+
+        /**
+         * @brief Compute Kubelka–Munk reflectance/transmittance for a finite thickness
+         *
+         * Uses per-channel reflectance color as R∞ and derives K/S from it. Absorption K is
+         * approximated from transmissionDistance (TD) when available; scattering S is then
+         * inferred via K/S. If TD is unavailable, falls back to the opacity-based model.
+         */
+        [[nodiscard]] KubelkaMunkRT computeKubelkaMunkRT(float thickness) const
+        {
+            KubelkaMunkRT result;
+
+            if (thickness <= 0.0f)
+            {
+                result.reflectance = Eigen::Vector3f::Zero();
+                result.transmittance = Eigen::Vector3f::Ones();
+                return result;
+            }
+
+            float const epsilon = 1e-6f;
+            float const effectiveOpacity = computeEffectiveOpacity(thickness);
+
+            for (int c = 0; c < 3; ++c)
+            {
+                float const Rinf = std::clamp(reflectanceColor[c], epsilon, 1.0f - epsilon);
+                float const td = transmissionDistance[c];
+
+                if (td <= 0.0f)
+                {
+                    // Fallback: approximate with opacity-based model
+                    result.reflectance[c] = std::clamp(Rinf * effectiveOpacity, 0.0f, 1.0f);
+                    result.transmittance[c] = std::clamp(1.0f - effectiveOpacity, 0.0f, 1.0f);
+                    continue;
+                }
+
+                // Derive K/S from R∞ and K from TD
+                float const kOverS = std::max(((1.0f - Rinf) * (1.0f - Rinf)) / std::max(2.0f * Rinf, epsilon), epsilon);
+                float const K = 1.0f / std::max(td, epsilon);
+                float const S = std::max(K / kOverS, epsilon);
+
+                float const alpha = std::sqrt(std::max(kOverS * (kOverS + 2.0f), 0.0f));
+                float const expTerm = std::exp(-alpha * S * thickness);
+                float const expSquared = expTerm * expTerm;
+
+                float const denom = std::max(1.0f - (Rinf * Rinf * expSquared), epsilon);
+                float const R_t = Rinf * (1.0f - expSquared) / denom;
+                float const T_t = (1.0f - Rinf * Rinf) * expTerm / denom;
+
+                result.reflectance[c] = std::clamp(R_t, 0.0f, 1.0f);
+                result.transmittance[c] = std::clamp(T_t, 0.0f, 1.0f);
+            }
+
+            return result;
         }
     };
 
