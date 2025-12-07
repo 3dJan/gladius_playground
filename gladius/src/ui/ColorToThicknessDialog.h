@@ -46,6 +46,34 @@ namespace gladius::ui
         /// Render the dialog contents (call each frame)
         void render();
 
+        /// Get precomputed LUTs (one per layer, bottom-to-top) and resolution
+        [[nodiscard]] std::vector<std::vector<float>> const & getPrecomputedLuts() const
+        {
+          return m_precomputedLuts;
+        }
+
+        [[nodiscard]] int getLutResolution() const
+        {
+          return m_lutResolution;
+        }
+
+        [[nodiscard]] bool hasPrecomputedLuts() const
+        {
+          return !m_precomputedLuts.empty();
+        }
+
+        /// Get the filament stack (bottom-to-top) currently defined in the dialog
+        [[nodiscard]] io::FilamentStack getFilamentStack() const
+        {
+            return io::FilamentStack{m_materials};
+        }
+
+        /// Get the thickness constraints used to build LUTs
+        [[nodiscard]] io::ThicknessConstraints const & getConstraints() const
+        {
+            return m_constraints;
+        }
+
       private:
         enum class FileMode
         {
@@ -59,6 +87,8 @@ namespace gladius::ui
         void renderConstraintsSection();
         void renderResultsSection();
         void handleFileDialogResult();
+
+        void computePrecomputedLuts();
 
         void loadMaterialsFromFile(std::filesystem::path const & path);
         void saveMaterialsToFile(std::filesystem::path const & path) const;
@@ -83,6 +113,10 @@ namespace gladius::ui
         io::ThicknessConstraints m_constraints{0.2F, 5.0F, 0.0F, 0.0F};
         io::IlluminationMode m_illuminationMode{io::IlluminationMode::Frontlit};
         std::size_t m_backgroundIndex{0};
+
+        int m_lutResolution{16};
+        std::vector<std::vector<float>> m_precomputedLuts; ///< One LUT per layer (bottom-to-top)
+        std::string m_lutStatus;
     };
 
 } // namespace gladius::ui

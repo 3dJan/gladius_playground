@@ -228,6 +228,114 @@ namespace gladius::dual_contouring
         }
     }
 
+    bool GpuSamplingSession::sampleCornersVariableThickness(std::vector<Eigen::Vector3f> const & positions,
+                                           std::vector<float> & outValues,
+                                           float baseIsoValue,
+                                           std::vector<float> const & thicknessLUT,
+                                           int lutResolution)
+    {
+        if (positions.empty())
+        {
+            outValues.clear();
+            return true;
+        }
+
+        if (!m_gpuAvailable)
+        {
+            return false;
+        }
+
+        outValues.resize(positions.size());
+
+        try
+        {
+            auto context = m_core->getComputeContext();
+            if (!context || !context->isValid())
+            {
+                return false;
+            }
+
+            // Check cache first if enabled
+            std::vector<std::size_t> uncachedIndices;
+            uncachedIndices.reserve(positions.size());
+
+            if (m_config.enableCaching)
+            {
+                for (std::size_t i = 0U; i < positions.size(); ++i)
+                {
+                    auto const morton =
+                      positionToMorton(positions[i], m_impl->gridMin, m_impl->gridSpacing);
+                    auto it = m_impl->cornerCache.find(morton);
+                    if (it != m_impl->cornerCache.end())
+                    {
+                        outValues[i] = it->second;
+                        ++m_stats.cacheHits;
+                    }
+                    else
+                    {
+                        uncachedIndices.push_back(i);
+                        ++m_stats.cacheMisses;
+                    }
+                }
+            }
+            else
+            {
+                uncachedIndices.resize(positions.size());
+                std::iota(uncachedIndices.begin(), uncachedIndices.end(), 0U);
+            }
+
+            if (uncachedIndices.empty())
+            {
+                return true;
+            }
+
+            // Get the sampling program
+            auto * program = m_core->getProgramManager().getDualContouringSamplingProgram();
+            if (!program)
+            {
+                logError("DualContouringSamplingProgram not available");
+                return false;
+            }
+
+            // Collect uncached positions for GPU batch
+            std::vector<Eigen::Vector3f> batchPositions;
+            batchPositions.reserve(uncachedIndices.size());
+            for (auto idx : uncachedIndices)
+            {
+                batchPositions.push_back(positions[idx]);
+            }
+
+            // Batch GPU sampling
+            std::vector<float> batchValues;
+            program->sampleCornersVariableThickness(
+              batchPositions, batchValues, *m_core->getPrimitives(), baseIsoValue, thicknessLUT, lutResolution);
+
+            // Populate output and cache
+            for (std::size_t i = 0U; i < uncachedIndices.size(); ++i)
+            {
+                auto const idx = uncachedIndices[i];
+                outValues[idx] = batchValues[i];
+
+                if (m_config.enableCaching)
+                {
+                    auto const morton =
+                      positionToMorton(positions[idx], m_impl->gridMin, m_impl->gridSpacing);
+                    m_impl->cornerCache[morton] = batchValues[i];
+                }
+            }
+
+            m_stats.cornerBatches += 1;
+            m_stats.totalCornerSamples += uncachedIndices.size();
+
+            return true;
+        }
+        catch (std::exception const & ex)
+        {
+            logError(fmt::format("Corner sampling failed: {}", ex.what()));
+            return false;
+        }
+    }
+
     bool GpuSamplingSession::sampleHermite(std::vector<Eigen::Vector3f> const & positions,
                                            std::vector<float> & outValues,
                                            std::vector<Eigen::Vector3f> & outGradients,

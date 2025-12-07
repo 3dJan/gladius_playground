@@ -28,6 +28,20 @@ namespace gladius
                           Primitives const & primitives,
                           float isoValue);
 
+        /// Sample SDF values at corner positions with variable thickness from LUT
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param baseIsoValue Base ISO value
+        /// @param thicknessLUT 3D LUT data (RGB -> Thickness)
+        /// @param lutResolution Resolution of the LUT (e.g. 32)
+        void sampleCornersVariableThickness(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          float baseIsoValue,
+                          std::vector<float> const & thicknessLUT,
+                          int lutResolution);
+
         /// Sample SDF values and gradients at Hermite positions
         /// @param positions Input positions to sample
         /// @param outValues Output SDF values (must be pre-sized)

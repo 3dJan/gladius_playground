@@ -1840,9 +1840,23 @@ namespace gladius::hierarchical_dc
                 }
             }
 
-            if (!m_gpuSampler->sampleCorners(m_cornerSamplePositions, m_cornerSampleValues))
+            if (!m_config.thicknessLUT.empty())
             {
-                return false;
+                if (!m_gpuSampler->sampleCornersVariableThickness(m_cornerSamplePositions,
+                                                                  m_cornerSampleValues,
+                                                                  m_config.isoValue,
+                                                                  m_config.thicknessLUT,
+                                                                  m_config.lutResolution))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                if (!m_gpuSampler->sampleCorners(m_cornerSamplePositions, m_cornerSampleValues))
+                {
+                    return false;
+                }
             }
 
             if (m_cornerSampleValues.size() != cornerCount)

@@ -3,6 +3,8 @@
 #include "FileDialogService.h"
 #include "ColorToThicknessDialog.h"
 #include "io/3mf/PaletteExtractor.h"
+#include "Mesh.h"
+#include "io/3mf/ShellGenerator.h"
 
 #include "imgui.h"
 
@@ -16,6 +18,7 @@
 #include <chrono>
 #include <compute/ManifoldDualContouringGpu.h>
 #include <DualContouringSamplingProgram.h>
+#include <fmt/format.h>
 #include <set>
 #include <stdexcept>
 #include <future>
@@ -1043,6 +1046,124 @@ namespace gladius::ui
         });
     }
 
+    void MeshExportDialog::exportShellsTo3mf(ComputeCore & core)
+    {
+        if (m_document == nullptr)
+        {
+            throw std::runtime_error("Document is required for shell export");
+        }
+
+        auto stack = m_colorToThicknessDialog.getFilamentStack();
+        if (stack.empty())
+        {
+            throw std::runtime_error("No materials defined for shell export");
+        }
+
+        int const lutResolution = m_colorToThicknessDialog.getLutResolution();
+        if (lutResolution <= 1)
+        {
+            throw std::runtime_error("LUT resolution must be greater than 1 for shell export");
+        }
+
+        auto const & precomputedLuts = m_colorToThicknessDialog.getPrecomputedLuts();
+        if (precomputedLuts.empty())
+        {
+            throw std::runtime_error("No precomputed LUTs available for shell export");
+        }
+
+        core.updateBBox();
+
+        // Build a placeholder constant thickness solution; unused when LUT is provided
+        io::ThicknessSolution solution(stack.size());
+        for (std::size_t i = 0; i < solution.thicknesses.size(); ++i)
+        {
+            solution.thicknesses[i] = m_colorToThicknessDialog.getConstraints().minThickness;
+        }
+
+        io::HierarchicalDualContouringOptions options{};
+        options.qualityPreset = m_hierarchicalQualityPreset;
+        options.applyPreset();
+        options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
+        options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
+        options.config.projectVerticesToSurface = m_hierarchicalProjectToSurface;
+        options.config.enableCoarsening = m_hierarchicalEnableCoarsening;
+        options.config.minFeatureSize = m_hierarchicalMinFeatureSize;
+        if (!options.config.enableProgressiveRefinement)
+        {
+            options.config.refinementIterations = 0U;
+        }
+
+        m_exportInProgress = true;
+        if (m_exportState != nullptr)
+        {
+            m_exportState->beginExport("3MF shell export");
+        }
+
+        io::ShellGenerator generator(core, *const_cast<Document*>(m_document));
+        auto shells = generator.generateShells(
+            stack,
+            solution,
+            options.config,
+            lutResolution,
+            m_colorToThicknessDialog.getConstraints(),
+            &precomputedLuts);
+
+        if (shells.empty())
+        {
+            throw std::runtime_error("Shell generation produced no meshes");
+        }
+
+        ComputeContext * context = core.getComputeContext().get();
+
+        // Build vector of (mesh, name, material color)
+        std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> meshesWithColors;
+        meshesWithColors.reserve(shells.size());
+
+        for (auto const & shell : shells)
+        {
+            auto mesh = std::make_shared<Mesh>(*context);
+
+            for (std::size_t idx = 0; idx + 2 < shell.indices.size(); idx += 3)
+            {
+                auto const i0 = shell.indices[idx + 0];
+                auto const i1 = shell.indices[idx + 1];
+                auto const i2 = shell.indices[idx + 2];
+
+                if (i0 >= shell.vertices.size() || i1 >= shell.vertices.size() || i2 >= shell.vertices.size())
+                {
+                    continue;
+                }
+
+                mesh->addFace(shell.vertices[i0], shell.vertices[i1], shell.vertices[i2]);
+            }
+
+            mesh->write();
+            std::string const name = fmt::format("Shell_L{}_{}", shell.layerIndex, shell.filamentName);
+
+            // Lookup material color from stack
+            Eigen::Vector3f color{1.0F, 1.0F, 1.0F};
+            if (static_cast<std::size_t>(shell.layerIndex) < stack.size())
+            {
+                color = stack[static_cast<std::size_t>(shell.layerIndex)].reflectanceColor;
+            }
+
+            meshesWithColors.emplace_back(std::move(mesh), name, color);
+        }
+
+        io::MeshWriter3mf writer(nullptr);
+        writer.exportMeshesWithMaterialColors(m_targetFile, meshesWithColors, m_document, true);
+
+        m_exportInProgress = false;
+        m_exportCompleted = true;
+        m_statusMessage = "Exported shell meshes to 3MF";
+        m_statusIsError = false;
+
+        if (m_exportState != nullptr)
+        {
+            m_exportState->endExport();
+        }
+    }
+
     void MeshExportDialog::startExport(ComputeCore & core)
     {
         if (m_targetFile.empty())
@@ -1053,8 +1174,10 @@ namespace gladius::ui
         bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
         
         // For 3MF format, only certain methods are supported
+        bool const allowShell3mf = m_colorToThicknessDialog.hasPrecomputedLuts();
         if (is3mf && m_selectedMethod != io::SurfaceExtractionMethod::LayeredMarchingCubes &&
-            m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring)
+            m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring &&
+            !(allowShell3mf && m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring))
         {
             throw std::runtime_error(
               "3MF export is currently only supported with layered marching cubes "
@@ -1107,6 +1230,12 @@ namespace gladius::ui
         }
         case io::SurfaceExtractionMethod::HierarchicalDualContouring:
         {
+            if (is3mf && m_colorToThicknessDialog.hasPrecomputedLuts())
+            {
+                exportShellsTo3mf(core);
+                return;
+            }
+
             io::HierarchicalDualContouringOptions options{};
             options.qualityPreset = m_hierarchicalQualityPreset;
             options.applyPreset();

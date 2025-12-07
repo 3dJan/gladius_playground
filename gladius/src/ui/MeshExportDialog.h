@@ -74,6 +74,7 @@ namespace gladius::ui
         void renderColorMaterialTab();
         void renderStatusArea();
           void derivePaletteFromMesh();
+        void exportShellsTo3mf(ComputeCore & core);
         void startExport(ComputeCore & core);
         void resetState();
         void resetExportState();

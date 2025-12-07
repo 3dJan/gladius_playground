@@ -161,6 +161,101 @@ namespace gladius::io
         }
     }
 
+    void MeshWriter3mf::exportMeshesWithMaterialColors(
+        std::filesystem::path const & filePath,
+        std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> const & meshesWithColors,
+        Document const * sourceDocument,
+        bool writeThumbnail)
+    {
+        if (meshesWithColors.empty())
+        {
+            throw std::runtime_error("No meshes provided for export");
+        }
+
+        try
+        {
+            auto model3mf = m_wrapper->CreateModel();
+            addDefaultMetadata(model3mf);
+
+            if (sourceDocument)
+            {
+                copyMetadata(*sourceDocument, model3mf);
+            }
+
+            // Create a color group for solid per-mesh colors
+            auto colorGroup = model3mf->AddColorGroup();
+            Lib3MF_uint32 const colorGroupId = colorGroup->GetUniqueResourceID();
+            // placeholder at index 0
+            colorGroup->AddColor({0, 0, 0, 0});
+
+            for (auto const & [mesh, name, color] : meshesWithColors)
+            {
+                if (!mesh || !validateMesh(*mesh))
+                {
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                            {fmt::format("Skipping invalid mesh: {}", name), events::Severity::Warning});
+                    }
+                    continue;
+                }
+
+                // Convert Eigen color to 8-bit
+                auto toU8 = [](float v) -> std::uint8_t
+                {
+                    return static_cast<std::uint8_t>(std::clamp(v * 255.0F + 0.5F, 0.0F, 255.0F));
+                };
+                Lib3MF::sColor lib3mfColor{toU8(color.x()), toU8(color.y()), toU8(color.z()), 255};
+                Lib3MF_uint32 const colorPropertyId = colorGroup->AddColor(lib3mfColor);
+
+                auto meshObject = addMeshToModel(model3mf, *mesh, name);
+
+                // Apply uniform color to every triangle
+                std::size_t const numFaces = mesh->getNumberOfFaces();
+                std::vector<Lib3MF::sTriangleProperties> triProps(numFaces);
+                for (std::size_t i = 0; i < numFaces; ++i)
+                {
+                    triProps[i].m_ResourceID = colorGroupId;
+                    triProps[i].m_PropertyIDs[0] = colorPropertyId;
+                    triProps[i].m_PropertyIDs[1] = colorPropertyId;
+                    triProps[i].m_PropertyIDs[2] = colorPropertyId;
+                }
+                meshObject->SetAllTriangleProperties(triProps);
+
+                createBuildItem(model3mf, meshObject, name);
+            }
+
+            if (writeThumbnail && sourceDocument)
+            {
+                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
+            }
+
+            auto writer = model3mf->QueryWriter("3mf");
+            writer->WriteToFile(filePath.string());
+
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Successfully exported {} shell meshes with colors to {}",
+                                 meshesWithColors.size(),
+                                 filePath.string()),
+                     events::Severity::Info});
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Failed to export meshes with colors to {}: {}",
+                                 filePath.string(),
+                                 e.what()),
+                     events::Severity::Error});
+            }
+            throw;
+        }
+    }
+
     void MeshWriter3mf::exportMeshWithColors(std::filesystem::path const & filePath,
                                              Mesh const & mesh,
                                              std::string const & meshName,

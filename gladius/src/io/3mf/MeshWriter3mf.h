@@ -65,6 +65,13 @@ namespace gladius::io
                           Document const * sourceDocument = nullptr,
                           bool writeThumbnail = false);
 
+        /// Export multiple meshes, each painted a solid color (material-based shell export)
+        void exportMeshesWithMaterialColors(
+            std::filesystem::path const & filePath,
+            std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> const & meshesWithColors,
+            Document const * sourceDocument = nullptr,
+            bool writeThumbnail = false);
+
         void exportMeshFromDocument(std::filesystem::path const & filePath,
                                     Document & document,
                                     ResourceKey const & resourceKey,

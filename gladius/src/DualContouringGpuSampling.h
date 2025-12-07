@@ -68,6 +68,14 @@ namespace gladius::dual_contouring
         [[nodiscard]] bool sampleCorners(std::vector<Eigen::Vector3f> const & positions,
                                          std::vector<float> & outValues);
 
+        /// Sample SDF values at corner positions with variable thickness
+        /// Returns false if GPU sampling fails and CPU fallback should be used
+        [[nodiscard]] bool sampleCornersVariableThickness(std::vector<Eigen::Vector3f> const & positions,
+                                         std::vector<float> & outValues,
+                                         float baseIsoValue,
+                                         std::vector<float> const & thicknessLUT,
+                                         int lutResolution);
+
         /// Sample SDF values and gradients at Hermite positions
         /// Returns false if GPU sampling fails and CPU fallback should be used
         [[nodiscard]] bool sampleHermite(std::vector<Eigen::Vector3f> const & positions,

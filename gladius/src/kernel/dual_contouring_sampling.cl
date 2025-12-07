@@ -253,3 +253,70 @@ __kernel void refineZeroCrossings(
     
     refinedPositions[gid] = (float4)(result.x, result.y, result.z, 0.0f);
 }
+
+// Variable thickness sampling kernel
+// Evaluates SDF with thickness modulation from a 3D LUT
+__kernel void sampleCornersVariableThickness(
+    __global const float4* positions,    // Input: array of (x,y,z,_) positions
+    __global float* values,              // Output: SDF values at positions
+    const unsigned int count,            // Number of positions to sample
+    PAYLOAD_ARGS,
+    const float baseIsoValue,            // Base ISO value (usually 0 or base offset)
+    __global const float* thicknessLUT,  // 3D LUT: RGB -> Thickness
+    const int lutResolution              // Resolution of the 3D LUT (e.g. 32)
+)
+{
+    const int gid = get_global_id(0);
+    
+    if (gid >= count)
+    {
+        return;
+    }
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Evaluate SDF at this position using the model function
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
+    const float3 color = clamp(sdfResult.xyz, 0.0f, 1.0f);
+    
+    // Trilinear interpolation of thickness from LUT
+    float3 uvw = color * (float)(lutResolution - 1);
+    int3 i = convert_int3(floor(uvw));
+    float3 f = uvw - convert_float3(i);
+    
+    // Clamp indices
+    i = clamp(i, 0, lutResolution - 2);
+    
+    // Helper macro for LUT access
+    #define LUT_IDX(x, y, z) (((x) * lutResolution + (y)) * lutResolution + (z))
+    
+    float c000 = thicknessLUT[LUT_IDX(i.x, i.y, i.z)];
+    float c001 = thicknessLUT[LUT_IDX(i.x, i.y, i.z + 1)];
+    float c010 = thicknessLUT[LUT_IDX(i.x, i.y + 1, i.z)];
+    float c011 = thicknessLUT[LUT_IDX(i.x, i.y + 1, i.z + 1)];
+    float c100 = thicknessLUT[LUT_IDX(i.x + 1, i.y, i.z)];
+    float c101 = thicknessLUT[LUT_IDX(i.x + 1, i.y, i.z + 1)];
+    float c110 = thicknessLUT[LUT_IDX(i.x + 1, i.y + 1, i.z)];
+    float c111 = thicknessLUT[LUT_IDX(i.x + 1, i.y + 1, i.z + 1)];
+    
+    float c00 = mix(c000, c001, f.z);
+    float c01 = mix(c010, c011, f.z);
+    float c10 = mix(c100, c101, f.z);
+    float c11 = mix(c110, c111, f.z);
+    
+    float c0 = mix(c00, c01, f.y);
+    float c1 = mix(c10, c11, f.y);
+    
+    float thickness = mix(c0, c1, f.x);
+    
+    // We want the surface at SDF = -thickness.
+    // Standard DC extracts at value = 0.
+    // So value = SDF - (-thickness) = SDF + thickness.
+    // We ignore baseIsoValue if the LUT contains the full cumulative thickness.
+    // If baseIsoValue is used, it might be an additional offset.
+    // Let's assume LUT contains the full thickness.
+    
+    values[gid] = distance + thickness + baseIsoValue;
+}

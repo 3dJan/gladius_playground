@@ -61,6 +61,8 @@ namespace gladius::hierarchical_dc
         float maxNormalDeviationDegrees{25.0F};  ///< Max allowed normal deviation between merged cells
         bool preserveAdaptiveDepthDuringCoarsening{true}; ///< Keep the first adaptive depth layer intact when merging
         std::size_t maxNodes{10000000U};         ///< Safety limit on total nodes to prevent OOM (0 = unlimited)
+        std::vector<float> thicknessLUT;         ///< Optional 3D LUT for variable thickness (RGB -> Thickness)
+        int lutResolution{0};                    ///< Resolution of the LUT (e.g. 32)
     };
 
     /// Quality presets for hierarchical dual contouring

@@ -251,4 +251,69 @@ namespace gladius
             outColors[i] = Eigen::Vector3f{clColors[i].s[0], clColors[i].s[1], clColors[i].s[2]};
         }
     }
+
+    void DualContouringSamplingProgram::sampleCornersVariableThickness(
+      std::vector<Eigen::Vector3f> const & positions,
+      std::vector<float> & outValues,
+      Primitives const & primitives,
+      float baseIsoValue,
+      std::vector<float> const & thicknessLUT,
+      int lutResolution)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outValues.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outValues.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer valueBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              outValues.size() * sizeof(cl_float));
+
+        cl::Buffer lutBuffer(m_ComputeContext->GetContext(),
+                             CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             thicknessLUT.size() * sizeof(float),
+                             const_cast<float*>(thicknessLUT.data()));
+
+        // Run kernel
+        m_programFront->run("sampleCornersVariableThickness",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           valueBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS,
+                           baseIsoValue,
+                           lutBuffer,
+                           lutResolution);
+
+        // Read results
+        m_ComputeContext->GetQueue().enqueueReadBuffer(valueBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       outValues.size() * sizeof(cl_float),
+                                                       outValues.data());
+    }
 }

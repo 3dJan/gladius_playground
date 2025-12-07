@@ -288,9 +288,9 @@ namespace gladius::ui
 
         if (ImGui::BeginTable("PaletteTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
-            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30.0F);
-            ImGui::TableSetupColumn("Color", ImGuiTableColumnFlags_WidthFixed, 150.0F);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 80.0F);
+            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 130.0F);
+            ImGui::TableSetupColumn("Color", ImGuiTableColumnFlags_WidthFixed, 250.0F);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 180.0F);
             ImGui::TableHeadersRow();
 
             for (std::size_t i = 0; i < m_palette.size(); ++i)
@@ -358,6 +358,12 @@ namespace gladius::ui
         ImGui::SetNextItemWidth(140.0F);
         ImGui::InputFloat("Total max thickness (mm, optional)", &m_constraints.totalMaxThickness, 0.5F, 1.0F, "%.3f");
 
+        ImGui::SetNextItemWidth(140.0F);
+        if (ImGui::InputInt("LUT resolution (per axis)", &m_lutResolution))
+        {
+            m_lutResolution = std::clamp(m_lutResolution, 2, 64); // keep sane bounds
+        }
+
         bool const canCompute = !m_materials.empty() && !m_palette.empty();
         ImGui::BeginDisabled(!canCompute);
         if (ImGui::Button("Compute"))
@@ -369,6 +375,24 @@ namespace gladius::ui
         {
             ImGui::SameLine();
             ImGui::TextDisabled("Add materials and palette colors to enable computation.");
+        }
+
+        ImGui::Separator();
+        bool const canBuildLut = !m_materials.empty();
+        ImGui::BeginDisabled(!canBuildLut);
+        if (ImGui::Button("Generate thickness LUT"))
+        {
+            computePrecomputedLuts();
+        }
+        ImGui::EndDisabled();
+        if (!canBuildLut)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Define materials first.");
+        }
+        if (!m_lutStatus.empty())
+        {
+            ImGui::TextDisabled("%s", m_lutStatus.c_str());
         }
     }
 
@@ -389,11 +413,11 @@ namespace gladius::ui
         int const columnCount = static_cast<int>(m_materials.size()) + 3;
         if (ImGui::BeginTable("ResultsTable", columnCount, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
-            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30.0F);
-            ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 90.0F);
+            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 130.0F);
+            ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 190.0F);
             for (auto const & mat : m_materials)
             {
-                ImGui::TableSetupColumn(mat.name.c_str(), ImGuiTableColumnFlags_WidthFixed, 110.0F);
+                ImGui::TableSetupColumn(mat.name.c_str(), ImGuiTableColumnFlags_WidthFixed, 200.0F);
             }
             ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 80.0F);
             ImGui::TableHeadersRow();
@@ -435,6 +459,72 @@ namespace gladius::ui
 
             ImGui::EndTable();
         }
+    }
+
+    void ColorToThicknessDialog::computePrecomputedLuts()
+    {
+        m_precomputedLuts.clear();
+        m_lutStatus.clear();
+
+        if (m_materials.empty() || m_lutResolution < 2)
+        {
+            m_lutStatus = "Cannot build LUT: need materials and resolution >= 2.";
+            return;
+        }
+
+        io::FilamentStack stack{m_materials};
+        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode, m_backgroundIndex};
+
+        std::size_t const layerCount = stack.size();
+        std::size_t const lutSize = static_cast<std::size_t>(m_lutResolution) *
+                                   static_cast<std::size_t>(m_lutResolution) *
+                                   static_cast<std::size_t>(m_lutResolution);
+
+        m_precomputedLuts.resize(layerCount);
+
+        float const denom = static_cast<float>(m_lutResolution - 1);
+
+        // Build one cumulative-thickness LUT per layer (bottom-to-top indexing)
+        for (std::size_t startLayer = 0; startLayer < layerCount; ++startLayer)
+        {
+            auto & lut = m_precomputedLuts[startLayer];
+            lut.resize(lutSize, 0.0F);
+
+            auto lutIndex = [this](int r, int g, int b) -> std::size_t
+            {
+                return (static_cast<std::size_t>(r) * static_cast<std::size_t>(m_lutResolution) +
+                        static_cast<std::size_t>(g)) * static_cast<std::size_t>(m_lutResolution) +
+                       static_cast<std::size_t>(b);
+            };
+
+            for (int r = 0; r < m_lutResolution; ++r)
+            {
+                for (int g = 0; g < m_lutResolution; ++g)
+                {
+                    for (int b = 0; b < m_lutResolution; ++b)
+                    {
+                        Eigen::Vector3f const color{
+                            static_cast<float>(r) / denom,
+                            static_cast<float>(g) / denom,
+                            static_cast<float>(b) / denom};
+
+                        io::ThicknessSolution const solution = solver.solve(color);
+
+                        float cumulative = 0.0F;
+                        for (std::size_t layer = startLayer;
+                             layer < solution.thicknesses.size();
+                             ++layer)
+                        {
+                            cumulative += solution.thicknesses[layer];
+                        }
+
+                        lut[lutIndex(r, g, b)] = cumulative;
+                    }
+                }
+            }
+        }
+
+        m_lutStatus = "Thickness LUT generated.";
     }
 
     void ColorToThicknessDialog::handleFileDialogResult()
@@ -496,6 +586,11 @@ namespace gladius::ui
         root["materials"] = materials;
         root["illuminationMode"] = (m_illuminationMode == io::IlluminationMode::Frontlit) ? "frontlit" : "backlit";
         root["backgroundIndex"] = m_backgroundIndex;
+        root["lutResolution"] = m_lutResolution;
+        if (!m_precomputedLuts.empty())
+        {
+            root["precomputedLuts"] = m_precomputedLuts;
+        }
         return root;
     }
 
@@ -554,6 +649,21 @@ namespace gladius::ui
         else if (m_backgroundIndex >= m_materials.size())
         {
             m_backgroundIndex = m_materials.size() - 1;
+        }
+
+        // Optional: restore LUT resolution and precomputed LUTs
+        m_lutResolution = std::clamp(json.value("lutResolution", m_lutResolution), 2, 64);
+        if (json.contains("precomputedLuts") && json["precomputedLuts"].is_array())
+        {
+            try
+            {
+                m_precomputedLuts = json["precomputedLuts"].get<std::vector<std::vector<float>>>();
+            }
+            catch (...)
+            {
+                // If parsing fails, leave LUTs empty
+                m_precomputedLuts.clear();
+            }
         }
     }
 
