@@ -461,9 +461,24 @@ namespace gladius::ui
         }
     }
 
+    std::string const & ColorToThicknessDialog::getLutStatus() const
+    {
+        return m_lutStatus;
+    }
+
+    bool ColorToThicknessDialog::ensurePrecomputedLuts()
+    {
+        if (!m_precomputedLuts.empty())
+        {
+            return true;
+        }
+
+        computePrecomputedLuts();
+        return !m_precomputedLuts.empty();
+    }
+
     void ColorToThicknessDialog::computePrecomputedLuts()
     {
-        m_precomputedLuts.clear();
         m_lutStatus.clear();
 
         if (m_materials.empty() || m_lutResolution < 2)
@@ -480,14 +495,15 @@ namespace gladius::ui
                                    static_cast<std::size_t>(m_lutResolution) *
                                    static_cast<std::size_t>(m_lutResolution);
 
-        m_precomputedLuts.resize(layerCount);
+                    std::vector<std::vector<float>> newLuts;
+                    newLuts.resize(layerCount);
 
         float const denom = static_cast<float>(m_lutResolution - 1);
 
         // Build one cumulative-thickness LUT per layer (bottom-to-top indexing)
         for (std::size_t startLayer = 0; startLayer < layerCount; ++startLayer)
         {
-            auto & lut = m_precomputedLuts[startLayer];
+            auto & lut = newLuts[startLayer];
             lut.resize(lutSize, 0.0F);
 
             auto lutIndex = [this](int r, int g, int b) -> std::size_t
@@ -524,6 +540,7 @@ namespace gladius::ui
             }
         }
 
+        m_precomputedLuts = std::move(newLuts);
         m_lutStatus = "Thickness LUT generated.";
     }
 

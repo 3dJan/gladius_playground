@@ -819,6 +819,45 @@ namespace gladius::ui
         
         ImGui::Spacing();
         ImGui::Spacing();
+
+                auto const & precomputedLuts = m_colorToThicknessDialog.getPrecomputedLuts();
+                bool const lutReady = !precomputedLuts.empty();
+                int const lutResolution = m_colorToThicknessDialog.getLutResolution();
+                bool const shellExportSupported = colorExportAvailable &&
+                    (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring);
+
+                ImGui::BeginDisabled(!shellExportSupported);
+                ImGui::Checkbox("Export shells with LUT", &m_enableShellBasedExport);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !shellExportSupported)
+                {
+                        ImGui::SetTooltip(
+                            "Shell-based export requires 3MF format, volumetric color, "
+                            "and the Manifold Dual Contouring method.");
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("One build item per shell with solid colors.");
+                ImGui::EndDisabled();
+
+                ImGui::Indent();
+                if (lutReady)
+                {
+                        ImGui::TextDisabled("LUT ready: %zu layers @ %d^3",
+                                                                precomputedLuts.size(),
+                                                                lutResolution);
+                }
+                else
+                {
+                        ImGui::TextDisabled("No LUT yet. It will be generated automatically at export.");
+                }
+                auto const & lutStatus = m_colorToThicknessDialog.getLutStatus();
+                if (!lutStatus.empty())
+                {
+                        ImGui::TextDisabled("%s", lutStatus.c_str());
+                }
+                ImGui::Unindent();
+
+                ImGui::Spacing();
+                ImGui::Spacing();
         
         // Future: Material settings placeholder
         ImGui::Text("Material Properties");
@@ -1073,25 +1112,54 @@ namespace gladius::ui
 
         core.updateBBox();
 
-        // Build a placeholder constant thickness solution; unused when LUT is provided
+        // Derive a per-layer thickness solution using LUTs when available; fallback to min thickness
         io::ThicknessSolution solution(stack.size());
         for (std::size_t i = 0; i < solution.thicknesses.size(); ++i)
         {
-            solution.thicknesses[i] = m_colorToThicknessDialog.getConstraints().minThickness;
+            float thickness = m_colorToThicknessDialog.getConstraints().minThickness;
+            if (i < precomputedLuts.size() && !precomputedLuts[i].empty())
+            {
+                int const res = std::max(2, lutResolution);
+                std::size_t const idx =
+                  (static_cast<std::size_t>(res - 1) * static_cast<std::size_t>(res) +
+                   static_cast<std::size_t>(res - 1)) * static_cast<std::size_t>(res) +
+                  static_cast<std::size_t>(res - 1);
+                if (idx < precomputedLuts[i].size())
+                {
+                    thickness = precomputedLuts[i][idx];
+                }
+            }
+            solution.thicknesses[i] = thickness;
         }
 
-        io::HierarchicalDualContouringOptions options{};
-        options.qualityPreset = m_hierarchicalQualityPreset;
+        io::ManifoldDualContouringOptions options{};
+        options.qualityPreset = m_manifoldQualityPreset;
         options.applyPreset();
-        options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
-        options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
-        options.config.projectVerticesToSurface = m_hierarchicalProjectToSurface;
-        options.config.enableCoarsening = m_hierarchicalEnableCoarsening;
-        options.config.minFeatureSize = m_hierarchicalMinFeatureSize;
-        if (!options.config.enableProgressiveRefinement)
+        options.enableGpu = m_manifoldEnableGpu;
+        options.enableCpuFallback = m_manifoldAllowCpuFallback;
+        options.enableCaching = m_manifoldEnableCaching;
+        options.isoValue = m_manifoldIsoValue;
+        if (m_manifoldMaxDepth > 0U)
         {
-            options.config.refinementIterations = 0U;
+            options.maxDepth = m_manifoldMaxDepth;
+            if (options.initialDepth > options.maxDepth)
+            {
+                options.initialDepth = options.maxDepth;
+            }
         }
+        options.minFeatureSize = m_manifoldMinFeatureSize;
+        options.enableChunking = m_manifoldEnableChunking;
+        options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
+        options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
+        options.subdivisionIterations = m_manifoldSubdivisionIterations;
+        options.projectToSurface = m_manifoldProjectToSurface;
+        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
+        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
+        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
+        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
+        options.simplificationQemWeight = std::max(0.0F,
+          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
 
         m_exportInProgress = true;
         if (m_exportState != nullptr)
@@ -1103,7 +1171,7 @@ namespace gladius::ui
         auto shells = generator.generateShells(
             stack,
             solution,
-            options.config,
+            options,
             lutResolution,
             m_colorToThicknessDialog.getConstraints(),
             &precomputedLuts);
@@ -1171,18 +1239,39 @@ namespace gladius::ui
             throw std::runtime_error("No target filename specified for mesh export");
         }
 
-        bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
-        
-        // For 3MF format, only certain methods are supported
-        bool const allowShell3mf = m_colorToThicknessDialog.hasPrecomputedLuts();
-        if (is3mf && m_selectedMethod != io::SurfaceExtractionMethod::LayeredMarchingCubes &&
-            m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring &&
-            !(allowShell3mf && m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring))
-        {
-            throw std::runtime_error(
-              "3MF export is currently only supported with layered marching cubes "
-              "or manifold dual contouring methods.");
-        }
+                bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
+                bool const wantsShellExport =
+                    is3mf && m_enableShellBasedExport &&
+                    m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring;
+
+                if (wantsShellExport && !m_colorToThicknessDialog.hasPrecomputedLuts())
+                {
+                        if (!m_colorToThicknessDialog.ensurePrecomputedLuts())
+                        {
+                                m_statusMessage = m_colorToThicknessDialog.getLutStatus();
+                                if (m_statusMessage.empty())
+                                {
+                                        m_statusMessage =
+                                            "Shell export requires materials and a generated LUT. "
+                                            "Open the Color -> Shell Thickness dialog to define materials.";
+                                }
+                                m_statusIsError = true;
+                                throw std::runtime_error(m_statusMessage);
+                        }
+                }
+
+                bool const shellLutReady = m_colorToThicknessDialog.hasPrecomputedLuts();
+                bool const is3mfMethodAllowed =
+                    m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes ||
+                    m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring;
+
+                if (is3mf && !is3mfMethodAllowed)
+                {
+                        throw std::runtime_error(
+                            "3MF export is currently only supported with layered marching cubes, "
+                            "manifold dual contouring, or shell-based hierarchical dual contouring when LUTs are "
+                            "available.");
+                }
 
         switch (m_selectedMethod)
         {
@@ -1230,32 +1319,16 @@ namespace gladius::ui
         }
         case io::SurfaceExtractionMethod::HierarchicalDualContouring:
         {
-            if (is3mf && m_colorToThicknessDialog.hasPrecomputedLuts())
+            throw std::runtime_error("Hierarchical dual contouring is deprecated. Use manifold dual contouring.");
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            if (is3mf && wantsShellExport)
             {
                 exportShellsTo3mf(core);
                 return;
             }
 
-            io::HierarchicalDualContouringOptions options{};
-            options.qualityPreset = m_hierarchicalQualityPreset;
-            options.applyPreset();
-            options.config.enableGpuAcceleration = m_hierarchicalEnableGpu;
-            options.config.enableProgressiveRefinement = m_hierarchicalEnableProgressiveRefinement;
-            options.config.projectVerticesToSurface = m_hierarchicalProjectToSurface;
-            options.config.enableCoarsening = m_hierarchicalEnableCoarsening;
-            options.config.minFeatureSize = m_hierarchicalMinFeatureSize;
-            if (!options.config.enableProgressiveRefinement)
-            {
-                options.config.refinementIterations = 0U;
-            }
-
-            m_hierarchicalExporter.setOptions(options);
-            m_hierarchicalExporter.beginExport(m_targetFile, core);
-            m_activeExporter = &m_hierarchicalExporter;
-            break;
-        }
-        case io::SurfaceExtractionMethod::ManifoldDualContouring:
-        {
             io::ManifoldDualContouringOptions options{};
             options.qualityPreset = m_manifoldQualityPreset;
             options.applyPreset();

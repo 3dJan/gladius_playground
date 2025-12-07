@@ -52,6 +52,8 @@ namespace gladius::ui
           return m_precomputedLuts;
         }
 
+        [[nodiscard]] std::string const & getLutStatus() const;
+
         [[nodiscard]] int getLutResolution() const
         {
           return m_lutResolution;
@@ -61,6 +63,9 @@ namespace gladius::ui
         {
           return !m_precomputedLuts.empty();
         }
+
+        /// Ensure LUTs exist; computes them if missing. Returns true when ready.
+        bool ensurePrecomputedLuts();
 
         /// Get the filament stack (bottom-to-top) currently defined in the dialog
         [[nodiscard]] io::FilamentStack getFilamentStack() const

@@ -1,8 +1,9 @@
 #include "ShellGenerator.h"
 
 #include "FrontlitThicknessSolver.h"
-#include "HierarchicalDualContouring.h"
+#include "SurfaceExtractionOptions.h"
 #include "compute/ComputeCore.h"
+#include "compute/ManifoldDualContouringGpu.h"
 #include "kernel/types.h"
 
 #include <memory>
@@ -85,10 +86,66 @@ namespace gladius::io
         return buildCumulativeThicknessLutInternal(solver, startLayer, lutResolution);
     }
 
+    namespace
+    {
+        [[nodiscard]] float sampleCumulativeThickness(std::vector<float> const & lut,
+                                                      int lutResolution)
+        {
+            if (lut.empty() || lutResolution <= 1)
+            {
+                return 0.0F;
+            }
+
+            // Use the brightest corner (r=g=b=lutResolution-1) as a representative maximum thickness.
+            std::size_t const idx =
+              (static_cast<std::size_t>(lutResolution - 1) * static_cast<std::size_t>(lutResolution) +
+               static_cast<std::size_t>(lutResolution - 1)) * static_cast<std::size_t>(lutResolution) +
+              static_cast<std::size_t>(lutResolution - 1);
+            return idx < lut.size() ? lut[idx] : 0.0F;
+        }
+
+        [[nodiscard]] compute::ManifoldDualContouringConfig toComputeConfig(
+          ManifoldDualContouringOptions const & options)
+        {
+            compute::ManifoldDualContouringConfig cfg{};
+            cfg.initialDepth = options.initialDepth;
+            cfg.maxDepth = options.maxDepth;
+            cfg.enableGpu = options.enableGpu;
+            cfg.enableCpuFallback = options.enableCpuFallback;
+            cfg.enableCaching = options.enableCaching;
+            cfg.isoValue = options.isoValue;
+            cfg.minFeatureSize = options.minFeatureSize;
+            cfg.enableChunking = options.enableChunking;
+            cfg.enableHierarchicalOctree = options.enableHierarchicalOctree;
+            cfg.enableSharpFeaturePostProcess = options.enableSharpFeaturePostProcess;
+            cfg.sharpFeatureAngleThreshold = options.sharpFeatureAngleThreshold;
+            cfg.subdivisionIterations = options.subdivisionIterations;
+            cfg.projectToSurface = options.projectToSurface;
+            cfg.simplificationMethod = static_cast<compute::SimplificationMethod>(
+              static_cast<int>(options.simplificationMethod));
+            cfg.enableSimplification = options.enableSimplification;
+            cfg.simplificationMaxSdfError = options.simplificationMaxSdfError;
+            cfg.simplificationMaxQemError = options.simplificationMaxQemError;
+            cfg.simplificationMaxNormalDeviation = options.simplificationMaxNormalDeviation;
+            cfg.simplificationSdfWeight = options.simplificationSdfWeight;
+            cfg.simplificationQemWeight = options.simplificationQemWeight;
+            cfg.simplificationNormalWeight = options.simplificationNormalWeight;
+            cfg.simplificationSharpEdgeThreshold = options.simplificationSharpEdgeThreshold;
+            cfg.simplificationBatchSize = options.simplificationBatchSize;
+            cfg.simplificationMaxPasses = options.simplificationMaxPasses;
+            cfg.simplificationTargetTriangles = options.simplificationTargetTriangles;
+            cfg.simplificationTargetReduction = options.simplificationTargetReduction;
+            cfg.enableQualityImprovement = true;
+            cfg.qualityImprovementPasses = 3U;
+            cfg.qualityMinAngleThreshold = 15.0F;
+            return cfg;
+        }
+    }
+
     std::vector<ShellGenerator::ShellMesh> ShellGenerator::generateShells(
         FilamentStack const& stack,
         ThicknessSolution const& solution,
-        hierarchical_dc::HierarchicalConfig config,
+        ManifoldDualContouringOptions const& options,
         int thicknessLutResolution,
         ThicknessConstraints thicknessConstraints,
         std::vector<std::vector<float>> const* precomputedLuts)
@@ -96,6 +153,12 @@ namespace gladius::io
         std::vector<ShellMesh> shells;
         
         if (stack.size() != solution.thicknesses.size())
+        {
+            return shells;
+        }
+
+        // Ensure bounding box is available for the GPU pipeline
+        if (!m_core.updateBBox())
         {
             return shells;
         }
@@ -108,33 +171,44 @@ namespace gladius::io
         {
             lutSolver = std::make_unique<FrontlitThicknessSolver>(stack, thicknessConstraints);
         }
-        
-        BoundingBox const bounds = m_document.computeBoundingBox();
+
+        compute::ManifoldDualContouringGpu gpuPipeline(m_core);
+        compute::ManifoldDualContouringConfig baseConfig = toComputeConfig(options);
+        baseConfig.enableQualityImprovement = true;
+        baseConfig.qualityImprovementPasses = 3U;
+        baseConfig.qualityMinAngleThreshold = 15.0F;
 
         // Iterate from top (last element) to bottom (first element)
         for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i)
         {
+            compute::ManifoldDualContouringConfig config = baseConfig;
+
             if (useVariableThickness)
             {
-                config.isoValue = 0.0f;
-                config.lutResolution = thicknessLutResolution;
+                float thickness = 0.0F;
                 if (precomputedLuts != nullptr &&
                     i < static_cast<int>(precomputedLuts->size()) &&
                     !precomputedLuts->at(static_cast<std::size_t>(i)).empty())
                 {
-                    config.thicknessLUT = precomputedLuts->at(static_cast<std::size_t>(i));
+                    thickness = sampleCumulativeThickness(
+                        precomputedLuts->at(static_cast<std::size_t>(i)), thicknessLutResolution);
                 }
                 else if (lutSolver)
                 {
-                    config.thicknessLUT = buildCumulativeThicknessLutInternal(
+                    auto lut = buildCumulativeThicknessLutInternal(
                         *lutSolver,
                         static_cast<std::size_t>(i),
                         thicknessLutResolution);
+                    thickness = sampleCumulativeThickness(lut, thicknessLutResolution);
                 }
-                else
+
+                if (thickness <= 0.0F)
                 {
-                    config.thicknessLUT.clear();
+                    thickness = solution.thicknesses[i];
                 }
+
+                config.isoValue = -currentOffset;
+                currentOffset += thickness;
             }
             else
             {
@@ -143,36 +217,23 @@ namespace gladius::io
                 // The kernel computes `distance - isoValue`.
                 // So we set isoValue = -currentOffset.
                 config.isoValue = -currentOffset;
-                config.thicknessLUT.clear();
-                config.lutResolution = 0;
+                currentOffset += solution.thicknesses[i];
             }
-            
-            // Create builder
-            hierarchical_dc::HierarchicalOctreeBuilder builder(m_core, config);
-            
-            // Build octree
-            builder.buildOctree(bounds);
-            
-            // Extract mesh
-            std::vector<Eigen::Vector3f> vertices;
-            std::vector<std::uint32_t> indices;
-            builder.extractMesh(vertices, indices);
-            
-            if (!vertices.empty() && !indices.empty())
+
+            gpuPipeline.setConfig(config);
+            gpuPipeline.generateMesh();
+
+            auto const & mesh = gpuPipeline.getMesh();
+
+            if (!mesh.positions.empty() && !mesh.indices.empty())
             {
                 ShellMesh shell;
-                shell.vertices = std::move(vertices);
-                shell.indices = std::move(indices);
+                shell.vertices = mesh.positions;
+                shell.indices = mesh.indices;
                 shell.filamentName = stack[i].name;
                 shell.layerIndex = i;
                 
                 shells.push_back(std::move(shell));
-            }
-            
-            // Update offset for the next inner shell (only used in constant thickness mode)
-            if (!useVariableThickness)
-            {
-                currentOffset += solution.thicknesses[i];
             }
         }
         

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "FilamentOpticalProperties.h"
-#include "HierarchicalDualContouring.h"
+#include "SurfaceExtractionOptions.h"
 #include "Mesh.h"
 #include "Document.h"
 
@@ -42,7 +42,7 @@ namespace gladius::io
         std::vector<ShellMesh> generateShells(
             FilamentStack const& stack,
             ThicknessSolution const& solution,
-            hierarchical_dc::HierarchicalConfig config,
+            ManifoldDualContouringOptions const& options,
             int thicknessLutResolution = 0,
             ThicknessConstraints thicknessConstraints = {},
             std::vector<std::vector<float>> const* precomputedLuts = nullptr);
