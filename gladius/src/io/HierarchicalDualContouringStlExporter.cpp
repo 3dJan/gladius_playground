@@ -49,7 +49,7 @@ namespace gladius::io
     }
 
     void HierarchicalDualContouringStlExporter::setOptions(
-      HierarchicalDualContouringOptions options)
+    hierarchical_dc::HierarchicalConfig options)
     {
         m_options = std::move(options);
     }
@@ -163,7 +163,7 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
-        hierarchical_dc::HierarchicalConfig config = m_options.config;
+        hierarchical_dc::HierarchicalConfig config = m_options;
 
         hierarchical_dc::HierarchicalOctreeBuilder builder(generator, config);
         builder.buildOctree(boundingBox.value());

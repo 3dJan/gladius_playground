@@ -272,129 +272,145 @@ namespace gladius::compute
 
         auto & queue = m_ComputeContext->GetQueue();
 
-        // First, sort the octree so binary search works
-        sortOctreeByMorton(octreeBuffer, nodeCount);
+        // Iterative halo generation: repeat until convergence (no new nodes created)
+        // This solves the "cascading halo problem" where halos need their own neighbors
+        std::size_t iteration = 0;
+        std::size_t previousNodeCount = 0;
+        constexpr std::size_t MAX_ITERATIONS = 5;
+        std::size_t totalHaloNodesAdded = 0;
 
-        // 1. Count halo neighbors needed per surface cell
-        auto haloCountBuffer = std::make_unique<cl::Buffer>(
-            m_ComputeContext->GetContext(),
-            CL_MEM_READ_WRITE,
-            nodeCount * sizeof(int));
+        std::cout << "Starting iterative halo generation..." << std::endl;
 
-        cl::NDRange global(nodeCount);
-        m_programFront->run("count_halo_neighbors",
-                           cl::NullRange,
-                           global,
-                           *octreeBuffer,
-                           *haloCountBuffer,
-                           static_cast<int>(nodeCount),
-                           static_cast<cl_uint>(maxCoord),
-                           static_cast<cl_uchar>(depth));
-
-        // 2. CPU-side prefix sum for halo offsets
-        std::vector<int> haloCounts(nodeCount);
-        queue.enqueueReadBuffer(*haloCountBuffer, CL_TRUE, 0, nodeCount * sizeof(int), haloCounts.data());
-
-        std::vector<int> haloOffsets(nodeCount);
-        int totalHaloNodes = 0;
-        for (std::size_t i = 0; i < nodeCount; ++i)
+        while (iteration < MAX_ITERATIONS)
         {
-            haloOffsets[i] = totalHaloNodes;
-            totalHaloNodes += haloCounts[i];
-        }
+            // Sort the octree so binary search works
+            sortOctreeByMorton(octreeBuffer, nodeCount);
 
-        if (totalHaloNodes == 0)
-        {
-            // No halo nodes needed - mesh should already be watertight
-            return;
-        }
+            // 1. Count halo neighbors needed per cell (including existing halos from previous iterations)
+            auto haloCountBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                nodeCount * sizeof(int));
 
-        std::cout << "Adding " << totalHaloNodes << " halo nodes for watertight mesh" << std::endl;
+            cl::NDRange global(nodeCount);
+            m_programFront->run("count_halo_neighbors",
+                               cl::NullRange,
+                               global,
+                               *octreeBuffer,
+                               *haloCountBuffer,
+                               static_cast<int>(nodeCount),
+                               static_cast<cl_uint>(maxCoord),
+                               static_cast<cl_uchar>(depth));
 
-        auto haloOffsetBuffer = std::make_unique<cl::Buffer>(
-            m_ComputeContext->GetContext(),
-            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-            nodeCount * sizeof(int),
-            haloOffsets.data());
+            // 2. CPU-side prefix sum for halo offsets
+            std::vector<int> haloCounts(nodeCount);
+            queue.enqueueReadBuffer(*haloCountBuffer, CL_TRUE, 0, nodeCount * sizeof(int), haloCounts.data());
 
-        // 3. Emit halo nodes
-        auto haloNodesBuffer = std::make_unique<cl::Buffer>(
-            m_ComputeContext->GetContext(),
-            CL_MEM_WRITE_ONLY,
-            static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode));
-
-        m_programFront->run("emit_halo_neighbors",
-                           cl::NullRange,
-                           global,
-                           *octreeBuffer,
-                           *haloOffsetBuffer,
-                           *haloNodesBuffer,
-                           static_cast<int>(nodeCount),
-                           static_cast<cl_uint>(maxCoord),
-                           static_cast<cl_uchar>(depth));
-
-        // 4. Read halo nodes, deduplicate, merge with original octree
-        std::vector<OctreeNode> haloNodes(static_cast<std::size_t>(totalHaloNodes));
-        queue.enqueueReadBuffer(*haloNodesBuffer, CL_TRUE, 0,
-                               static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode),
-                               haloNodes.data());
-
-        // Deduplicate halo nodes, MERGING edgeMasks for nodes at the same position
-        // Multiple surface cells may contribute edges to the same halo node
-        std::sort(haloNodes.begin(), haloNodes.end(),
-                 [](OctreeNode const & a, OctreeNode const & b)
-                 { return a.mortonCode < b.mortonCode; });
-
-        // Custom deduplication that merges edgeMask and internalMask
-        if (!haloNodes.empty())
-        {
-            auto writeIt = haloNodes.begin();
-            for (auto readIt = haloNodes.begin() + 1; readIt != haloNodes.end(); ++readIt)
+            std::vector<int> haloOffsets(nodeCount);
+            int totalHaloNodes = 0;
+            for (std::size_t i = 0; i < nodeCount; ++i)
             {
-                if (readIt->mortonCode == writeIt->mortonCode)
-                {
-                    // Merge edge masks (OR them together)
-                    writeIt->edgeMask |= readIt->edgeMask;
-                    writeIt->internalMask |= readIt->internalMask;
-                }
-                else
-                {
-                    // Move to next unique position
-                    ++writeIt;
-                    *writeIt = *readIt;
-                }
+                haloOffsets[i] = totalHaloNodes;
+                totalHaloNodes += haloCounts[i];
             }
-            haloNodes.erase(writeIt + 1, haloNodes.end());
+
+            if (totalHaloNodes == 0)
+            {
+                // Convergence reached - no more halo nodes needed
+                std::cout << "  Iteration " << iteration << ": Convergence reached (no new halos needed)" << std::endl;
+                break;
+            }
+
+            std::cout << "  Iteration " << iteration << ": Adding " << totalHaloNodes << " halo nodes" << std::endl;
+
+            auto haloOffsetBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                nodeCount * sizeof(int),
+                haloOffsets.data());
+
+            // 3. Emit halo nodes
+            auto haloNodesBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_WRITE_ONLY,
+                static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode));
+
+            m_programFront->run("emit_halo_neighbors",
+                               cl::NullRange,
+                               global,
+                               *octreeBuffer,
+                               *haloOffsetBuffer,
+                               *haloNodesBuffer,
+                               static_cast<int>(nodeCount),
+                               static_cast<cl_uint>(maxCoord),
+                               static_cast<cl_uchar>(depth));
+
+            // 4. Read halo nodes, deduplicate, merge with original octree
+            std::vector<OctreeNode> haloNodes(static_cast<std::size_t>(totalHaloNodes));
+            queue.enqueueReadBuffer(*haloNodesBuffer, CL_TRUE, 0,
+                                   static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode),
+                                   haloNodes.data());
+
+            // Deduplicate halo nodes (same Morton code = same position)
+            // Since we set edgeMask=0 for all halos now, we don't need to merge edgeMasks
+            std::sort(haloNodes.begin(), haloNodes.end(),
+                     [](OctreeNode const & a, OctreeNode const & b)
+                     { return a.mortonCode < b.mortonCode; });
+
+            haloNodes.erase(std::unique(haloNodes.begin(), haloNodes.end(),
+                                       [](OctreeNode const & a, OctreeNode const & b)
+                                       { return a.mortonCode == b.mortonCode; }),
+                           haloNodes.end());
+
+            if (haloNodes.empty())
+            {
+                std::cout << "  Iteration " << iteration << ": All halos were duplicates, convergence reached" << std::endl;
+                break;
+            }
+
+            std::cout << "  After deduplication: " << haloNodes.size() << " unique halo nodes" << std::endl;
+            totalHaloNodesAdded += haloNodes.size();
+
+            // 5. Read original nodes
+            std::vector<OctreeNode> originalNodes(nodeCount);
+            queue.enqueueReadBuffer(*octreeBuffer, CL_TRUE, 0,
+                                   nodeCount * sizeof(OctreeNode),
+                                   originalNodes.data());
+
+            // 6. Merge and sort
+            previousNodeCount = nodeCount;
+            originalNodes.insert(originalNodes.end(), haloNodes.begin(), haloNodes.end());
+            std::sort(originalNodes.begin(), originalNodes.end(),
+                     [](OctreeNode const & a, OctreeNode const & b)
+                     { return a.mortonCode < b.mortonCode; });
+
+            // 7. Write back to new buffer
+            std::size_t const newNodeCount = originalNodes.size();
+            octreeBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                newNodeCount * sizeof(OctreeNode),
+                originalNodes.data());
+
+            nodeCount = newNodeCount;
+            ++iteration;
+
+            // Check for convergence
+            if (nodeCount == previousNodeCount)
+            {
+                std::cout << "  Iteration " << iteration << ": Convergence reached (no new unique nodes)" << std::endl;
+                break;
+            }
         }
 
-        if (haloNodes.empty())
+        if (iteration >= MAX_ITERATIONS)
         {
-            return;
+            std::cout << "  Warning: Reached maximum iterations (" << MAX_ITERATIONS 
+                      << ") without full convergence" << std::endl;
         }
 
-        std::cout << "After deduplication: " << haloNodes.size() << " unique halo nodes" << std::endl;
-
-        // 5. Read original nodes
-        std::vector<OctreeNode> originalNodes(nodeCount);
-        queue.enqueueReadBuffer(*octreeBuffer, CL_TRUE, 0,
-                               nodeCount * sizeof(OctreeNode),
-                               originalNodes.data());
-
-        // 6. Merge and sort
-        originalNodes.insert(originalNodes.end(), haloNodes.begin(), haloNodes.end());
-        std::sort(originalNodes.begin(), originalNodes.end(),
-                 [](OctreeNode const & a, OctreeNode const & b)
-                 { return a.mortonCode < b.mortonCode; });
-
-        // 7. Write back to new buffer
-        std::size_t const newNodeCount = originalNodes.size();
-        octreeBuffer = std::make_unique<cl::Buffer>(
-            m_ComputeContext->GetContext(),
-            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-            newNodeCount * sizeof(OctreeNode),
-            originalNodes.data());
-
-        nodeCount = newNodeCount;
+        std::cout << "Iterative halo generation complete: " << totalHaloNodesAdded 
+                  << " total halo nodes added in " << iteration << " iterations" << std::endl;
     }
 
     ManifoldDualContouringProgram::DiagnosticCounters ManifoldDualContouringProgram::runQuadDiagnostics(

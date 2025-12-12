@@ -39,11 +39,6 @@ namespace gladius::io
         }
     }
 
-    void HierarchicalDualContouringOptions::applyPreset()
-    {
-        hierarchical_dc::applyQualityPreset(config, qualityPreset);
-    }
-
     void ManifoldDualContouringOptions::applyPreset()
     {
         switch (qualityPreset)

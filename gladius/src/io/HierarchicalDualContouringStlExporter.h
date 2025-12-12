@@ -29,7 +29,7 @@ namespace gladius::io
         HierarchicalDualContouringStlExporter();
         explicit HierarchicalDualContouringStlExporter(events::SharedLogger logger);
 
-        void setOptions(HierarchicalDualContouringOptions options);
+        void setOptions(hierarchical_dc::HierarchicalConfig options);
 
         void beginExport(std::filesystem::path const & fileName, ComputeCore & generator) override;
         bool advanceExport(ComputeCore & generator) override;
@@ -54,7 +54,7 @@ namespace gladius::io
                              std::vector<std::uint32_t> const & indices) const;
 
         events::SharedLogger m_logger;
-        HierarchicalDualContouringOptions m_options{};
+        hierarchical_dc::HierarchicalConfig m_options{};
         std::filesystem::path m_targetFile;
         ComputeCore * m_computeCore{nullptr};
         std::atomic<State> m_state{State::Idle};

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "../HierarchicalDualContouring.h"
-
 #include <cstddef>
 #include <optional>
 
@@ -11,7 +9,6 @@ namespace gladius::io
     {
         LayeredMarchingCubes,
         DualContouring,
-        HierarchicalDualContouring,
         ManifoldDualContouring
     };
 
@@ -44,18 +41,6 @@ namespace gladius::io
         float curvatureThreshold{0.5F};
         bool enableBalancedRefinement{false};
         
-        /// Apply quality preset parameters
-        void applyPreset();
-    };
-
-    using HierarchicalDualContouringQuality = hierarchical_dc::HierarchicalQuality;
-
-    struct HierarchicalDualContouringOptions
-    {
-        HierarchicalDualContouringQuality qualityPreset{
-          HierarchicalDualContouringQuality::Balanced};
-        hierarchical_dc::HierarchicalConfig config{};
-
         /// Apply quality preset parameters
         void applyPreset();
     };
@@ -118,7 +103,6 @@ namespace gladius::io
         SurfaceExtractionMethod method{SurfaceExtractionMethod::LayeredMarchingCubes};
         std::size_t marchingCubesQualityLevel{1U};
         DualContouringOptions dualContouring{};
-        HierarchicalDualContouringOptions hierarchicalDualContouring{};
         ManifoldDualContouringOptions manifoldDualContouring{};
     };
 }

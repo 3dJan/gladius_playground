@@ -5,7 +5,6 @@
 #include "io/3mf/FaceColorSampler.h"
 #include "ColorToThicknessDialog.h"
 #include "io/DualContouringStlExporter.h"
-#include "io/HierarchicalDualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/MeshExporter3mf.h"
@@ -83,7 +82,6 @@ namespace gladius::ui
         vdb::MeshExporter m_layeredExporter;
         vdb::MeshExporter3mf m_layeredExporter3mf;
         io::DualContouringStlExporter m_dualExporter;
-        io::HierarchicalDualContouringStlExporter m_hierarchicalExporter;
         io::ManifoldDualContouringStlExporter m_manifoldExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
@@ -94,13 +92,6 @@ namespace gladius::ui
         std::size_t m_marchingCubesQuality = 1U;
         io::DualContouringQuality m_dualQualityPreset = io::DualContouringQuality::Balanced;
         bool m_dualForceUniform = false;
-        io::HierarchicalDualContouringQuality m_hierarchicalQualityPreset =
-          io::HierarchicalDualContouringQuality::Balanced;
-        bool m_hierarchicalEnableGpu = true;
-        bool m_hierarchicalEnableProgressiveRefinement = true;
-        bool m_hierarchicalProjectToSurface = true;
-        bool m_hierarchicalEnableCoarsening = false;
-        float m_hierarchicalMinFeatureSize = 0.0F;
         io::ManifoldDualContouringQuality m_manifoldQualityPreset =
           io::ManifoldDualContouringQuality::UltraFine;
         bool m_manifoldEnableGpu = true;

@@ -1111,10 +1111,106 @@ int findNodeByMorton(__global const OctreeNode* nodes, int numNodes, ulong targe
     return -1;
 }
 
+/// Get the 4 cells that share a specific edge
+/// Returns array of coordinate offsets relative to the given cell
+/// Edge numbering (matching the edgeMask bits):
+/// 0: X at y=0,z=0 | 1: Y at x=1,z=0 | 2: X at y=1,z=0 | 3: Y at x=0,z=0
+/// 4: X at y=0,z=1 | 5: Y at x=1,z=1 | 6: X at y=1,z=1 | 7: Y at x=0,z=1
+/// 8: Z at x=0,y=0 | 9: Z at x=1,y=0 | 10: Z at x=1,y=1 | 11: Z at x=0,y=1
+inline void getEdgeNeighbors(int edge, __private long out_dx[4], __private long out_dy[4], __private long out_dz[4])
+{
+    // Each edge is shared by exactly 4 cells
+    // Store offsets in the output arrays
+    switch(edge)
+    {
+        case 0: // X-axis at min Y, min Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 0; out_dy[1] = -1; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = -1;
+            out_dx[3] = 0; out_dy[3] = -1; out_dz[3] = -1;
+            break;
+        case 1: // Y-axis at max X, min Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = -1;
+            out_dx[3] = 1; out_dy[3] = 0; out_dz[3] = -1;
+            break;
+        case 2: // X-axis at max Y, min Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 0; out_dy[1] = 1; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = -1;
+            out_dx[3] = 0; out_dy[3] = 1; out_dz[3] = -1;
+            break;
+        case 3: // Y-axis at min X, min Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = -1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = -1;
+            out_dx[3] = -1; out_dy[3] = 0; out_dz[3] = -1;
+            break;
+        case 4: // X-axis at min Y, max Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 0; out_dy[1] = -1; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = 1;
+            out_dx[3] = 0; out_dy[3] = -1; out_dz[3] = 1;
+            break;
+        case 5: // Y-axis at max X, max Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = 1;
+            out_dx[3] = 1; out_dy[3] = 0; out_dz[3] = 1;
+            break;
+        case 6: // X-axis at max Y, max Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 0; out_dy[1] = 1; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = 1;
+            out_dx[3] = 0; out_dy[3] = 1; out_dz[3] = 1;
+            break;
+        case 7: // Y-axis at min X, max Z
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = -1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 0; out_dz[2] = 1;
+            out_dx[3] = -1; out_dy[3] = 0; out_dz[3] = 1;
+            break;
+        case 8: // Z-axis at min X, min Y
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = -1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = -1; out_dz[2] = 0;
+            out_dx[3] = -1; out_dy[3] = -1; out_dz[3] = 0;
+            break;
+        case 9: // Z-axis at max X, min Y
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = -1; out_dz[2] = 0;
+            out_dx[3] = 1; out_dy[3] = -1; out_dz[3] = 0;
+            break;
+        case 10: // Z-axis at max X, max Y
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = 1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 1; out_dz[2] = 0;
+            out_dx[3] = 1; out_dy[3] = 1; out_dz[3] = 0;
+            break;
+        case 11: // Z-axis at min X, max Y
+            out_dx[0] = 0; out_dy[0] = 0; out_dz[0] = 0;
+            out_dx[1] = -1; out_dy[1] = 0; out_dz[1] = 0;
+            out_dx[2] = 0; out_dy[2] = 1; out_dz[2] = 0;
+            out_dx[3] = -1; out_dy[3] = 1; out_dz[3] = 0;
+            break;
+        default:
+            // Invalid edge - return zeros
+            for (int i = 0; i < 4; i++)
+            {
+                out_dx[i] = 0;
+                out_dy[i] = 0;
+                out_dz[i] = 0;
+            }
+            break;
+    }
+}
+
 /// Count missing halo neighbors for each surface cell
-/// We check ALL 26 neighbors (3x3x3 cube minus center) because:
-/// - +X,+Y,+Z directions are needed when this cell emits quads for its edges
-/// - -X,-Y,-Z directions are needed when NEIGHBOR cells emit quads that include this cell
+/// Strategy: For each edge with a surface crossing, ensure all 4 cells sharing
+/// that edge exist. This prevents holes when forming quads.
+/// This is more precise than the previous 26-neighborhood approach.
 __kernel void count_halo_neighbors(
     __global const OctreeNode* nodes,
     __global int* haloCounts,
@@ -1137,37 +1233,47 @@ __kernel void count_halo_neighbors(
     ulong3 coords = decodeMorton3(node.mortonCode);
     int count = 0;
     
-    // Check all 26 neighbors in the 3x3x3 cube around this cell
-    for (int dz = -1; dz <= 1; dz++)
+    // For each edge with a surface crossing, check if all 4 sharing cells exist
+    for (int edge = 0; edge < 12; edge++)
     {
-        for (int dy = -1; dy <= 1; dy++)
+        // Skip edges without surface crossing
+        if (!(node.edgeMask & (1u << edge)))
+            continue;
+        
+        // Get the 4 cells that share this edge
+        long dx[4], dy[4], dz[4];
+        getEdgeNeighbors(edge, dx, dy, dz);
+        
+        for (int i = 0; i < 4; i++)
         {
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                // Skip self
-                if (dx == 0 && dy == 0 && dz == 0) continue;
-                
-                // Check bounds
-                long nx = (long)coords.x + dx;
-                long ny = (long)coords.y + dy;
-                long nz = (long)coords.z + dz;
-                
-                if (nx < 0 || ny < 0 || nz < 0) continue;
-                if (nx > maxCoord || ny > maxCoord || nz > maxCoord) continue;
-                
-                // Check if neighbor exists
-                ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
-                if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
-                    count++;
-            }
+            // Skip self (always at index 0 with offset 0,0,0)
+            if (dx[i] == 0 && dy[i] == 0 && dz[i] == 0)
+                continue;
+            
+            // Check bounds
+            long nx = (long)coords.x + dx[i];
+            long ny = (long)coords.y + dy[i];
+            long nz = (long)coords.z + dz[i];
+            
+            if (nx < 0 || ny < 0 || nz < 0)
+                continue;
+            if (nx > maxCoord || ny > maxCoord || nz > maxCoord)
+                continue;
+            
+            // Check if neighbor exists
+            ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
+            if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
+                count++;
         }
     }
     
     haloCounts[id] = count;
 }
 
-/// Emit halo nodes for missing neighbors (all 26 directions)
-/// Also compute edgeMask for halo nodes based on corresponding edges in neighbor surface cells
+/// Emit halo nodes for missing edge neighbors
+/// For each edge with a surface crossing, ensure all 4 sharing cells exist.
+/// Halo nodes are created with edgeMask=0 so they don't try to emit quads themselves.
+/// This prevents the cascading halo problem.
 __kernel void emit_halo_neighbors(
     __global const OctreeNode* nodes,
     __global const int* haloOffsets,
@@ -1187,88 +1293,47 @@ __kernel void emit_halo_neighbors(
     ulong3 coords = decodeMorton3(node.mortonCode);
     int writeIdx = haloOffsets[id];
     
-    // Edge correspondence: edge at (cx, cy, cz) corresponds to edge at halo offset
-    // Surface cell at (0,0,0) with edge X corresponds to halo at offset (dx, dy, dz) with edge Y:
-    // Edge 0 (X at y=0, z=0) -> Edge 6 at offset (0, -1, -1)  (X at y=max, z=max)
-    // Edge 3 (Y at x=0, z=0) -> Edge 5 at offset (-1, 0, -1)  (Y at x=max, z=max)
-    // Edge 8 (Z at x=0, y=0) -> Edge 10 at offset (-1, -1, 0) (Z at x=max, y=max)
-    // Edge 1 (Y at x=1, z=0) -> Edge 5 at offset (0, 0, -1)
-    // Edge 2 (X at y=1, z=0) -> Edge 6 at offset (0, 0, -1)
-    // Edge 4 (X at y=0, z=1) -> Edge 6 at offset (0, -1, 0)
-    // Edge 7 (Y at x=0, z=1) -> Edge 5 at offset (-1, 0, 0)
-    // Edge 9 (Z at x=1, y=0) -> Edge 10 at offset (0, -1, 0)
-    // Edge 11 (Z at x=0, y=1) -> Edge 10 at offset (-1, 0, 0)
-    
-    // Check all 26 neighbors in the 3x3x3 cube around this cell
-    for (int dz = -1; dz <= 1; dz++)
+    // For each edge with a surface crossing, check if all 4 sharing cells exist
+    for (int edge = 0; edge < 12; edge++)
     {
-        for (int dy = -1; dy <= 1; dy++)
+        // Skip edges without surface crossing
+        if (!(node.edgeMask & (1u << edge)))
+            continue;
+        
+        // Get the 4 cells that share this edge
+        long dx[4], dy[4], dz[4];
+        getEdgeNeighbors(edge, dx, dy, dz);
+        
+        for (int i = 0; i < 4; i++)
         {
-            for (int dx = -1; dx <= 1; dx++)
+            // Skip self (always at index 0)
+            if (dx[i] == 0 && dy[i] == 0 && dz[i] == 0)
+                continue;
+            
+            // Check bounds
+            long nx = (long)coords.x + dx[i];
+            long ny = (long)coords.y + dy[i];
+            long nz = (long)coords.z + dz[i];
+            
+            if (nx < 0 || ny < 0 || nz < 0)
+                continue;
+            if (nx > maxCoord || ny > maxCoord || nz > maxCoord)
+                continue;
+            
+            // Check if neighbor exists
+            ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
+            if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
             {
-                // Skip self
-                if (dx == 0 && dy == 0 && dz == 0) continue;
-                
-                // Check bounds
-                long nx = (long)coords.x + dx;
-                long ny = (long)coords.y + dy;
-                long nz = (long)coords.z + dz;
-                
-                if (nx < 0 || ny < 0 || nz < 0) continue;
-                if (nx > maxCoord || ny > maxCoord || nz > maxCoord) continue;
-                
-                // Check if neighbor exists
-                ulong nMorton = encodeMorton3((ulong)nx, (ulong)ny, (ulong)nz);
-                if (findNodeByMorton(nodes, numNodes, nMorton) < 0)
-                {
-                    // Compute edgeMask for halo node based on this surface cell's edges
-                    uint haloEdgeMask = 0;
-                    
-                    // If this surface cell has an edge, and the halo is at the corresponding offset,
-                    // set the corresponding edge in the halo
-                    if (dx == 0 && dy == -1 && dz == -1)
-                    {
-                        // Halo at (0,-1,-1) inherits edge 6 from surface edge 0
-                        if (node.edgeMask & (1 << 0)) haloEdgeMask |= (1 << 6);
-                    }
-                    if (dx == -1 && dy == 0 && dz == -1)
-                    {
-                        // Halo at (-1,0,-1) inherits edge 5 from surface edge 3
-                        if (node.edgeMask & (1 << 3)) haloEdgeMask |= (1 << 5);
-                    }
-                    if (dx == -1 && dy == -1 && dz == 0)
-                    {
-                        // Halo at (-1,-1,0) inherits edge 10 from surface edge 8
-                        if (node.edgeMask & (1 << 8)) haloEdgeMask |= (1 << 10);
-                    }
-                    if (dx == 0 && dy == 0 && dz == -1)
-                    {
-                        // Halo at (0,0,-1) inherits edges from surface edges 1, 2
-                        if (node.edgeMask & (1 << 1)) haloEdgeMask |= (1 << 5);
-                        if (node.edgeMask & (1 << 2)) haloEdgeMask |= (1 << 6);
-                    }
-                    if (dx == 0 && dy == -1 && dz == 0)
-                    {
-                        // Halo at (0,-1,0) inherits edges from surface edges 4, 9
-                        if (node.edgeMask & (1 << 4)) haloEdgeMask |= (1 << 6);
-                        if (node.edgeMask & (1 << 9)) haloEdgeMask |= (1 << 10);
-                    }
-                    if (dx == -1 && dy == 0 && dz == 0)
-                    {
-                        // Halo at (-1,0,0) inherits edges from surface edges 7, 11
-                        if (node.edgeMask & (1 << 7)) haloEdgeMask |= (1 << 5);
-                        if (node.edgeMask & (1 << 11)) haloEdgeMask |= (1 << 10);
-                    }
-                    
-                    OctreeNode halo;
-                    halo.mortonCode = nMorton;
-                    halo.edgeMask = haloEdgeMask;
-                    halo.internalMask = 0;
-                    halo.depth = targetDepth;
-                    halo.padding[0] = 1; // Mark as halo node needing synthetic vertex
-                    for (int p = 1; p < 7; p++) halo.padding[p] = 0;
-                    haloNodes[writeIdx++] = halo;
-                }
+                // Create halo node WITHOUT edgeMask
+                // This prevents halos from trying to emit quads (solving cascading problem)
+                OctreeNode halo;
+                halo.mortonCode = nMorton;
+                halo.edgeMask = 0;  // CRITICAL: Halos don't emit quads
+                halo.internalMask = 0;
+                halo.depth = targetDepth;
+                halo.padding[0] = 1; // Mark as halo node
+                for (int p = 1; p < 7; p++) halo.padding[p] = 0;
+                haloNodes[writeIdx++] = halo;
             }
         }
     }

@@ -74,13 +74,6 @@ namespace gladius::ui
           "Fine",
           "Ultra Fine"};
 
-        constexpr std::array<char const *, 5> HIERARCHICAL_QUALITY_LABELS{
-            "Draft",
-            "Balanced",
-            "Fine",
-            "Ultra Fine",
-            "Custom"};
-
         constexpr std::array<char const *, 5> MANIFOLD_QUALITY_LABELS{
             "Draft",
             "Balanced",
@@ -198,8 +191,6 @@ namespace gladius::ui
             return "Exporting " + formatName + " using layered marching cubes";
         case io::SurfaceExtractionMethod::DualContouring:
             return "Exporting " + formatName + " using dual contouring";
-        case io::SurfaceExtractionMethod::HierarchicalDualContouring:
-            return "Exporting " + formatName + " using hierarchical dual contouring";
         case io::SurfaceExtractionMethod::ManifoldDualContouring:
             return "Exporting " + formatName + " using manifold dual contouring";
         default:
@@ -230,10 +221,6 @@ namespace gladius::ui
         {
             m_dualExporter.finalize();
         }
-        else if (m_activeExporter == &m_hierarchicalExporter)
-        {
-            m_hierarchicalExporter.finalize();
-        }
         else if (m_activeExporter == &m_manifoldExporter)
         {
             m_manifoldExporter.finalize();
@@ -260,10 +247,6 @@ namespace gladius::ui
         else if (m_activeExporter == &m_dualExporter)
         {
             m_dualExporter.finalize();
-        }
-        else if (m_activeExporter == &m_hierarchicalExporter)
-        {
-            m_hierarchicalExporter.finalize();
         }
         else if (m_activeExporter == &m_manifoldExporter)
         {
@@ -491,90 +474,6 @@ namespace gladius::ui
             }
             ImGui::TextWrapped(
               "Dual contouring builds an adaptive octree over the SDF. Higher quality settings enable curvature refinement and use finer gradients for smoother surfaces.");
-        }
-        else if (m_selectedMethod == io::SurfaceExtractionMethod::HierarchicalDualContouring)
-        {
-            int qualityIndex = static_cast<int>(m_hierarchicalQualityPreset);
-            qualityIndex = std::clamp(
-              qualityIndex, 0, static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()) - 1);
-            if (ImGui::BeginCombo(
-                  "Quality",
-                  HIERARCHICAL_QUALITY_LABELS.at(static_cast<std::size_t>(qualityIndex))))
-            {
-                for (int i = 0; i < static_cast<int>(HIERARCHICAL_QUALITY_LABELS.size()); ++i)
-                {
-                    bool const selected = (i == qualityIndex);
-                    if (ImGui::Selectable(HIERARCHICAL_QUALITY_LABELS[static_cast<std::size_t>(i)],
-                                          selected))
-                    {
-                        qualityIndex = i;
-                        m_hierarchicalQualityPreset =
-                          static_cast<io::HierarchicalDualContouringQuality>(i);
-
-                        if (m_hierarchicalQualityPreset !=
-                            io::HierarchicalDualContouringQuality::Custom)
-                        {
-                            switch (m_hierarchicalQualityPreset)
-                            {
-                            case io::HierarchicalDualContouringQuality::Draft:
-                                m_hierarchicalEnableProgressiveRefinement = false;
-                                break;
-                            case io::HierarchicalDualContouringQuality::Balanced:
-                            case io::HierarchicalDualContouringQuality::Fine:
-                            case io::HierarchicalDualContouringQuality::UltraFine:
-                                m_hierarchicalEnableProgressiveRefinement = true;
-                                break;
-                            case io::HierarchicalDualContouringQuality::Custom:
-                                break;
-                            }
-                        }
-                    }
-                    if (selected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::Checkbox("Enable GPU acceleration", &m_hierarchicalEnableGpu);
-            ImGui::Checkbox("Enable progressive refinement",
-                            &m_hierarchicalEnableProgressiveRefinement);
-
-            if (!m_hierarchicalEnableProgressiveRefinement)
-            {
-                ImGui::SameLine();
-                ImGui::TextDisabled("refinement passes will be skipped");
-            }
-
-            ImGui::Checkbox("Project vertices to surface", &m_hierarchicalProjectToSurface);
-            if (m_hierarchicalProjectToSurface)
-            {
-                ImGui::SameLine();
-                ImGui::TextDisabled("GPU post-processing for smoother surfaces");
-            }
-
-            ImGui::Separator();
-            ImGui::Checkbox("Enable coarsening (experimental)", &m_hierarchicalEnableCoarsening);
-            if (m_hierarchicalEnableCoarsening)
-            {
-                ImGui::SameLine();
-                ImGui::TextDisabled("merge cells where safe to reduce triangles");
-            }
-
-            ImGui::BeginDisabled(!m_hierarchicalEnableCoarsening);
-            ImGui::InputFloat("Minimum feature size", &m_hierarchicalMinFeatureSize, 0.1F, 1.0F, "%.3f");
-            if (m_hierarchicalMinFeatureSize < 0.0F)
-            {
-                m_hierarchicalMinFeatureSize = 0.0F;
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("world units; smaller features may be simplified");
-            ImGui::EndDisabled();
-
-            ImGui::TextWrapped(
-              "Hierarchical dual contouring incrementally refines an adaptive octree. "
-              "Use progressive refinement for the smoothest surfaces; disable it for a faster preview.");
         }
         else if (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring)
         {
@@ -1316,10 +1215,6 @@ namespace gladius::ui
             m_dualExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_dualExporter;
             break;
-        }
-        case io::SurfaceExtractionMethod::HierarchicalDualContouring:
-        {
-            throw std::runtime_error("Hierarchical dual contouring is deprecated. Use manifold dual contouring.");
         }
         case io::SurfaceExtractionMethod::ManifoldDualContouring:
         {
