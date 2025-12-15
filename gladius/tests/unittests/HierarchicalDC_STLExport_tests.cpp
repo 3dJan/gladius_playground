@@ -17,6 +17,7 @@
 
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -72,6 +73,21 @@ namespace gladius_tests::hierarchical_dc_mesh
           private:
             std::filesystem::path m_path;
         };
+
+          [[nodiscard]] bool gpuTestsEnabled()
+          {
+            char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
+            if (env == nullptr)
+            {
+              return false;
+            }
+
+            std::string value(env);
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+            { return static_cast<char>(std::tolower(c)); });
+
+            return value == "1" || value == "true" || value == "on" || value == "yes";
+          }
 
         [[nodiscard]] bool isAdmeshAvailable()
         {
@@ -291,7 +307,7 @@ namespace gladius_tests::hierarchical_dc_mesh
         }
 
         void exportAndValidateWithAdmesh(DocumentBundle & bundle,
-                                         io::HierarchicalDualContouringOptions options,
+                                         hierarchical_dc::HierarchicalConfig options,
                                          std::string const & scenarioLabel,
                                          bool enforceCleanExpectations,
                                          AdmeshMetrics * outMetrics = nullptr)
@@ -552,11 +568,10 @@ namespace gladius_tests::hierarchical_dc_mesh
         auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
         ASSERT_TRUE(bundle.core->updateBBox());
 
-        io::HierarchicalDualContouringOptions options;
-        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
-        options.applyPreset();
-        options.config.projectVerticesToSurface = false; // Validate raw extraction
-        options.config.enableGpuAcceleration = false;    // Keep deterministic CPU path
+        hierarchical_dc::HierarchicalConfig options;
+        hierarchical_dc::applyQualityPreset(options, hierarchical_dc::HierarchicalQuality::Balanced);
+        options.projectVerticesToSurface = false; // Validate raw extraction
+        options.enableGpuAcceleration = false;    // Keep deterministic CPU path
 
         exportAndValidateWithAdmesh(bundle, options, "baseline_cpu", true);
     }
@@ -591,16 +606,22 @@ namespace gladius_tests::hierarchical_dc_mesh
 
         auto const & scenario = GetParam();
 
+        if (scenario.enableGpuAcceleration && !gpuTestsEnabled())
+        {
+            GTEST_SKIP()
+              << "GPU-heavy tests disabled; set GLADIUS_RUN_GPU_TESTS=1 to enable (scenario: "
+              << scenario.name << ")";
+        }
+
         auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
         ASSERT_TRUE(bundle.core->updateBBox());
 
-        io::HierarchicalDualContouringOptions options;
-        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
-        options.applyPreset();
-        options.config.projectVerticesToSurface = false; // Tests target core extractor
-        options.config.enableGpuAcceleration = scenario.enableGpuAcceleration;
-        options.config.enableCoarsening = scenario.enableCoarsening;
-        options.config.minFeatureSize = scenario.minFeatureSize;
+        hierarchical_dc::HierarchicalConfig options;
+        hierarchical_dc::applyQualityPreset(options, hierarchical_dc::HierarchicalQuality::Balanced);
+        options.projectVerticesToSurface = false; // Tests target core extractor
+        options.enableGpuAcceleration = scenario.enableGpuAcceleration;
+        options.enableCoarsening = scenario.enableCoarsening;
+        options.minFeatureSize = scenario.minFeatureSize;
 
         AdmeshMetrics metrics{};
         exportAndValidateWithAdmesh(
@@ -675,14 +696,18 @@ namespace gladius_tests::hierarchical_dc_mesh
             GTEST_SKIP() << "admesh CLI is not available on PATH";
         }
 
+      if (!gpuTestsEnabled())
+      {
+        GTEST_SKIP() << "GPU-heavy tests disabled; set GLADIUS_RUN_GPU_TESTS=1 to enable";
+      }
+
         auto bundle = loadDocument("testdata/SphereInACage.3mf");
         ASSERT_TRUE(bundle.core->updateBBox());
 
-        io::HierarchicalDualContouringOptions options;
-        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
-        options.applyPreset();
-        options.config.projectVerticesToSurface = true;
-        options.config.enableGpuAcceleration = true;
+        hierarchical_dc::HierarchicalConfig options;
+        hierarchical_dc::applyQualityPreset(options, hierarchical_dc::HierarchicalQuality::Balanced);
+        options.projectVerticesToSurface = true;
+        options.enableGpuAcceleration = true;
 
         AdmeshMetrics metrics{};
         exportAndValidateWithAdmesh(bundle, options, "SphereInACage_Hierarchical", false, &metrics);
@@ -726,11 +751,10 @@ namespace gladius_tests::hierarchical_dc_mesh
         auto bundle = loadDocument("testdata/webcam_003.3mf");
         ASSERT_TRUE(bundle.core->updateBBox());
 
-        io::HierarchicalDualContouringOptions options;
-        options.qualityPreset = io::HierarchicalDualContouringQuality::Balanced;
-        options.applyPreset();
-        options.config.projectVerticesToSurface = true;
-        options.config.enableGpuAcceleration = true;
+        hierarchical_dc::HierarchicalConfig options;
+        hierarchical_dc::applyQualityPreset(options, hierarchical_dc::HierarchicalQuality::Balanced);
+        options.projectVerticesToSurface = true;
+        options.enableGpuAcceleration = true;
 
         AdmeshMetrics metrics{};
         exportAndValidateWithAdmesh(bundle, options, "WebcamMount_Hierarchical", false, &metrics);

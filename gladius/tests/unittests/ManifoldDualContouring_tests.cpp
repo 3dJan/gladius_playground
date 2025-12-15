@@ -13,11 +13,14 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <sstream>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 
 namespace gladius::compute::tests
@@ -49,6 +52,51 @@ namespace gladius::compute::tests
             std::size_t openEdges{0U};
             std::size_t nonManifoldEdges{0U};
         };
+
+        struct NeighborOffset
+        {
+            int dx;
+            int dy;
+            int dz;
+        };
+
+        [[nodiscard]] std::array<NeighborOffset, 4> getEdgeNeighborOffsetsForTest(int edge)
+        {
+            // Must match getEdgeNeighbors() in gladius/src/kernel/manifold_dual_contouring.cl
+            switch (edge)
+            {
+                case 0: return {{{0, 0, 0}, {0, -1, 0}, {0, 0, -1}, {0, -1, -1}}};
+                case 1: return {{{0, 0, 0}, {+1, 0, 0}, {0, 0, -1}, {+1, 0, -1}}};
+                case 2: return {{{0, 0, 0}, {0, +1, 0}, {0, 0, -1}, {0, +1, -1}}};
+                case 3: return {{{0, 0, 0}, {-1, 0, 0}, {0, 0, -1}, {-1, 0, -1}}};
+                case 4: return {{{0, 0, 0}, {0, -1, 0}, {0, 0, +1}, {0, -1, +1}}};
+                case 5: return {{{0, 0, 0}, {+1, 0, 0}, {0, 0, +1}, {+1, 0, +1}}};
+                case 6: return {{{0, 0, 0}, {0, +1, 0}, {0, 0, +1}, {0, +1, +1}}};
+                case 7: return {{{0, 0, 0}, {-1, 0, 0}, {0, 0, +1}, {-1, 0, +1}}};
+                case 8: return {{{0, 0, 0}, {-1, 0, 0}, {0, -1, 0}, {-1, -1, 0}}};
+                case 9: return {{{0, 0, 0}, {+1, 0, 0}, {0, -1, 0}, {+1, -1, 0}}};
+                case 10: return {{{0, 0, 0}, {+1, 0, 0}, {0, +1, 0}, {+1, +1, 0}}};
+                case 11: return {{{0, 0, 0}, {-1, 0, 0}, {0, +1, 0}, {-1, +1, 0}}};
+                default: break;
+            }
+
+            return {{{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}};
+        }
+
+        [[nodiscard]] bool gpuTestsEnabled()
+        {
+            char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
+            if (env == nullptr)
+            {
+                return false;
+            }
+
+            std::string value(env);
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+            { return static_cast<char>(std::tolower(c)); });
+
+            return value == "1" || value == "true" || value == "on" || value == "yes";
+        }
 
         [[nodiscard]] MeshEdgeStats analyzeMeshEdges(ManifoldDualContouringMesh const & mesh)
         {
@@ -400,6 +448,11 @@ namespace gladius::compute::tests
       protected:
         void SetUp() override
         {
+            if (!gpuTestsEnabled())
+            {
+                GTEST_SKIP() << "GPU-heavy tests disabled; set GLADIUS_RUN_GPU_TESTS=1 to enable";
+            }
+
             m_context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
             if (!m_context->isValid())
             {
@@ -488,6 +541,47 @@ namespace gladius::compute::tests
         gpu.setConfig(config);
 
         gpu.generateMesh();
+    }
+
+    TEST(ManifoldDualContouring_EdgeNeighbors, EdgeNeighborOffsets_AreWellFormed)
+    {
+        for (int edge = 0; edge < 12; ++edge)
+        {
+            auto const offsets = getEdgeNeighborOffsetsForTest(edge);
+
+            // Must include self at index 0.
+            EXPECT_EQ(offsets[0].dx, 0);
+            EXPECT_EQ(offsets[0].dy, 0);
+            EXPECT_EQ(offsets[0].dz, 0);
+
+            // All 4 offsets must be unique.
+            std::array<std::tuple<int, int, int>, 4> unique = {{
+              {offsets[0].dx, offsets[0].dy, offsets[0].dz},
+              {offsets[1].dx, offsets[1].dy, offsets[1].dz},
+              {offsets[2].dx, offsets[2].dy, offsets[2].dz},
+              {offsets[3].dx, offsets[3].dy, offsets[3].dz},
+            }};
+            std::sort(unique.begin(), unique.end());
+            auto const it = std::unique(unique.begin(), unique.end());
+            EXPECT_EQ(it, unique.end()) << "Duplicate offsets for edge " << edge;
+
+            // Basic axis constraints:
+            // - X-edges (0,2,4,6): dx must be 0 for all offsets
+            // - Y-edges (1,3,5,7): dy must be 0 for all offsets
+            // - Z-edges (8-11): dz must be 0 for all offsets
+            if (edge == 0 || edge == 2 || edge == 4 || edge == 6)
+            {
+                for (auto const & o : offsets) EXPECT_EQ(o.dx, 0) << "X-edge has dx != 0 for edge " << edge;
+            }
+            else if (edge == 1 || edge == 3 || edge == 5 || edge == 7)
+            {
+                for (auto const & o : offsets) EXPECT_EQ(o.dy, 0) << "Y-edge has dy != 0 for edge " << edge;
+            }
+            else
+            {
+                for (auto const & o : offsets) EXPECT_EQ(o.dz, 0) << "Z-edge has dz != 0 for edge " << edge;
+            }
+        }
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithImplicitGyroid)
@@ -854,6 +948,111 @@ namespace gladius::compute::tests
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
         std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
                   << (reversedRatio * 100.0) << "%)" << std::endl;
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_Hierarchical_IsWatertight)
+    {
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        ManifoldDualContouringGpu mesher(*bundle.core);
+
+        ManifoldDualContouringConfig config;
+        config.enableGpu = true;
+        config.enableCpuFallback = true;
+        config.enableCaching = true;
+        config.initialDepth = 5;
+        config.maxDepth = 7;
+        config.isoValue = 0.0F;
+        config.enableHierarchicalOctree = true; // Exercise watertight global Morton + halo path
+        config.enableChunking = false;
+        mesher.setConfig(config);
+
+        mesher.generateMesh();
+
+        auto const & mesh = mesher.getMesh();
+        ASSERT_FALSE(mesh.indices.empty());
+
+        MeshEdgeStats const stats = analyzeMeshEdges(mesh);
+        EXPECT_EQ(stats.openEdges, 0U) << "Hierarchical mode should not produce boundary/open edges";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Hierarchical mode should not produce non-manifold edges";
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_SinglePass_IsWatertight)
+    {
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        ManifoldDualContouringGpu mesher(*bundle.core);
+
+        ManifoldDualContouringConfig config;
+        config.enableGpu = true;
+        config.enableCpuFallback = true;
+        config.enableCaching = true;
+        config.initialDepth = 5;
+        config.maxDepth = 7;
+        config.isoValue = 0.0F;
+        config.enableHierarchicalOctree = false;
+        config.enableChunking = false;
+        mesher.setConfig(config);
+
+        mesher.generateMesh();
+
+        auto const & mesh = mesher.getMesh();
+        ASSERT_FALSE(mesh.indices.empty());
+
+        MeshEdgeStats const stats = analyzeMeshEdges(mesh);
+        EXPECT_EQ(stats.openEdges, 0U) << "Single-pass mode should not produce boundary/open edges";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Single-pass mode should not produce non-manifold edges";
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_ExportDialogDefaults_IsWatertight)
+    {
+        // This test intentionally mirrors the export dialog defaults for Manifold Dual Contouring:
+        // - UltraFine preset (initialDepth=7, maxDepth=9)
+        // - hierarchical octree enabled (watertight-by-construction)
+        // - chunking enabled by default, but inactive because minFeatureSize == 0
+        // - project-to-surface enabled
+        auto bundle = loadDocument("testdata/SphereInACage.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        gladius::io::ManifoldDualContouringOptions exportDefaults{};
+        exportDefaults.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportDefaults.applyPreset();
+        exportDefaults.enableHierarchicalOctree = true;
+        exportDefaults.minFeatureSize = 0.0F;
+        exportDefaults.enableChunking = true;
+        exportDefaults.projectToSurface = true;
+        exportDefaults.enableSharpFeaturePostProcess = false;
+        exportDefaults.simplificationMethod = gladius::io::SimplificationMethod::None;
+        exportDefaults.enableSimplification = false;
+
+        ManifoldDualContouringGpu mesher(*bundle.core);
+        ManifoldDualContouringConfig config;
+        config.enableGpu = exportDefaults.enableGpu;
+        config.enableCpuFallback = exportDefaults.enableCpuFallback;
+        config.enableCaching = exportDefaults.enableCaching;
+        config.initialDepth = exportDefaults.initialDepth;
+        config.maxDepth = exportDefaults.maxDepth;
+        config.isoValue = exportDefaults.isoValue;
+        config.minFeatureSize = exportDefaults.minFeatureSize;
+        config.enableChunking = exportDefaults.enableChunking;
+        config.enableHierarchicalOctree = exportDefaults.enableHierarchicalOctree;
+        config.enableSharpFeaturePostProcess = exportDefaults.enableSharpFeaturePostProcess;
+        config.sharpFeatureAngleThreshold = exportDefaults.sharpFeatureAngleThreshold;
+        config.subdivisionIterations = exportDefaults.subdivisionIterations;
+        config.projectToSurface = exportDefaults.projectToSurface;
+        config.simplificationMethod = SimplificationMethod::None;
+        mesher.setConfig(config);
+
+        mesher.generateMesh();
+
+        auto const & mesh = mesher.getMesh();
+        ASSERT_FALSE(mesh.indices.empty());
+
+        MeshEdgeStats const stats = analyzeMeshEdges(mesh);
+        EXPECT_EQ(stats.openEdges, 0U) << "Export-dialog default config should not produce boundary/open edges";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Export-dialog default config should not produce non-manifold edges";
     }
 
     TEST_F(ManifoldDualContouringGpu_Test,
