@@ -522,6 +522,15 @@ namespace gladius::ui
             ImGui::SameLine();
             ImGui::TextDisabled("higher values capture more detail");
 
+                        ImGui::Separator();
+                        ImGui::Text("Watertightness (Experimental)");
+                        ImGui::Checkbox("Enable hierarchical octree", &m_manifoldEnableHierarchicalOctree);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("global Morton octree with 2:1 balancing");
+                        ImGui::TextWrapped(
+                            "When enabled, Gladius uses a global balanced octree intended to improve watertightness/manifoldness. "
+                            "This may increase memory usage and runtime.");
+
             ImGui::Separator();
             ImGui::Text("Minimum Feature Size (Thin Walls)");
             
@@ -538,6 +547,11 @@ namespace gladius::ui
                 ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
                 ImGui::SameLine();
                 ImGui::TextDisabled("divide-and-conquer for memory efficiency");
+
+                if (m_manifoldEnableHierarchicalOctree)
+                {
+                    ImGui::TextDisabled("Note: chunking is ignored when hierarchical octree is enabled.");
+                }
             }
 
             ImGui::Separator();
@@ -947,6 +961,7 @@ namespace gladius::ui
         }
         options.minFeatureSize = m_manifoldMinFeatureSize;
         options.enableChunking = m_manifoldEnableChunking;
+        options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
@@ -1048,6 +1063,7 @@ namespace gladius::ui
         }
         options.minFeatureSize = m_manifoldMinFeatureSize;
         options.enableChunking = m_manifoldEnableChunking;
+        options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
@@ -1242,6 +1258,7 @@ namespace gladius::ui
             // Minimum feature size and chunking
             options.minFeatureSize = m_manifoldMinFeatureSize;
             options.enableChunking = m_manifoldEnableChunking;
+            options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
             // Sharp feature post-processing options
             options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
             options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;

@@ -36,6 +36,19 @@ namespace gladius::compute
 
         /// Tolerance for zero-crossing refinement
         constexpr float ZERO_CROSSING_TOLERANCE = 1e-5F;
+
+        [[nodiscard]] bool hasEdgeCrossing(float const v0, float const v1)
+        {
+            // Tolerance-consistent edge-crossing detection.
+            // The previous implementation treated any near-zero corner as a crossing, even
+            // when both corners were on the same side. At higher depths this can create
+            // spurious Hermite samples/quads and lead to non-manifold edge overuse.
+            //
+            // We classify corners with a small negative tolerance as "inside".
+            bool const inside0 = (v0 < -ZERO_CROSSING_TOLERANCE);
+            bool const inside1 = (v1 < -ZERO_CROSSING_TOLERANCE);
+            return inside0 != inside1;
+        }
     }
 
     BoundingBox GlobalOctreeNode::computeBounds(Eigen::Vector3f const& globalBboxMin,
@@ -69,20 +82,29 @@ namespace gladius::compute
             iz += oz * levelScale;
         }
 
-        // Cell size at this depth
-        auto const cellsPerAxis = static_cast<float>(1U << depth);
-        Eigen::Vector3f const cellSize = globalBboxSize / cellsPerAxis;
+        // Cell bounds at this depth.
+        // IMPORTANT: Use a numerically consistent formulation for min/max so that
+        // neighboring cells share *exactly* the same corner/face coordinates.
+        // Computing max as (min + cellSize) can diverge (by a few ulps) from
+        // computing neighbor.min as (globalMin + (i+1)*cellSize), which in turn can
+        // produce inconsistent corner sampling and edge masks at higher depths.
+        double const cellsPerAxis = static_cast<double>(1U << depth);
+        Eigen::Array3d const globalMin = globalBboxMin.cast<double>().array();
+        Eigen::Array3d const globalSize = globalBboxSize.cast<double>().array();
+        Eigen::Array3d const cellSize = globalSize / cellsPerAxis;
 
-        // Compute bounds
+        Eigen::Array3d const minD = globalMin + Eigen::Array3d(static_cast<double>(ix), static_cast<double>(iy), static_cast<double>(iz)) * cellSize;
+        Eigen::Array3d const maxD = globalMin + Eigen::Array3d(static_cast<double>(ix + 1U), static_cast<double>(iy + 1U), static_cast<double>(iz + 1U)) * cellSize;
+
         BoundingBox bounds;
-        bounds.min.s[0] = globalBboxMin.x() + static_cast<float>(ix) * cellSize.x();
-        bounds.min.s[1] = globalBboxMin.y() + static_cast<float>(iy) * cellSize.y();
-        bounds.min.s[2] = globalBboxMin.z() + static_cast<float>(iz) * cellSize.z();
+        bounds.min.s[0] = static_cast<float>(minD.x());
+        bounds.min.s[1] = static_cast<float>(minD.y());
+        bounds.min.s[2] = static_cast<float>(minD.z());
         bounds.min.s[3] = 0.0F;
 
-        bounds.max.s[0] = bounds.min.s[0] + cellSize.x();
-        bounds.max.s[1] = bounds.min.s[1] + cellSize.y();
-        bounds.max.s[2] = bounds.min.s[2] + cellSize.z();
+        bounds.max.s[0] = static_cast<float>(maxD.x());
+        bounds.max.s[1] = static_cast<float>(maxD.y());
+        bounds.max.s[2] = static_cast<float>(maxD.z());
         bounds.max.s[3] = 0.0F;
 
         return bounds;
@@ -157,6 +179,10 @@ namespace gladius::compute
         std::cout << "Generating vertices..." << std::endl;
         #endif
         generateVertices();
+
+        // Phase 3b: Generate "halo" vertices for non-intersecting neighbors that are required
+        // to close owned-edge quads. This is the CPU analogue of the GPU halo approach.
+        generateHaloVerticesForWatertightness();
         #ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Vertices generated: " << m_stats.vertexCount << std::endl;
 
@@ -352,7 +378,7 @@ namespace gladius::compute
             node.internalMask = 0U;
             for (std::uint8_t c = 0U; c < 8U; ++c)
             {
-                if (node.cornerValues[c] < 0.0F)
+                if (node.cornerValues[c] < -ZERO_CROSSING_TOLERANCE)
                 {
                     node.internalMask |= (1U << c);
                     ++negativeCornerCount;
@@ -370,7 +396,7 @@ namespace gladius::compute
                 std::uint8_t const c0 = EDGE_CORNERS[e][0];
                 std::uint8_t const c1 = EDGE_CORNERS[e][1];
 
-                if (node.cornerValues[c0] * node.cornerValues[c1] < 0.0F)
+                if (hasEdgeCrossing(node.cornerValues[c0], node.cornerValues[c1]))
                 {
                     node.edgeMask |= (1U << e);
                 }
@@ -487,8 +513,8 @@ namespace gladius::compute
                 child.mortonCode = computeChildMorton(parentMorton, childIndex, parentDepth);
                 child.depth = childDepth;
 
-                // Register Morton code for lookup
-                m_mortonToIndex[child.mortonCode] = childNodeIdx;
+                // Register Morton code for lookup (depth-aware to avoid collisions)
+                m_mortonToIndex[MortonNodeKey{child.mortonCode, child.depth}] = childNodeIdx;
 
                 childLevel.nodeIndices.push_back(childNodeIdx);
             }
@@ -524,7 +550,10 @@ namespace gladius::compute
                 }
             }
             
-            // For each intersecting leaf, ensure its 6 face-adjacent neighbors exist
+            // For each intersecting leaf, ensure its face-adjacent neighbors exist.
+            // Additionally, ensure that for each *owned* edge with a sign-change we have the
+            // full 2x2 neighborhood of cells around that edge (4 cells per edge).
+            // This mirrors the GPU quad emission rule and avoids missing quads.
             for (std::size_t nodeIdx : intersectingLeaves)
             {
                 auto const& node = m_nodes[nodeIdx];
@@ -565,7 +594,7 @@ namespace gladius::compute
                         static_cast<std::uint32_t>(nz),
                         node.depth);
                     
-                    if (m_mortonToIndex.find(neighborMorton) == m_mortonToIndex.end())
+                    if (m_mortonToIndex.find(MortonNodeKey{neighborMorton, node.depth}) == m_mortonToIndex.end())
                     {
                         // Neighbor doesn't exist - create it
                         std::size_t const newNodeIdx = createNodeAtCoordinates(
@@ -580,6 +609,60 @@ namespace gladius::compute
                             changed = true;
                         }
                     }
+                }
+
+                // Owned-edge neighbor completion (CPU edge numbering):
+                // - Edge 3: X-axis at (y=max, z=max)
+                // - Edge 7: Y-axis at (x=max, z=max)
+                // - Edge 11: Z-axis at (x=max, y=max)
+                // Each quad needs 4 cells; we create the 3 neighbors around the owned edge.
+                auto ensureCellAt = [&](std::int32_t x, std::int32_t y, std::int32_t z)
+                {
+                    if (x < 0 || x > static_cast<std::int32_t>(maxCoord) ||
+                        y < 0 || y > static_cast<std::int32_t>(maxCoord) ||
+                        z < 0 || z > static_cast<std::int32_t>(maxCoord))
+                    {
+                        return;
+                    }
+
+                    std::uint64_t const morton = encodePathMorton(
+                        static_cast<std::uint32_t>(x),
+                        static_cast<std::uint32_t>(y),
+                        static_cast<std::uint32_t>(z),
+                        node.depth);
+
+                    if (m_mortonToIndex.find(MortonNodeKey{morton, node.depth}) == m_mortonToIndex.end())
+                    {
+                        std::size_t const newNodeIdx = createNodeAtCoordinates(
+                            static_cast<std::uint32_t>(x),
+                            static_cast<std::uint32_t>(y),
+                            static_cast<std::uint32_t>(z),
+                            node.depth);
+                        if (newNodeIdx != std::numeric_limits<std::size_t>::max())
+                        {
+                            ++neighborsThisPass;
+                            changed = true;
+                        }
+                    }
+                };
+
+                if ((node.edgeMask & (1U << 3U)) != 0U)
+                {
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 0);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 1);
+                }
+                if ((node.edgeMask & (1U << 7U)) != 0U)
+                {
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 0);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
+                }
+                if ((node.edgeMask & (1U << 11U)) != 0U)
+                {
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 0);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 0);
+                    ensureCellAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 0);
                 }
             }
             
@@ -603,7 +686,7 @@ namespace gladius::compute
     {
         // First check if node already exists
         std::uint64_t const mortonCode = encodePathMorton(x, y, z, depth);
-        auto it = m_mortonToIndex.find(mortonCode);
+        auto it = m_mortonToIndex.find(MortonNodeKey{mortonCode, depth});
         if (it != m_mortonToIndex.end())
         {
             return it->second; // Already exists
@@ -618,8 +701,8 @@ namespace gladius::compute
         node.isIntersecting = false; // Will be evaluated below
         node.needsRefinement = false;
         
-        // Register in Morton lookup
-        m_mortonToIndex[mortonCode] = nodeIdx;
+        // Register in Morton lookup (depth-aware)
+        m_mortonToIndex[MortonNodeKey{mortonCode, depth}] = nodeIdx;
         
         // Add to appropriate level
         if (depth < m_levels.size())
@@ -627,32 +710,24 @@ namespace gladius::compute
             m_levels[depth].nodeIndices.push_back(nodeIdx);
         }
         
-        // Evaluate corners for this node to determine if it's intersecting
-        BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize, 0);
+        // Evaluate corners for this node to determine if it's intersecting.
+        // Must match the normal evaluation path: cornerValues store (sdf - isoValue),
+        // internalMask marks corners with value < 0, and edgeMask is derived from sign changes.
+        BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
+                                   static_cast<std::uint32_t>(m_config.maxDepth));
         
         // Sample SDF at all 8 corners
-        std::uint8_t signMask = 0U;
-        std::uint8_t zeroMask = 0U;
+        node.internalMask = 0U;
         for (std::uint8_t c = 0U; c < 8U; ++c)
         {
             Eigen::Vector3f const cornerPos = cornerPosition(c, bounds);
-            float const sdfValue = sampleSdf(cornerPos);
-            node.cornerValues[c] = sdfValue;
-            
-            if (sdfValue >= 0.0F)
+            float const v = sampleSdf(cornerPos) - m_config.isoValue;
+            node.cornerValues[c] = v;
+            if (v < -ZERO_CROSSING_TOLERANCE)
             {
-                signMask |= (1U << c);
-            }
-            if (std::abs(sdfValue) < 1e-6F)
-            {
-                zeroMask |= (1U << c);
+                node.internalMask |= (1U << c);
             }
         }
-        
-        // Check if node intersects surface
-        bool const allPositive = (signMask == 0xFFU);
-        bool const allNegative = (signMask == 0x00U);
-        node.isIntersecting = !allPositive && !allNegative;
         
         // Detect edge crossings
         node.edgeMask = 0U;
@@ -662,14 +737,182 @@ namespace gladius::compute
             auto const c1 = EDGE_CORNERS[e][1];
             float const v0 = node.cornerValues[c0];
             float const v1 = node.cornerValues[c1];
-            
-            if (v0 * v1 < 0.0F)
+
+            if (hasEdgeCrossing(v0, v1))
             {
                 node.edgeMask |= (1U << e);
             }
         }
+
+        node.isIntersecting = (node.edgeMask != 0U);
         
         return nodeIdx;
+    }
+
+    void GlobalMortonOctree::ensureProjectedVertex(GlobalOctreeNode& node)
+    {
+        if (!node.vertexIndices.empty())
+        {
+            return;
+        }
+
+        std::uint32_t existingIndex = 0U;
+        if (m_vertexRegistry.tryGetCellVertexIndex(node.mortonCode, node.depth, existingIndex, 0U))
+        {
+            node.vertexIndices.push_back(existingIndex);
+            return;
+        }
+
+        BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
+                                                       static_cast<std::uint32_t>(m_config.maxDepth));
+
+        Eigen::Vector3f p;
+        p.x() = 0.5F * (bounds.min.s[0] + bounds.max.s[0]);
+        p.y() = 0.5F * (bounds.min.s[1] + bounds.max.s[1]);
+        p.z() = 0.5F * (bounds.min.s[2] + bounds.max.s[2]);
+
+        float const cellSize = bounds.max.s[0] - bounds.min.s[0];
+        float const epsilon = std::max(cellSize * 0.01F, 1e-6F);
+
+        for (std::size_t iter = 0U; iter < 16U; ++iter)
+        {
+            float const value = sampleSdf(p) - m_config.isoValue;
+            if (std::abs(value) < ZERO_CROSSING_TOLERANCE)
+            {
+                break;
+            }
+
+            Eigen::Vector3f const grad = sampleGradient(p, epsilon);
+            float const g2 = grad.squaredNorm();
+            if (g2 < 1e-20F)
+            {
+                break;
+            }
+
+            p = p - (value / g2) * grad;
+            p.x() = std::clamp(p.x(), bounds.min.s[0], bounds.max.s[0]);
+            p.y() = std::clamp(p.y(), bounds.min.s[1], bounds.max.s[1]);
+            p.z() = std::clamp(p.z(), bounds.min.s[2], bounds.max.s[2]);
+        }
+
+        Eigen::Vector3f normal = sampleGradient(p, epsilon);
+        float const nLen = normal.norm();
+        if (nLen > 1e-12F)
+        {
+            normal /= nLen;
+        }
+        else
+        {
+            normal = Eigen::Vector3f(1.0F, 0.0F, 0.0F);
+        }
+
+        std::uint32_t const vertexIndex = m_vertexRegistry.registerCellVertex(node.mortonCode, node.depth, p, normal, 0U);
+        node.vertexIndices.push_back(vertexIndex);
+    }
+
+    void GlobalMortonOctree::generateHaloVerticesForWatertightness()
+    {
+        // We only ever emit faces from intersecting cells, but we may still need vertices
+        // in adjacent non-intersecting cells to avoid boundary edges (holes).
+
+        std::vector<std::size_t> intersectingLeaves;
+        intersectingLeaves.reserve(m_nodes.size());
+        for (std::size_t i = 0U; i < m_nodes.size(); ++i)
+        {
+            if (m_nodes[i].isLeaf && m_nodes[i].isIntersecting)
+            {
+                intersectingLeaves.push_back(i);
+            }
+        }
+
+        auto ensureNeighborVertex = [&](GlobalOctreeNode const& baseNode, std::uint32_t cx, std::uint32_t cy, std::uint32_t cz,
+                                        std::int32_t dx, std::int32_t dy, std::int32_t dz)
+        {
+            auto const maxCoord = (1U << baseNode.depth) - 1U;
+            auto const nx = static_cast<std::int32_t>(cx) + dx;
+            auto const ny = static_cast<std::int32_t>(cy) + dy;
+            auto const nz = static_cast<std::int32_t>(cz) + dz;
+
+            if (nx < 0 || nx > static_cast<std::int32_t>(maxCoord) ||
+                ny < 0 || ny > static_cast<std::int32_t>(maxCoord) ||
+                nz < 0 || nz > static_cast<std::int32_t>(maxCoord))
+            {
+                return;
+            }
+
+            std::uint64_t const morton = encodePathMorton(
+                static_cast<std::uint32_t>(nx),
+                static_cast<std::uint32_t>(ny),
+                static_cast<std::uint32_t>(nz),
+                baseNode.depth);
+
+            auto it = m_mortonToIndex.find(MortonNodeKey{morton, baseNode.depth});
+            if (it == m_mortonToIndex.end())
+            {
+                // Should not happen after balancing, but keep this safe.
+                std::size_t const created = createNodeAtCoordinates(
+                    static_cast<std::uint32_t>(nx),
+                    static_cast<std::uint32_t>(ny),
+                    static_cast<std::uint32_t>(nz),
+                    baseNode.depth);
+                if (created == std::numeric_limits<std::size_t>::max())
+                {
+                    return;
+                }
+                it = m_mortonToIndex.find(MortonNodeKey{morton, baseNode.depth});
+                if (it == m_mortonToIndex.end())
+                {
+                    return;
+                }
+            }
+
+            auto& neighbor = m_nodes[it->second];
+            if (!neighbor.isLeaf)
+            {
+                return;
+            }
+
+            // Only create halo vertices for non-intersecting cells. Intersecting cells should
+            // already have a QEF vertex from generateVertices().
+            if (!neighbor.isIntersecting)
+            {
+                ensureProjectedVertex(neighbor);
+            }
+        };
+
+        for (std::size_t nodeIdx : intersectingLeaves)
+        {
+            auto const& node = m_nodes[nodeIdx];
+            if (node.depth == 0U)
+            {
+                continue;
+            }
+
+            std::uint32_t cx = 0U, cy = 0U, cz = 0U;
+            decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+
+            // Owned edges only (3, 7, 11): ensure the other three cells have vertices.
+            if ((node.edgeMask & (1U << 3U)) != 0U)
+            {
+                ensureNeighborVertex(node, cx, cy, cz, 0, +1, 0);
+                ensureNeighborVertex(node, cx, cy, cz, 0, 0, +1);
+                ensureNeighborVertex(node, cx, cy, cz, 0, +1, +1);
+            }
+            if ((node.edgeMask & (1U << 7U)) != 0U)
+            {
+                ensureNeighborVertex(node, cx, cy, cz, +1, 0, 0);
+                ensureNeighborVertex(node, cx, cy, cz, 0, 0, +1);
+                ensureNeighborVertex(node, cx, cy, cz, +1, 0, +1);
+            }
+            if ((node.edgeMask & (1U << 11U)) != 0U)
+            {
+                ensureNeighborVertex(node, cx, cy, cz, +1, 0, 0);
+                ensureNeighborVertex(node, cx, cy, cz, 0, +1, 0);
+                ensureNeighborVertex(node, cx, cy, cz, +1, +1, 0);
+            }
+        }
+
+        m_stats.vertexCount = m_vertexRegistry.getVertexCount();
     }
 
     void GlobalMortonOctree::ensureNeighborsExist(std::size_t nodeIndex)
@@ -879,7 +1122,7 @@ namespace gladius::compute
                 child.mortonCode = computeChildMorton(parentMorton, childIndex, parentDepth);
                 child.depth = childDepth;
 
-                m_mortonToIndex[child.mortonCode] = childNodeIdx;
+                m_mortonToIndex[MortonNodeKey{child.mortonCode, child.depth}] = childNodeIdx;
                 m_levels[childDepth].nodeIndices.push_back(childNodeIdx);
             }
         }
@@ -927,11 +1170,41 @@ namespace gladius::compute
     {
         auto const startTime = std::chrono::high_resolution_clock::now();
 
+        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        std::size_t const totalNodes = m_nodes.size();
+        std::size_t intersectingLeaves = 0U;
+        for (auto const& n : m_nodes)
+        {
+            if (n.isLeaf && n.isIntersecting)
+            {
+                ++intersectingLeaves;
+            }
+        }
+        if (debugProgress)
+        {
+            std::cout << "  Generating vertices for " << intersectingLeaves << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
+        }
+
+        std::size_t processedIntersecting = 0U;
+        std::size_t nextProgress = 0U;
+        if (debugProgress)
+        {
+            // Print progress roughly 20 times across the run (minimum interval guard).
+            nextProgress = std::max<std::size_t>(intersectingLeaves / 20U, 25000U);
+        }
+
         for (auto& node : m_nodes)
         {
             if (!node.isLeaf || !node.isIntersecting)
             {
                 continue;
+            }
+
+            ++processedIntersecting;
+            if (debugProgress && (processedIntersecting % nextProgress == 0U))
+            {
+                float const pct = intersectingLeaves > 0U ? (100.0F * static_cast<float>(processedIntersecting) / static_cast<float>(intersectingLeaves)) : 100.0F;
+                std::cout << "    vertexGen progress: " << processedIntersecting << "/" << intersectingLeaves << " (" << pct << "%)" << std::endl;
             }
 
             // Gather Hermite samples for this cell
@@ -945,6 +1218,11 @@ namespace gladius::compute
 
         auto const endTime = std::chrono::high_resolution_clock::now();
         m_stats.vertexGenerationTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+        if (debugProgress)
+        {
+            std::cout << "  Vertex generation complete in " << m_stats.vertexGenerationTimeMs << " ms (vertices=" << m_stats.vertexCount << ")" << std::endl;
+        }
     }
 
     void GlobalMortonOctree::gatherHermiteSamples(GlobalOctreeNode& node)
@@ -988,6 +1266,26 @@ namespace gladius::compute
                                                   float endValue,
                                                   Eigen::Vector3f& outPosition)
     {
+        if (std::abs(startValue) <= ZERO_CROSSING_TOLERANCE)
+        {
+            outPosition = start;
+            return;
+        }
+
+        if (std::abs(endValue) <= ZERO_CROSSING_TOLERANCE)
+        {
+            outPosition = end;
+            return;
+        }
+
+        // Defensive: if the edge does not actually bracket the iso-surface, fall back
+        // to the midpoint to avoid unstable bisection behavior.
+        if ((startValue < 0.0F) == (endValue < 0.0F))
+        {
+            outPosition = (start + end) * 0.5F;
+            return;
+        }
+
         Eigen::Vector3f lo = start;
         Eigen::Vector3f hi = end;
         float vLo = startValue;
@@ -1026,6 +1324,12 @@ namespace gladius::compute
             return;
         }
 
+        node.vertexIndices.clear();
+    node.edgeComponents.fill(0U);
+        node.edge3Component = 0U;
+        node.edge7Component = 0U;
+        node.edge11Component = 0U;
+
         BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
                                                        static_cast<std::uint32_t>(m_config.maxDepth));
 
@@ -1037,48 +1341,330 @@ namespace gladius::compute
         }
         massPoint /= static_cast<float>(node.hermiteSamples.size());
 
-        // Use QEF solver if enough samples
-        Eigen::Vector3f vertex;
-        Eigen::Vector3f normal = Eigen::Vector3f::Zero();
+        // Manifold Dual Contouring requires multiple vertices in ambiguous cells.
+        // Instead of clustering by gradients (which is unreliable for topology), we
+        // compute per-cell components by connecting edge intersections through the
+        // 6 faces using marching-squares connectivity (with asymptotic decider for
+        // ambiguous cases 5/10).
+        float constexpr NORMAL_EPS = 1e-6F;
 
-        if (node.hermiteSamples.size() >= 3U)
+        // Map edgeIndex -> hermite sample index (or -1 if no intersection on that edge).
+        std::array<int, 12> sampleIndexByEdge;
+        sampleIndexByEdge.fill(-1);
+        for (std::size_t i = 0U; i < node.hermiteSamples.size(); ++i)
         {
-            // Build QEF matrices
-            Eigen::Matrix3f ata = Eigen::Matrix3f::Zero();
-            Eigen::Vector3f atb = Eigen::Vector3f::Zero();
-
-            for (auto const& sample : node.hermiteSamples)
+            std::uint8_t const e = node.hermiteSamples[i].edgeIndex;
+            if (e < sampleIndexByEdge.size())
             {
-                Eigen::Vector3f const n = sample.gradient.normalized();
-                ata += n * n.transpose();
-                atb += n * n.dot(sample.position);
-                normal += n;
+                sampleIndexByEdge[e] = static_cast<int>(i);
+            }
+        }
+
+        // Union-Find over hermite samples.
+        std::vector<int> parent(node.hermiteSamples.size(), -1);
+        std::vector<int> rank(node.hermiteSamples.size(), 0);
+        for (std::size_t i = 0U; i < parent.size(); ++i)
+        {
+            parent[i] = static_cast<int>(i);
+        }
+
+        auto findRoot = [&](int x)
+        {
+            while (parent[static_cast<std::size_t>(x)] != x)
+            {
+                parent[static_cast<std::size_t>(x)] = parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+                x = parent[static_cast<std::size_t>(x)];
+            }
+            return x;
+        };
+
+        auto unite = [&](int a, int b)
+        {
+            if (a < 0 || b < 0)
+            {
+                return;
+            }
+            int ra = findRoot(a);
+            int rb = findRoot(b);
+            if (ra == rb)
+            {
+                return;
+            }
+            int& rra = rank[static_cast<std::size_t>(ra)];
+            int& rrb = rank[static_cast<std::size_t>(rb)];
+            if (rra < rrb)
+            {
+                parent[static_cast<std::size_t>(ra)] = rb;
+            }
+            else if (rrb < rra)
+            {
+                parent[static_cast<std::size_t>(rb)] = ra;
+            }
+            else
+            {
+                parent[static_cast<std::size_t>(rb)] = ra;
+                ++rra;
+            }
+        };
+
+        struct FaceConnectivity
+        {
+            std::array<std::uint8_t, 4> corners;
+            std::array<std::uint8_t, 4> edges; // in order: (0-1),(1-2),(2-3),(3-0)
+        };
+
+        // Corner order is around the face (0,1,2,3) with edges accordingly.
+        constexpr std::array<FaceConnectivity, 6> FACES = {{
+            // z=0
+            FaceConnectivity{{0U, 1U, 3U, 2U}, {0U, 5U, 1U, 4U}},
+            // z=1
+            FaceConnectivity{{4U, 5U, 7U, 6U}, {2U, 7U, 3U, 6U}},
+            // y=0
+            FaceConnectivity{{0U, 1U, 5U, 4U}, {0U, 9U, 2U, 8U}},
+            // y=1
+            FaceConnectivity{{2U, 3U, 7U, 6U}, {1U, 11U, 3U, 10U}},
+            // x=0
+            FaceConnectivity{{0U, 2U, 6U, 4U}, {4U, 10U, 6U, 8U}},
+            // x=1
+            FaceConnectivity{{1U, 3U, 7U, 5U}, {5U, 11U, 7U, 9U}},
+        }};
+
+        auto isCornerInside = [&](std::uint8_t cornerIndex) -> bool
+        {
+            return (node.internalMask & (1U << cornerIndex)) != 0U;
+        };
+
+        auto connectFace = [&, this](FaceConnectivity const& f)
+        {
+            std::uint8_t ccase = 0U;
+            if (isCornerInside(f.corners[0])) { ccase |= 1U; }
+            if (isCornerInside(f.corners[1])) { ccase |= 2U; }
+            if (isCornerInside(f.corners[2])) { ccase |= 4U; }
+            if (isCornerInside(f.corners[3])) { ccase |= 8U; }
+
+            if (ccase == 0U || ccase == 15U)
+            {
+                return;
             }
 
-            // Solve with SVD
-            Eigen::JacobiSVD<Eigen::Matrix3f> svd(ata, Eigen::ComputeFullU | Eigen::ComputeFullV);
-            vertex = svd.solve(atb);
+            auto edgeSampleIndex = [&](std::uint8_t faceEdgeIndex) -> int
+            {
+                std::uint8_t const cellEdge = f.edges[faceEdgeIndex];
+                if (cellEdge >= sampleIndexByEdge.size())
+                {
+                    return -1;
+                }
+                return sampleIndexByEdge[cellEdge];
+            };
+
+            auto connectEdges = [&](std::uint8_t a, std::uint8_t b)
+            {
+                unite(edgeSampleIndex(a), edgeSampleIndex(b));
+            };
+
+            switch (ccase)
+            {
+                case 1U:  connectEdges(3U, 0U); break;
+                case 2U:  connectEdges(0U, 1U); break;
+                case 3U:  connectEdges(3U, 1U); break;
+                case 4U:  connectEdges(1U, 2U); break;
+                case 6U:  connectEdges(0U, 2U); break;
+                case 7U:  connectEdges(3U, 2U); break;
+                case 8U:  connectEdges(2U, 3U); break;
+                case 9U:  connectEdges(0U, 2U); break;
+                case 11U: connectEdges(1U, 2U); break;
+                case 12U: connectEdges(1U, 3U); break;
+                case 13U: connectEdges(0U, 1U); break;
+                case 14U: connectEdges(3U, 0U); break;
+                case 5U:
+                case 10U:
+                {
+                    // Ambiguous marching-squares cases on this face. For robust component
+                    // labeling on non-trilinear fields, sample the actual SDF at the face
+                    // center (rather than relying purely on corner values).
+
+                    Eigen::Vector3f const p0 = cornerPosition(f.corners[0], bounds);
+                    Eigen::Vector3f const p1 = cornerPosition(f.corners[1], bounds);
+                    Eigen::Vector3f const p2 = cornerPosition(f.corners[2], bounds);
+                    Eigen::Vector3f const p3 = cornerPosition(f.corners[3], bounds);
+                    Eigen::Vector3f const faceCenter = 0.25F * (p0 + p1 + p2 + p3);
+
+                    bool const centerInside = (sampleSdf(faceCenter) - m_config.isoValue) < 0.0F;
+                    bool const diagonal02Inside = isCornerInside(f.corners[0]) && isCornerInside(f.corners[2]);
+
+                    // If center sign matches the (0,2) diagonal's inside-ness, connect edges
+                    // around the opposite diagonal. This generalizes the asymptotic decider
+                    // for both ambiguous cases 5 and 10.
+                    if (centerInside == diagonal02Inside)
+                    {
+                        connectEdges(0U, 1U);
+                        connectEdges(2U, 3U);
+                    }
+                    else
+                    {
+                        connectEdges(0U, 3U);
+                        connectEdges(1U, 2U);
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        };
+
+        for (auto const& f : FACES)
+        {
+            connectFace(f);
+        }
+
+        // Assign compact component ids.
+        std::unordered_map<int, std::uint8_t> rootToComponent;
+        rootToComponent.reserve(node.hermiteSamples.size());
+
+        std::vector<std::uint8_t> sampleComponent(node.hermiteSamples.size(), 0U);
+        std::uint8_t componentCount = 0U;
+        for (std::size_t i = 0U; i < node.hermiteSamples.size(); ++i)
+        {
+            int const root = findRoot(static_cast<int>(i));
+            auto it = rootToComponent.find(root);
+            if (it == rootToComponent.end())
+            {
+                if (componentCount < std::numeric_limits<std::uint8_t>::max())
+                {
+                    std::uint8_t const c = componentCount;
+                    rootToComponent.emplace(root, c);
+                    ++componentCount;
+                    sampleComponent[i] = c;
+                }
+                else
+                {
+                    // Extremely unlikely in practice, but keep the code safe.
+                    sampleComponent[i] = 0U;
+                }
+            }
+            else
+            {
+                sampleComponent[i] = it->second;
+            }
+        }
+
+        if (componentCount == 0U)
+        {
+            componentCount = 1U;
+        }
+
+        // Edge→component mapping for quad emission.
+        // Any of the 4 cells around a geometric edge may reference that same edge
+        // via a different local edge index, so we need a mapping for all 12 edges.
+        for (std::uint8_t e = 0U; e < node.edgeComponents.size(); ++e)
+        {
+            int const idx = sampleIndexByEdge[e];
+            if (idx >= 0)
+            {
+                node.edgeComponents[e] = sampleComponent[static_cast<std::size_t>(idx)];
+            }
+        }
+        node.edge3Component = node.edgeComponents[3U];
+        node.edge7Component = node.edgeComponents[7U];
+        node.edge11Component = node.edgeComponents[11U];
+
+        auto solveComponent = [&](std::uint8_t comp) -> std::pair<Eigen::Vector3f, Eigen::Vector3f>
+        {
+            std::vector<HermiteSample const*> samples;
+            samples.reserve(node.hermiteSamples.size());
+            for (std::size_t i = 0U; i < node.hermiteSamples.size(); ++i)
+            {
+                if (sampleComponent[i] == comp)
+                {
+                    samples.push_back(&node.hermiteSamples[i]);
+                }
+            }
+
+            Eigen::Vector3f vertex = massPoint;
+            Eigen::Vector3f normal = Eigen::Vector3f::Zero();
+            Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+
+            if (samples.size() >= 3U)
+            {
+                Eigen::Matrix3f ata = Eigen::Matrix3f::Zero();
+                Eigen::Vector3f atb = Eigen::Vector3f::Zero();
+                for (auto const* s : samples)
+                {
+                    Eigen::Vector3f n = s->gradient;
+                    float const nLen = n.norm();
+                    if (nLen > NORMAL_EPS)
+                    {
+                        n /= nLen;
+                    }
+                    ata += n * n.transpose();
+                    atb += n * n.dot(s->position);
+                    normal += n;
+                    centroid += s->position;
+                }
+
+                centroid /= static_cast<float>(samples.size());
+
+                Eigen::JacobiSVD<Eigen::Matrix3f> svd(ata, Eigen::ComputeFullU | Eigen::ComputeFullV);
+                Eigen::Vector3f const solved = svd.solve(atb);
+
+                // If the unconstrained solution is outside the cell, use the component centroid.
+                // This avoids multiple adjacent cells clamping to the same boundary corner/edge,
+                // which can collapse edges and create topological cracks.
+                float const cellSizeX = bounds.max.s[0] - bounds.min.s[0];
+                float const cellSizeY = bounds.max.s[1] - bounds.min.s[1];
+                float const cellSizeZ = bounds.max.s[2] - bounds.min.s[2];
+                float const eps = 1e-6F * std::max({cellSizeX, cellSizeY, cellSizeZ, 1.0F});
+
+                bool const outside = (solved.x() < bounds.min.s[0] - eps) || (solved.x() > bounds.max.s[0] + eps) ||
+                                     (solved.y() < bounds.min.s[1] - eps) || (solved.y() > bounds.max.s[1] + eps) ||
+                                     (solved.z() < bounds.min.s[2] - eps) || (solved.z() > bounds.max.s[2] + eps);
+
+                vertex = outside ? centroid : solved;
+            }
+            else if (!samples.empty())
+            {
+                // Mass point for this component.
+                vertex = Eigen::Vector3f::Zero();
+                for (auto const* s : samples)
+                {
+                    vertex += s->position;
+                    centroid += s->position;
+                    Eigen::Vector3f n = s->gradient;
+                    float const nLen = n.norm();
+                    if (nLen > NORMAL_EPS)
+                    {
+                        n /= nLen;
+                    }
+                    normal += n;
+                }
+                vertex /= static_cast<float>(samples.size());
+                centroid /= static_cast<float>(samples.size());
+            }
 
             // Clamp to cell bounds
             vertex.x() = std::clamp(vertex.x(), bounds.min.s[0], bounds.max.s[0]);
             vertex.y() = std::clamp(vertex.y(), bounds.min.s[1], bounds.max.s[1]);
             vertex.z() = std::clamp(vertex.z(), bounds.min.s[2], bounds.max.s[2]);
-        }
-        else
-        {
-            vertex = massPoint;
-            for (auto const& sample : node.hermiteSamples)
+
+            float const nLen = normal.norm();
+            if (nLen > NORMAL_EPS)
             {
-                normal += sample.gradient.normalized();
+                normal /= nLen;
             }
+            else
+            {
+                normal = Eigen::Vector3f(1.0F, 0.0F, 0.0F);
+            }
+
+            return {vertex, normal};
+        };
+
+        for (std::uint8_t comp = 0U; comp < componentCount; ++comp)
+        {
+            auto const [vertex, normal] = solveComponent(comp);
+            std::uint32_t const vertexIndex = m_vertexRegistry.registerCellVertex(node.mortonCode, node.depth, vertex, normal, comp);
+            node.vertexIndices.push_back(vertexIndex);
         }
-
-        normal.normalize();
-
-        // Register vertex globally
-        std::uint32_t const vertexIndex = m_vertexRegistry.registerCellVertex(
-            node.mortonCode, vertex, normal);
-        node.vertexIndices.push_back(vertexIndex);
     }
 
     void GlobalMortonOctree::extractMesh(std::vector<Eigen::Vector3f>& positions,
@@ -1094,12 +1680,67 @@ namespace gladius::compute
 
         // Generate quads from shared edges
         generateQuads(indices);
-        
-        // Note: Hole filling disabled - boundary edges come from half-degenerate quads
-        // that cannot be easily fixed without risking winding inconsistencies.
-        // The mesh has consistent winding (multiple=0) but some boundary edges.
-        // TODO: Address degenerate quads at generation time, not as a post-process.
-        // fillBoundaryHoles(indices, positions);
+
+        // Remove geometrically degenerate triangles (e.g., when two distinct vertex indices
+        // end up at identical positions). These triangles contribute spurious boundary edges
+        // but do not cover area.
+        {
+            float const domainScale = m_globalBboxSize.norm();
+            float const eps = std::max(1e-7F * domainScale, 1e-9F);
+            float const eps2 = eps * eps;
+            float const areaEps = std::max(1e-10F * domainScale * domainScale, 1e-12F);
+
+            std::vector<std::uint32_t> filtered;
+            filtered.reserve(indices.size());
+            std::size_t removed = 0U;
+
+            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
+            {
+                std::uint32_t const a = indices[i + 0U];
+                std::uint32_t const b = indices[i + 1U];
+                std::uint32_t const c = indices[i + 2U];
+
+                if (a == b || b == c || a == c)
+                {
+                    ++removed;
+                    continue;
+                }
+
+                Eigen::Vector3f const& pa = positions[a];
+                Eigen::Vector3f const& pb = positions[b];
+                Eigen::Vector3f const& pc = positions[c];
+
+                Eigen::Vector3f const ab = pb - pa;
+                Eigen::Vector3f const bc = pc - pb;
+                Eigen::Vector3f const ca = pa - pc;
+
+                if (ab.squaredNorm() < eps2 || bc.squaredNorm() < eps2 || ca.squaredNorm() < eps2)
+                {
+                    ++removed;
+                    continue;
+                }
+
+                float const area2 = (ab.cross(pc - pa)).squaredNorm();
+                if (area2 < areaEps * areaEps)
+                {
+                    ++removed;
+                    continue;
+                }
+
+                filtered.push_back(a);
+                filtered.push_back(b);
+                filtered.push_back(c);
+            }
+
+            if (removed > 0U)
+            {
+                indices.swap(filtered);
+            }
+        }
+
+        // Note: Boundary hole filling is intentionally disabled here.
+        // The current naive loop triangulation can introduce significant non-manifold
+        // topology. Holes must be fixed by correct quad generation / neighbor completion.
         
         // Fix orientation of connected components using gradient voting
         fixTriangleOrientation(indices);
@@ -1187,14 +1828,25 @@ namespace gladius::compute
             }
         }
         
-        // Debug: print first few non-manifold edges
+        // Debug: print first few problematic edges
         std::size_t debugCount = 0;
+        std::size_t boundaryDebugCount = 0;
         for (auto const& [edge, triangles] : edgeToTriangles)
         {
             std::size_t count = triangles.size();
             if (count == 1)
             {
                 ++m_stats.boundaryEdges;
+
+                if (boundaryDebugCount < 12)
+                {
+                    float const edgeLen = (positions[edge.first] - positions[edge.second]).norm();
+                    std::cout << "  Boundary edge (" << edge.first << "," << edge.second
+                              << ") len=" << edgeLen << " tri=" << triangles.front()
+                              << " [" << indices[triangles.front() * 3] << "," << indices[triangles.front() * 3 + 1]
+                              << "," << indices[triangles.front() * 3 + 2] << "]" << std::endl;
+                    ++boundaryDebugCount;
+                }
             }
             else if (count == 2)
             {
@@ -1208,12 +1860,14 @@ namespace gladius::compute
                 else ++nonManifoldMore;
                 
                 // Debug: print details for first few non-manifold edges
-                if (debugCount < 5)
+                if (debugCount < 12)
                 {
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                    std::cout << "  Non-manifold edge (" << edge.first << "," << edge.second 
-                              << ") count=" << count << " from quads: ";
-                              #endif
+                    float const edgeLen = (positions[edge.first] - positions[edge.second]).norm();
+                    std::cout << "  Non-manifold edge (" << edge.first << "," << edge.second
+                              << ") count=" << count
+                              << " len=" << edgeLen
+                              << (edge.first == edge.second ? " [DEGENERATE]" : "")
+                              << std::endl;
                     for (auto t : triangles)
                     {
                         std::size_t quadIdx = t / 2;
@@ -1222,23 +1876,15 @@ namespace gladius::compute
                             (indices[t*3] == edge.second && indices[t*3+2] == edge.first) :
                             (indices[t*3] == edge.first && indices[t*3+2] == edge.second) ||
                             (indices[t*3] == edge.second && indices[t*3+2] == edge.first);
-                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                        std::cout << "Q" << quadIdx << (isDiagonal ? "(diag)" : "(peri)") << " ";
-                        #endif
+                        (void)quadIdx;
+                        (void)isDiagonal;
                     }
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                    std::cout << std::endl;
                     std::cout << "    Triangles: ";
-                    #endif
                     for (auto t : triangles)
                     {
-                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << t << "[" << indices[t*3] << "," << indices[t*3+1] << "," << indices[t*3+2] << "] ";
-                        #endif
                     }
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << std::endl;
-                    #endif
                     ++debugCount;
                 }
             }
@@ -1276,17 +1922,46 @@ namespace gladius::compute
         std::size_t halfDegenerateQuads = 0;
         std::size_t boundaryEdges = 0;  // Edges where neighbors don't exist
         std::size_t missingVertexQuads = 0;  // Quads where a cell lacks a vertex
+
+        // Guard against accidental duplicate quad emission for the same geometric edge.
+        // If an edge is emitted more than once, shared perimeter edges can become non-manifold.
+        std::unordered_set<std::uint64_t> emittedOwnedEdges;
+        std::size_t duplicateOwnedEdgesSkipped = 0U;
+
+        auto makeOwnedEdgeKey = [](std::uint8_t axis,
+                                   std::uint32_t ex,
+                                   std::uint32_t ey,
+                                   std::uint32_t ez,
+                                   std::uint8_t depth) -> std::uint64_t
+        {
+            // Pack (depth, axis, ex, ey, ez) into a 64-bit key.
+            // Coordinates are grid-vertex coordinates in [0, 2^depth].
+            return static_cast<std::uint64_t>(depth) |
+                   (static_cast<std::uint64_t>(axis) << 8U) |
+                   (static_cast<std::uint64_t>(ex) << 10U) |
+                   (static_cast<std::uint64_t>(ey) << 26U) |
+                   (static_cast<std::uint64_t>(ez) << 42U);
+        };
         
-        // Build Morton→nodeIdx map for fast lookup at uniform depth
+        // Build Morton→nodeIdx map for fast lookup at uniform depth.
+        // Note: neighbors required for quad closure may be non-intersecting but still have a
+        // "halo" vertex, so we include any leaf that has a vertex.
         std::unordered_map<std::uint64_t, std::size_t> mortonToNode;
         std::map<std::uint8_t, std::size_t> depthDistribution;
+        std::uint8_t minIntersectDepth = std::numeric_limits<std::uint8_t>::max();
+        std::uint8_t maxIntersectDepth = 0U;
         for (std::size_t nodeIdx = 0U; nodeIdx < m_nodes.size(); ++nodeIdx)
         {
             auto const& node = m_nodes[nodeIdx];
-            if (node.isLeaf && node.isIntersecting)
+            if (node.isLeaf && !node.vertexIndices.empty())
             {
                 mortonToNode[node.mortonCode] = nodeIdx;
-                ++depthDistribution[node.depth];
+                if (node.isIntersecting)
+                {
+                    ++depthDistribution[node.depth];
+                    minIntersectDepth = std::min(minIntersectDepth, node.depth);
+                    maxIntersectDepth = std::max(maxIntersectDepth, node.depth);
+                }
             }
         }
         
@@ -1352,14 +2027,190 @@ namespace gladius::compute
             #endif
         }
         
-        // Helper to get vertex index from a node (returns max if no vertex)
-        auto getVertexFromNode = [this](std::size_t nodeIdx) -> std::uint32_t {
-            if (nodeIdx >= m_nodes.size()) return std::numeric_limits<std::uint32_t>::max();
+        // Helper to get vertex index from a node for a specific edge (returns max if no vertex)
+        auto getVertexFromNodeForEdge = [this](std::size_t nodeIdx, std::uint8_t edgeNum) -> std::uint32_t {
+            if (nodeIdx >= m_nodes.size())
+            {
+                return std::numeric_limits<std::uint32_t>::max();
+            }
+
             auto const& node = m_nodes[nodeIdx];
-            if (node.vertexIndices.empty()) return std::numeric_limits<std::uint32_t>::max();
-            return node.vertexIndices[0];
+            if (node.vertexIndices.empty())
+            {
+                return std::numeric_limits<std::uint32_t>::max();
+            }
+
+            if (edgeNum >= node.edgeComponents.size())
+            {
+                return std::numeric_limits<std::uint32_t>::max();
+            }
+
+            std::uint8_t const component = node.edgeComponents[edgeNum];
+            if (component >= node.vertexIndices.size())
+            {
+                // Do not silently fall back to component 0: that can connect unrelated
+                // components and create non-manifold topology.
+                return std::numeric_limits<std::uint32_t>::max();
+            }
+            return node.vertexIndices[component];
         };
+
+        auto triangleArea = [&positions](std::uint32_t a, std::uint32_t b, std::uint32_t c) -> float {
+            Eigen::Vector3f const& pa = positions[a];
+            Eigen::Vector3f const& pb = positions[b];
+            Eigen::Vector3f const& pc = positions[c];
+            return (pb - pa).cross(pc - pa).norm();
+        };
+
+        auto makeUndirectedEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+        {
+            if (a > b)
+            {
+                std::swap(a, b);
+            }
+            return (static_cast<std::uint64_t>(a) << 32U) | b;
+        };
+
+        struct QuadCandidate
+        {
+            std::uint8_t axis;
+            std::array<std::uint32_t, 6> diag12Tris;
+            std::array<std::uint32_t, 6> diag03Tris;
+            float area12a;
+            float area12b;
+            float area03a;
+            float area03b;
+            std::uint64_t diag12Key;
+            std::uint64_t diag03Key;
+            std::array<std::uint64_t, 4> perimeterEdges;
+        };
+
+        auto computePerimeterEdgesFromTris = [&](std::array<std::uint32_t, 6> const& tris) -> std::array<std::uint64_t, 4>
+        {
+            // The two-triangle representation contains 6 undirected edges where the internal
+            // diagonal appears twice. The remaining 4 unique edges are the quad perimeter.
+            std::array<std::uint64_t, 6> edges = {
+              makeUndirectedEdgeKey(tris[0], tris[1]),
+              makeUndirectedEdgeKey(tris[1], tris[2]),
+              makeUndirectedEdgeKey(tris[2], tris[0]),
+              makeUndirectedEdgeKey(tris[3], tris[4]),
+              makeUndirectedEdgeKey(tris[4], tris[5]),
+              makeUndirectedEdgeKey(tris[5], tris[3]),
+            };
+
+            std::array<std::uint64_t, 6> uniqueEdges{};
+            std::array<std::uint8_t, 6> uniqueCounts{};
+            std::size_t uniqueCount = 0U;
+
+            for (std::size_t i = 0U; i < edges.size(); ++i)
+            {
+                bool found = false;
+                for (std::size_t j = 0U; j < uniqueCount; ++j)
+                {
+                    if (uniqueEdges[j] == edges[i])
+                    {
+                        ++uniqueCounts[j];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    uniqueEdges[uniqueCount] = edges[i];
+                    uniqueCounts[uniqueCount] = 1U;
+                    ++uniqueCount;
+                }
+            }
+
+            std::array<std::uint64_t, 4> perimeter{};
+            std::size_t out = 0U;
+            for (std::size_t j = 0U; j < uniqueCount; ++j)
+            {
+                if (uniqueCounts[j] == 1U)
+                {
+                    if (out < perimeter.size())
+                    {
+                        perimeter[out++] = uniqueEdges[j];
+                    }
+                }
+            }
+            return perimeter;
+        };
+
+        auto computeDiagonalEdgeFromTris = [&](std::array<std::uint32_t, 6> const& tris) -> std::uint64_t
+        {
+            std::array<std::uint64_t, 6> edges = {
+              makeUndirectedEdgeKey(tris[0], tris[1]),
+              makeUndirectedEdgeKey(tris[1], tris[2]),
+              makeUndirectedEdgeKey(tris[2], tris[0]),
+              makeUndirectedEdgeKey(tris[3], tris[4]),
+              makeUndirectedEdgeKey(tris[4], tris[5]),
+              makeUndirectedEdgeKey(tris[5], tris[3]),
+            };
+
+            std::array<std::uint64_t, 6> uniqueEdges{};
+            std::array<std::uint8_t, 6> uniqueCounts{};
+            std::size_t uniqueCount = 0U;
+
+            for (std::size_t i = 0U; i < edges.size(); ++i)
+            {
+                bool found = false;
+                for (std::size_t j = 0U; j < uniqueCount; ++j)
+                {
+                    if (uniqueEdges[j] == edges[i])
+                    {
+                        ++uniqueCounts[j];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    uniqueEdges[uniqueCount] = edges[i];
+                    uniqueCounts[uniqueCount] = 1U;
+                    ++uniqueCount;
+                }
+            }
+
+            for (std::size_t j = 0U; j < uniqueCount; ++j)
+            {
+                if (uniqueCounts[j] == 2U)
+                {
+                    return uniqueEdges[j];
+                }
+            }
+            return 0U;
+        };
+
+        // First pass: gather all valid quads (candidates) and build an order-independent view
+        // of which edges will be used as perimeter edges.
+        std::vector<QuadCandidate> candidates;
+        candidates.reserve(160000U);
         
+        auto addCandidate = [&](std::uint8_t axis,
+                                std::array<std::uint32_t, 6> const& diag12,
+                                std::array<std::uint32_t, 6> const& diag03)
+        {
+            float constexpr MIN_AREA = 1e-10F;
+            QuadCandidate c;
+            c.axis = axis;
+            c.diag12Tris = diag12;
+            c.diag03Tris = diag03;
+            c.area12a = triangleArea(diag12[0], diag12[1], diag12[2]);
+            c.area12b = triangleArea(diag12[3], diag12[4], diag12[5]);
+            c.area03a = triangleArea(diag03[0], diag03[1], diag03[2]);
+            c.area03b = triangleArea(diag03[3], diag03[4], diag03[5]);
+            c.diag12Key = computeDiagonalEdgeFromTris(diag12);
+            c.diag03Key = computeDiagonalEdgeFromTris(diag03);
+            c.perimeterEdges = computePerimeterEdgesFromTris(diag12);
+
+            // Only keep candidates with 4 perimeter edges (defensive: should always be 4).
+            // If perimeterEdges contains zeros due to unexpected topology, we still keep it;
+            // it will just weaken the diagonal-vs-perimeter check rather than crashing.
+            candidates.push_back(c);
+            (void)MIN_AREA;
+        };
+
         for (std::size_t nodeIdx = 0U; nodeIdx < m_nodes.size(); ++nodeIdx)
         {
             auto const& node = m_nodes[nodeIdx];
@@ -1368,7 +2219,7 @@ namespace gladius::compute
                 continue;
             }
             ++intersectingLeafCount;
-            
+
             // Decode this cell's coordinates
             std::uint32_t cx = 0U, cy = 0U, cz = 0U;
             for (std::uint8_t d = 0U; d < node.depth; ++d)
@@ -1383,15 +2234,25 @@ namespace gladius::compute
                 cy += oy * levelScale;
                 cz += oz * levelScale;
             }
-            
+
             auto const maxCoord = (1U << node.depth) - 1U;
-            
+
             // Check owned edges 3, 7, 11 (edges at max corner)
             // CPU EDGE_CORNERS uses different numbering than GPU:
             //   CPU Edge 3 = GPU Edge 6: X-axis at (y=max, z=max), corners 6-7
             // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
             if ((node.edgeMask & (1U << 3)) && cy < maxCoord && cz < maxCoord)
             {
+                // Unique key for this geometric edge (axis X) at grid vertex coordinate (cx, cy+1, cz+1)
+                {
+                    std::uint64_t const edgeKey = makeOwnedEdgeKey(0U, cx, cy + 1U, cz + 1U, node.depth);
+                    if (!emittedOwnedEdges.insert(edgeKey).second)
+                    {
+                        ++duplicateOwnedEdgesSkipped;
+                        continue;
+                    }
+                }
+
                 // Look up 3 neighbors by coordinate
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
                     std::uint64_t code = 0U;
@@ -1405,63 +2266,73 @@ namespace gladius::compute
                     }
                     return code;
                 };
-                
+
                 std::uint64_t const m1 = encodeMorton(cx, cy + 1, cz);
                 std::uint64_t const m2 = encodeMorton(cx, cy, cz + 1);
                 std::uint64_t const m3 = encodeMorton(cx, cy + 1, cz + 1);
-                
+
                 auto it1 = mortonToNode.find(m1);
                 auto it2 = mortonToNode.find(m2);
                 auto it3 = mortonToNode.find(m3);
-                
+
                 bool const foundAll = (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end());
                 if (!foundAll)
                 {
                     ++boundaryEdges;
+
+                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     // Track which neighbors are missing and why
                     static std::size_t sampleCount = 0;
                     if (sampleCount++ < 5)
                     {
+                        std::uint8_t const depth = node.depth;
                         // Check if nodes exist in the full octree but aren't intersecting
-                        auto checkNode = [this](std::uint64_t mc, char const* name) {
-                            auto it = m_mortonToIndex.find(mc);
-                            if (it == m_mortonToIndex.end()) {
-                                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                                std::cout << "    " << name << " mc=" << std::hex << mc << std::dec 
+                        auto checkNode = [this, depth](std::uint64_t mc, char const* name)
+                        {
+                            auto it = m_mortonToIndex.find(MortonNodeKey{mc, depth});
+                            if (it == m_mortonToIndex.end())
+                            {
+                                std::cout << "    " << name << " mc=" << std::hex << mc << std::dec
                                           << ": NOT IN OCTREE" << std::endl;
-                                          #endif
-                            } else {
+                            }
+                            else
+                            {
                                 auto const& n = m_nodes[it->second];
-                                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                                std::cout << "    " << name << " mc=" << std::hex << mc << std::dec 
-                                          << ": exists, isLeaf=" << n.isLeaf 
+                                std::cout << "    " << name << " mc=" << std::hex << mc << std::dec
+                                          << ": exists, isLeaf=" << n.isLeaf
                                           << " isIntersecting=" << n.isIntersecting << std::endl;
-                                          #endif
                             }
                         };
-                        
-                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                        std::cout << "  Edge3 neighbor miss at (" << cx << "," << cy << "," << cz 
+
+                        std::cout << "  Edge3 neighbor miss at (" << cx << "," << cy << "," << cz
                                   << ") depth=" << static_cast<int>(node.depth)
                                   << " mc=" << std::hex << node.mortonCode << std::dec
-                                  << ": n1(" << (it1 != mortonToNode.end()) 
+                                  << ": n1(" << (it1 != mortonToNode.end())
                                   << ") n2(" << (it2 != mortonToNode.end())
                                   << ") n3(" << (it3 != mortonToNode.end()) << ")" << std::endl;
-                        std::cout << "    Lookup codes: m1=" << std::hex << m1 
+                        std::cout << "    Lookup codes: m1=" << std::hex << m1
                                   << " m2=" << m2 << " m3=" << m3 << std::dec << std::endl;
-                                  #endif
+
                         checkNode(m1, "n1");
                         checkNode(m2, "n2");
                         checkNode(m3, "n3");
                     }
+                    #endif
                 }
                 else
                 {
-                    std::uint32_t v0 = getVertexFromNode(nodeIdx);
-                    std::uint32_t v1 = getVertexFromNode(it1->second);
-                    std::uint32_t v2 = getVertexFromNode(it2->second);
-                    std::uint32_t v3 = getVertexFromNode(it3->second);
-                    
+                    // NOTE: Each of the 4 cells around this geometric edge refers to it with
+                    // a different local edge index. This matters for multi-vertex/component
+                    // selection.
+                    // Geometric edge = X-axis at (y=max,z=max) for base cell (edge 3).
+                    // Neighbors use: (y=min,z=max)=edge2, (y=max,z=min)=edge1, (y=min,z=min)=edge0.
+                    // Order vertices cyclically around the edge in the (y,z) neighborhood plane:
+                    //   (cy,cz) -> (cy+1,cz) -> (cy+1,cz+1) -> (cy,cz+1)
+                    std::uint32_t v0 = getVertexFromNodeForEdge(nodeIdx, 3U);
+                    std::uint32_t v1 = getVertexFromNodeForEdge(it1->second, 2U);
+                    std::uint32_t v2 = getVertexFromNodeForEdge(it3->second, 0U);
+                    std::uint32_t v3 = getVertexFromNodeForEdge(it2->second, 1U);
+
                     if (v0 != std::numeric_limits<std::uint32_t>::max() &&
                         v1 != std::numeric_limits<std::uint32_t>::max() &&
                         v2 != std::numeric_limits<std::uint32_t>::max() &&
@@ -1470,64 +2341,13 @@ namespace gladius::compute
                         // Check for duplicate vertices
                         if (v0 != v1 && v0 != v2 && v0 != v3 && v1 != v2 && v1 != v3 && v2 != v3)
                         {
-                            // Winding based on corner 7 (max corner) being inside
-                            bool corner7Inside = (node.internalMask & (1U << 7)) != 0;
-                            
-                            Eigen::Vector3f const& p0 = positions[v0];
-                            Eigen::Vector3f const& p1 = positions[v1];
-                            Eigen::Vector3f const& p2 = positions[v2];
-                            Eigen::Vector3f const& p3 = positions[v3];
-                            
-                            // Triangle 1: v0, v2, v1 (or v0, v1, v2 depending on winding)
-                            // Triangle 2: v1, v2, v3 (or v1, v3, v2)
-                            Eigen::Vector3f tri1_normal, tri2_normal;
-                            if (corner7Inside)
-                            {
-                                tri1_normal = (p2 - p0).cross(p1 - p0);
-                                tri2_normal = (p2 - p1).cross(p3 - p1);
-                            }
-                            else
-                            {
-                                tri1_normal = (p1 - p0).cross(p2 - p0);
-                                tri2_normal = (p3 - p1).cross(p2 - p1);
-                            }
-                            
-                            bool const tri1Valid = tri1_normal.norm() >= 1e-10F;
-                            bool const tri2Valid = tri2_normal.norm() >= 1e-10F;
-                            
-                            if (tri1Valid != tri2Valid) ++halfDegenerateQuads;
-                            
-                            if (tri1Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v2);
-                                    indices.push_back(v1);
-                                }
-                                else
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                }
-                            }
-                            if (tri2Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                    indices.push_back(v3);
-                                }
-                                else
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v3);
-                                    indices.push_back(v2);
-                                }
-                            }
-                            ++emittedQuads;
+                            // Two triangulations of the quad:
+                            //  - diagonal (v0,v2): (v0,v1,v2) + (v0,v2,v3)
+                            //  - diagonal (v1,v3): (v0,v1,v3) + (v1,v2,v3)
+                            std::array<std::uint32_t, 6> diag12{v0, v1, v2,  v0, v2, v3};
+                            std::array<std::uint32_t, 6> diag03{v0, v1, v3,  v1, v2, v3};
+
+                            addCandidate(0U, diag12, diag03);
                         }
                     }
                     else
@@ -1541,6 +2361,16 @@ namespace gladius::compute
             // Shared by: (x,y,z), (x+1,y,z), (x,y,z+1), (x+1,y,z+1)
             if ((node.edgeMask & (1U << 7)) && cx < maxCoord && cz < maxCoord)
             {
+                // Unique key for this geometric edge (axis Y) at grid vertex coordinate (cx+1, cy, cz+1)
+                {
+                    std::uint64_t const edgeKey = makeOwnedEdgeKey(1U, cx + 1U, cy, cz + 1U, node.depth);
+                    if (!emittedOwnedEdges.insert(edgeKey).second)
+                    {
+                        ++duplicateOwnedEdgesSkipped;
+                        continue;
+                    }
+                }
+
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
                     std::uint64_t code = 0U;
                     for (std::uint8_t d = 0U; d < node.depth; ++d)
@@ -1564,10 +2394,14 @@ namespace gladius::compute
                 
                 if (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end())
                 {
-                    std::uint32_t v0 = getVertexFromNode(nodeIdx);
-                    std::uint32_t v1 = getVertexFromNode(it1->second);
-                    std::uint32_t v2 = getVertexFromNode(it2->second);
-                    std::uint32_t v3 = getVertexFromNode(it3->second);
+                    // Geometric edge = Y-axis at (x=max,z=max) for base cell (edge 7).
+                    // Neighbors use: (x=min,z=max)=edge6, (x=max,z=min)=edge5, (x=min,z=min)=edge4.
+                    // Order vertices cyclically around the edge in the (x,z) neighborhood plane:
+                    //   (cx,cz) -> (cx+1,cz) -> (cx+1,cz+1) -> (cx,cz+1)
+                    std::uint32_t v0 = getVertexFromNodeForEdge(nodeIdx, 7U);
+                    std::uint32_t v1 = getVertexFromNodeForEdge(it1->second, 6U);
+                    std::uint32_t v2 = getVertexFromNodeForEdge(it3->second, 4U);
+                    std::uint32_t v3 = getVertexFromNodeForEdge(it2->second, 5U);
                     
                     if (v0 != std::numeric_limits<std::uint32_t>::max() &&
                         v1 != std::numeric_limits<std::uint32_t>::max() &&
@@ -1576,62 +2410,10 @@ namespace gladius::compute
                     {
                         if (v0 != v1 && v0 != v2 && v0 != v3 && v1 != v2 && v1 != v3 && v2 != v3)
                         {
-                            bool corner7Inside = (node.internalMask & (1U << 7)) != 0;
-                            
-                            Eigen::Vector3f const& p0 = positions[v0];
-                            Eigen::Vector3f const& p1 = positions[v1];
-                            Eigen::Vector3f const& p2 = positions[v2];
-                            Eigen::Vector3f const& p3 = positions[v3];
-                            
-                            Eigen::Vector3f tri1_normal, tri2_normal;
-                            // Y-edge has inverted winding compared to X/Z edges
-                            if (corner7Inside)
-                            {
-                                tri1_normal = (p1 - p0).cross(p2 - p0);
-                                tri2_normal = (p3 - p1).cross(p2 - p1);
-                            }
-                            else
-                            {
-                                tri1_normal = (p2 - p0).cross(p1 - p0);
-                                tri2_normal = (p2 - p1).cross(p3 - p1);
-                            }
-                            
-                            bool const tri1Valid = tri1_normal.norm() >= 1e-10F;
-                            bool const tri2Valid = tri2_normal.norm() >= 1e-10F;
-                            
-                            if (tri1Valid != tri2Valid) ++halfDegenerateQuads;
-                            
-                            if (tri1Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                }
-                                else
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v2);
-                                    indices.push_back(v1);
-                                }
-                            }
-                            if (tri2Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v3);
-                                    indices.push_back(v2);
-                                }
-                                else
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                    indices.push_back(v3);
-                                }
-                            }
-                            ++emittedQuads;
+                            std::array<std::uint32_t, 6> diag12{v0, v1, v2,  v0, v2, v3};
+                            std::array<std::uint32_t, 6> diag03{v0, v1, v3,  v1, v2, v3};
+
+                            addCandidate(1U, diag12, diag03);
                         }
                     }
                     else
@@ -1649,6 +2431,16 @@ namespace gladius::compute
             // Shared by: (x,y,z), (x+1,y,z), (x,y+1,z), (x+1,y+1,z)
             if ((node.edgeMask & (1U << 11)) && cx < maxCoord && cy < maxCoord)
             {
+                // Unique key for this geometric edge (axis Z) at grid vertex coordinate (cx+1, cy+1, cz)
+                {
+                    std::uint64_t const edgeKey = makeOwnedEdgeKey(2U, cx + 1U, cy + 1U, cz, node.depth);
+                    if (!emittedOwnedEdges.insert(edgeKey).second)
+                    {
+                        ++duplicateOwnedEdgesSkipped;
+                        continue;
+                    }
+                }
+
                 auto encodeMorton = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) -> std::uint64_t {
                     std::uint64_t code = 0U;
                     for (std::uint8_t d = 0U; d < node.depth; ++d)
@@ -1672,10 +2464,14 @@ namespace gladius::compute
                 
                 if (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end())
                 {
-                    std::uint32_t v0 = getVertexFromNode(nodeIdx);
-                    std::uint32_t v1 = getVertexFromNode(it1->second);
-                    std::uint32_t v2 = getVertexFromNode(it2->second);
-                    std::uint32_t v3 = getVertexFromNode(it3->second);
+                    // Geometric edge = Z-axis at (x=max,y=max) for base cell (edge 11).
+                    // Neighbors use: (x=min,y=max)=edge10, (x=max,y=min)=edge9, (x=min,y=min)=edge8.
+                    // Order vertices cyclically around the edge in the (x,y) neighborhood plane:
+                    //   (cx,cy) -> (cx+1,cy) -> (cx+1,cy+1) -> (cx,cy+1)
+                    std::uint32_t v0 = getVertexFromNodeForEdge(nodeIdx, 11U);
+                    std::uint32_t v1 = getVertexFromNodeForEdge(it1->second, 10U);
+                    std::uint32_t v2 = getVertexFromNodeForEdge(it3->second, 8U);
+                    std::uint32_t v3 = getVertexFromNodeForEdge(it2->second, 9U);
                     
                     if (v0 != std::numeric_limits<std::uint32_t>::max() &&
                         v1 != std::numeric_limits<std::uint32_t>::max() &&
@@ -1684,61 +2480,10 @@ namespace gladius::compute
                     {
                         if (v0 != v1 && v0 != v2 && v0 != v3 && v1 != v2 && v1 != v3 && v2 != v3)
                         {
-                            bool corner7Inside = (node.internalMask & (1U << 7)) != 0;
-                            
-                            Eigen::Vector3f const& p0 = positions[v0];
-                            Eigen::Vector3f const& p1 = positions[v1];
-                            Eigen::Vector3f const& p2 = positions[v2];
-                            Eigen::Vector3f const& p3 = positions[v3];
-                            
-                            Eigen::Vector3f tri1_normal, tri2_normal;
-                            if (corner7Inside)
-                            {
-                                tri1_normal = (p2 - p0).cross(p1 - p0);
-                                tri2_normal = (p2 - p1).cross(p3 - p1);
-                            }
-                            else
-                            {
-                                tri1_normal = (p1 - p0).cross(p2 - p0);
-                                tri2_normal = (p3 - p1).cross(p2 - p1);
-                            }
-                            
-                            bool const tri1Valid = tri1_normal.norm() >= 1e-10F;
-                            bool const tri2Valid = tri2_normal.norm() >= 1e-10F;
-                            
-                            if (tri1Valid != tri2Valid) ++halfDegenerateQuads;
-                            
-                            if (tri1Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v2);
-                                    indices.push_back(v1);
-                                }
-                                else
-                                {
-                                    indices.push_back(v0);
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                }
-                            }
-                            if (tri2Valid)
-                            {
-                                if (corner7Inside)
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v2);
-                                    indices.push_back(v3);
-                                }
-                                else
-                                {
-                                    indices.push_back(v1);
-                                    indices.push_back(v3);
-                                    indices.push_back(v2);
-                                }
-                            }
-                            ++emittedQuads;
+                            std::array<std::uint32_t, 6> diag12{v0, v1, v2,  v0, v2, v3};
+                            std::array<std::uint32_t, 6> diag03{v0, v1, v3,  v1, v2, v3};
+
+                            addCandidate(2U, diag12, diag03);
                         }
                     }
                     else
@@ -1751,6 +2496,248 @@ namespace gladius::compute
                     ++boundaryEdges;
                 }
             }
+        }
+
+        // Build an order-independent map of all perimeter edges that will appear regardless
+        // of quad diagonal choices. If a quad diagonal equals any perimeter edge, that edge
+        // would be used by 3+ triangles (2 from the diagonal + at least 1 from perimeter),
+        // creating non-manifold topology.
+        std::unordered_map<std::uint64_t, std::uint16_t> perimeterEdgeCount;
+        perimeterEdgeCount.reserve(candidates.size() * 4U);
+
+        // Collect small diagnostics about which edge-axis types contribute to each perimeter edge.
+        std::unordered_map<std::uint64_t, std::array<std::uint8_t, 3>> perimeterEdgeAxes;
+        std::unordered_map<std::uint64_t, std::uint8_t> perimeterEdgeAxesCount;
+        perimeterEdgeAxes.reserve(candidates.size() * 4U);
+        perimeterEdgeAxesCount.reserve(candidates.size() * 4U);
+
+        for (auto const& c : candidates)
+        {
+            for (auto const e : c.perimeterEdges)
+            {
+                // Skip zeros (defensive).
+                if (e == 0U)
+                {
+                    continue;
+                }
+                ++perimeterEdgeCount[e];
+
+                auto& axes = perimeterEdgeAxes[e];
+                std::uint8_t& axesCount = perimeterEdgeAxesCount[e];
+                if (axesCount < axes.size())
+                {
+                    axes[axesCount++] = c.axis;
+                }
+            }
+        }
+
+        std::size_t perimeterEdgesOverused = 0U;
+        std::uint16_t maxPerimeterEdgeUse = 0U;
+        for (auto const& [edgeKey, count] : perimeterEdgeCount)
+        {
+            maxPerimeterEdgeUse = std::max(maxPerimeterEdgeUse, count);
+            if (count > 2U)
+            {
+                ++perimeterEdgesOverused;
+            }
+        }
+
+        if (perimeterEdgesOverused > 0U)
+        {
+            std::size_t printed = 0U;
+            for (auto const& [edgeKey, count] : perimeterEdgeCount)
+            {
+                if (count <= 2U)
+                {
+                    continue;
+                }
+
+                auto const axesIt = perimeterEdgeAxes.find(edgeKey);
+                auto const axesCountIt = perimeterEdgeAxesCount.find(edgeKey);
+
+                std::uint8_t const axesCount = (axesCountIt != perimeterEdgeAxesCount.end()) ? axesCountIt->second : 0U;
+                std::array<std::uint8_t, 3> axes{};
+                if (axesIt != perimeterEdgeAxes.end())
+                {
+                    axes = axesIt->second;
+                }
+
+                std::cout << "  Overused perimeter edge key=0x" << std::hex << edgeKey << std::dec
+                          << " count=" << count
+                          << " axes=[";
+                for (std::uint8_t i = 0U; i < axesCount; ++i)
+                {
+                    std::cout << static_cast<int>(axes[i]);
+                    if (i + 1U < axesCount)
+                    {
+                        std::cout << ",";
+                    }
+                }
+                std::cout << "]" << std::endl;
+
+                if (++printed >= 6U)
+                {
+                    break;
+                }
+            }
+        }
+
+        // Track current undirected edge usage in the generated triangle mesh.
+        // We still use this (order-dependent) to avoid diagonal-diagonal collisions.
+        std::unordered_map<std::uint64_t, std::uint8_t> edgeUseCount;
+        edgeUseCount.reserve(512000U);
+
+        auto optionNonManifoldPenalty = [&](std::array<std::uint32_t, 6> const& tris) -> std::uint32_t
+        {
+            // Count per-edge increments for this option (6 edges per triangle pair, with shared
+            // diagonal appearing twice).
+            std::array<std::uint64_t, 6> edges = {
+              makeUndirectedEdgeKey(tris[0], tris[1]),
+              makeUndirectedEdgeKey(tris[1], tris[2]),
+              makeUndirectedEdgeKey(tris[2], tris[0]),
+              makeUndirectedEdgeKey(tris[3], tris[4]),
+              makeUndirectedEdgeKey(tris[4], tris[5]),
+              makeUndirectedEdgeKey(tris[5], tris[3]),
+            };
+
+            std::array<std::uint64_t, 6> uniqueEdges{};
+            std::array<std::uint8_t, 6> inc{};
+            std::size_t uniqueCount = 0U;
+            for (std::size_t i = 0U; i < edges.size(); ++i)
+            {
+                bool found = false;
+                for (std::size_t j = 0U; j < uniqueCount; ++j)
+                {
+                    if (uniqueEdges[j] == edges[i])
+                    {
+                        ++inc[j];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    uniqueEdges[uniqueCount] = edges[i];
+                    inc[uniqueCount] = 1U;
+                    ++uniqueCount;
+                }
+            }
+
+            std::uint32_t penalty = 0U;
+            for (std::size_t j = 0U; j < uniqueCount; ++j)
+            {
+                auto const it = edgeUseCount.find(uniqueEdges[j]);
+                std::uint8_t const current = (it != edgeUseCount.end()) ? it->second : 0U;
+                std::uint8_t const next = static_cast<std::uint8_t>(current + inc[j]);
+                if (next > 2U)
+                {
+                    penalty += static_cast<std::uint32_t>(next - 2U);
+                }
+            }
+            return penalty;
+        };
+
+        auto commitOption = [&](std::array<std::uint32_t, 6> const& tris)
+        {
+            indices.push_back(tris[0]);
+            indices.push_back(tris[1]);
+            indices.push_back(tris[2]);
+            indices.push_back(tris[3]);
+            indices.push_back(tris[4]);
+            indices.push_back(tris[5]);
+
+            auto bump = [&](std::uint32_t a, std::uint32_t b)
+            {
+                std::uint64_t const k = makeUndirectedEdgeKey(a, b);
+                auto it = edgeUseCount.find(k);
+                if (it == edgeUseCount.end())
+                {
+                    edgeUseCount.emplace(k, 1U);
+                }
+                else
+                {
+                    it->second = static_cast<std::uint8_t>(it->second + 1U);
+                }
+            };
+
+            bump(tris[0], tris[1]);
+            bump(tris[1], tris[2]);
+            bump(tris[2], tris[0]);
+            bump(tris[3], tris[4]);
+            bump(tris[4], tris[5]);
+            bump(tris[5], tris[3]);
+        };
+
+        // Second pass: choose diagonals in a way that is order-independent w.r.t.
+        // diagonal-vs-perimeter collisions.
+        float constexpr MIN_AREA = 1e-10F;
+        std::size_t zeroDiagonalKeys = 0U;
+        for (auto const& c : candidates)
+        {
+            if (c.diag12Key == 0U || c.diag03Key == 0U)
+            {
+                ++zeroDiagonalKeys;
+            }
+
+            bool const diag12Ok = (c.area12a >= MIN_AREA) && (c.area12b >= MIN_AREA);
+            bool const diag03Ok = (c.area03a >= MIN_AREA) && (c.area03b >= MIN_AREA);
+
+            bool useDiag12 = diag12Ok;
+            if (!diag12Ok && diag03Ok)
+            {
+                useDiag12 = false;
+            }
+            else if (diag12Ok && diag03Ok)
+            {
+                useDiag12 = std::min(c.area12a, c.area12b) >= std::min(c.area03a, c.area03b);
+            }
+
+            // Hard rule: never pick a diagonal that equals any perimeter edge in the full quad set.
+            bool const diag12IsPerimeter = perimeterEdgeCount.find(c.diag12Key) != perimeterEdgeCount.end();
+            bool const diag03IsPerimeter = perimeterEdgeCount.find(c.diag03Key) != perimeterEdgeCount.end();
+            if (diag12IsPerimeter != diag03IsPerimeter)
+            {
+                useDiag12 = !diag12IsPerimeter;
+            }
+
+            // If both are (unfortunately) forbidden or both allowed, fall back to incremental
+            // non-manifold penalty to avoid diagonal-diagonal collisions.
+            std::array<std::uint32_t, 6> const& diag12 = c.diag12Tris;
+            std::array<std::uint32_t, 6> const& diag03 = c.diag03Tris;
+            std::uint32_t const penalty12 = optionNonManifoldPenalty(diag12);
+            std::uint32_t const penalty03 = optionNonManifoldPenalty(diag03);
+            if (penalty12 != penalty03)
+            {
+                useDiag12 = (penalty12 < penalty03);
+            }
+
+            auto const& chosen = useDiag12 ? diag12 : diag03;
+            float const chosenAreaA = useDiag12 ? c.area12a : c.area03a;
+            float const chosenAreaB = useDiag12 ? c.area12b : c.area03b;
+            if (chosenAreaA < MIN_AREA || chosenAreaB < MIN_AREA)
+            {
+                ++halfDegenerateQuads;
+            }
+
+            commitOption(chosen);
+            ++emittedQuads;
+        }
+
+        if (boundaryEdges > 0U || missingVertexQuads > 0U || halfDegenerateQuads > 0U || duplicateOwnedEdgesSkipped > 0U ||
+            perimeterEdgesOverused > 0U || zeroDiagonalKeys > 0U)
+        {
+            std::cout << "  Quad generation (hierarchical): intersectingLeaves=" << intersectingLeafCount
+                      << ", emittedQuads=" << emittedQuads
+                      << ", neighborMisses=" << boundaryEdges
+                      << ", missingVertexQuads=" << missingVertexQuads
+                      << ", halfDegenerateQuads=" << halfDegenerateQuads
+                      << ", duplicateOwnedEdgesSkipped=" << duplicateOwnedEdgesSkipped
+                      << ", perimeterEdgesOverused=" << perimeterEdgesOverused
+                      << ", maxPerimeterEdgeUse=" << maxPerimeterEdgeUse
+                      << ", zeroDiagonalKeys=" << zeroDiagonalKeys
+                      << ", depthRange=[" << static_cast<int>(minIntersectDepth)
+                      << "," << static_cast<int>(maxIntersectDepth) << "]"
+                      << std::endl;
         }
         
         #ifdef GLOBALMORTON_DEBUG_OUTPUT
@@ -2377,7 +3364,7 @@ namespace gladius::compute
 
         std::uint64_t const neighborMorton = encodePathMorton(x, y, z, depth);
 
-        auto it = m_mortonToIndex.find(neighborMorton);
+        auto it = m_mortonToIndex.find(MortonNodeKey{neighborMorton, depth});
         if (it != m_mortonToIndex.end())
         {
             return it->second;

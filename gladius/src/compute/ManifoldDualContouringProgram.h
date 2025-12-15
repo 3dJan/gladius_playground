@@ -101,7 +101,11 @@ namespace gladius::compute
             std::unique_ptr<cl::Buffer> & octreeBuffer,
             std::size_t & nodeCount,
             std::uint32_t maxCoord,
-            std::uint8_t depth);
+            std::uint8_t depth,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            Primitives const & primitives,
+            float isoValue);
         
         /// Diagnostic counters for boundary hole analysis (all 12 edges)
         struct DiagnosticCounters

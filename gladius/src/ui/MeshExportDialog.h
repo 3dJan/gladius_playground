@@ -102,6 +102,8 @@ namespace gladius::ui
         // Minimum feature size and chunking
         float m_manifoldMinFeatureSize = 0.0F;
         bool m_manifoldEnableChunking = true;
+        // Hierarchical octree (watertight mesh generation)
+        bool m_manifoldEnableHierarchicalOctree = true;
         // Sharp feature post-processing
         bool m_manifoldEnableSharpFeaturePostProcess = false;
         float m_manifoldSharpFeatureAngleThreshold = 0.5F;

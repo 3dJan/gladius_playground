@@ -8,6 +8,31 @@
 
 namespace gladius::compute
 {
+    struct CellVertexKey
+    {
+        std::uint64_t morton{0U};
+        std::uint8_t depth{0U};
+        std::uint8_t component{0U};
+
+        friend bool operator==(CellVertexKey const& a, CellVertexKey const& b)
+        {
+            return a.morton == b.morton && a.depth == b.depth && a.component == b.component;
+        }
+    };
+
+    struct CellVertexKeyHash
+    {
+        std::size_t operator()(CellVertexKey const& k) const noexcept
+        {
+            std::size_t const h0 = std::hash<std::uint64_t>{}(k.morton);
+            std::size_t const h1 = std::hash<std::uint8_t>{}(k.depth);
+            std::size_t const h2 = std::hash<std::uint8_t>{}(k.component);
+            // Basic combine.
+            std::size_t const h01 = h0 ^ (h1 + 0x9e3779b97f4a7c15ULL + (h0 << 6U) + (h0 >> 2U));
+            return h01 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h01 << 6U) + (h01 >> 2U));
+        }
+    };
+
     /**
      * @brief Encodes 3D integer coordinates into a 64-bit Morton code (Z-order curve).
      * 
@@ -99,8 +124,10 @@ namespace gladius::compute
          * @return Global vertex index
          */
         [[nodiscard]] std::uint32_t registerCellVertex(std::uint64_t cellMorton,
+                                std::uint8_t cellDepth,
                                                         Eigen::Vector3f const& position,
-                                                        Eigen::Vector3f const& normal);
+                                                        Eigen::Vector3f const& normal,
+                                                        std::uint8_t component = 0U);
 
         /**
          * @brief Register a vertex for an edge crossing.
@@ -123,7 +150,7 @@ namespace gladius::compute
          * @param cellMorton Morton code of the cell
          * @return true if vertex exists
          */
-        [[nodiscard]] bool hasCellVertex(std::uint64_t cellMorton) const;
+        [[nodiscard]] bool hasCellVertex(std::uint64_t cellMorton, std::uint8_t cellDepth, std::uint8_t component = 0U) const;
 
         /**
          * @brief Get vertex index for a cell (must exist).
@@ -132,7 +159,7 @@ namespace gladius::compute
          * @return Global vertex index
          * @throws std::out_of_range if vertex not found
          */
-        [[nodiscard]] std::uint32_t getCellVertexIndex(std::uint64_t cellMorton) const;
+        [[nodiscard]] std::uint32_t getCellVertexIndex(std::uint64_t cellMorton, std::uint8_t cellDepth, std::uint8_t component = 0U) const;
 
         /**
          * @brief Try to get vertex index for a cell.
@@ -141,7 +168,10 @@ namespace gladius::compute
          * @param[out] index Output vertex index
          * @return true if vertex found, false otherwise
          */
-        [[nodiscard]] bool tryGetCellVertexIndex(std::uint64_t cellMorton, std::uint32_t& index) const;
+        [[nodiscard]] bool tryGetCellVertexIndex(std::uint64_t cellMorton,
+                     std::uint8_t cellDepth,
+                             std::uint32_t& index,
+                             std::uint8_t component = 0U) const;
 
         /**
          * @brief Get all vertex positions.
@@ -207,8 +237,8 @@ namespace gladius::compute
         Eigen::Vector3f m_globalBboxSize{Eigen::Vector3f::Zero()};
         std::uint32_t m_maxDepth{0U};
 
-        /// Cell Morton code → global vertex index
-        std::unordered_map<std::uint64_t, std::uint32_t> m_cellToVertex;
+        /// (Cell Morton code, component) → global vertex index
+        std::unordered_map<CellVertexKey, std::uint32_t, CellVertexKeyHash> m_cellToVertex;
 
         /// Edge Morton code → global vertex index
         std::unordered_map<std::uint64_t, std::uint32_t> m_edgeToVertex;

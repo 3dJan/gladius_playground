@@ -58,8 +58,9 @@ namespace gladius::io
     {
         ManifoldDualContouringQuality qualityPreset{
           ManifoldDualContouringQuality::UltraFine};
-        std::size_t initialDepth{5U};
-        std::size_t maxDepth{7U};
+                // Keep defaults consistent with the default preset (UltraFine) even if applyPreset() is not called.
+                std::size_t initialDepth{7U};
+                std::size_t maxDepth{9U};
         bool enableGpu{true};
         bool enableCpuFallback{true};
         bool enableCaching{true};
@@ -69,8 +70,8 @@ namespace gladius::io
         float minFeatureSize{0.0F};                 ///< Minimum feature size to preserve (world units); 0 = disabled
         bool enableChunking{true};                  ///< Enable spatial chunking when minFeatureSize requires higher depth than maxDepth
         
-        // Hierarchical octree approach (experimental, improves watertightness)
-        bool enableHierarchicalOctree{false};       ///< Enable global Morton octree with 2:1 balancing for watertight mesh
+        // Hierarchical octree approach (recommended for watertight exports)
+        bool enableHierarchicalOctree{true};        ///< Enable global Morton octree with 2:1 balancing for watertight mesh
         
         // Sharp feature post-processing options
         bool enableSharpFeaturePostProcess{false};  ///< Enable subdivision and projection at sharp features

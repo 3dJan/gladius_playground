@@ -1339,6 +1339,97 @@ __kernel void emit_halo_neighbors(
     }
 }
 
+/// Recompute edge masks for halo nodes.
+///
+/// Halo nodes are initially created without edgeMask/internalMask so they don't emit geometry.
+/// However, to solve the "cascading halo problem" and to allow missing surface cells to become
+/// real participants, we need to evaluate the SDF for halos and compute their edgeMask.
+///
+/// Any halo that actually contains the surface (sign changes) is converted into a real surface
+/// node by clearing padding[0]. Nodes that remain empty keep padding[0]==1 and edgeMask==0.
+__kernel void recompute_halo_edge_masks(
+    __global OctreeNode* nodes,
+    const int numNodes,
+    const float3 bboxMin,
+    const float3 bboxMax,
+    PAYLOAD_ARGS,
+    const float isoValue)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+
+    OctreeNode node = nodes[id];
+    if (node.padding[0] != 1)
+    {
+        return;
+    }
+
+    // Compute cell bounds
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    float3 cellMax = cellMin + cellExtent;
+
+    // Sample SDF at 8 corners
+    float cornerValues[8];
+    uint signMask = 0;
+    for (int corner = 0; corner < 8; corner++)
+    {
+        int cx = (corner >> 0) & 1;
+        int cy = (corner >> 1) & 1;
+        int cz = (corner >> 2) & 1;
+
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
+        float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+        float sdfValue = sdfResult.w - isoValue;
+        cornerValues[corner] = sdfValue;
+
+        if (sdfValue < 0.0f)
+        {
+            signMask |= (1u << corner);
+        }
+    }
+
+    bool const containsSurface = (signMask != 0u) && (signMask != 0xFFu);
+
+    // Always store sign information (useful for downstream diagnostics)
+    node.internalMask = signMask;
+    node.edgeMask = 0;
+
+    if (containsSurface)
+    {
+        const int edgeCorners[12][2] = {
+            {0,1}, {1,3}, {3,2}, {2,0},
+            {4,5}, {5,7}, {7,6}, {6,4},
+            {0,4}, {1,5}, {3,7}, {2,6}
+        };
+
+        for (int e = 0; e < 12; e++)
+        {
+            int c0 = edgeCorners[e][0];
+            int c1 = edgeCorners[e][1];
+            if ((cornerValues[c0] < 0.0f) != (cornerValues[c1] < 0.0f))
+            {
+                node.edgeMask |= (1u << e);
+            }
+        }
+
+        // Promote to real surface node.
+        node.padding[0] = 0;
+    }
+    else
+    {
+        // Keep as halo.
+        node.padding[0] = 1;
+    }
+
+    // Keep remaining padding bytes deterministic.
+    for (int p = 1; p < 7; p++) node.padding[p] = 0;
+
+    nodes[id] = node;
+}
+
 // ============================================================================
 // GPU-Based Watertight Index Generation
 // ============================================================================
@@ -1386,6 +1477,15 @@ __kernel void count_quads(
     if (id >= numNodes) return;
     
     OctreeNode node = nodes[id];
+
+    // Halo nodes must never emit quads/triangles. We keep this check explicit
+    // (even though halos are typically created with edgeMask=0) to prevent
+    // accidental geometry emission if future changes propagate edgeMask bits.
+    if (node.padding[0] == 1)
+    {
+        quadCounts[id] = 0;
+        return;
+    }
     
     // Skip cells without surface (including halo nodes which have edgeMask=0)
     if (node.edgeMask == 0)
@@ -1941,6 +2041,9 @@ __kernel void count_quads_diagnostic(
     if (id >= numNodes) return;
     
     OctreeNode node = nodes[id];
+
+    // Diagnostics should focus on real surface cells.
+    if (node.padding[0] == 1) return;
     
     // Skip cells without surface
     if (node.edgeMask == 0) return;

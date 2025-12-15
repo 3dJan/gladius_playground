@@ -260,7 +260,11 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> & octreeBuffer,
         std::size_t & nodeCount,
         std::uint32_t maxCoord,
-        std::uint8_t depth)
+        std::uint8_t depth,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        float isoValue)
     {
         if (nodeCount == 0)
         {
@@ -271,6 +275,9 @@ namespace gladius::compute
         swapProgramsIfNeeded();
 
         auto & queue = m_ComputeContext->GetQueue();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
 
         // Iterative halo generation: repeat until convergence (no new nodes created)
         // This solves the "cascading halo problem" where halos need their own neighbors
@@ -284,6 +291,7 @@ namespace gladius::compute
         while (iteration < MAX_ITERATIONS)
         {
             // Sort the octree so binary search works
+            std::size_t const nodeCountAtStart = nodeCount;
             sortOctreeByMorton(octreeBuffer, nodeCount);
 
             // 1. Count halo neighbors needed per cell (including existing halos from previous iterations)
@@ -369,9 +377,9 @@ namespace gladius::compute
             }
 
             std::cout << "  After deduplication: " << haloNodes.size() << " unique halo nodes" << std::endl;
-            totalHaloNodesAdded += haloNodes.size();
 
-            // 5. Read original nodes
+            // Note: some halos may already exist in the octree; we count actual additions
+            // after merging + deduplication below.
             std::vector<OctreeNode> originalNodes(nodeCount);
             queue.enqueueReadBuffer(*octreeBuffer, CL_TRUE, 0,
                                    nodeCount * sizeof(OctreeNode),
@@ -384,15 +392,70 @@ namespace gladius::compute
                      [](OctreeNode const & a, OctreeNode const & b)
                      { return a.mortonCode < b.mortonCode; });
 
+            // 6b. Deduplicate (original nodes may already contain some halos from previous iterations).
+            // When duplicates exist, we must never allow the halo-flag to override a real surface node.
+            std::vector<OctreeNode> mergedNodes;
+            mergedNodes.reserve(originalNodes.size());
+
+            for (auto const & node : originalNodes)
+            {
+                if (mergedNodes.empty() || mergedNodes.back().mortonCode != node.mortonCode)
+                {
+                    mergedNodes.push_back(node);
+                    continue;
+                }
+
+                OctreeNode & dst = mergedNodes.back();
+
+                // Merge masks conservatively. (Halos currently have edgeMask/internalMask==0)
+                dst.edgeMask |= node.edgeMask;
+                dst.internalMask |= node.internalMask;
+                dst.depth = std::max(dst.depth, node.depth);
+
+                bool const dstIsHalo = (dst.padding[0] == 1);
+                bool const srcIsHalo = (node.padding[0] == 1);
+                dst.padding[0] = (dstIsHalo && srcIsHalo) ? 1 : 0;
+
+                // Any node that participates in surface extraction must not be treated as halo.
+                if (dst.edgeMask != 0)
+                {
+                    dst.padding[0] = 0;
+                }
+
+                // Keep remaining padding bytes deterministic.
+                std::memset(&dst.padding[1], 0, sizeof(dst.padding) - 1);
+            }
+
             // 7. Write back to new buffer
-            std::size_t const newNodeCount = originalNodes.size();
+            std::size_t const newNodeCount = mergedNodes.size();
             octreeBuffer = std::make_unique<cl::Buffer>(
                 m_ComputeContext->GetContext(),
                 CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 newNodeCount * sizeof(OctreeNode),
-                originalNodes.data());
+                mergedNodes.data());
 
             nodeCount = newNodeCount;
+
+            // 7b. Recompute edge masks for halo nodes and promote any halo that actually
+            // contains the surface (clears padding[0] in the kernel).
+            {
+                cl::NDRange globalRecompute(nodeCount);
+                m_programFront->run("recompute_halo_edge_masks",
+                                   cl::NullRange,
+                                   globalRecompute,
+                                   *octreeBuffer,
+                                   static_cast<int>(nodeCount),
+                                   clBboxMin,
+                                   clBboxMax,
+                                   PAYLOAD_ARGUMENTS,
+                                   isoValue);
+            }
+
+            if (nodeCount > nodeCountAtStart)
+            {
+                totalHaloNodesAdded += (nodeCount - nodeCountAtStart);
+            }
+
             ++iteration;
 
             // Check for convergence

@@ -37,7 +37,7 @@ namespace gladius::compute
         float minFeatureSize{0.0F};              ///< Minimum feature size to preserve (world units); 0 = disabled
         
         // Global hierarchical octree (watertight mesh generation)
-        bool enableHierarchicalOctree{false};   ///< DISABLED: Global Morton octree is experimental and broken
+        bool enableHierarchicalOctree{false};   ///< Enable global Morton octree with 2:1 balancing (experimental)
         bool enableAdaptiveRefinement{false};    ///< TEMPORARILY DISABLED: Enable curvature-based adaptive refinement
         float curvatureThreshold{0.3F};          ///< Gradient variance threshold for subdivision
         std::size_t refinementPasses{2U};        ///< Number of adaptive refinement passes
@@ -69,7 +69,9 @@ namespace gladius::compute
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
         
         // Mesh quality improvement (post-processing)
-        bool enableQualityImprovement{true};        ///< Enable edge flipping to improve triangle quality
+        // NOTE: Keep this OFF by default. Edge flipping is purely a quality optimization and must
+        // never compromise manifoldness/watertightness. It can be enabled explicitly by callers.
+        bool enableQualityImprovement{false};       ///< Enable edge flipping to improve triangle quality
         std::size_t qualityImprovementPasses{3U};   ///< Number of edge flip optimization passes
         float qualityMinAngleThreshold{15.0F};      ///< Target minimum angle threshold (degrees)
         

@@ -156,10 +156,13 @@ namespace gladius::compute
     }
 
     std::uint32_t GlobalVertexRegistry::registerCellVertex(std::uint64_t cellMorton,
+                                                            std::uint8_t cellDepth,
                                                             Eigen::Vector3f const& position,
-                                                            Eigen::Vector3f const& normal)
+                                                            Eigen::Vector3f const& normal,
+                                                            std::uint8_t component)
     {
-        auto it = m_cellToVertex.find(cellMorton);
+        CellVertexKey const key{cellMorton, cellDepth, component};
+        auto it = m_cellToVertex.find(key);
         if (it != m_cellToVertex.end())
         {
             return it->second;
@@ -168,7 +171,7 @@ namespace gladius::compute
         auto const index = static_cast<std::uint32_t>(m_positions.size());
         m_positions.push_back(position);
         m_normals.push_back(normal);
-        m_cellToVertex[cellMorton] = index;
+        m_cellToVertex[key] = index;
 
         return index;
     }
@@ -191,14 +194,14 @@ namespace gladius::compute
         return index;
     }
 
-    bool GlobalVertexRegistry::hasCellVertex(std::uint64_t cellMorton) const
+    bool GlobalVertexRegistry::hasCellVertex(std::uint64_t cellMorton, std::uint8_t cellDepth, std::uint8_t component) const
     {
-        return m_cellToVertex.find(cellMorton) != m_cellToVertex.end();
+        return m_cellToVertex.find(CellVertexKey{cellMorton, cellDepth, component}) != m_cellToVertex.end();
     }
 
-    std::uint32_t GlobalVertexRegistry::getCellVertexIndex(std::uint64_t cellMorton) const
+    std::uint32_t GlobalVertexRegistry::getCellVertexIndex(std::uint64_t cellMorton, std::uint8_t cellDepth, std::uint8_t component) const
     {
-        auto it = m_cellToVertex.find(cellMorton);
+        auto it = m_cellToVertex.find(CellVertexKey{cellMorton, cellDepth, component});
         if (it == m_cellToVertex.end())
         {
             throw std::out_of_range("Cell vertex not found for Morton code");
@@ -206,9 +209,9 @@ namespace gladius::compute
         return it->second;
     }
 
-    bool GlobalVertexRegistry::tryGetCellVertexIndex(std::uint64_t cellMorton, std::uint32_t& index) const
+    bool GlobalVertexRegistry::tryGetCellVertexIndex(std::uint64_t cellMorton, std::uint8_t cellDepth, std::uint32_t& index, std::uint8_t component) const
     {
-        auto it = m_cellToVertex.find(cellMorton);
+        auto it = m_cellToVertex.find(CellVertexKey{cellMorton, cellDepth, component});
         if (it == m_cellToVertex.end())
         {
             return false;

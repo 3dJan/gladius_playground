@@ -9,11 +9,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <Eigen/Eigenvalues>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <cstdlib>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,6 +94,32 @@ namespace gladius::compute
         Eigen::Vector3f originalBboxMax =
           Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
 
+                // The hierarchical octree implementation is currently limited to maxDepth<=7.
+                // If a deeper hierarchical setting is requested, we fall back to the non-hierarchical
+                // path and clamp the effective maxDepth to 7 to preserve watertight/manifold output.
+                // (This is a temporary safety net for export-dialog defaults.)
+                std::uint32_t const requestedMaxDepth = m_config.maxDepth;
+                bool const requestedHierarchical = m_config.enableHierarchicalOctree;
+                bool const fallbackDueToDepth = requestedHierarchical && requestedMaxDepth > 7U;
+                std::uint32_t const effectiveMaxDepth = fallbackDueToDepth ? 7U : requestedMaxDepth;
+
+                struct MaxDepthGuard
+                {
+                        ManifoldDualContouringConfig & cfg;
+                        std::uint32_t original;
+                        explicit MaxDepthGuard(ManifoldDualContouringConfig & c)
+                                : cfg(c)
+                                , original(c.maxDepth)
+                        {
+                        }
+                        ~MaxDepthGuard()
+                        {
+                                cfg.maxDepth = original;
+                        }
+                } maxDepthGuard(m_config);
+
+                m_config.maxDepth = effectiveMaxDepth;
+
         // Add margin to bounding box to ensure surface at boundaries is properly captured.
         // The margin should be at least 2 voxels at the finest level to allow proper
         // sign change detection at the surface boundary.
@@ -104,8 +132,31 @@ namespace gladius::compute
         m_cachedBboxMax = originalBboxMax + Eigen::Vector3f(margin, margin, margin);
         m_cachedBboxSize = m_cachedBboxMax - m_cachedBboxMin;
 
-        // Use hierarchical octree approach if enabled (produces watertight meshes)
-        if (m_config.enableHierarchicalOctree)
+        if (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
+        {
+            std::cout << "MDC generateMesh config: initialDepth=" << m_config.initialDepth
+                      << ", maxDepth=" << requestedMaxDepth;
+            if (effectiveMaxDepth != requestedMaxDepth)
+            {
+                std::cout << " (effective=" << effectiveMaxDepth << ")";
+            }
+            std::cout
+                      << ", hierarchical=" << (m_config.enableHierarchicalOctree ? "true" : "false")
+                      << ", chunking=" << (m_config.enableChunking ? "true" : "false")
+                      << ", minFeatureSize=" << m_config.minFeatureSize << std::endl;
+        }
+
+        // Use hierarchical octree approach if enabled.
+        // NOTE: The hierarchical implementation is currently limited to maxDepth<=7.
+        // For deeper requested settings we clamp the effective depth to 7.
+        bool const useHierarchical = m_config.enableHierarchicalOctree;
+        if (fallbackDueToDepth && std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
+        {
+            std::cout << "Hierarchical octree is currently limited to maxDepth<=7; clamping requested maxDepth="
+                      << requestedMaxDepth << " to effective maxDepth=" << m_config.maxDepth << std::endl;
+        }
+
+        if (useHierarchical)
         {
             generateMeshHierarchical();
         }
@@ -346,7 +397,11 @@ namespace gladius::compute
             m_program->addHaloNodes(m_octreeBuffer,
                                     m_octreeNodeCount,
                                     maxCoord,
-                                    static_cast<std::uint8_t>(m_config.maxDepth));
+                                    static_cast<std::uint8_t>(m_config.maxDepth),
+                                    bboxMin,
+                                    bboxMax,
+                                    *primitives,
+                                    m_config.isoValue);
 
             std::cout << "Octree construction complete. Total nodes after halo: "
                       << m_octreeNodeCount << std::endl;
@@ -1904,6 +1959,162 @@ namespace gladius::compute
             return;
         }
 
+        bool const debugEnabled = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+
+        // ----------------------------------------------------------------
+        // Pre-pass: weld near-coincident boundary vertices (index remap only)
+        //
+        // The non-hierarchical single-pass path can still produce tiny cracks
+        // where two vertices should be identical but differ slightly.
+        // Those cracks show up as degree-1 chains instead of clean loops,
+        // which makes loop-based capping unreliable.
+        //
+        // We do a very conservative weld ONLY on vertices that participate in
+        // boundary edges, and we only remap indices (no vertex buffer compaction).
+        // This keeps the operation cheap and avoids accidentally merging interior
+        // vertices.
+        // ----------------------------------------------------------------
+        auto weldBoundaryVerticesByRemap = [&](std::vector<std::uint32_t> const & boundaryVertexList)
+        {
+            if (boundaryVertexList.size() < 2U)
+            {
+                return;
+            }
+
+            // Use a small fraction of the search radius as weld tolerance.
+            float const tolerance = std::max(1e-6F, searchRadius * 0.25F);
+            float const toleranceSq = tolerance * tolerance;
+
+            // Simple union-find over the (small) boundary-vertex set.
+            struct DisjointSet
+            {
+                std::vector<std::uint32_t> parent;
+                explicit DisjointSet(std::size_t n)
+                    : parent(n)
+                {
+                    std::iota(parent.begin(), parent.end(), 0U);
+                }
+                std::uint32_t find(std::uint32_t x)
+                {
+                    while (parent[x] != x)
+                    {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    return x;
+                }
+                void unite(std::uint32_t a, std::uint32_t b)
+                {
+                    a = find(a);
+                    b = find(b);
+                    if (a != b)
+                    {
+                        parent[b] = a;
+                    }
+                }
+            };
+
+            DisjointSet dsu(boundaryVertexList.size());
+
+            for (std::size_t i = 0U; i < boundaryVertexList.size(); ++i)
+            {
+                std::uint32_t const vi = boundaryVertexList[i];
+                Eigen::Vector3f const & pi = m_mesh.positions[vi];
+                for (std::size_t j = i + 1U; j < boundaryVertexList.size(); ++j)
+                {
+                    std::uint32_t const vj = boundaryVertexList[j];
+                    Eigen::Vector3f const & pj = m_mesh.positions[vj];
+                    if ((pj - pi).squaredNorm() < toleranceSq)
+                    {
+                        dsu.unite(static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(j));
+                    }
+                }
+            }
+
+            // Map from original vertex index -> representative vertex index.
+            std::unordered_map<std::uint32_t, std::uint32_t> remap;
+            remap.reserve(boundaryVertexList.size());
+
+            // Choose the lowest original vertex index in each set as representative.
+            std::unordered_map<std::uint32_t, std::uint32_t> repToMinVertex;
+            repToMinVertex.reserve(boundaryVertexList.size());
+
+            for (std::size_t i = 0U; i < boundaryVertexList.size(); ++i)
+            {
+                std::uint32_t const rep = dsu.find(static_cast<std::uint32_t>(i));
+                std::uint32_t const v = boundaryVertexList[i];
+                auto it = repToMinVertex.find(rep);
+                if (it == repToMinVertex.end())
+                {
+                    repToMinVertex.emplace(rep, v);
+                }
+                else
+                {
+                    it->second = std::min(it->second, v);
+                }
+            }
+
+            std::size_t merges = 0U;
+            for (std::size_t i = 0U; i < boundaryVertexList.size(); ++i)
+            {
+                std::uint32_t const rep = dsu.find(static_cast<std::uint32_t>(i));
+                std::uint32_t const v = boundaryVertexList[i];
+                std::uint32_t const canonical = repToMinVertex[rep];
+                remap.emplace(v, canonical);
+                if (canonical != v)
+                {
+                    ++merges;
+                }
+            }
+
+            if (merges == 0U)
+            {
+                return;
+            }
+
+            // Remap indices. This may create degenerate triangles; we cull them.
+            std::vector<std::uint32_t> newIndices;
+            newIndices.reserve(m_mesh.indices.size());
+            for (std::size_t t = 0U; t < m_mesh.indices.size(); t += 3U)
+            {
+                std::uint32_t i0 = m_mesh.indices[t + 0U];
+                std::uint32_t i1 = m_mesh.indices[t + 1U];
+                std::uint32_t i2 = m_mesh.indices[t + 2U];
+
+                auto r0 = remap.find(i0);
+                auto r1 = remap.find(i1);
+                auto r2 = remap.find(i2);
+                if (r0 != remap.end())
+                {
+                    i0 = r0->second;
+                }
+                if (r1 != remap.end())
+                {
+                    i1 = r1->second;
+                }
+                if (r2 != remap.end())
+                {
+                    i2 = r2->second;
+                }
+
+                if (i0 == i1 || i1 == i2 || i2 == i0)
+                {
+                    continue;
+                }
+
+                newIndices.push_back(i0);
+                newIndices.push_back(i1);
+                newIndices.push_back(i2);
+            }
+            m_mesh.indices = std::move(newIndices);
+
+            if (debugEnabled)
+            {
+                std::cout << "  Gap filling: Boundary vertex weld remapped " << merges
+                          << " indices (tolerance=" << tolerance << ")" << std::endl;
+            }
+        };
+
         // Build edge-to-triangle map to find boundary edges
         // An edge is a boundary edge if it's used by only 1 triangle
         // IMPORTANT: We store DIRECTED edges to preserve winding order
@@ -1945,30 +2156,37 @@ namespace gladius::compute
             std::uint32_t thirdVertex; // The third vertex of the triangle (for normal)
         };
 
-        std::unordered_map<DirectedEdge, EdgeInfo, UndirectedEdgeHash, UndirectedEdgeEqual>
-          edgeInfo;
+        std::unordered_map<DirectedEdge, EdgeInfo, UndirectedEdgeHash, UndirectedEdgeEqual> edgeInfo;
 
-        for (std::size_t t = 0U; t < m_mesh.indices.size(); t += 3U)
+        auto buildEdgeInfo = [&]()
         {
-            std::uint32_t const i0 = m_mesh.indices[t + 0U];
-            std::uint32_t const i1 = m_mesh.indices[t + 1U];
-            std::uint32_t const i2 = m_mesh.indices[t + 2U];
+            edgeInfo.clear();
 
-            // Store directed edges as they appear in the triangle (preserves winding)
-            // Also store the opposite vertex for each edge (for normal computation)
-            std::tuple<DirectedEdge, std::uint32_t> const edges[3] = {
-              {{i0, i1}, i2}, {{i1, i2}, i0}, {{i2, i0}, i1}};
-            for (auto const & [e, opposite] : edges)
+            for (std::size_t t = 0U; t < m_mesh.indices.size(); t += 3U)
             {
-                auto & info = edgeInfo[e];
-                if (info.count == 0U)
+                std::uint32_t const i0 = m_mesh.indices[t + 0U];
+                std::uint32_t const i1 = m_mesh.indices[t + 1U];
+                std::uint32_t const i2 = m_mesh.indices[t + 2U];
+
+                // Store directed edges as they appear in the triangle (preserves winding)
+                // Also store the opposite vertex for each edge (for normal computation)
+                std::tuple<DirectedEdge, std::uint32_t> const edges[3] = {
+                  {{i0, i1}, i2}, {{i1, i2}, i0}, {{i2, i0}, i1}};
+                for (auto const & [e, opposite] : edges)
                 {
-                    info.directedEdge = e; // Store the direction from first occurrence
-                    info.thirdVertex = opposite;
+                    auto & info = edgeInfo[e];
+                    if (info.count == 0U)
+                    {
+                        info.directedEdge = e; // Store the direction from first occurrence
+                        info.thirdVertex = opposite;
+                    }
+                    info.count++;
                 }
-                info.count++;
             }
-        }
+        };
+
+        // Build edge info, then do a conservative boundary-vertex weld and rebuild once.
+        buildEdgeInfo();
 
         // Get bounding box for filtering - edges on bbox faces should not be filled
         // as they are legitimate open boundaries (surface clipped at bbox)
@@ -2003,24 +2221,61 @@ namespace gladius::compute
         std::vector<BoundaryEdge> boundaryEdges;     // Internal boundary edges
         std::vector<BoundaryEdge> bboxBoundaryEdges; // Edges on bbox faces (need capping)
 
-        for (auto const & [edge, info] : edgeInfo)
+        auto collectBoundaryEdges = [&]()
         {
-            if (info.count == 1U)
-            {
-                // Check if both vertices are on bbox faces
-                Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
-                Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
+            boundaryEdges.clear();
+            bboxBoundaryEdges.clear();
 
-                if (isOnBboxFace(p0) && isOnBboxFace(p1))
+            for (auto const & [edge, info] : edgeInfo)
+            {
+                if (info.count == 1U)
                 {
-                    // Collect bbox boundary edges for capping (CSG intersection boundaries)
-                    bboxBoundaryEdges.push_back({info.directedEdge, info.thirdVertex});
-                }
-                else
-                {
-                    boundaryEdges.push_back({info.directedEdge, info.thirdVertex});
+                    // Check if both vertices are on bbox faces
+                    Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
+                    Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
+
+                    if (isOnBboxFace(p0) && isOnBboxFace(p1))
+                    {
+                        // Collect bbox boundary edges for capping (CSG intersection boundaries)
+                        bboxBoundaryEdges.push_back({info.directedEdge, info.thirdVertex});
+                    }
+                    else
+                    {
+                        boundaryEdges.push_back({info.directedEdge, info.thirdVertex});
+                    }
                 }
             }
+        };
+
+        collectBoundaryEdges();
+
+        // Weld boundary vertices (internal and bbox) once and rebuild edge info/boundary lists.
+        // This helps convert small chains into clean loops.
+        {
+            std::unordered_set<std::uint32_t> boundaryVertexSet;
+            boundaryVertexSet.reserve((boundaryEdges.size() + bboxBoundaryEdges.size()) * 2U);
+            for (BoundaryEdge const & be : boundaryEdges)
+            {
+                boundaryVertexSet.insert(be.edge.v0);
+                boundaryVertexSet.insert(be.edge.v1);
+            }
+            for (BoundaryEdge const & be : bboxBoundaryEdges)
+            {
+                boundaryVertexSet.insert(be.edge.v0);
+                boundaryVertexSet.insert(be.edge.v1);
+            }
+
+            std::vector<std::uint32_t> boundaryVertexList;
+            boundaryVertexList.reserve(boundaryVertexSet.size());
+            for (std::uint32_t v : boundaryVertexSet)
+            {
+                boundaryVertexList.push_back(v);
+            }
+            weldBoundaryVerticesByRemap(boundaryVertexList);
+
+            // Rebuild edge info and boundary edges after remap.
+            buildEdgeInfo();
+            collectBoundaryEdges();
         }
 
         if (boundaryEdges.empty() && bboxBoundaryEdges.empty())
@@ -2033,217 +2288,829 @@ namespace gladius::compute
                   << ", " << bboxBoundaryEdges.size() << " on bbox boundary (will cap)"
                   << std::endl;
 
-        // Build spatial hash for edge midpoints
-        float const searchRadiusSq = searchRadius * searchRadius;
-        float const cellSize = searchRadius * 2.0F;
-        float const invCellSize = 1.0F / cellSize;
-
-        auto hashPos = [invCellSize](Eigen::Vector3f const & pos) -> std::uint64_t
+        // ----------------------------------------------------------------
+        // Phase 1: Cap internal boundary loops (non-bbox holes)
+        //
+        // The previous implementation tried to stitch boundary edges in pairs based on proximity.
+        // That can leave holes and/or introduce non-manifold edges. Here we instead try to trace
+        // boundary loops and cap each loop with a simple centroid fan.
+        // ----------------------------------------------------------------
+        if (!boundaryEdges.empty())
         {
-            auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
-            auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
-            auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
-            std::uint64_t const hx = static_cast<std::uint64_t>(ix) & 0x1FFFFF;
-            std::uint64_t const hy = static_cast<std::uint64_t>(iy) & 0x1FFFFF;
-            std::uint64_t const hz = static_cast<std::uint64_t>(iz) & 0x1FFFFF;
-            return (hx << 42) | (hy << 21) | hz;
-        };
-
-        // Store edge midpoints with their indices
-        std::unordered_map<std::uint64_t, std::vector<std::size_t>> edgeSpatialHash;
-        std::vector<Eigen::Vector3f> edgeMidpoints(boundaryEdges.size());
-
-        for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
-        {
-            Eigen::Vector3f const & p0 = m_mesh.positions[boundaryEdges[i].edge.v0];
-            Eigen::Vector3f const & p1 = m_mesh.positions[boundaryEdges[i].edge.v1];
-            edgeMidpoints[i] = (p0 + p1) * 0.5F;
-            edgeSpatialHash[hashPos(edgeMidpoints[i])].push_back(i);
-        }
-
-        // Find pairs of nearby boundary edges that can be stitched
-        std::vector<bool> edgeUsed(boundaryEdges.size(), false);
-        std::vector<std::uint32_t> newTriangles;
-
-        for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
-        {
-            if (edgeUsed[i])
+            // Build undirected adjacency for boundary edges.
+            std::unordered_map<std::uint32_t, std::vector<std::size_t>> vertexToEdges;
+            vertexToEdges.reserve(boundaryEdges.size());
+            for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
             {
-                continue;
+                vertexToEdges[boundaryEdges[i].edge.v0].push_back(i);
+                vertexToEdges[boundaryEdges[i].edge.v1].push_back(i);
             }
 
-            Eigen::Vector3f const & midI = edgeMidpoints[i];
-            BoundaryEdge const & boundaryI = boundaryEdges[i];
-            DirectedEdge const & edgeI = boundaryI.edge;
-            Eigen::Vector3f const & pI0 = m_mesh.positions[edgeI.v0];
-            Eigen::Vector3f const & pI1 = m_mesh.positions[edgeI.v1];
-            float const edgeLenI = (pI1 - pI0).norm();
-
-            // Compute normal of original triangle containing edge I
-            Eigen::Vector3f const & pI2 = m_mesh.positions[boundaryI.thirdVertex];
-            Eigen::Vector3f const normalI = (pI1 - pI0).cross(pI2 - pI0).normalized();
-
-            // Search neighboring cells
-            auto const ix = static_cast<std::int32_t>(std::floor(midI.x() * invCellSize));
-            auto const iy = static_cast<std::int32_t>(std::floor(midI.y() * invCellSize));
-            auto const iz = static_cast<std::int32_t>(std::floor(midI.z() * invCellSize));
-
-            std::size_t bestMatch = std::numeric_limits<std::size_t>::max();
-            float bestDistSq = searchRadiusSq;
-
-            for (int dz = -1; dz <= 1; ++dz)
+            if (debugEnabled)
             {
-                for (int dy = -1; dy <= 1; ++dy)
+                std::size_t deg1 = 0U;
+                std::size_t deg2 = 0U;
+                std::size_t deg3p = 0U;
+                for (auto const & [v, edges] : vertexToEdges)
                 {
-                    for (int dx = -1; dx <= 1; ++dx)
+                    if (edges.size() == 1U)
                     {
-                        std::uint64_t const hx = static_cast<std::uint64_t>(ix + dx) & 0x1FFFFF;
-                        std::uint64_t const hy = static_cast<std::uint64_t>(iy + dy) & 0x1FFFFF;
-                        std::uint64_t const hz = static_cast<std::uint64_t>(iz + dz) & 0x1FFFFF;
-                        std::uint64_t const neighborHash = (hx << 42) | (hy << 21) | hz;
+                        ++deg1;
+                    }
+                    else if (edges.size() == 2U)
+                    {
+                        ++deg2;
+                    }
+                    else
+                    {
+                        ++deg3p;
+                    }
+                }
+                std::cout << "  Gap filling: Internal boundary vertex degrees: deg1=" << deg1
+                          << ", deg2=" << deg2 << ", deg>=3=" << deg3p << std::endl;
+            }
 
-                        auto it = edgeSpatialHash.find(neighborHash);
-                        if (it == edgeSpatialHash.end())
+            // Split into connected components (by vertices) so we can compute a local best-fit plane per component.
+            std::unordered_set<std::uint32_t> visitedVertices;
+            visitedVertices.reserve(vertexToEdges.size());
+
+            std::vector<bool> edgeUsed(boundaryEdges.size(), false);
+            std::vector<std::uint32_t> capTriangles;
+            std::size_t loopCount = 0U;
+            std::size_t cappedEdges = 0U;
+            std::size_t const maxLoopSize = 5000U;
+            std::size_t componentCount = 0U;
+
+            for (auto const & [seedVertex, _] : vertexToEdges)
+            {
+                if (visitedVertices.count(seedVertex) != 0)
+                {
+                    continue;
+                }
+
+                ++componentCount;
+
+                // Collect component vertices and edges.
+                std::vector<std::uint32_t> componentVertices;
+                componentVertices.reserve(64U);
+                std::vector<std::uint32_t> queue;
+                queue.reserve(64U);
+
+                visitedVertices.insert(seedVertex);
+                queue.push_back(seedVertex);
+
+                std::unordered_set<std::size_t> componentEdgeIndices;
+                componentEdgeIndices.reserve(128U);
+
+                for (std::size_t q = 0U; q < queue.size(); ++q)
+                {
+                    std::uint32_t const v = queue[q];
+                    componentVertices.push_back(v);
+                    auto it = vertexToEdges.find(v);
+                    if (it == vertexToEdges.end())
+                    {
+                        continue;
+                    }
+                    for (std::size_t edgeIdx : it->second)
+                    {
+                        componentEdgeIndices.insert(edgeIdx);
+                        BoundaryEdge const & e = boundaryEdges[edgeIdx];
+                        std::uint32_t const other = (e.edge.v0 == v) ? e.edge.v1 : e.edge.v0;
+                        if (visitedVertices.count(other) == 0)
                         {
-                            continue;
+                            visitedVertices.insert(other);
+                            queue.push_back(other);
                         }
+                    }
+                }
 
-                        for (std::size_t j : it->second)
+                if (componentVertices.size() < 3U || componentEdgeIndices.size() < 3U)
+                {
+                    continue;
+                }
+
+                // Best-fit plane via PCA.
+                Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+                for (std::uint32_t v : componentVertices)
+                {
+                    Eigen::Vector3f const & p = m_mesh.positions[v];
+                    centroid += Eigen::Vector3d(p.x(), p.y(), p.z());
+                }
+                centroid /= static_cast<double>(componentVertices.size());
+
+                Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+                for (std::uint32_t v : componentVertices)
+                {
+                    Eigen::Vector3f const & pf = m_mesh.positions[v];
+                    Eigen::Vector3d const p(pf.x(), pf.y(), pf.z());
+                    Eigen::Vector3d const d = p - centroid;
+                    cov += d * d.transpose();
+                }
+                cov /= static_cast<double>(componentVertices.size());
+
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+                Eigen::Vector3d normal = Eigen::Vector3d::UnitZ();
+                if (solver.info() == Eigen::Success)
+                {
+                    normal = solver.eigenvectors().col(0); // smallest eigenvalue
+                    if (normal.squaredNorm() > 0.0)
+                    {
+                        normal.normalize();
+                    }
+                }
+
+                // Fall back to triangle normals if PCA is degenerate.
+                if (normal.squaredNorm() < 1e-20)
+                {
+                    Eigen::Vector3d n = Eigen::Vector3d::Zero();
+                    for (std::size_t edgeIdx : componentEdgeIndices)
+                    {
+                        BoundaryEdge const & be = boundaryEdges[edgeIdx];
+                        Eigen::Vector3f const & p0 = m_mesh.positions[be.edge.v0];
+                        Eigen::Vector3f const & p1 = m_mesh.positions[be.edge.v1];
+                        Eigen::Vector3f const & p2 = m_mesh.positions[be.thirdVertex];
+                        Eigen::Vector3d const nn = Eigen::Vector3d((p1 - p0).cross(p2 - p0).cast<double>());
+                        if (nn.squaredNorm() > 0.0)
                         {
-                            if (j == i || edgeUsed[j])
+                            n += nn.normalized();
+                        }
+                    }
+                    if (n.squaredNorm() > 0.0)
+                    {
+                        normal = n.normalized();
+                    }
+                }
+
+                Eigen::Vector3d const uAxis = normal.unitOrthogonal();
+                Eigen::Vector3d const vAxis = normal.cross(uAxis);
+
+                // If the boundary graph is not a collection of pure cycles (e.g., due to small cracks
+                // producing open chains), try to add short "bridge" edges between odd-degree vertices
+                // to restore closure before loop extraction.
+                struct SyntheticEdge
+                {
+                    std::uint32_t v0;
+                    std::uint32_t v1;
+                };
+                std::vector<SyntheticEdge> syntheticEdges;
+                syntheticEdges.reserve(32U);
+
+                {
+                    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> neighbors;
+                    neighbors.reserve(componentVertices.size());
+
+                    auto undirectedKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+                    {
+                        std::uint32_t const lo = std::min(a, b);
+                        std::uint32_t const hi = std::max(a, b);
+                        return (static_cast<std::uint64_t>(lo) << 32U) | static_cast<std::uint64_t>(hi);
+                    };
+
+                    std::unordered_set<std::uint64_t> existingEdges;
+                    existingEdges.reserve(componentEdgeIndices.size());
+
+                    for (std::size_t edgeIdx : componentEdgeIndices)
+                    {
+                        BoundaryEdge const & be = boundaryEdges[edgeIdx];
+                        neighbors[be.edge.v0].push_back(be.edge.v1);
+                        neighbors[be.edge.v1].push_back(be.edge.v0);
+                        existingEdges.insert(undirectedKey(be.edge.v0, be.edge.v1));
+                    }
+
+                    std::vector<std::uint32_t> oddVertices;
+                    oddVertices.reserve(16U);
+                    for (auto const & [v, ns] : neighbors)
+                    {
+                        if ((ns.size() % 2U) == 1U)
+                        {
+                            oddVertices.push_back(v);
+                        }
+                    }
+
+                    // Allow bridging across small cracks. Use a somewhat generous threshold
+                    // (still tiny compared to the model bbox) to cope with deep settings.
+                    float avgEdgeLen = 0.0F;
+                    if (!componentEdgeIndices.empty())
+                    {
+                        for (std::size_t edgeIdx : componentEdgeIndices)
+                        {
+                            BoundaryEdge const & be = boundaryEdges[edgeIdx];
+                            Eigen::Vector3f const & p0 = m_mesh.positions[be.edge.v0];
+                            Eigen::Vector3f const & p1 = m_mesh.positions[be.edge.v1];
+                            avgEdgeLen += (p1 - p0).norm();
+                        }
+                        avgEdgeLen /= static_cast<float>(componentEdgeIndices.size());
+                    }
+
+                    float const maxBridgeLength = std::max(searchRadius * 12.0F, avgEdgeLen * 8.0F);
+                    float const maxBridgeLengthSq = maxBridgeLength * maxBridgeLength;
+
+                    std::size_t bridgesAdded = 0U;
+                    while (oddVertices.size() >= 2U)
+                    {
+                        std::uint32_t const v0 = oddVertices.back();
+                        oddVertices.pop_back();
+                        Eigen::Vector3f const & p0 = m_mesh.positions[v0];
+
+                        std::size_t bestIdx = std::numeric_limits<std::size_t>::max();
+                        float bestDistSq = maxBridgeLengthSq;
+
+                        for (std::size_t i = 0U; i < oddVertices.size(); ++i)
+                        {
+                            std::uint32_t const v1 = oddVertices[i];
+                            if (existingEdges.count(undirectedKey(v0, v1)) != 0)
                             {
                                 continue;
                             }
 
-                            // Check if edges have similar length
-                            BoundaryEdge const & boundaryJ = boundaryEdges[j];
-                            DirectedEdge const & edgeJ = boundaryJ.edge;
-                            Eigen::Vector3f const & pJ0 = m_mesh.positions[edgeJ.v0];
-                            Eigen::Vector3f const & pJ1 = m_mesh.positions[edgeJ.v1];
-                            float const edgeLenJ = (pJ1 - pJ0).norm();
-
-                            float const lenRatio =
-                              std::min(edgeLenI, edgeLenJ) / std::max(edgeLenI, edgeLenJ);
-                            if (lenRatio < 0.5F)
-                            {
-                                continue; // Edge lengths too different
-                            }
-
-                            // Check if edges come from triangles with similar normals
-                            // This avoids connecting edges from opposite sides of a thin sheet
-                            Eigen::Vector3f const & pJ2 = m_mesh.positions[boundaryJ.thirdVertex];
-                            Eigen::Vector3f const normalJ =
-                              (pJ1 - pJ0).cross(pJ2 - pJ0).normalized();
-                            float const normalDot = normalI.dot(normalJ);
-                            if (normalDot < 0.7F) // Normals should point nearly the same direction
-                            {
-                                continue; // Edges from opposite sides of surface
-                            }
-
-                            float const distSq = (edgeMidpoints[j] - midI).squaredNorm();
+                            Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+                            float const distSq = (p1 - p0).squaredNorm();
                             if (distSq < bestDistSq)
                             {
                                 bestDistSq = distSq;
-                                bestMatch = j;
+                                bestIdx = i;
                             }
+                        }
+
+                        if (bestIdx == std::numeric_limits<std::size_t>::max())
+                        {
+                            break;
+                        }
+
+                        std::uint32_t const v1 = oddVertices[bestIdx];
+                        oddVertices.erase(oddVertices.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+
+                        syntheticEdges.push_back({v0, v1});
+                        existingEdges.insert(undirectedKey(v0, v1));
+                        neighbors[v0].push_back(v1);
+                        neighbors[v1].push_back(v0);
+                        ++bridgesAdded;
+                    }
+
+                    if (debugEnabled && bridgesAdded > 0U)
+                    {
+                        std::cout << "  Gap filling: Added " << bridgesAdded << " short bridge edges to close odd-degree internal boundaries" << std::endl;
+                    }
+                }
+
+                // Build half-edges for the component (two per undirected boundary edge).
+                struct HalfEdge
+                {
+                    std::uint32_t from;
+                    std::uint32_t to;
+                    bool isSynthetic;
+                    std::size_t idx; // boundaryEdges index if !isSynthetic, else syntheticEdges index
+                };
+
+                std::vector<HalfEdge> halfEdges;
+                halfEdges.reserve(componentEdgeIndices.size() * 2U);
+                std::unordered_map<std::uint32_t, std::vector<std::size_t>> outgoing;
+                outgoing.reserve(componentVertices.size());
+
+                auto halfEdgeKey = [](std::uint32_t from, std::uint32_t to) -> std::uint64_t
+                {
+                    return (static_cast<std::uint64_t>(from) << 32U) | static_cast<std::uint64_t>(to);
+                };
+
+                std::unordered_map<std::uint64_t, std::size_t> directedToHalfEdge;
+                directedToHalfEdge.reserve(componentEdgeIndices.size() * 2U);
+
+                for (std::size_t edgeIdx : componentEdgeIndices)
+                {
+                    BoundaryEdge const & be = boundaryEdges[edgeIdx];
+                    std::uint32_t const a = be.edge.v0;
+                    std::uint32_t const b = be.edge.v1;
+
+                    std::size_t const he0 = halfEdges.size();
+                    halfEdges.push_back({a, b, false, edgeIdx});
+                    outgoing[a].push_back(he0);
+                    directedToHalfEdge[halfEdgeKey(a, b)] = he0;
+
+                    std::size_t const he1 = halfEdges.size();
+                    halfEdges.push_back({b, a, false, edgeIdx});
+                    outgoing[b].push_back(he1);
+                    directedToHalfEdge[halfEdgeKey(b, a)] = he1;
+                }
+
+                // Add synthetic bridge edges to the half-edge set.
+                for (std::size_t i = 0U; i < syntheticEdges.size(); ++i)
+                {
+                    std::uint32_t const a = syntheticEdges[i].v0;
+                    std::uint32_t const b = syntheticEdges[i].v1;
+
+                    std::size_t const he0 = halfEdges.size();
+                    halfEdges.push_back({a, b, true, i});
+                    outgoing[a].push_back(he0);
+                    directedToHalfEdge[halfEdgeKey(a, b)] = he0;
+
+                    std::size_t const he1 = halfEdges.size();
+                    halfEdges.push_back({b, a, true, i});
+                    outgoing[b].push_back(he1);
+                    directedToHalfEdge[halfEdgeKey(b, a)] = he1;
+                }
+
+                auto projectToPlane = [&uAxis, &vAxis](Eigen::Vector3f const & vec) -> Eigen::Vector2d
+                {
+                    Eigen::Vector3d const v(vec.x(), vec.y(), vec.z());
+                    return Eigen::Vector2d(v.dot(uAxis), v.dot(vAxis));
+                };
+
+                auto nextHalfEdge = [&](HalfEdge const & he) -> std::size_t
+                {
+                    // We arrived at he.to from he.from. Choose outgoing (he.to -> w)
+                    // that is the next CCW edge in the component's best-fit plane.
+                    auto itOut = outgoing.find(he.to);
+                    if (itOut == outgoing.end() || itOut->second.empty())
+                    {
+                        return std::numeric_limits<std::size_t>::max();
+                    }
+
+                    Eigen::Vector3f const & pFrom = m_mesh.positions[he.from];
+                    Eigen::Vector3f const & pTo = m_mesh.positions[he.to];
+                    Eigen::Vector2d const inDir = projectToPlane(pFrom - pTo);
+                    double const inLenSq = inDir.squaredNorm();
+                    if (inLenSq < 1e-24)
+                    {
+                        return std::numeric_limits<std::size_t>::max();
+                    }
+                    Eigen::Vector2d const inUnit = inDir / std::sqrt(inLenSq);
+
+                    std::size_t best = std::numeric_limits<std::size_t>::max();
+                    double bestAngle = std::numeric_limits<double>::infinity();
+
+                    std::size_t bestFallback = std::numeric_limits<std::size_t>::max();
+                    double bestFallbackDot = -std::numeric_limits<double>::infinity();
+
+                    for (std::size_t candIdx : itOut->second)
+                    {
+                        HalfEdge const & cand = halfEdges[candIdx];
+                        if (cand.to == he.from)
+                        {
+                            // Prefer not to immediately reverse, but keep as fallback.
+                            continue;
+                        }
+
+                        Eigen::Vector3f const & pOther = m_mesh.positions[cand.to];
+                        Eigen::Vector2d outDir = projectToPlane(pOther - pTo);
+                        double const outLenSq = outDir.squaredNorm();
+                        if (outLenSq < 1e-24)
+                        {
+                            continue;
+                        }
+                        Eigen::Vector2d const outUnit = outDir / std::sqrt(outLenSq);
+
+                        double dot = inUnit.dot(outUnit);
+                        dot = std::clamp(dot, -1.0, 1.0);
+                        double cross = inUnit.x() * outUnit.y() - inUnit.y() * outUnit.x();
+                        double angle = std::atan2(cross, dot); // (-pi, pi]
+                        if (angle <= 1e-12)
+                        {
+                            angle += 2.0 * M_PI;
+                        }
+
+                        if (angle < bestAngle)
+                        {
+                            bestAngle = angle;
+                            best = candIdx;
+                        }
+
+                        // Fallback: keep the "straightest" option in case we must reverse.
+                        if (dot > bestFallbackDot)
+                        {
+                            bestFallbackDot = dot;
+                            bestFallback = candIdx;
+                        }
+                    }
+
+                    if (best != std::numeric_limits<std::size_t>::max())
+                    {
+                        return best;
+                    }
+
+                    // If the only option is to reverse (degree 1), do it.
+                    auto itReverse = directedToHalfEdge.find(halfEdgeKey(he.to, he.from));
+                    if (itReverse != directedToHalfEdge.end())
+                    {
+                        return itReverse->second;
+                    }
+
+                    return bestFallback;
+                };
+
+                // Extract loops using the half-edge "next" relation.
+                std::vector<bool> localHalfUsed(halfEdges.size(), false);
+                std::vector<bool> syntheticUsed(syntheticEdges.size(), false);
+                for (std::size_t startHe = 0U; startHe < halfEdges.size(); ++startHe)
+                {
+                    if (localHalfUsed[startHe])
+                    {
+                        continue;
+                    }
+
+                    HalfEdge const & startHalf = halfEdges[startHe];
+                    if (!startHalf.isSynthetic && edgeUsed[startHalf.idx])
+                    {
+                        localHalfUsed[startHe] = true;
+                        continue;
+                    }
+                    if (startHalf.isSynthetic && startHalf.idx < syntheticUsed.size() && syntheticUsed[startHalf.idx])
+                    {
+                        localHalfUsed[startHe] = true;
+                        continue;
+                    }
+
+                    struct EdgeRef
+                    {
+                        bool isSynthetic;
+                        std::size_t idx;
+                    };
+
+                    std::vector<std::size_t> cycleHalfEdges;
+                    std::vector<EdgeRef> cycleEdges;
+                    std::vector<std::size_t> cycleBoundaryEdgeIndices;
+                    std::vector<std::uint32_t> loopVertices;
+                    std::unordered_set<std::size_t> visited;
+                    visited.reserve(128U);
+
+                    std::size_t he = startHe;
+                    bool foundLoop = false;
+                    bool containsSynthetic = false;
+                    while (cycleHalfEdges.size() < maxLoopSize)
+                    {
+                        if (visited.count(he) != 0)
+                        {
+                            break;
+                        }
+
+                        HalfEdge const & curr = halfEdges[he];
+                        if (!curr.isSynthetic && edgeUsed[curr.idx])
+                        {
+                            break;
+                        }
+                        if (curr.isSynthetic && curr.idx < syntheticUsed.size() && syntheticUsed[curr.idx])
+                        {
+                            break;
+                        }
+
+                        visited.insert(he);
+                        cycleHalfEdges.push_back(he);
+                        cycleEdges.push_back({curr.isSynthetic, curr.idx});
+                        containsSynthetic = containsSynthetic || curr.isSynthetic;
+                        if (!curr.isSynthetic)
+                        {
+                            cycleBoundaryEdgeIndices.push_back(curr.idx);
+                        }
+                        loopVertices.push_back(curr.from);
+
+                        std::size_t const nextHe = nextHalfEdge(halfEdges[he]);
+                        if (nextHe == std::numeric_limits<std::size_t>::max())
+                        {
+                            break;
+                        }
+                        if (nextHe == startHe && loopVertices.size() >= 3U)
+                        {
+                            foundLoop = true;
+                            break;
+                        }
+                        he = nextHe;
+                    }
+
+                    // Mark locally visited half-edges so we don't repeatedly attempt the same walk.
+                    for (std::size_t heIdx : cycleHalfEdges)
+                    {
+                        localHalfUsed[heIdx] = true;
+                    }
+
+                    if (!foundLoop || loopVertices.size() < 3U)
+                    {
+                        continue;
+                    }
+
+                    // Never cap loops that depend on synthetic edges. Those synthetic edges are
+                    // not part of the original boundary and would become *new* boundary edges
+                    // after capping.
+                    if (containsSynthetic)
+                    {
+                        continue;
+                    }
+
+                    // Commit: mark underlying undirected edges as used.
+                    for (EdgeRef const & e : cycleEdges)
+                    {
+                        // containsSynthetic is false here.
+                        edgeUsed[e.idx] = true;
+                    }
+
+                    ++loopCount;
+                    cappedEdges += loopVertices.size();
+
+                    // Compute a representative normal (from the original boundary triangles).
+                    Eigen::Vector3f avgNormal = Eigen::Vector3f::Zero();
+                    for (std::size_t edgeIdx : cycleBoundaryEdgeIndices)
+                    {
+                        BoundaryEdge const & be = boundaryEdges[edgeIdx];
+                        Eigen::Vector3f const & p0 = m_mesh.positions[be.edge.v0];
+                        Eigen::Vector3f const & p1 = m_mesh.positions[be.edge.v1];
+                        Eigen::Vector3f const & p2 = m_mesh.positions[be.thirdVertex];
+                        Eigen::Vector3f const n = (p1 - p0).cross(p2 - p0);
+                        if (n.squaredNorm() > 0.0F)
+                        {
+                            avgNormal += n.normalized();
+                        }
+                    }
+                    if (avgNormal.squaredNorm() > 0.0F)
+                    {
+                        avgNormal.normalize();
+                    }
+
+                    // Add centroid vertex for a stable fan triangulation.
+                    Eigen::Vector3f centroidF = Eigen::Vector3f::Zero();
+                    for (std::uint32_t v : loopVertices)
+                    {
+                        centroidF += m_mesh.positions[v];
+                    }
+                    centroidF /= static_cast<float>(loopVertices.size());
+
+                    std::uint32_t const centroidIndex = static_cast<std::uint32_t>(m_mesh.positions.size());
+                    m_mesh.positions.push_back(centroidF);
+                    if (!m_mesh.normals.empty())
+                    {
+                        m_mesh.normals.push_back(avgNormal);
+                    }
+
+                    for (std::size_t i = 0U; i < loopVertices.size(); ++i)
+                    {
+                        std::uint32_t const v0 = loopVertices[i];
+                        std::uint32_t const v1 = loopVertices[(i + 1U) % loopVertices.size()];
+
+                        if (v0 == v1 || v0 == centroidIndex || v1 == centroidIndex)
+                        {
+                            continue;
+                        }
+
+                        Eigen::Vector3f const & p0 = m_mesh.positions[v0];
+                        Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+                        Eigen::Vector3f const & pc = m_mesh.positions[centroidIndex];
+                        Eigen::Vector3f const triNormal = (p1 - p0).cross(pc - p0);
+                        if (triNormal.squaredNorm() < 1e-12F)
+                        {
+                            continue;
+                        }
+
+                        if (avgNormal.squaredNorm() == 0.0F || triNormal.dot(avgNormal) >= 0.0F)
+                        {
+                            capTriangles.push_back(v0);
+                            capTriangles.push_back(v1);
+                            capTriangles.push_back(centroidIndex);
+                        }
+                        else
+                        {
+                            capTriangles.push_back(v0);
+                            capTriangles.push_back(centroidIndex);
+                            capTriangles.push_back(v1);
                         }
                     }
                 }
             }
 
-            if (bestMatch != std::numeric_limits<std::size_t>::max())
+            // Phase 1b (fallback): Stitch remaining internal boundary edges in pairs.
+            // These remaining edges are typically short open chains (degree-1 endpoints) caused by
+            // missing neighbor coverage. Pairing nearby boundary edges and bridging them with a quad
+            // often closes the crack without introducing branching.
+            std::vector<std::size_t> remainingEdges;
+            remainingEdges.reserve(boundaryEdges.size());
+            for (std::size_t i = 0U; i < boundaryEdges.size(); ++i)
             {
-                // Create bridge triangles between edges i and bestMatch
-                BoundaryEdge const & boundaryJ = boundaryEdges[bestMatch];
-                DirectedEdge const & edgeJ = boundaryJ.edge;
-
-                // We have normal of original triangle (normalI) computed earlier.
-                // Use distance to determine which vertices to pair.
-                float const d00 =
-                  (m_mesh.positions[edgeI.v0] - m_mesh.positions[edgeJ.v0]).squaredNorm();
-                float const d01 =
-                  (m_mesh.positions[edgeI.v0] - m_mesh.positions[edgeJ.v1]).squaredNorm();
-
-                // Determine vertex pairing based on distance
-                std::uint32_t const jNear0 = (d00 < d01) ? edgeJ.v0 : edgeJ.v1; // Near I.v0
-                std::uint32_t const jNear1 = (d00 < d01) ? edgeJ.v1 : edgeJ.v0; // Near I.v1
-
-                // Create bridge triangles with correct winding based on original normal
-                // The quad is: I.v0 -- I.v1 -- jNear1 -- jNear0 (spatial order)
-                // We need to determine if this should be CCW or CW based on normalI
-
-                // Helper to add triangle with winding check
-                auto addTriangleWithCorrectWinding =
-                  [this, &newTriangles, &normalI](
-                    std::uint32_t a, std::uint32_t b, std::uint32_t c) -> bool
+                if (!edgeUsed[i])
                 {
-                    // Skip if any two vertices are the same
-                    if (a == b || b == c || c == a)
-                    {
-                        return false;
-                    }
-
-                    Eigen::Vector3f const & pA = m_mesh.positions[a];
-                    Eigen::Vector3f const & pB = m_mesh.positions[b];
-                    Eigen::Vector3f const & pC = m_mesh.positions[c];
-
-                    // Check triangle area - skip if degenerate
-                    Eigen::Vector3f const triNormal = (pB - pA).cross(pC - pA);
-                    float const areaSq = triNormal.squaredNorm();
-                    float constexpr minAreaSq = 1e-12F;
-                    if (areaSq < minAreaSq)
-                    {
-                        return false;
-                    }
-
-                    // Check if triangle normal aligns with original normal
-                    // If not, reverse the winding
-                    if (triNormal.dot(normalI) < 0.0F)
-                    {
-                        // Reverse winding: swap b and c
-                        newTriangles.push_back(a);
-                        newTriangles.push_back(c);
-                        newTriangles.push_back(b);
-                    }
-                    else
-                    {
-                        newTriangles.push_back(a);
-                        newTriangles.push_back(b);
-                        newTriangles.push_back(c);
-                    }
-                    return true;
-                };
-
-                // Create the two bridge triangles for the quad
-                // Quad: I.v0 -- I.v1 -- jNear1 -- jNear0
-                addTriangleWithCorrectWinding(edgeI.v0, edgeI.v1, jNear1);
-                addTriangleWithCorrectWinding(edgeI.v0, jNear1, jNear0);
-
-                edgeUsed[i] = true;
-                edgeUsed[bestMatch] = true;
-            }
-        }
-
-        if (!newTriangles.empty())
-        {
-            std::size_t const bridgeTriCount = newTriangles.size() / 3U;
-            m_mesh.indices.insert(m_mesh.indices.end(), newTriangles.begin(), newTriangles.end());
-
-            std::size_t remainingBoundary = 0U;
-            for (bool used : edgeUsed)
-            {
-                if (!used)
-                {
-                    ++remainingBoundary;
+                    remainingEdges.push_back(i);
                 }
             }
 
-            std::cout << "  Gap filling: Created " << bridgeTriCount << " bridge triangles, "
-                      << remainingBoundary << " boundary edges remain" << std::endl;
-        }
-        else if (!boundaryEdges.empty())
-        {
-            std::cout << "  Gap filling: No matching edge pairs found" << std::endl;
+            if (!remainingEdges.empty())
+            {
+                float avgRemainingEdgeLen = 0.0F;
+                for (std::size_t idx : remainingEdges)
+                {
+                    BoundaryEdge const & be = boundaryEdges[idx];
+                    avgRemainingEdgeLen += (m_mesh.positions[be.edge.v1] - m_mesh.positions[be.edge.v0]).norm();
+                }
+                avgRemainingEdgeLen /= static_cast<float>(remainingEdges.size());
+
+                float const stitchRadius = std::max(searchRadius * 16.0F, avgRemainingEdgeLen * 16.0F);
+                float const stitchRadiusSq = stitchRadius * stitchRadius;
+                float const cellSize = stitchRadius * 2.0F;
+                float const invCellSize = 1.0F / cellSize;
+
+                auto hashPos = [invCellSize](Eigen::Vector3f const & pos) -> std::uint64_t
+                {
+                    auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
+                    auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
+                    auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
+                    std::uint64_t const hx = static_cast<std::uint64_t>(ix) & 0x1FFFFF;
+                    std::uint64_t const hy = static_cast<std::uint64_t>(iy) & 0x1FFFFF;
+                    std::uint64_t const hz = static_cast<std::uint64_t>(iz) & 0x1FFFFF;
+                    return (hx << 42) | (hy << 21) | hz;
+                };
+
+                std::unordered_map<std::uint64_t, std::vector<std::size_t>> spatial;
+                spatial.reserve(remainingEdges.size());
+                std::vector<Eigen::Vector3f> midpoints(boundaryEdges.size(), Eigen::Vector3f::Zero());
+
+                for (std::size_t idx : remainingEdges)
+                {
+                    BoundaryEdge const & be = boundaryEdges[idx];
+                    Eigen::Vector3f const & p0 = m_mesh.positions[be.edge.v0];
+                    Eigen::Vector3f const & p1 = m_mesh.positions[be.edge.v1];
+                    midpoints[idx] = (p0 + p1) * 0.5F;
+                    spatial[hashPos(midpoints[idx])].push_back(idx);
+                }
+
+                std::vector<std::uint32_t> stitchTriangles;
+                stitchTriangles.reserve(remainingEdges.size() * 6U);
+                std::size_t stitchedPairs = 0U;
+
+                std::vector<bool> stitched(boundaryEdges.size(), false);
+
+                for (std::size_t idx : remainingEdges)
+                {
+                    if (edgeUsed[idx] || stitched[idx])
+                    {
+                        continue;
+                    }
+
+                    Eigen::Vector3f const & mid = midpoints[idx];
+                    auto const ix = static_cast<std::int32_t>(std::floor(mid.x() * invCellSize));
+                    auto const iy = static_cast<std::int32_t>(std::floor(mid.y() * invCellSize));
+                    auto const iz = static_cast<std::int32_t>(std::floor(mid.z() * invCellSize));
+
+                    std::size_t bestMatch = std::numeric_limits<std::size_t>::max();
+                    float bestDistSq = stitchRadiusSq;
+
+                    for (int dz = -1; dz <= 1; ++dz)
+                    {
+                        for (int dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int dx = -1; dx <= 1; ++dx)
+                            {
+                                std::uint64_t const hx = static_cast<std::uint64_t>(ix + dx) & 0x1FFFFF;
+                                std::uint64_t const hy = static_cast<std::uint64_t>(iy + dy) & 0x1FFFFF;
+                                std::uint64_t const hz = static_cast<std::uint64_t>(iz + dz) & 0x1FFFFF;
+                                std::uint64_t const h = (hx << 42) | (hy << 21) | hz;
+
+                                auto it = spatial.find(h);
+                                if (it == spatial.end())
+                                {
+                                    continue;
+                                }
+                                for (std::size_t cand : it->second)
+                                {
+                                    if (cand == idx || edgeUsed[cand] || stitched[cand])
+                                    {
+                                        continue;
+                                    }
+                                    float const distSq = (midpoints[cand] - mid).squaredNorm();
+                                    if (distSq < bestDistSq)
+                                    {
+                                        bestDistSq = distSq;
+                                        bestMatch = cand;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (bestMatch == std::numeric_limits<std::size_t>::max())
+                    {
+                        continue;
+                    }
+
+                    // Bridge idx and bestMatch with a quad, choosing endpoint pairing by minimal distance.
+                    BoundaryEdge const & e0 = boundaryEdges[idx];
+                    BoundaryEdge const & e1 = boundaryEdges[bestMatch];
+
+                    std::uint32_t const a0 = e0.edge.v0;
+                    std::uint32_t const b0 = e0.edge.v1;
+                    std::uint32_t const a1 = e1.edge.v0;
+                    std::uint32_t const b1 = e1.edge.v1;
+
+                    Eigen::Vector3f const & pA0 = m_mesh.positions[a0];
+                    Eigen::Vector3f const & pB0 = m_mesh.positions[b0];
+                    Eigen::Vector3f const & pA1 = m_mesh.positions[a1];
+                    Eigen::Vector3f const & pB1 = m_mesh.positions[b1];
+
+                    float const pair0 = (pA0 - pA1).squaredNorm() + (pB0 - pB1).squaredNorm();
+                    float const pair1 = (pA0 - pB1).squaredNorm() + (pB0 - pA1).squaredNorm();
+
+                    std::uint32_t c = a1;
+                    std::uint32_t d = b1;
+                    if (pair1 < pair0)
+                    {
+                        c = b1;
+                        d = a1;
+                    }
+
+                    // Average normal from the two original boundary triangles.
+                    Eigen::Vector3f avgNormal = Eigen::Vector3f::Zero();
+                    {
+                        Eigen::Vector3f const & p2 = m_mesh.positions[e0.thirdVertex];
+                        Eigen::Vector3f const n0 = (pB0 - pA0).cross(p2 - pA0);
+                        if (n0.squaredNorm() > 0.0F)
+                        {
+                            avgNormal += n0.normalized();
+                        }
+                    }
+                    {
+                        Eigen::Vector3f const & p2 = m_mesh.positions[e1.thirdVertex];
+                        Eigen::Vector3f const n1 = (m_mesh.positions[b1] - m_mesh.positions[a1]).cross(p2 - m_mesh.positions[a1]);
+                        if (n1.squaredNorm() > 0.0F)
+                        {
+                            avgNormal += n1.normalized();
+                        }
+                    }
+                    if (avgNormal.squaredNorm() > 0.0F)
+                    {
+                        avgNormal.normalize();
+                    }
+
+                    // Triangulate quad (a0, b0, d, c) as (a0,b0,d) and (a0,d,c).
+                    auto emitTri = [&](std::uint32_t v0, std::uint32_t v1, std::uint32_t v2)
+                    {
+                        if (v0 == v1 || v1 == v2 || v2 == v0)
+                        {
+                            return;
+                        }
+                        Eigen::Vector3f const & p0 = m_mesh.positions[v0];
+                        Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+                        Eigen::Vector3f const & p2 = m_mesh.positions[v2];
+                        Eigen::Vector3f const n = (p1 - p0).cross(p2 - p0);
+                        if (n.squaredNorm() < 1e-12F)
+                        {
+                            return;
+                        }
+                        if (avgNormal.squaredNorm() == 0.0F || n.dot(avgNormal) >= 0.0F)
+                        {
+                            stitchTriangles.push_back(v0);
+                            stitchTriangles.push_back(v1);
+                            stitchTriangles.push_back(v2);
+                        }
+                        else
+                        {
+                            stitchTriangles.push_back(v0);
+                            stitchTriangles.push_back(v2);
+                            stitchTriangles.push_back(v1);
+                        }
+                    };
+
+                    emitTri(a0, b0, d);
+                    emitTri(a0, d, c);
+
+                    edgeUsed[idx] = true;
+                    edgeUsed[bestMatch] = true;
+                    stitched[idx] = true;
+                    stitched[bestMatch] = true;
+                    ++stitchedPairs;
+                }
+
+                if (!stitchTriangles.empty())
+                {
+                    capTriangles.insert(capTriangles.end(), stitchTriangles.begin(), stitchTriangles.end());
+                }
+
+                if (debugEnabled)
+                {
+                    std::cout << "  Gap filling: Stitched " << stitchedPairs << " internal boundary edge pairs with "
+                              << (stitchTriangles.size() / 3U) << " bridge triangles (radius=" << stitchRadius << ")" << std::endl;
+                }
+            }
+
+            if (!capTriangles.empty())
+            {
+                std::size_t const triCount = capTriangles.size() / 3U;
+                m_mesh.indices.insert(m_mesh.indices.end(), capTriangles.begin(), capTriangles.end());
+
+                std::size_t remaining = 0U;
+                for (bool u : edgeUsed)
+                {
+                    if (!u)
+                    {
+                        ++remaining;
+                    }
+                }
+
+                if (debugEnabled)
+                {
+                    std::cout << "  Gap filling: Internal boundary components=" << componentCount
+                              << ", loops capped=" << loopCount << std::endl;
+                }
+                std::cout << "  Gap filling: Capped " << loopCount << " internal loops with "
+                          << triCount << " cap triangles (capped " << cappedEdges
+                          << " edges, " << remaining << " edges unlooped)" << std::endl;
+            }
+            else
+            {
+                std::cout << "  Gap filling: No closed internal boundary loops found" << std::endl;
+            }
         }
 
         // ========================================================================

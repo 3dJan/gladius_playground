@@ -292,6 +292,26 @@ namespace gladius::compute
                     continue;
                 }
 
+                // Guard against degenerate topology (repeated vertices). Flipping such an edge can
+                // easily create zero-area triangles and/or duplicate edges.
+                if (edgeA == oppA || edgeA == oppB || edgeB == oppA || edgeB == oppB)
+                {
+                    continue;
+                }
+
+                // Flipping replaces the shared edge (edgeA, edgeB) with the diagonal (oppA, oppB).
+                // If that diagonal already exists elsewhere, the flip would create a non-manifold
+                // edge (used by >2 triangles). Be conservative and skip.
+                std::uint64_t const newDiagonalKey = makeEdgeKey(oppA, oppB);
+                if (edgeToTriangles.find(newDiagonalKey) != edgeToTriangles.end())
+                {
+                    continue;
+                }
+                if (processedEdges.count(newDiagonalKey) != 0U)
+                {
+                    continue;
+                }
+
                 // Current triangles: (edgeA, edgeB, oppA) and (edgeA, oppB, edgeB) or similar
                 // After flip: (edgeA, oppB, oppA) and (edgeB, oppA, oppB)
 

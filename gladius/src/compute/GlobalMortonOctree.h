@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -106,6 +107,17 @@ namespace gladius::compute
         /// Vertices for this cell (up to 4 for complex manifold configurations)
         std::vector<std::uint32_t> vertexIndices;
 
+        /// Edge→component mapping for multi-vertex cells (used by quad emission).
+        /// For each of the 12 local edges, stores which vertex component to use.
+        /// Defaults to component 0.
+        std::array<std::uint8_t, 12> edgeComponents{};
+
+        /// Edge→component mapping for multi-vertex cells (used by quad emission).
+        /// Defaults to component 0.
+        std::uint8_t edge3Component{0U};
+        std::uint8_t edge7Component{0U};
+        std::uint8_t edge11Component{0U};
+
         /// Hermite samples for QEF solving
         std::vector<HermiteSample> hermiteSamples;
 
@@ -141,6 +153,27 @@ namespace gladius::compute
         double constructionTimeMs{0.0};
         double vertexGenerationTimeMs{0.0};
         double meshExtractionTimeMs{0.0};
+    };
+
+    struct MortonNodeKey
+    {
+        std::uint64_t morton{0U};
+        std::uint8_t depth{0U};
+
+        friend bool operator==(MortonNodeKey const& a, MortonNodeKey const& b)
+        {
+            return a.morton == b.morton && a.depth == b.depth;
+        }
+    };
+
+    struct MortonNodeKeyHash
+    {
+        std::size_t operator()(MortonNodeKey const& k) const noexcept
+        {
+            std::size_t const h0 = std::hash<std::uint64_t>{}(k.morton);
+            std::size_t const h1 = std::hash<std::uint8_t>{}(k.depth);
+            return h0 ^ (h1 + 0x9e3779b97f4a7c15ULL + (h0 << 6U) + (h0 >> 2U));
+        }
     };
 
     /**
@@ -222,7 +255,7 @@ namespace gladius::compute
         GlobalVertexRegistry m_vertexRegistry;
 
         // Morton code → node index lookup
-        std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
+        std::unordered_map<MortonNodeKey, std::size_t, MortonNodeKeyHash> m_mortonToIndex;
 
         // Phase 1: Initial octree construction
         void buildInitialOctree();
@@ -237,6 +270,10 @@ namespace gladius::compute
         void ensureNeighborsExist(std::size_t nodeIndex);
         [[nodiscard]] std::size_t createNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
                                                            std::uint32_t z, std::uint8_t depth);
+
+        // Phase 3b: Halo vertex generation (neighbors that must exist for quad closure)
+        void generateHaloVerticesForWatertightness();
+        void ensureProjectedVertex(GlobalOctreeNode& node);
 
         // Phase 2: Adaptive refinement
         void refineAdaptively();
