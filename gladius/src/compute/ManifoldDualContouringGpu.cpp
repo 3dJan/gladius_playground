@@ -94,32 +94,6 @@ namespace gladius::compute
         Eigen::Vector3f originalBboxMax =
           Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
 
-                // The hierarchical octree implementation is currently limited to maxDepth<=7.
-                // If a deeper hierarchical setting is requested, we fall back to the non-hierarchical
-                // path and clamp the effective maxDepth to 7 to preserve watertight/manifold output.
-                // (This is a temporary safety net for export-dialog defaults.)
-                std::uint32_t const requestedMaxDepth = m_config.maxDepth;
-                bool const requestedHierarchical = m_config.enableHierarchicalOctree;
-                bool const fallbackDueToDepth = requestedHierarchical && requestedMaxDepth > 7U;
-                std::uint32_t const effectiveMaxDepth = fallbackDueToDepth ? 7U : requestedMaxDepth;
-
-                struct MaxDepthGuard
-                {
-                        ManifoldDualContouringConfig & cfg;
-                        std::uint32_t original;
-                        explicit MaxDepthGuard(ManifoldDualContouringConfig & c)
-                                : cfg(c)
-                                , original(c.maxDepth)
-                        {
-                        }
-                        ~MaxDepthGuard()
-                        {
-                                cfg.maxDepth = original;
-                        }
-                } maxDepthGuard(m_config);
-
-                m_config.maxDepth = effectiveMaxDepth;
-
         // Add margin to bounding box to ensure surface at boundaries is properly captured.
         // The margin should be at least 2 voxels at the finest level to allow proper
         // sign change detection at the surface boundary.
@@ -135,28 +109,14 @@ namespace gladius::compute
         if (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
         {
             std::cout << "MDC generateMesh config: initialDepth=" << m_config.initialDepth
-                      << ", maxDepth=" << requestedMaxDepth;
-            if (effectiveMaxDepth != requestedMaxDepth)
-            {
-                std::cout << " (effective=" << effectiveMaxDepth << ")";
-            }
-            std::cout
+                      << ", maxDepth=" << m_config.maxDepth
                       << ", hierarchical=" << (m_config.enableHierarchicalOctree ? "true" : "false")
                       << ", chunking=" << (m_config.enableChunking ? "true" : "false")
                       << ", minFeatureSize=" << m_config.minFeatureSize << std::endl;
         }
 
         // Use hierarchical octree approach if enabled.
-        // NOTE: The hierarchical implementation is currently limited to maxDepth<=7.
-        // For deeper requested settings we clamp the effective depth to 7.
-        bool const useHierarchical = m_config.enableHierarchicalOctree;
-        if (fallbackDueToDepth && std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
-        {
-            std::cout << "Hierarchical octree is currently limited to maxDepth<=7; clamping requested maxDepth="
-                      << requestedMaxDepth << " to effective maxDepth=" << m_config.maxDepth << std::endl;
-        }
-
-        if (useHierarchical)
+        if (m_config.enableHierarchicalOctree)
         {
             generateMeshHierarchical();
         }
