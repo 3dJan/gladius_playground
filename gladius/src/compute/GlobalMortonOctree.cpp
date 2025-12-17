@@ -8,12 +8,15 @@
 #include <Eigen/Geometry>
 #include <Eigen/SVD>
 
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <unordered_map>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -39,14 +42,13 @@ namespace gladius::compute
 
         [[nodiscard]] bool hasEdgeCrossing(float const v0, float const v1)
         {
-            // Tolerance-consistent edge-crossing detection.
-            // The previous implementation treated any near-zero corner as a crossing, even
-            // when both corners were on the same side. At higher depths this can create
-            // spurious Hermite samples/quads and lead to non-manifold edge overuse.
-            //
-            // We classify corners with a small negative tolerance as "inside".
-            bool const inside0 = (v0 < -ZERO_CROSSING_TOLERANCE);
-            bool const inside1 = (v1 < -ZERO_CROSSING_TOLERANCE);
+            // Robust edge-crossing detection.
+            // Use a strict sign test rather than a tolerance-based "inside" classification.
+            // A negative tolerance can miss legitimate crossings when both endpoints are
+            // close to 0 (common at high depth when the surface passes near grid corners),
+            // which then produces boundary edges (holes).
+            bool const inside0 = (v0 < 0.0F);
+            bool const inside1 = (v1 < 0.0F);
             return inside0 != inside1;
         }
     }
@@ -136,16 +138,30 @@ namespace gladius::compute
             return;
         }
 
-        // Get global bounding box
-        auto bbox = m_core.getBoundingBox();
-        if (!bbox.has_value())
+        // Get global bounding box.
+        // IMPORTANT: The octree domain must fully contain the surface. If the surface
+        // intersects the domain boundary, owned-edge quad emission will necessarily
+        // skip out-of-bounds neighbors and produce holes (boundary edges).
+        //
+        // For parity with the GPU path, allow callers to provide a padded bounding box.
+        BoundingBox domainBbox{};
+        if (config.boundingBoxOverride.has_value())
         {
-            std::cerr << "No bounding box available" << std::endl;
-            return;
+            domainBbox = *config.boundingBoxOverride;
+        }
+        else
+        {
+            auto bbox = m_core.getBoundingBox();
+            if (!bbox.has_value())
+            {
+                std::cerr << "No bounding box available" << std::endl;
+                return;
+            }
+            domainBbox = *bbox;
         }
 
-        m_globalBboxMin = Eigen::Vector3f(bbox->min.s[0], bbox->min.s[1], bbox->min.s[2]);
-        m_globalBboxMax = Eigen::Vector3f(bbox->max.s[0], bbox->max.s[1], bbox->max.s[2]);
+        m_globalBboxMin = Eigen::Vector3f(domainBbox.min.s[0], domainBbox.min.s[1], domainBbox.min.s[2]);
+        m_globalBboxMax = Eigen::Vector3f(domainBbox.max.s[0], domainBbox.max.s[1], domainBbox.max.s[2]);
         m_globalBboxSize = m_globalBboxMax - m_globalBboxMin;
 
         // Initialize vertex registry with global bounds
@@ -202,6 +218,13 @@ namespace gladius::compute
 
     void GlobalMortonOctree::buildInitialOctree()
     {
+        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        if (debugProgress)
+        {
+            std::cout << "  Building initial octree..." << std::endl;
+            std::cout << "    initialDepth=" << m_config.initialDepth << ", maxDepth=" << m_config.maxDepth << std::endl;
+        }
+
         // Initialize levels array
         m_levels.resize(m_config.maxDepth + 1U);
         for (std::size_t d = 0U; d <= m_config.maxDepth; ++d)
@@ -219,7 +242,16 @@ namespace gladius::compute
         // Force subdivision of ALL nodes during initial phase (forceSubdivision=true)
         for (std::size_t depth = 0U; depth < m_config.initialDepth; ++depth)
         {
+            if (debugProgress)
+            {
+                std::cout << "    Initial build: processing depth " << depth << " (forceSubdivision=true)" << std::endl;
+            }
             processLevel(depth, true);
+            if (debugProgress)
+            {
+                std::cout << "      nodes=" << m_nodes.size() << ", nextLevelNodes="
+                          << (depth + 1U < m_levels.size() ? m_levels[depth + 1U].nodeIndices.size() : 0U) << std::endl;
+            }
         }
 
         // Process remaining levels only for intersecting nodes (forceSubdivision=false)
@@ -230,7 +262,16 @@ namespace gladius::compute
             {
                 break;
             }
+            if (debugProgress)
+            {
+                std::cout << "    Adaptive build: processing depth " << depth << " (forceSubdivision=false)" << std::endl;
+            }
             processLevel(depth, false);
+            if (debugProgress)
+            {
+                std::cout << "      nodes=" << m_nodes.size() << ", nextLevelNodes="
+                          << (depth + 1U < m_levels.size() ? m_levels[depth + 1U].nodeIndices.size() : 0U) << std::endl;
+            }
         }
 
         // Count final statistics
@@ -378,7 +419,7 @@ namespace gladius::compute
             node.internalMask = 0U;
             for (std::uint8_t c = 0U; c < 8U; ++c)
             {
-                if (node.cornerValues[c] < -ZERO_CROSSING_TOLERANCE)
+                if (node.cornerValues[c] < 0.0F)
                 {
                     node.internalMask |= (1U << c);
                     ++negativeCornerCount;
@@ -525,6 +566,8 @@ namespace gladius::compute
     {
         // 2:1 octree balancing: ensure all intersecting cells have face-adjacent neighbors
         // at the same depth. This is critical for proper quad formation.
+
+        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
         
         std::cout << "  Balancing octree for watertight mesh generation..." << std::endl;
         
@@ -539,9 +582,17 @@ namespace gladius::compute
             changed = false;
             ++passes;
             std::size_t neighborsThisPass = 0U;
+
+            // Minimal progress output to keep long balance passes observable.
+            std::cout << "    Balance pass " << passes << "..." << std::endl;
             
             // Collect all current intersecting leaves
             std::vector<std::size_t> intersectingLeaves;
+            if (debugProgress)
+            {
+                // Heuristic reserve to reduce reallocations.
+                intersectingLeaves.reserve(std::min<std::size_t>(m_nodes.size(), 2'500'000U));
+            }
             for (std::size_t i = 0U; i < m_nodes.size(); ++i)
             {
                 if (m_nodes[i].isLeaf && m_nodes[i].isIntersecting)
@@ -549,13 +600,35 @@ namespace gladius::compute
                     intersectingLeaves.push_back(i);
                 }
             }
+
+            if (debugProgress)
+            {
+                std::cout << "    Balance pass " << passes << ": intersectingLeaves=" << intersectingLeaves.size() << std::endl;
+            }
             
             // For each intersecting leaf, ensure its face-adjacent neighbors exist.
             // Additionally, ensure that for each *owned* edge with a sign-change we have the
             // full 2x2 neighborhood of cells around that edge (4 cells per edge).
             // This mirrors the GPU quad emission rule and avoids missing quads.
+            std::size_t processed = 0U;
+            std::size_t nextProgress = 0U;
+            if (debugProgress)
+            {
+                // About 20 progress updates per pass.
+                nextProgress = std::max<std::size_t>(intersectingLeaves.size() / 20U, 50'000U);
+            }
+
             for (std::size_t nodeIdx : intersectingLeaves)
             {
+                ++processed;
+                if (debugProgress && (processed % nextProgress == 0U))
+                {
+                    float const pct = intersectingLeaves.empty() ? 100.0F
+                                                                  : (100.0F * static_cast<float>(processed) /
+                                                                     static_cast<float>(intersectingLeaves.size()));
+                    std::cout << "      balance progress: " << processed << "/" << intersectingLeaves.size() << " (" << pct << "%)" << std::endl;
+                }
+
                 auto const& node = m_nodes[nodeIdx];
                 
                 // Decode this cell's coordinates
@@ -667,14 +740,6 @@ namespace gladius::compute
             }
             
             totalNeighborsCreated += neighborsThisPass;
-            
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
-            if (neighborsThisPass > 0U)
-            {
-                std::cout << "    Balance pass " << passes << ": created " 
-                          << neighborsThisPass << " neighbor cells" << std::endl;
-            }
-            #endif
         }
         
         std::cout << "  Balancing complete: " << totalNeighborsCreated << " neighbor cells created in "
@@ -723,7 +788,7 @@ namespace gladius::compute
             Eigen::Vector3f const cornerPos = cornerPosition(c, bounds);
             float const v = sampleSdf(cornerPos) - m_config.isoValue;
             node.cornerValues[c] = v;
-            if (v < -ZERO_CROSSING_TOLERANCE)
+            if (v < 0.0F)
             {
                 node.internalMask |= (1U << c);
             }
@@ -1325,7 +1390,7 @@ namespace gladius::compute
         }
 
         node.vertexIndices.clear();
-    node.edgeComponents.fill(0U);
+        node.edgeComponents.fill(0U);
         node.edge3Component = 0U;
         node.edge7Component = 0U;
         node.edge11Component = 0U;
@@ -1480,16 +1545,42 @@ namespace gladius::compute
                 case 10U:
                 {
                     // Ambiguous marching-squares cases on this face. For robust component
-                    // labeling on non-trilinear fields, sample the actual SDF at the face
-                    // center (rather than relying purely on corner values).
+                    // labeling, use an asymptotic-decider style probe position. Instead of
+                    // sampling at the face center (which can be misleading for thin features),
+                    // compute the bilinear saddle point (x*,y*) from the four corner values
+                    // and sample the actual SDF there.
 
                     Eigen::Vector3f const p0 = cornerPosition(f.corners[0], bounds);
                     Eigen::Vector3f const p1 = cornerPosition(f.corners[1], bounds);
                     Eigen::Vector3f const p2 = cornerPosition(f.corners[2], bounds);
                     Eigen::Vector3f const p3 = cornerPosition(f.corners[3], bounds);
-                    Eigen::Vector3f const faceCenter = 0.25F * (p0 + p1 + p2 + p3);
 
-                    bool const centerInside = (sampleSdf(faceCenter) - m_config.isoValue) < 0.0F;
+                    float const s0 = node.cornerValues[f.corners[0]];
+                    float const s1 = node.cornerValues[f.corners[1]];
+                    float const s2 = node.cornerValues[f.corners[2]];
+                    float const s3 = node.cornerValues[f.corners[3]];
+
+                    // Corner order is (0,1,2,3) around the face, so we can treat these as:
+                    // f00=s0, f10=s1, f11=s2, f01=s3.
+                    float const denomX = (s0 - s3) + (s2 - s1);
+                    float const denomY = (s0 - s1) + (s2 - s3);
+
+                    float xStar = 0.5F;
+                    float yStar = 0.5F;
+                    if (std::abs(denomX) > 1e-12F)
+                    {
+                        xStar = (s0 - s3) / denomX;
+                    }
+                    if (std::abs(denomY) > 1e-12F)
+                    {
+                        yStar = (s0 - s1) / denomY;
+                    }
+                    xStar = std::clamp(xStar, 0.0F, 1.0F);
+                    yStar = std::clamp(yStar, 0.0F, 1.0F);
+
+                    Eigen::Vector3f const deciderPos = p0 + xStar * (p1 - p0) + yStar * (p3 - p0);
+
+                    bool const centerInside = (sampleSdf(deciderPos) - m_config.isoValue) < 0.0F;
                     bool const diagonal02Inside = isCornerInside(f.corners[0]) && isCornerInside(f.corners[2]);
 
                     // If center sign matches the (0,2) diagonal's inside-ness, connect edges
@@ -1681,15 +1772,12 @@ namespace gladius::compute
         // Generate quads from shared edges
         generateQuads(indices);
 
-        // Remove geometrically degenerate triangles (e.g., when two distinct vertex indices
-        // end up at identical positions). These triangles contribute spurious boundary edges
-        // but do not cover area.
+        // Remove strictly degenerate triangles.
+        //
+        // NOTE: Be conservative here. Position/area-based filtering can remove very small but
+        // valid triangles at high depth and open cracks (boundary edges). We only drop triangles
+        // that are degenerate by index.
         {
-            float const domainScale = m_globalBboxSize.norm();
-            float const eps = std::max(1e-7F * domainScale, 1e-9F);
-            float const eps2 = eps * eps;
-            float const areaEps = std::max(1e-10F * domainScale * domainScale, 1e-12F);
-
             std::vector<std::uint32_t> filtered;
             filtered.reserve(indices.size());
             std::size_t removed = 0U;
@@ -1701,27 +1789,6 @@ namespace gladius::compute
                 std::uint32_t const c = indices[i + 2U];
 
                 if (a == b || b == c || a == c)
-                {
-                    ++removed;
-                    continue;
-                }
-
-                Eigen::Vector3f const& pa = positions[a];
-                Eigen::Vector3f const& pb = positions[b];
-                Eigen::Vector3f const& pc = positions[c];
-
-                Eigen::Vector3f const ab = pb - pa;
-                Eigen::Vector3f const bc = pc - pb;
-                Eigen::Vector3f const ca = pa - pc;
-
-                if (ab.squaredNorm() < eps2 || bc.squaredNorm() < eps2 || ca.squaredNorm() < eps2)
-                {
-                    ++removed;
-                    continue;
-                }
-
-                float const area2 = (ab.cross(pc - pa)).squaredNorm();
-                if (area2 < areaEps * areaEps)
                 {
                     ++removed;
                     continue;
@@ -1741,35 +1808,47 @@ namespace gladius::compute
         // Note: Boundary hole filling is intentionally disabled here.
         // The current naive loop triangulation can introduce significant non-manifold
         // topology. Holes must be fixed by correct quad generation / neighbor completion.
-        
-        // Fix orientation of connected components using gradient voting
-        fixTriangleOrientation(indices);
-        
-        // Post-fix directed edge analysis
+
+        // Fixing triangle orientation and post-fix edge-direction analysis can be very expensive
+        // (it requires building large adjacency/edge maps). For very large meshes (depth=9),
+        // this can dominate runtime and memory and can even terminate the process.
+        //
+        // Since the watertight/manifold checks below are based on *undirected* edge usage,
+        // we can safely skip orientation fixing for large exports.
+        std::size_t const triangleCount = indices.size() / 3U;
+        constexpr std::size_t MAX_TRIANGLES_FOR_ORIENTATION_FIX = 250000U;
+        if (triangleCount <= MAX_TRIANGLES_FOR_ORIENTATION_FIX)
         {
+            fixTriangleOrientation(indices);
+
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+            // Post-fix directed edge analysis (debug only, small meshes only)
             std::unordered_map<std::uint64_t, int> directedEdgeCount;
+            directedEdgeCount.reserve(indices.size());
             for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
             {
                 std::uint32_t const v0 = indices[i + 0];
                 std::uint32_t const v1 = indices[i + 1];
                 std::uint32_t const v2 = indices[i + 2];
-                
+
                 auto makeDirectedKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t {
                     return (static_cast<std::uint64_t>(a) << 32) | b;
                 };
-                
+
                 ++directedEdgeCount[makeDirectedKey(v0, v1)];
                 ++directedEdgeCount[makeDirectedKey(v1, v2)];
                 ++directedEdgeCount[makeDirectedKey(v2, v0)];
             }
-            
-            std::size_t pairedEdges = 0, singleEdges = 0, multipleEdges = 0;
+
+            std::size_t pairedEdges = 0U;
+            std::size_t singleEdges = 0U;
+            std::size_t multipleEdges = 0U;
             for (auto const& [edgeKey, count] : directedEdgeCount)
             {
                 std::uint32_t const a = static_cast<std::uint32_t>(edgeKey >> 32);
                 std::uint32_t const b = static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFF);
                 std::uint64_t const reverseKey = (static_cast<std::uint64_t>(b) << 32) | a;
-                
+
                 if (count > 1)
                 {
                     ++multipleEdges;
@@ -1783,12 +1862,11 @@ namespace gladius::compute
                     ++singleEdges;
                 }
             }
-            
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
-            std::cout << "  POST-FIX directed edge analysis: paired=" << (pairedEdges / 2) 
-                      << ", single=" << singleEdges 
+
+            std::cout << "  POST-FIX directed edge analysis: paired=" << (pairedEdges / 2)
+                      << ", single=" << singleEdges
                       << ", multiple=" << multipleEdges << std::endl;
-                      #endif
+#endif
         }
 
         m_stats.triangleCount = indices.size() / 3U;
@@ -1796,112 +1874,458 @@ namespace gladius::compute
         auto const endTime = std::chrono::high_resolution_clock::now();
         m_stats.meshExtractionTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
-        // Validate mesh
-        std::map<std::pair<std::uint32_t, std::uint32_t>, int> edgeCount;
-        for (std::size_t i = 0U; i < indices.size(); i += 3U)
+        // Validate mesh (watertight + manifold) using undirected edge usage.
+        //
+        // IMPORTANT: This must scale to very large meshes (millions of triangles). Avoid
+        // std::map and per-edge triangle lists, which explode memory.
+        auto makeUndirectedEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
         {
-            for (int e = 0; e < 3; ++e)
+            if (a > b)
             {
-                std::uint32_t v0 = indices[i + e];
-                std::uint32_t v1 = indices[i + (e + 1) % 3];
-                auto edge = std::minmax(v0, v1);
-                edgeCount[edge]++;
+                std::swap(a, b);
             }
+            return (static_cast<std::uint64_t>(a) << 32U) | static_cast<std::uint64_t>(b);
+        };
+
+        std::vector<std::uint64_t> edges;
+        edges.reserve(indices.size()); // 3 edges per triangle == indices.size()
+        for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
+        {
+            std::uint32_t const v0 = indices[i + 0U];
+            std::uint32_t const v1 = indices[i + 1U];
+            std::uint32_t const v2 = indices[i + 2U];
+
+            edges.push_back(makeUndirectedEdgeKey(v0, v1));
+            edges.push_back(makeUndirectedEdgeKey(v1, v2));
+            edges.push_back(makeUndirectedEdgeKey(v2, v0));
         }
+
+        std::sort(edges.begin(), edges.end());
 
         m_stats.boundaryEdges = 0U;
         m_stats.nonManifoldEdges = 0U;
-        std::size_t internalEdges = 0U;
-        std::size_t nonManifold3 = 0U, nonManifold4 = 0U, nonManifoldMore = 0U;
-        
-        // Track which triangle each edge comes from for debugging
-        std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::size_t>> edgeToTriangles;
-        for (std::size_t i = 0U; i < indices.size(); i += 3U)
+
+        // If the boundary is tiny and the mesh is otherwise manifold, we can optionally
+        // fill the resulting hole loops with a simple fan triangulation.
+        // This is a pragmatic safeguard for rare degeneracy cases.
+        constexpr std::size_t MAX_BOUNDARY_EDGES_FOR_FILL = 256U;
+        std::vector<std::uint64_t> boundaryEdgeKeys;
+        boundaryEdgeKeys.reserve(32U);
+        bool boundaryTooLargeForFill = false;
+
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+        std::size_t maxEdgeUse = 0U;
+        std::size_t printedBoundary = 0U;
+        std::size_t printedNonManifold = 0U;
+#endif
+
+        for (std::size_t i = 0U; i < edges.size();)
         {
-            std::size_t triIdx = i / 3U;
-            for (int e = 0; e < 3; ++e)
+            std::size_t j = i + 1U;
+            while (j < edges.size() && edges[j] == edges[i])
             {
-                std::uint32_t v0 = indices[i + e];
-                std::uint32_t v1 = indices[i + (e + 1) % 3];
-                auto edge = std::minmax(v0, v1);
-                edgeToTriangles[edge].push_back(triIdx);
+                ++j;
             }
-        }
-        
-        // Debug: print first few problematic edges
-        std::size_t debugCount = 0;
-        std::size_t boundaryDebugCount = 0;
-        for (auto const& [edge, triangles] : edgeToTriangles)
-        {
-            std::size_t count = triangles.size();
-            if (count == 1)
+
+            std::size_t const count = j - i;
+            if (count == 1U)
             {
                 ++m_stats.boundaryEdges;
 
-                if (boundaryDebugCount < 12)
+                if (!boundaryTooLargeForFill)
                 {
-                    float const edgeLen = (positions[edge.first] - positions[edge.second]).norm();
-                    std::cout << "  Boundary edge (" << edge.first << "," << edge.second
-                              << ") len=" << edgeLen << " tri=" << triangles.front()
-                              << " [" << indices[triangles.front() * 3] << "," << indices[triangles.front() * 3 + 1]
-                              << "," << indices[triangles.front() * 3 + 2] << "]" << std::endl;
-                    ++boundaryDebugCount;
+                    if (boundaryEdgeKeys.size() < MAX_BOUNDARY_EDGES_FOR_FILL)
+                    {
+                        boundaryEdgeKeys.push_back(edges[i]);
+                    }
+                    else
+                    {
+                        boundaryTooLargeForFill = true;
+                        boundaryEdgeKeys.clear();
+                    }
                 }
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+                if (printedBoundary < 12U)
+                {
+                    std::uint32_t const a = static_cast<std::uint32_t>(edges[i] >> 32U);
+                    std::uint32_t const b = static_cast<std::uint32_t>(edges[i] & 0xFFFFFFFFU);
+                    float const edgeLen = (positions[a] - positions[b]).norm();
+                    std::cout << "  Boundary edge (" << a << "," << b << ") len=" << edgeLen << std::endl;
+                    ++printedBoundary;
+                }
+#endif
             }
-            else if (count == 2)
-            {
-                ++internalEdges;
-            }
-            else if (count > 2)
+            else if (count > 2U)
             {
                 ++m_stats.nonManifoldEdges;
-                if (count == 3) ++nonManifold3;
-                else if (count == 4) ++nonManifold4;
-                else ++nonManifoldMore;
-                
-                // Debug: print details for first few non-manifold edges
-                if (debugCount < 12)
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+                if (printedNonManifold < 12U)
                 {
-                    float const edgeLen = (positions[edge.first] - positions[edge.second]).norm();
-                    std::cout << "  Non-manifold edge (" << edge.first << "," << edge.second
-                              << ") count=" << count
-                              << " len=" << edgeLen
-                              << (edge.first == edge.second ? " [DEGENERATE]" : "")
-                              << std::endl;
-                    for (auto t : triangles)
+                    std::uint32_t const a = static_cast<std::uint32_t>(edges[i] >> 32U);
+                    std::uint32_t const b = static_cast<std::uint32_t>(edges[i] & 0xFFFFFFFFU);
+                    float const edgeLen = (positions[a] - positions[b]).norm();
+                    std::cout << "  Non-manifold edge (" << a << "," << b << ") count=" << count << " len=" << edgeLen << std::endl;
+                    ++printedNonManifold;
+                }
+                maxEdgeUse = std::max(maxEdgeUse, count);
+#endif
+            }
+
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+            maxEdgeUse = std::max(maxEdgeUse, count);
+#endif
+
+            i = j;
+        }
+
+        // Attempt small hole fill (only if we have a small, non-branching boundary and no non-manifold edges).
+        if (m_stats.boundaryEdges > 0U && m_stats.boundaryEdges <= MAX_BOUNDARY_EDGES_FOR_FILL && !boundaryTooLargeForFill &&
+            m_stats.nonManifoldEdges == 0U)
+        {
+            // Build boundary adjacency.
+            std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> adjacency;
+            adjacency.reserve(boundaryEdgeKeys.size() * 2U);
+
+            for (auto const k : boundaryEdgeKeys)
+            {
+                std::uint32_t const a = static_cast<std::uint32_t>(k >> 32U);
+                std::uint32_t const b = static_cast<std::uint32_t>(k & 0xFFFFFFFFU);
+                adjacency[a].push_back(b);
+                adjacency[b].push_back(a);
+            }
+
+            // Diagnose boundary graph shape (cheap; boundary is small).
+            {
+                std::size_t minDeg = std::numeric_limits<std::size_t>::max();
+                std::size_t maxDeg = 0U;
+                std::size_t notTwo = 0U;
+
+                for (auto const& [v, nbrs] : adjacency)
+                {
+                    minDeg = std::min(minDeg, nbrs.size());
+                    maxDeg = std::max(maxDeg, nbrs.size());
+                    if (nbrs.size() != 2U)
                     {
-                        std::size_t quadIdx = t / 2;
-                        bool isDiagonal = (t % 2 == 0) ? 
-                            (indices[t*3] == edge.first && indices[t*3+2] == edge.second) ||
-                            (indices[t*3] == edge.second && indices[t*3+2] == edge.first) :
-                            (indices[t*3] == edge.first && indices[t*3+2] == edge.second) ||
-                            (indices[t*3] == edge.second && indices[t*3+2] == edge.first);
-                        (void)quadIdx;
-                        (void)isDiagonal;
+                        ++notTwo;
                     }
-                    std::cout << "    Triangles: ";
-                    for (auto t : triangles)
+                }
+
+                std::cout << "  Small-boundary fill candidate: boundaryEdges=" << boundaryEdgeKeys.size()
+                          << ", boundaryVertices=" << adjacency.size()
+                          << ", degreeRange=[" << (minDeg == std::numeric_limits<std::size_t>::max() ? 0U : minDeg)
+                          << "," << maxDeg << "]"
+                          << ", verticesWithDegree!=2=" << notTwo << std::endl;
+
+                if (notTwo > 0U)
+                {
+                    std::size_t printed = 0U;
+                    for (auto const& [v, nbrs] : adjacency)
                     {
-                        std::cout << t << "[" << indices[t*3] << "," << indices[t*3+1] << "," << indices[t*3+2] << "] ";
+                        if (nbrs.size() == 2U)
+                        {
+                            continue;
+                        }
+                        std::cout << "    boundary vertex " << v << " degree=" << nbrs.size() << std::endl;
+                        if (++printed >= 12U)
+                        {
+                            break;
+                        }
                     }
-                    std::cout << std::endl;
-                    ++debugCount;
+                }
+            }
+
+            bool canFill = true;
+            for (auto const& [v, nbrs] : adjacency)
+            {
+                if (nbrs.size() != 2U)
+                {
+                    canFill = false;
+                    break;
+                }
+            }
+
+            if (canFill)
+            {
+                // Extract loops.
+                auto makeEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+                {
+                    if (a > b)
+                    {
+                        std::swap(a, b);
+                    }
+                    return (static_cast<std::uint64_t>(a) << 32U) | static_cast<std::uint64_t>(b);
+                };
+
+                std::unordered_set<std::uint64_t> visitedBoundaryEdges;
+                visitedBoundaryEdges.reserve(boundaryEdgeKeys.size());
+
+                std::vector<std::vector<std::uint32_t>> loops;
+                loops.reserve(4U);
+
+                for (auto const k : boundaryEdgeKeys)
+                {
+                    if (visitedBoundaryEdges.find(k) != visitedBoundaryEdges.end())
+                    {
+                        continue;
+                    }
+
+                    std::uint32_t const startA = static_cast<std::uint32_t>(k >> 32U);
+                    std::uint32_t const startB = static_cast<std::uint32_t>(k & 0xFFFFFFFFU);
+
+                    std::vector<std::uint32_t> loop;
+                    loop.reserve(32U);
+                    loop.push_back(startA);
+                    loop.push_back(startB);
+                    visitedBoundaryEdges.insert(k);
+
+                    std::uint32_t prev = startA;
+                    std::uint32_t curr = startB;
+                    bool closed = false;
+
+                    // Walk until we close the loop.
+                    for (std::size_t steps = 0U; steps < boundaryEdgeKeys.size() + 4U; ++steps)
+                    {
+                        auto const& nbrs = adjacency[curr];
+                        std::uint32_t const next = (nbrs[0] != prev) ? nbrs[0] : nbrs[1];
+
+                        if (next == loop.front())
+                        {
+                            // Mark the closing edge as visited as well.
+                            visitedBoundaryEdges.insert(makeEdgeKey(curr, next));
+                            closed = true;
+                            break;
+                        }
+
+                        std::uint64_t const ek = makeEdgeKey(curr, next);
+                        if (visitedBoundaryEdges.find(ek) != visitedBoundaryEdges.end())
+                        {
+                            // Looping back into visited edges before closing -> ambiguous, abort.
+                            canFill = false;
+                            break;
+                        }
+                        visitedBoundaryEdges.insert(ek);
+
+                        loop.push_back(next);
+                        prev = curr;
+                        curr = next;
+                    }
+
+                    if (!canFill)
+                    {
+                        break;
+                    }
+
+                    if (!closed)
+                    {
+                        canFill = false;
+                        break;
+                    }
+
+                    if (loop.size() >= 3U)
+                    {
+                        loops.push_back(std::move(loop));
+                    }
+                    else
+                    {
+                        canFill = false;
+                        break;
+                    }
+                }
+
+                if (canFill && !loops.empty())
+                {
+                    std::vector<std::uint32_t> filledIndices = indices;
+
+                    auto countEdgeUsage = [&](std::uint64_t edgeKey) -> std::size_t
+                    {
+                        auto const range = std::equal_range(edges.begin(), edges.end(), edgeKey);
+                        return static_cast<std::size_t>(std::distance(range.first, range.second));
+                    };
+
+                    for (auto const& loop : loops)
+                    {
+                        if (loop.size() == 3U)
+                        {
+                            filledIndices.push_back(loop[0]);
+                            filledIndices.push_back(loop[1]);
+                            filledIndices.push_back(loop[2]);
+                        }
+                        else
+                        {
+                            // Constrained ear-clipping triangulation.
+                            // Goal: close the boundary without creating any edge with usage > 2.
+                            std::vector<std::uint32_t> poly = loop;
+                            std::unordered_map<std::uint64_t, std::uint8_t> localEdgeInc;
+                            localEdgeInc.reserve(poly.size() * 3U);
+
+                            auto canAddTri = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c) -> bool
+                            {
+                                std::array<std::uint64_t, 3> const triEdges = {
+                                  makeUndirectedEdgeKey(a, b),
+                                  makeUndirectedEdgeKey(b, c),
+                                  makeUndirectedEdgeKey(c, a),
+                                };
+
+                                for (auto const ek : triEdges)
+                                {
+                                    std::size_t const current = countEdgeUsage(ek);
+                                    std::uint8_t const inc = (localEdgeInc.find(ek) != localEdgeInc.end()) ? localEdgeInc[ek] : 0U;
+                                    if (current + static_cast<std::size_t>(inc) + 1U > 2U)
+                                    {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            };
+
+                            auto addTri = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c)
+                            {
+                                filledIndices.push_back(a);
+                                filledIndices.push_back(b);
+                                filledIndices.push_back(c);
+
+                                ++localEdgeInc[makeUndirectedEdgeKey(a, b)];
+                                ++localEdgeInc[makeUndirectedEdgeKey(b, c)];
+                                ++localEdgeInc[makeUndirectedEdgeKey(c, a)];
+                            };
+
+                            bool triangulated = true;
+                            float constexpr MIN_EAR_AREA2 = 1e-12F;
+                            while (poly.size() > 3U)
+                            {
+                                std::size_t bestIndex = std::numeric_limits<std::size_t>::max();
+                                float bestArea2 = 0.0F;
+
+                                for (std::size_t i = 0U; i < poly.size(); ++i)
+                                {
+                                    std::uint32_t const prev = poly[(i + poly.size() - 1U) % poly.size()];
+                                    std::uint32_t const curr = poly[i];
+                                    std::uint32_t const next = poly[(i + 1U) % poly.size()];
+
+                                    if (prev == curr || curr == next || prev == next)
+                                    {
+                                        continue;
+                                    }
+
+                                    Eigen::Vector3f const a = positions[prev];
+                                    Eigen::Vector3f const b = positions[curr];
+                                    Eigen::Vector3f const c = positions[next];
+                                    float const area2 = (b - a).cross(c - a).squaredNorm();
+                                    if (area2 < MIN_EAR_AREA2)
+                                    {
+                                        continue;
+                                    }
+
+                                    if (!canAddTri(prev, curr, next))
+                                    {
+                                        continue;
+                                    }
+
+                                    if (area2 > bestArea2)
+                                    {
+                                        bestArea2 = area2;
+                                        bestIndex = i;
+                                    }
+                                }
+
+                                if (bestIndex == std::numeric_limits<std::size_t>::max())
+                                {
+                                    triangulated = false;
+                                    break;
+                                }
+
+                                std::uint32_t const prev = poly[(bestIndex + poly.size() - 1U) % poly.size()];
+                                std::uint32_t const curr = poly[bestIndex];
+                                std::uint32_t const next = poly[(bestIndex + 1U) % poly.size()];
+                                addTri(prev, curr, next);
+
+                                poly.erase(poly.begin() + static_cast<std::ptrdiff_t>(bestIndex));
+                            }
+
+                            if (triangulated)
+                            {
+                                if (poly.size() == 3U && canAddTri(poly[0], poly[1], poly[2]))
+                                {
+                                    addTri(poly[0], poly[1], poly[2]);
+                                }
+                                else if (poly.size() != 3U)
+                                {
+                                    triangulated = false;
+                                }
+                            }
+
+                            if (!triangulated)
+                            {
+                                canFill = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!canFill)
+                    {
+                        // Abort filling attempt.
+                        // We keep the original mesh and let the caller decide on fallback.
+                    }
+                    else
+                    {
+                        // Revalidate filled mesh. Reuse the same counting strategy.
+                        std::vector<std::uint64_t> edges2;
+                        edges2.reserve(filledIndices.size());
+                        for (std::size_t i = 0U; i + 2U < filledIndices.size(); i += 3U)
+                        {
+                            std::uint32_t const v0 = filledIndices[i + 0U];
+                            std::uint32_t const v1 = filledIndices[i + 1U];
+                            std::uint32_t const v2 = filledIndices[i + 2U];
+                            edges2.push_back(makeUndirectedEdgeKey(v0, v1));
+                            edges2.push_back(makeUndirectedEdgeKey(v1, v2));
+                            edges2.push_back(makeUndirectedEdgeKey(v2, v0));
+                        }
+                        std::sort(edges2.begin(), edges2.end());
+
+                        std::size_t boundary2 = 0U;
+                        std::size_t nonManifold2 = 0U;
+                        for (std::size_t i = 0U; i < edges2.size();)
+                        {
+                            std::size_t j = i + 1U;
+                            while (j < edges2.size() && edges2[j] == edges2[i])
+                            {
+                                ++j;
+                            }
+                            std::size_t const count = j - i;
+                            if (count == 1U)
+                            {
+                                ++boundary2;
+                            }
+                            else if (count > 2U)
+                            {
+                                ++nonManifold2;
+                            }
+                            i = j;
+                        }
+
+                        if (boundary2 == 0U && nonManifold2 == 0U)
+                        {
+                            indices.swap(filledIndices);
+                            m_stats.triangleCount = indices.size() / 3U;
+                            m_stats.boundaryEdges = 0U;
+                            m_stats.nonManifoldEdges = 0U;
+                            std::cout << "  Filled small boundary holes: boundaryEdges " << boundaryEdgeKeys.size() << " -> 0" << std::endl;
+                        }
+                    }
                 }
             }
         }
 
-        #ifdef GLOBALMORTON_DEBUG_OUTPUT
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Mesh extraction complete:" << std::endl;
-        std::cout << "  Edge analysis: internal=" << internalEdges 
-                  << ", boundary=" << m_stats.boundaryEdges 
-                  << ", non-manifold=" << m_stats.nonManifoldEdges 
-                  << " (3x=" << nonManifold3 << ", 4x=" << nonManifold4 << ", 5+x=" << nonManifoldMore << ")" << std::endl;
         std::cout << "  Vertices: " << positions.size() << std::endl;
         std::cout << "  Triangles: " << m_stats.triangleCount << std::endl;
         std::cout << "  Boundary edges: " << m_stats.boundaryEdges << std::endl;
         std::cout << "  Non-manifold edges: " << m_stats.nonManifoldEdges << std::endl;
+        std::cout << "  Max edge use: " << maxEdgeUse << std::endl;
         std::cout << "  Time: " << m_stats.meshExtractionTimeMs << " ms" << std::endl;
-        #endif
+#endif
     }
 
     void GlobalMortonOctree::generateQuads(std::vector<std::uint32_t>& indices)
@@ -1943,10 +2367,13 @@ namespace gladius::compute
                    (static_cast<std::uint64_t>(ez) << 42U);
         };
         
-        // Build Morton→nodeIdx map for fast lookup at uniform depth.
+        // Build Morton→nodeIdx map for fast lookup.
+        // IMPORTANT: The octree is hierarchical (mixed depths). A plain mortonCode key is
+        // ambiguous across depths and can cause cross-depth collisions, leading to incorrect
+        // neighbor matches and non-manifold quad emission. Key by (morton, depth).
         // Note: neighbors required for quad closure may be non-intersecting but still have a
         // "halo" vertex, so we include any leaf that has a vertex.
-        std::unordered_map<std::uint64_t, std::size_t> mortonToNode;
+        std::unordered_map<MortonNodeKey, std::size_t, MortonNodeKeyHash> mortonToNode;
         std::map<std::uint8_t, std::size_t> depthDistribution;
         std::uint8_t minIntersectDepth = std::numeric_limits<std::uint8_t>::max();
         std::uint8_t maxIntersectDepth = 0U;
@@ -1955,7 +2382,7 @@ namespace gladius::compute
             auto const& node = m_nodes[nodeIdx];
             if (node.isLeaf && !node.vertexIndices.empty())
             {
-                mortonToNode[node.mortonCode] = nodeIdx;
+                mortonToNode[MortonNodeKey{node.mortonCode, node.depth}] = nodeIdx;
                 if (node.isIntersecting)
                 {
                     ++depthDistribution[node.depth];
@@ -2271,9 +2698,9 @@ namespace gladius::compute
                 std::uint64_t const m2 = encodeMorton(cx, cy, cz + 1);
                 std::uint64_t const m3 = encodeMorton(cx, cy + 1, cz + 1);
 
-                auto it1 = mortonToNode.find(m1);
-                auto it2 = mortonToNode.find(m2);
-                auto it3 = mortonToNode.find(m3);
+                auto it1 = mortonToNode.find(MortonNodeKey{m1, node.depth});
+                auto it2 = mortonToNode.find(MortonNodeKey{m2, node.depth});
+                auto it3 = mortonToNode.find(MortonNodeKey{m3, node.depth});
 
                 bool const foundAll = (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end());
                 if (!foundAll)
@@ -2388,9 +2815,9 @@ namespace gladius::compute
                 std::uint64_t const m2 = encodeMorton(cx, cy, cz + 1);
                 std::uint64_t const m3 = encodeMorton(cx + 1, cy, cz + 1);
                 
-                auto it1 = mortonToNode.find(m1);
-                auto it2 = mortonToNode.find(m2);
-                auto it3 = mortonToNode.find(m3);
+                auto it1 = mortonToNode.find(MortonNodeKey{m1, node.depth});
+                auto it2 = mortonToNode.find(MortonNodeKey{m2, node.depth});
+                auto it3 = mortonToNode.find(MortonNodeKey{m3, node.depth});
                 
                 if (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end())
                 {
@@ -2458,9 +2885,9 @@ namespace gladius::compute
                 std::uint64_t const m2 = encodeMorton(cx, cy + 1, cz);
                 std::uint64_t const m3 = encodeMorton(cx + 1, cy + 1, cz);
                 
-                auto it1 = mortonToNode.find(m1);
-                auto it2 = mortonToNode.find(m2);
-                auto it3 = mortonToNode.find(m3);
+                auto it1 = mortonToNode.find(MortonNodeKey{m1, node.depth});
+                auto it2 = mortonToNode.find(MortonNodeKey{m2, node.depth});
+                auto it3 = mortonToNode.find(MortonNodeKey{m3, node.depth});
                 
                 if (it1 != mortonToNode.end() && it2 != mortonToNode.end() && it3 != mortonToNode.end())
                 {
@@ -2542,6 +2969,60 @@ namespace gladius::compute
             }
         }
 
+        // If a perimeter edge would be used by more than 2 quads, the resulting triangle mesh
+        // contains non-manifold edges. This can happen in rare corner cases where multiple
+        // quads collapse onto the same vertex pair.
+        //
+        // We choose to emit only the two "best" quads (largest geometric area) for each such
+        // overused perimeter edge. This is a pragmatic, local repair that aims to preserve a
+        // watertight 2-manifold mesh for export.
+        std::vector<bool> forceSkipCandidate;
+        forceSkipCandidate.assign(candidates.size(), false);
+
+        if (perimeterEdgesOverused > 0U)
+        {
+            std::unordered_map<std::uint64_t, std::vector<std::pair<float, std::size_t>>> edgeToCandidateQuality;
+            edgeToCandidateQuality.reserve(perimeterEdgesOverused * 2U);
+
+            auto candidateQuality = [&](QuadCandidate const& c) -> float
+            {
+                float const q12 = std::min(c.area12a, c.area12b);
+                float const q03 = std::min(c.area03a, c.area03b);
+                return std::max(q12, q03);
+            };
+
+            for (std::size_t i = 0U; i < candidates.size(); ++i)
+            {
+                auto const& c = candidates[i];
+                float const q = candidateQuality(c);
+                for (auto const e : c.perimeterEdges)
+                {
+                    auto const it = perimeterEdgeCount.find(e);
+                    if (it != perimeterEdgeCount.end() && it->second > 2U)
+                    {
+                        edgeToCandidateQuality[e].push_back({q, i});
+                    }
+                }
+            }
+
+            for (auto& [edgeKey, list] : edgeToCandidateQuality)
+            {
+                if (list.size() <= 2U)
+                {
+                    continue;
+                }
+
+                std::sort(list.begin(), list.end(), [](auto const& a, auto const& b) {
+                    return a.first > b.first;
+                });
+
+                for (std::size_t k = 2U; k < list.size(); ++k)
+                {
+                    forceSkipCandidate[list[k].second] = true;
+                }
+            }
+        }
+
         if (perimeterEdgesOverused > 0U)
         {
             std::size_t printed = 0U;
@@ -2582,61 +3063,6 @@ namespace gladius::compute
             }
         }
 
-        // Track current undirected edge usage in the generated triangle mesh.
-        // We still use this (order-dependent) to avoid diagonal-diagonal collisions.
-        std::unordered_map<std::uint64_t, std::uint8_t> edgeUseCount;
-        edgeUseCount.reserve(512000U);
-
-        auto optionNonManifoldPenalty = [&](std::array<std::uint32_t, 6> const& tris) -> std::uint32_t
-        {
-            // Count per-edge increments for this option (6 edges per triangle pair, with shared
-            // diagonal appearing twice).
-            std::array<std::uint64_t, 6> edges = {
-              makeUndirectedEdgeKey(tris[0], tris[1]),
-              makeUndirectedEdgeKey(tris[1], tris[2]),
-              makeUndirectedEdgeKey(tris[2], tris[0]),
-              makeUndirectedEdgeKey(tris[3], tris[4]),
-              makeUndirectedEdgeKey(tris[4], tris[5]),
-              makeUndirectedEdgeKey(tris[5], tris[3]),
-            };
-
-            std::array<std::uint64_t, 6> uniqueEdges{};
-            std::array<std::uint8_t, 6> inc{};
-            std::size_t uniqueCount = 0U;
-            for (std::size_t i = 0U; i < edges.size(); ++i)
-            {
-                bool found = false;
-                for (std::size_t j = 0U; j < uniqueCount; ++j)
-                {
-                    if (uniqueEdges[j] == edges[i])
-                    {
-                        ++inc[j];
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found)
-                {
-                    uniqueEdges[uniqueCount] = edges[i];
-                    inc[uniqueCount] = 1U;
-                    ++uniqueCount;
-                }
-            }
-
-            std::uint32_t penalty = 0U;
-            for (std::size_t j = 0U; j < uniqueCount; ++j)
-            {
-                auto const it = edgeUseCount.find(uniqueEdges[j]);
-                std::uint8_t const current = (it != edgeUseCount.end()) ? it->second : 0U;
-                std::uint8_t const next = static_cast<std::uint8_t>(current + inc[j]);
-                if (next > 2U)
-                {
-                    penalty += static_cast<std::uint32_t>(next - 2U);
-                }
-            }
-            return penalty;
-        };
-
         auto commitOption = [&](std::array<std::uint32_t, 6> const& tris)
         {
             indices.push_back(tris[0]);
@@ -2645,35 +3071,22 @@ namespace gladius::compute
             indices.push_back(tris[3]);
             indices.push_back(tris[4]);
             indices.push_back(tris[5]);
-
-            auto bump = [&](std::uint32_t a, std::uint32_t b)
-            {
-                std::uint64_t const k = makeUndirectedEdgeKey(a, b);
-                auto it = edgeUseCount.find(k);
-                if (it == edgeUseCount.end())
-                {
-                    edgeUseCount.emplace(k, 1U);
-                }
-                else
-                {
-                    it->second = static_cast<std::uint8_t>(it->second + 1U);
-                }
-            };
-
-            bump(tris[0], tris[1]);
-            bump(tris[1], tris[2]);
-            bump(tris[2], tris[0]);
-            bump(tris[3], tris[4]);
-            bump(tris[4], tris[5]);
-            bump(tris[5], tris[3]);
         };
 
-        // Second pass: choose diagonals in a way that is order-independent w.r.t.
-        // diagonal-vs-perimeter collisions.
+        // Second pass: choose diagonals.
         float constexpr MIN_AREA = 1e-10F;
         std::size_t zeroDiagonalKeys = 0U;
-        for (auto const& c : candidates)
+
+        // Reserve once; the final triangle count is large for depth=9.
+        indices.reserve(indices.size() + candidates.size() * 6U);
+
+        for (std::size_t candidateIndex = 0U; candidateIndex < candidates.size(); ++candidateIndex)
         {
+            auto const& c = candidates[candidateIndex];
+            if (!forceSkipCandidate.empty() && forceSkipCandidate[candidateIndex])
+            {
+                continue;
+            }
             if (c.diag12Key == 0U || c.diag03Key == 0U)
             {
                 ++zeroDiagonalKeys;
@@ -2700,18 +3113,7 @@ namespace gladius::compute
                 useDiag12 = !diag12IsPerimeter;
             }
 
-            // If both are (unfortunately) forbidden or both allowed, fall back to incremental
-            // non-manifold penalty to avoid diagonal-diagonal collisions.
-            std::array<std::uint32_t, 6> const& diag12 = c.diag12Tris;
-            std::array<std::uint32_t, 6> const& diag03 = c.diag03Tris;
-            std::uint32_t const penalty12 = optionNonManifoldPenalty(diag12);
-            std::uint32_t const penalty03 = optionNonManifoldPenalty(diag03);
-            if (penalty12 != penalty03)
-            {
-                useDiag12 = (penalty12 < penalty03);
-            }
-
-            auto const& chosen = useDiag12 ? diag12 : diag03;
+            auto const& chosen = useDiag12 ? c.diag12Tris : c.diag03Tris;
             float const chosenAreaA = useDiag12 ? c.area12a : c.area03a;
             float const chosenAreaB = useDiag12 ? c.area12b : c.area03b;
             if (chosenAreaA < MIN_AREA || chosenAreaB < MIN_AREA)
@@ -2750,50 +3152,49 @@ namespace gladius::compute
         std::cout << "    Triangles: " << (indices.size() / 3) << std::endl;
         
         #endif
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
         // Debug: check for degenerate triangles
         std::size_t degenerateCount = 0;
         for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
         {
-            if (indices[i] == indices[i+1] || indices[i+1] == indices[i+2] || indices[i] == indices[i+2])
+            if (indices[i] == indices[i + 1] || indices[i + 1] == indices[i + 2] || indices[i] == indices[i + 2])
             {
                 ++degenerateCount;
             }
         }
         if (degenerateCount > 0)
         {
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "    WARNING: " << degenerateCount << " degenerate triangles!" << std::endl;
-            #endif
         }
-        
+
         // Debug: Check directed edge consistency
         std::unordered_map<std::uint64_t, int> directedEdgeCount;
+        directedEdgeCount.reserve(indices.size());
         for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
         {
             std::uint32_t const v0 = indices[i + 0];
             std::uint32_t const v1 = indices[i + 1];
             std::uint32_t const v2 = indices[i + 2];
-            
+
             auto makeDirectedKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t {
                 return (static_cast<std::uint64_t>(a) << 32) | b;
             };
-            
+
             ++directedEdgeCount[makeDirectedKey(v0, v1)];
             ++directedEdgeCount[makeDirectedKey(v1, v2)];
             ++directedEdgeCount[makeDirectedKey(v2, v0)];
         }
-        
+
         std::size_t pairedEdges = 0;   // Edge appears once, opposite appears once
         std::size_t singleEdges = 0;   // Edge appears once, no opposite
-        std::size_t sameDirectionEdges = 0;  // Edge appears but so does its opposite in SAME direction (wrong!)
         std::size_t multipleEdges = 0; // Edge appears more than once
-        
+
         for (auto const& [edgeKey, count] : directedEdgeCount)
         {
             std::uint32_t const a = static_cast<std::uint32_t>(edgeKey >> 32);
             std::uint32_t const b = static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFF);
             std::uint64_t const reverseKey = (static_cast<std::uint64_t>(b) << 32) | a;
-            
+
             if (count > 1)
             {
                 ++multipleEdges;
@@ -2807,19 +3208,15 @@ namespace gladius::compute
                 ++singleEdges;
             }
         }
-        
-        #ifdef GLOBALMORTON_DEBUG_OUTPUT
-        std::cout << "  Directed edge analysis: paired=" << (pairedEdges / 2) 
-                  << ", single=" << singleEdges 
+
+        std::cout << "  Directed edge analysis: paired=" << (pairedEdges / 2)
+                  << ", single=" << singleEdges
                   << ", multiple=" << multipleEdges << std::endl;
-        
-        #endif
+
         // Debug: sample some multiple edges
         if (multipleEdges > 0)
         {
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
             std::cout << "  Multiple edge samples (first 10):" << std::endl;
-            #endif
             int sampleCount = 0;
             for (auto const& [edgeKey, count] : directedEdgeCount)
             {
@@ -2827,7 +3224,7 @@ namespace gladius::compute
                 {
                     std::uint32_t const a = static_cast<std::uint32_t>(edgeKey >> 32);
                     std::uint32_t const b = static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFF);
-                    
+
                     // Find which triangles have this edge
                     std::size_t const numTris = indices.size() / 3;
                     std::vector<std::size_t> trianglesWithEdge;
@@ -2836,29 +3233,24 @@ namespace gladius::compute
                         std::uint32_t const v0 = indices[tri * 3 + 0];
                         std::uint32_t const v1 = indices[tri * 3 + 1];
                         std::uint32_t const v2 = indices[tri * 3 + 2];
-                        
+
                         if ((v0 == a && v1 == b) || (v1 == a && v2 == b) || (v2 == a && v0 == b))
                         {
                             trianglesWithEdge.push_back(tri);
                         }
                     }
-                    
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
+
                     std::cout << "    Edge " << a << "->" << b << " appears " << count << " times in triangles: ";
-                    #endif
                     for (std::size_t tri : trianglesWithEdge)
                     {
-                        #ifdef GLOBALMORTON_DEBUG_OUTPUT
                         std::cout << tri << " ";
-                        #endif
                     }
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
                     std::cout << std::endl;
-                    #endif
                     ++sampleCount;
                 }
             }
         }
+#endif
     }
 
     void GlobalMortonOctree::fillBoundaryHoles(std::vector<std::uint32_t>& indices,

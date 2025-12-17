@@ -282,8 +282,79 @@ namespace gladius::ui
         {
             if (isExportFinished(core))
             {
-                finalizeExport();
-                onExportCompleted();
+                // IMPORTANT: some exporters reset their internal state in finalize().
+                // Capture the error information BEFORE finalizeExport() runs.
+                io::IExporter * const finishedExporter = m_activeExporter;
+
+                bool failed = false;
+                std::string failureMessage;
+                if (finishedExporter == &m_dualExporter)
+                {
+                    failed = m_dualExporter.hasError();
+                    failureMessage = m_dualExporter.errorMessage();
+                }
+                else if (finishedExporter == &m_manifoldExporter)
+                {
+                    failed = m_manifoldExporter.hasError();
+                    failureMessage = m_manifoldExporter.errorMessage();
+                }
+
+                try
+                {
+                    finalizeExport();
+                }
+                catch (std::exception const & ex)
+                {
+                    failed = true;
+                    if (failureMessage.empty())
+                    {
+                        failureMessage = ex.what();
+                    }
+                }
+
+                // Final safety net: don't claim success unless the output exists.
+                if (!failed && !m_targetFile.empty())
+                {
+                    std::error_code ec;
+                    bool const exists = std::filesystem::exists(m_targetFile, ec);
+                    if (ec || !exists)
+                    {
+                        failed = true;
+                        failureMessage = fmt::format(
+                          "Export finished but output file does not exist: {}",
+                          m_targetFile.string());
+                    }
+                    else
+                    {
+                        auto const size = std::filesystem::file_size(m_targetFile, ec);
+                        if (ec || size == 0U)
+                        {
+                            failed = true;
+                            failureMessage = fmt::format(
+                              "Export finished but output file is empty: {}",
+                              m_targetFile.string());
+                        }
+                    }
+                }
+
+                if (failed)
+                {
+                    m_exportInProgress = false;
+                    m_exportCompleted = false;
+                    m_statusMessage = "Export failed";
+                    m_statusIsError = true;
+                    m_errorMessage =
+                      failureMessage.empty() ? "Export failed (no additional error information)"
+                                            : failureMessage;
+                    if (m_exportState != nullptr)
+                    {
+                        m_exportState->endExport();
+                    }
+                }
+                else
+                {
+                    onExportCompleted();
+                }
             }
         }
 

@@ -71,6 +71,13 @@ namespace gladius::compute
         bool enableAdaptiveRefinement{true}; ///< Enable curvature-based refinement
         float curvatureThreshold{0.3F};     ///< Gradient variance threshold for subdivision
         std::size_t refinementPasses{2U};   ///< Number of adaptive refinement passes
+
+        /// Optional override for the octree/SDF domain bounding box.
+        ///
+        /// If not set, the octree will use ComputeCore::getBoundingBox().
+        /// When set, the caller must ensure the precomputed SDF buffer corresponds
+        /// to the same bounding box, otherwise sampling will be incorrect.
+        std::optional<BoundingBox> boundingBoxOverride{std::nullopt};
     };
 
     /**

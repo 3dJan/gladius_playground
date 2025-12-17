@@ -122,126 +122,7 @@ namespace gladius::compute
         }
         else
         {
-            // Fallback to chunked or single-pass approach
-            // Check if chunking is needed
-            std::size_t const chunkDivisor = calculateChunkDivisor();
-            bool const useChunking =
-              m_config.enableChunking && m_config.minFeatureSize > 0.0F && chunkDivisor > 1U;
-
-            if (useChunking)
-            {
-                std::cout << "Using chunked processing with " << chunkDivisor
-                          << "^3 = " << (chunkDivisor * chunkDivisor * chunkDivisor)
-                          << " potential chunks" << std::endl;
-                std::cout << "  BBox: [" << m_cachedBboxMin.transpose() << "] to ["
-                          << m_cachedBboxMax.transpose() << "]" << std::endl;
-                std::cout << "  minFeatureSize: " << m_config.minFeatureSize
-                          << ", maxDepth: " << m_config.maxDepth << std::endl;
-
-                // Enable chunked mode - disables maxCoord boundary check in generateIndices()
-                m_isChunkedMode = true;
-
-                std::vector<ChunkInfo> chunks = generateChunkGrid();
-                std::size_t processedChunks = 0U;
-                std::size_t emptyChunks = 0U;
-
-                ManifoldDualContouringMesh combinedMesh;
-
-                for (auto const & chunk : chunks)
-                {
-                    if (!isChunkNonEmpty(chunk))
-                    {
-                        continue;
-                    }
-
-                    ++processedChunks;
-                    if (processedChunks <= 5U || processedChunks % 50U == 0U)
-                    {
-                        std::cout << "  Processing chunk " << processedChunks << "/"
-                                  << chunks.size() << " [" << chunk.indexX << "," << chunk.indexY
-                                  << "," << chunk.indexZ << "]..." << std::endl;
-                    }
-
-                    ManifoldDualContouringMesh chunkMesh;
-                    generateMeshForChunk(chunk, chunkMesh);
-
-                    // Clip triangles to core region to avoid duplicate geometry in overlap areas
-                    // Each triangle is kept only if its centroid is within the chunk's core region
-                    clipMeshToCore(chunkMesh, chunk);
-
-                    if (chunkMesh.positions.empty())
-                    {
-                        ++emptyChunks;
-                    }
-                    else
-                    {
-                        if (processedChunks <= 5U || processedChunks % 50U == 0U)
-                        {
-                            std::cout << "    Generated " << chunkMesh.positions.size()
-                                      << " vertices, " << chunkMesh.indices.size() / 3U
-                                      << " triangles" << std::endl;
-                        }
-                        mergeMeshes(combinedMesh, chunkMesh);
-                    }
-                }
-
-                m_mesh = std::move(combinedMesh);
-
-                std::cout << "Chunk processing complete: " << processedChunks
-                          << " chunks processed, " << emptyChunks << " produced no geometry"
-                          << std::endl;
-                std::cout << "Combined mesh before welding: " << m_mesh.positions.size()
-                          << " vertices, " << m_mesh.indices.size() / 3U << " triangles"
-                          << std::endl;
-
-                // Weld boundary vertices to make mesh watertight
-                if (!m_mesh.positions.empty())
-                {
-                    // Calculate appropriate weld tolerance if not specified
-                    // Use a fraction of the voxel size at maxDepth as tolerance
-                    float weldTolerance = m_config.chunkWeldTolerance;
-                    Eigen::Vector3f const chunkSize =
-                      m_cachedBboxSize / static_cast<float>(chunkDivisor);
-                    float const voxelSize =
-                      chunkSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth);
-
-                    if (weldTolerance <= 0.0F)
-                    {
-                        // Chunk size / 2^maxDepth = voxel size within chunk
-                        // Use 0.5 * voxel size as tolerance - conservative to avoid
-                        // welding vertices that shouldn't be merged
-                        weldTolerance = voxelSize * 0.5F;
-                        std::cout << "  Auto weld tolerance: " << weldTolerance
-                                  << " (voxel size: " << voxelSize << ")" << std::endl;
-                    }
-                    weldBoundaryVertices(weldTolerance);
-
-                    // Fill gaps between unconnected boundary edges
-                    // Use voxel size as search radius - edges from neighboring chunks
-                    // should be within this distance
-                    fillBoundaryGaps(voxelSize * 1.5F);
-                }
-
-                // Reset chunked mode flag
-                m_isChunkedMode = false;
-            }
-            else
-            {
-                // Original single-pass processing (not chunked)
-                m_isChunkedMode = false;
-                constructOctree();
-                generateVertices();
-                generateIndices();
-
-                // Fill gaps between disconnected boundary edges.
-                // This helps close holes caused by missing neighbor cells in the octree.
-                // The function skips edges on the bbox boundary to avoid creating
-                // incorrect geometry at domain boundaries.
-                if (!m_mesh.indices.empty())
-                {
-                    fillBoundaryGaps(voxelSize * 1.5F);
-                }
-            }
+            generateMeshNonHierarchical();
         } // End of else block for non-hierarchical processing
 
         // Post-processing for sharp features
@@ -271,6 +152,141 @@ namespace gladius::compute
         if (m_config.projectToSurface && !m_mesh.indices.empty())
         {
             projectVerticesToSurface();
+        }
+    }
+
+    void ManifoldDualContouringGpu::generateMeshNonHierarchical()
+    {
+        // Fallback to chunked or single-pass approach.
+        // Note: This helper assumes the bounding box and program compilation were already
+        // prepared by generateMesh().
+        m_mesh.positions.clear();
+        m_mesh.normals.clear();
+        m_mesh.indices.clear();
+        m_lastVertexCount = 0U;
+
+        // Use a conservative voxel size (used as search radius heuristics).
+        // This uses the padded bbox (which is what the kernels/octree see).
+        float const voxelSize = m_cachedBboxSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth);
+
+        // Check if chunking is needed
+        std::size_t const chunkDivisor = calculateChunkDivisor();
+        bool const useChunking =
+          m_config.enableChunking && m_config.minFeatureSize > 0.0F && chunkDivisor > 1U;
+
+        if (useChunking)
+        {
+            std::cout << "Using chunked processing with " << chunkDivisor
+                      << "^3 = " << (chunkDivisor * chunkDivisor * chunkDivisor)
+                      << " potential chunks" << std::endl;
+            std::cout << "  BBox: [" << m_cachedBboxMin.transpose() << "] to ["
+                      << m_cachedBboxMax.transpose() << "]" << std::endl;
+            std::cout << "  minFeatureSize: " << m_config.minFeatureSize
+                      << ", maxDepth: " << m_config.maxDepth << std::endl;
+
+            // Enable chunked mode - disables maxCoord boundary check in generateIndices()
+            m_isChunkedMode = true;
+
+            std::vector<ChunkInfo> chunks = generateChunkGrid();
+            std::size_t processedChunks = 0U;
+            std::size_t emptyChunks = 0U;
+
+            ManifoldDualContouringMesh combinedMesh;
+
+            for (auto const & chunk : chunks)
+            {
+                if (!isChunkNonEmpty(chunk))
+                {
+                    continue;
+                }
+
+                ++processedChunks;
+                if (processedChunks <= 5U || processedChunks % 50U == 0U)
+                {
+                    std::cout << "  Processing chunk " << processedChunks << "/"
+                              << chunks.size() << " [" << chunk.indexX << "," << chunk.indexY
+                              << "," << chunk.indexZ << "]..." << std::endl;
+                }
+
+                ManifoldDualContouringMesh chunkMesh;
+                generateMeshForChunk(chunk, chunkMesh);
+
+                // Clip triangles to core region to avoid duplicate geometry in overlap areas
+                // Each triangle is kept only if its centroid is within the chunk's core region
+                clipMeshToCore(chunkMesh, chunk);
+
+                if (chunkMesh.positions.empty())
+                {
+                    ++emptyChunks;
+                }
+                else
+                {
+                    if (processedChunks <= 5U || processedChunks % 50U == 0U)
+                    {
+                        std::cout << "    Generated " << chunkMesh.positions.size()
+                                  << " vertices, " << chunkMesh.indices.size() / 3U
+                                  << " triangles" << std::endl;
+                    }
+                    mergeMeshes(combinedMesh, chunkMesh);
+                }
+            }
+
+            m_mesh = std::move(combinedMesh);
+
+            std::cout << "Chunk processing complete: " << processedChunks
+                      << " chunks processed, " << emptyChunks << " produced no geometry"
+                      << std::endl;
+            std::cout << "Combined mesh before welding: " << m_mesh.positions.size()
+                      << " vertices, " << m_mesh.indices.size() / 3U << " triangles"
+                      << std::endl;
+
+            // Weld boundary vertices to make mesh watertight
+            if (!m_mesh.positions.empty())
+            {
+                // Calculate appropriate weld tolerance if not specified
+                // Use a fraction of the voxel size at maxDepth as tolerance
+                float weldTolerance = m_config.chunkWeldTolerance;
+                Eigen::Vector3f const chunkSize =
+                  m_cachedBboxSize / static_cast<float>(chunkDivisor);
+                float const chunkVoxelSize =
+                  chunkSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth);
+
+                if (weldTolerance <= 0.0F)
+                {
+                    // Chunk size / 2^maxDepth = voxel size within chunk
+                    // Use 0.5 * voxel size as tolerance - conservative to avoid
+                    // welding vertices that shouldn't be merged
+                    weldTolerance = chunkVoxelSize * 0.5F;
+                    std::cout << "  Auto weld tolerance: " << weldTolerance
+                              << " (voxel size: " << chunkVoxelSize << ")" << std::endl;
+                }
+                weldBoundaryVertices(weldTolerance);
+
+                // Fill gaps between unconnected boundary edges
+                // Use voxel size as search radius - edges from neighboring chunks
+                // should be within this distance
+                fillBoundaryGaps(chunkVoxelSize * 1.5F);
+            }
+
+            // Reset chunked mode flag
+            m_isChunkedMode = false;
+        }
+        else
+        {
+            // Original single-pass processing (not chunked)
+            m_isChunkedMode = false;
+            constructOctree();
+            generateVertices();
+            generateIndices();
+
+            // Fill gaps between disconnected boundary edges.
+            // This helps close holes caused by missing neighbor cells in the octree.
+            // The function skips edges on the bbox boundary to avoid creating
+            // incorrect geometry at domain boundaries.
+            if (!m_mesh.indices.empty())
+            {
+                fillBoundaryGaps(voxelSize * 1.5F);
+            }
         }
     }
 
@@ -3493,11 +3509,20 @@ namespace gladius::compute
         std::cout << "Using hierarchical octree approach for watertight mesh generation"
                   << std::endl;
 
-        // Ensure SDF is precomputed for the bounding box
-        if (m_cachedBoundingBox.has_value())
-        {
-            m_core.precomputeSdfForBBox(*m_cachedBoundingBox);
-        }
+        // Ensure SDF is precomputed for the SAME bounding box the octree will use.
+        // Use the padded bbox computed in generateMesh() (2 voxels at maxDepth) to
+        // avoid clipping the surface at the domain boundary.
+        BoundingBox paddedBbox{};
+        paddedBbox.min.s[0] = m_cachedBboxMin.x();
+        paddedBbox.min.s[1] = m_cachedBboxMin.y();
+        paddedBbox.min.s[2] = m_cachedBboxMin.z();
+        paddedBbox.min.s[3] = 0.0F;
+        paddedBbox.max.s[0] = m_cachedBboxMax.x();
+        paddedBbox.max.s[1] = m_cachedBboxMax.y();
+        paddedBbox.max.s[2] = m_cachedBboxMax.z();
+        paddedBbox.max.s[3] = 0.0F;
+
+        m_core.precomputeSdfForBBox(paddedBbox);
 
         // Create or reuse the hierarchical octree
         if (!m_hierarchicalOctree)
@@ -3514,6 +3539,7 @@ namespace gladius::compute
         octreeConfig.enableAdaptiveRefinement = m_config.enableAdaptiveRefinement;
         octreeConfig.curvatureThreshold = m_config.curvatureThreshold;
         octreeConfig.refinementPasses = m_config.refinementPasses;
+        octreeConfig.boundingBoxOverride = paddedBbox;
 
         // Build the octree
         m_hierarchicalOctree->build(octreeConfig);
@@ -3536,6 +3562,15 @@ namespace gladius::compute
         if (stats.nonManifoldEdges > 0U)
         {
             std::cout << "  WARNING: Mesh has non-manifold edges!" << std::endl;
+        }
+
+        // The GlobalMortonOctree path is still experimental. If it produces a mesh that
+        // fails basic watertight/manifold criteria, fall back to the proven GPU octree
+        // path (single-pass or chunked). This preserves export correctness for users.
+        if (stats.boundaryEdges > 0U || stats.nonManifoldEdges > 0U)
+        {
+            std::cout << "  Falling back to non-hierarchical MDC because hierarchical output is not watertight/manifold." << std::endl;
+            generateMeshNonHierarchical();
         }
     }
 }

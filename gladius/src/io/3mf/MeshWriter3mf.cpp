@@ -16,10 +16,57 @@
 #include <lib3mf_abi.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <map>
 #include <sstream>
+#include <system_error>
 #include <tuple>
+
+namespace
+{
+    [[nodiscard]] bool isFinite3(float x, float y, float z)
+    {
+        return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+    }
+
+    [[nodiscard]] double triangleArea2(float ax, float ay, float az,
+                                       float bx, float by, float bz,
+                                       float cx, float cy, float cz)
+    {
+        // 4 * area^2 = |(b-a) x (c-a)|^2
+        double const abx = static_cast<double>(bx) - static_cast<double>(ax);
+        double const aby = static_cast<double>(by) - static_cast<double>(ay);
+        double const abz = static_cast<double>(bz) - static_cast<double>(az);
+
+        double const acx = static_cast<double>(cx) - static_cast<double>(ax);
+        double const acy = static_cast<double>(cy) - static_cast<double>(ay);
+        double const acz = static_cast<double>(cz) - static_cast<double>(az);
+
+        double const cxp = aby * acz - abz * acy;
+        double const cyp = abz * acx - abx * acz;
+        double const czp = abx * acy - aby * acx;
+        return cxp * cxp + cyp * cyp + czp * czp;
+    }
+
+    void verifyFileWritten(std::filesystem::path const & filePath)
+    {
+        std::error_code ec;
+        bool const exists = std::filesystem::exists(filePath, ec);
+        if (ec || !exists)
+        {
+            throw std::runtime_error(
+              fmt::format("3MF export failed to create output file: {}", filePath.string()));
+        }
+
+        auto const size = std::filesystem::file_size(filePath, ec);
+        if (ec || size == 0U)
+        {
+            throw std::runtime_error(
+              fmt::format("3MF export produced an empty output file: {}", filePath.string()));
+        }
+    }
+}
 
 namespace gladius::io
 {
@@ -69,6 +116,8 @@ namespace gladius::io
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
+            verifyFileWritten(filePath);
 
             if (m_logger)
             {
@@ -140,6 +189,8 @@ namespace gladius::io
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
+            verifyFileWritten(filePath);
 
             if (m_logger)
             {
@@ -232,6 +283,7 @@ namespace gladius::io
 
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
 
             if (m_logger)
             {
@@ -512,6 +564,12 @@ namespace gladius::io
         auto const & vertexBuffer = mesh.getVertices();
         auto const vertexData = const_cast<Buffer<cl_float4> &>(vertexBuffer).getDataCopy();
 
+        std::size_t trianglesAdded = 0U;
+        std::size_t skippedNonFinite = 0U;
+        std::size_t skippedZeroArea = 0U;
+        std::size_t skippedCollapsed = 0U;
+        std::size_t skippedLib3mf = 0U;
+
         // Add all triangles
         for (size_t i = 0; i < numFaces; ++i)
         {
@@ -534,6 +592,22 @@ namespace gladius::io
             auto const & v2 = vertexData[vertexOffset + 1];
             auto const & v3 = vertexData[vertexOffset + 2];
 
+            if (!isFinite3(v1.x, v1.y, v1.z) || !isFinite3(v2.x, v2.y, v2.z) ||
+                !isFinite3(v3.x, v3.y, v3.z))
+            {
+                ++skippedNonFinite;
+                continue;
+            }
+
+            // Skip near-degenerate triangles early (helps avoid collapsing triangles after rounding).
+            // Threshold is intentionally very small; it mainly filters truly pathological cases.
+            constexpr double MIN_AREA2 = 1e-24;
+            if (triangleArea2(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z) <= MIN_AREA2)
+            {
+                ++skippedZeroArea;
+                continue;
+            }
+
             // Convert cl_float4 to Vector3
             Vector3 vertex1(v1.x, v1.y, v1.z);
             Vector3 vertex2(v2.x, v2.y, v2.z);
@@ -544,9 +618,59 @@ namespace gladius::io
             auto v2Index = getOrCreateVertex(vertex2);
             auto v3Index = getOrCreateVertex(vertex3);
 
+            // Vertex de-duplication can collapse very tiny triangles. 3MF does not allow degenerate triangles.
+            if (v1Index == v2Index || v2Index == v3Index || v1Index == v3Index)
+            {
+                ++skippedCollapsed;
+                continue;
+            }
+
             // Ensure counter-clockwise order for outward-facing normals
             // The 3MF spec requires counter-clockwise vertex order
-            meshObject->AddTriangle({v1Index, v2Index, v3Index});
+            try
+            {
+                meshObject->AddTriangle({v1Index, v2Index, v3Index});
+                ++trianglesAdded;
+            }
+            catch (Lib3MF::ELib3MFException const &)
+            {
+                // Skip invalid triangles rather than failing the entire export.
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
+            catch (std::exception const &)
+            {
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
+        }
+
+        if (trianglesAdded == 0U)
+        {
+            throw std::runtime_error(
+              "3MF export failed: all triangles were invalid/degenerate after filtering");
+        }
+
+        if (m_logger && (skippedNonFinite + skippedZeroArea + skippedCollapsed + skippedLib3mf) > 0U)
+        {
+            m_logger->addEvent(
+              {fmt::format(
+                 "3MF export filtered triangles for '{}': added={}, skippedNonFinite={}, skippedZeroArea={}, skippedCollapsed={}, skippedLib3mf={}",
+                 meshName,
+                 trianglesAdded,
+                 skippedNonFinite,
+                 skippedZeroArea,
+                 skippedCollapsed,
+                 skippedLib3mf),
+               events::Severity::Warning});
         }
 
         if (m_logger)
@@ -638,6 +762,12 @@ namespace gladius::io
         std::vector<Lib3MF::sTriangleProperties> triangleProperties;
         triangleProperties.reserve(numFaces);
 
+        std::size_t trianglesAdded = 0U;
+        std::size_t skippedNonFinite = 0U;
+        std::size_t skippedZeroArea = 0U;
+        std::size_t skippedCollapsed = 0U;
+        std::size_t skippedLib3mf = 0U;
+
         // Add all triangles with color properties
         for (size_t i = 0; i < numFaces; ++i)
         {
@@ -659,6 +789,20 @@ namespace gladius::io
             auto const & v2 = vertexData[vertexOffset + 1];
             auto const & v3 = vertexData[vertexOffset + 2];
 
+            if (!isFinite3(v1.x, v1.y, v1.z) || !isFinite3(v2.x, v2.y, v2.z) ||
+                !isFinite3(v3.x, v3.y, v3.z))
+            {
+                ++skippedNonFinite;
+                continue;
+            }
+
+            constexpr double MIN_AREA2 = 1e-24;
+            if (triangleArea2(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z) <= MIN_AREA2)
+            {
+                ++skippedZeroArea;
+                continue;
+            }
+
             Vector3 const vertex1(v1.x, v1.y, v1.z);
             Vector3 const vertex2(v2.x, v2.y, v2.z);
             Vector3 const vertex3(v3.x, v3.y, v3.z);
@@ -667,7 +811,35 @@ namespace gladius::io
             auto const v2Index = getOrCreateVertex(vertex2);
             auto const v3Index = getOrCreateVertex(vertex3);
 
-            meshObject->AddTriangle({v1Index, v2Index, v3Index});
+            if (v1Index == v2Index || v2Index == v3Index || v1Index == v3Index)
+            {
+                ++skippedCollapsed;
+                continue;
+            }
+
+            try
+            {
+                meshObject->AddTriangle({v1Index, v2Index, v3Index});
+                ++trianglesAdded;
+            }
+            catch (Lib3MF::ELib3MFException const &)
+            {
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
+            catch (std::exception const &)
+            {
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
 
             // Get color property ID for this face (same color for all 3 vertices = flat shading)
             Lib3MF_uint32 const colorPropertyId = getOrCreateColorProperty(faceColors[i]);
@@ -680,6 +852,26 @@ namespace gladius::io
             props.m_PropertyIDs[2] = colorPropertyId;
             triangleProperties.push_back(props);
         }
+
+                if (trianglesAdded == 0U)
+                {
+                        throw std::runtime_error(
+                            "3MF export failed: all triangles were invalid/degenerate after filtering");
+                }
+
+                if (m_logger && (skippedNonFinite + skippedZeroArea + skippedCollapsed + skippedLib3mf) > 0U)
+                {
+                        m_logger->addEvent(
+                            {fmt::format(
+                                 "3MF export filtered colored triangles for '{}': added={}, skippedNonFinite={}, skippedZeroArea={}, skippedCollapsed={}, skippedLib3mf={}",
+                                 meshName,
+                                 trianglesAdded,
+                                 skippedNonFinite,
+                                 skippedZeroArea,
+                                 skippedCollapsed,
+                                 skippedLib3mf),
+                             events::Severity::Warning});
+                }
 
         // Apply all triangle properties at once
         meshObject->SetAllTriangleProperties(triangleProperties);
@@ -775,6 +967,12 @@ namespace gladius::io
         std::vector<Lib3MF::sTriangleProperties> triangleProperties;
         triangleProperties.reserve(numFaces);
 
+        std::size_t trianglesAdded = 0U;
+        std::size_t skippedNonFinite = 0U;
+        std::size_t skippedZeroArea = 0U;
+        std::size_t skippedCollapsed = 0U;
+        std::size_t skippedLib3mf = 0U;
+
         // Add all triangles with per-vertex color properties
         for (size_t i = 0; i < numFaces; ++i)
         {
@@ -796,6 +994,20 @@ namespace gladius::io
             auto const & v2 = vertexData[vertexOffset + 1];
             auto const & v3 = vertexData[vertexOffset + 2];
 
+            if (!isFinite3(v1.x, v1.y, v1.z) || !isFinite3(v2.x, v2.y, v2.z) ||
+                !isFinite3(v3.x, v3.y, v3.z))
+            {
+                ++skippedNonFinite;
+                continue;
+            }
+
+            constexpr double MIN_AREA2 = 1e-24;
+            if (triangleArea2(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z) <= MIN_AREA2)
+            {
+                ++skippedZeroArea;
+                continue;
+            }
+
             Vector3 const vertex1(v1.x, v1.y, v1.z);
             Vector3 const vertex2(v2.x, v2.y, v2.z);
             Vector3 const vertex3(v3.x, v3.y, v3.z);
@@ -804,7 +1016,35 @@ namespace gladius::io
             auto const v2Index = getOrCreateVertex(vertex2);
             auto const v3Index = getOrCreateVertex(vertex3);
 
-            meshObject->AddTriangle({v1Index, v2Index, v3Index});
+            if (v1Index == v2Index || v2Index == v3Index || v1Index == v3Index)
+            {
+                ++skippedCollapsed;
+                continue;
+            }
+
+            try
+            {
+                meshObject->AddTriangle({v1Index, v2Index, v3Index});
+                ++trianglesAdded;
+            }
+            catch (Lib3MF::ELib3MFException const &)
+            {
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
+            catch (std::exception const &)
+            {
+                ++skippedLib3mf;
+                if (skippedLib3mf > 1000U)
+                {
+                    throw;
+                }
+                continue;
+            }
 
             // Get color property IDs for each vertex of this face
             auto const & faceVertexColors = vertexColors[i];
@@ -820,6 +1060,26 @@ namespace gladius::io
             props.m_PropertyIDs[2] = colorProp2;
             triangleProperties.push_back(props);
         }
+
+                if (trianglesAdded == 0U)
+                {
+                        throw std::runtime_error(
+                            "3MF export failed: all triangles were invalid/degenerate after filtering");
+                }
+
+                if (m_logger && (skippedNonFinite + skippedZeroArea + skippedCollapsed + skippedLib3mf) > 0U)
+                {
+                        m_logger->addEvent(
+                            {fmt::format(
+                                 "3MF export filtered vertex-colored triangles for '{}': added={}, skippedNonFinite={}, skippedZeroArea={}, skippedCollapsed={}, skippedLib3mf={}",
+                                 meshName,
+                                 trianglesAdded,
+                                 skippedNonFinite,
+                                 skippedZeroArea,
+                                 skippedCollapsed,
+                                 skippedLib3mf),
+                             events::Severity::Warning});
+                }
 
         // Apply all triangle properties at once
         meshObject->SetAllTriangleProperties(triangleProperties);

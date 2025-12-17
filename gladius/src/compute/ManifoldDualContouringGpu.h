@@ -173,6 +173,11 @@ namespace gladius::compute
         void mergeMeshes(ManifoldDualContouringMesh & target, ManifoldDualContouringMesh const & source);
         void weldBoundaryVertices(float tolerance);
         void fillBoundaryGaps(float searchRadius);
+
+        // Non-hierarchical mesh generation (single-pass or chunked).
+        // Kept as a helper so hierarchical meshing can fall back to the proven path
+        // if the experimental GlobalMortonOctree output is not watertight/manifold.
+        void generateMeshNonHierarchical();
         
         // Hierarchical octree approach (watertight mesh generation)
         void generateMeshHierarchical();
