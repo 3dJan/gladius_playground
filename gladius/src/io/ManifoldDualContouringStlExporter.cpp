@@ -3,6 +3,7 @@
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
 #include "MeshExporter.h"
+#include "MeshExporter3mf.h"
 
 #include "ComputeContext.h"
 #include "ComputeCore.h"
@@ -71,6 +72,11 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setConvertToSrgb(bool convertToSrgb)
     {
         m_convertToSrgb = convertToSrgb;
+    }
+
+    void ManifoldDualContouringStlExporter::setColorMode(ColorMode mode)
+    {
+        m_colorMode = mode;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -336,22 +342,39 @@ namespace gladius::io
                     facesForSampling.push_back({indices[i], indices[i + 1], indices[i + 2]});
                 }
                 
-                // Sample face colors using GPU
+                // Sample colors using GPU
                 auto* samplingProgram = generator.getProgramManager().getDualContouringSamplingProgram();
                 auto primitives = generator.getPrimitives();
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
-                        positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                    
-                    writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                    
-                    if (m_logger)
+                    if (m_colorMode == ColorMode::PerVertex)
                     {
-                        m_logger->addEvent(
-                          {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
-                           events::Severity::Info});
+                        auto vertexColors = FaceColorSampler::sampleVertexColors(
+                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                        
+                        writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("Exported 3MF mesh with per-vertex colors"),
+                               events::Severity::Info});
+                        }
+                    }
+                    else
+                    {
+                        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
+                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                        
+                        writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
+                               events::Severity::Info});
+                        }
                     }
                 }
                 else

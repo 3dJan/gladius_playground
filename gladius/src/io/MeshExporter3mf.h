@@ -40,11 +40,18 @@ namespace gladius::vdb
         /// @param convertToSrgb If true, convert linear RGB to sRGB (default: true)
         void setConvertToSrgb(bool convertToSrgb);
 
+        using ColorMode = gladius::io::ColorMode;
+
+        /// @brief Set the color export mode
+        /// @param mode The color mode to use
+        void setColorMode(ColorMode mode);
+
       private:
         events::SharedLogger m_logger;
         ComputeCore * m_computeCore = nullptr;
         Document const * m_sourceDocument = nullptr;
         bool m_exportWithColors = false;  ///< Whether to sample and export volumetric colors
         bool m_convertToSrgb = true;  ///< Whether to convert linear RGB to sRGB
+        ColorMode m_colorMode = ColorMode::PerFace; ///< The color mode to use
     };
 }

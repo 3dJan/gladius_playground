@@ -782,6 +782,30 @@ namespace gladius::ui
                     "Apply gamma correction for accurate display on monitors.\n"
                     "Disable if colors are already in sRGB or for raw linear output.");
             }
+
+            // Color mode selection
+            ImGui::Text("Color Mode:");
+            ImGui::SameLine();
+            
+            int mode = static_cast<int>(m_colorMode);
+            if (ImGui::RadioButton("Per-face (Compatible)", mode == 0))
+            {
+                m_colorMode = io::ColorMode::PerFace;
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Flat shading, one color per triangle. Most compatible with slicers.");
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Per-vertex (Smooth)", mode == 1))
+            {
+                m_colorMode = io::ColorMode::PerVertex;
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Smooth shading, three colors per triangle. May not be supported by all viewers.");
+            }
             
             ImGui::Unindent();
         }
@@ -1271,6 +1295,7 @@ namespace gladius::ui
                 bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
                 m_layeredExporter3mf.setExportWithColors(exportColors);
                 m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
+                m_layeredExporter3mf.setColorMode(m_colorMode);
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -1355,6 +1380,7 @@ namespace gladius::ui
             bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
             m_manifoldExporter.setExportWithColors(exportColors);
             m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
+            m_manifoldExporter.setColorMode(m_colorMode);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;

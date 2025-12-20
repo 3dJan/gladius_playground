@@ -27,6 +27,11 @@ namespace gladius::vdb
         m_convertToSrgb = convertToSrgb;
     }
 
+    void MeshExporter3mf::setColorMode(ColorMode mode)
+    {
+        m_colorMode = mode;
+    }
+
     void MeshExporter3mf::beginExport(std::filesystem::path const & fileName,
                                       ComputeCore & generator)
     {
@@ -81,23 +86,41 @@ namespace gladius::vdb
                     faces.push_back({baseIdx, baseIdx + 1, baseIdx + 2});
                 }
                 
-                // Sample vertex colors using GPU (per-vertex coloring for smooth interpolation)
+                // Sample colors using GPU
                 auto* samplingProgram = m_computeCore->getProgramManager().getDualContouringSamplingProgram();
                 auto primitives = m_computeCore->getPrimitives();
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    auto vertexColors = io::FaceColorSampler::sampleVertexColors(
-                        vertices, faces, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                    
-                    writer.exportMeshWithVertexColors(m_fileName, mesh, meshName, vertexColors, m_sourceDocument, true);
-                    
-                    if (m_logger)
+                    if (m_colorMode == ColorMode::PerVertex)
                     {
-                        m_logger->addEvent(
-                          {fmt::format("Successfully exported 3MF mesh with per-vertex colors to {}", 
-                                       m_fileName.string()),
-                           events::Severity::Info});
+                        auto vertexColors = io::FaceColorSampler::sampleVertexColors(
+                            vertices, faces, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                        
+                        writer.exportMeshWithVertexColors(m_fileName, mesh, meshName, vertexColors, m_sourceDocument, true);
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("Successfully exported 3MF mesh with per-vertex colors to {}", 
+                                           m_fileName.string()),
+                               events::Severity::Info});
+                        }
+                    }
+                    else
+                    {
+                        auto faceColors = io::FaceColorSampler::sampleFaceColorsAsColor8(
+                            vertices, faces, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                        
+                        writer.exportMeshWithColors(m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
+                        
+                        if (m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("Successfully exported 3MF mesh with per-face colors to {}", 
+                                           m_fileName.string()),
+                               events::Severity::Info});
+                        }
                     }
                 }
                 else

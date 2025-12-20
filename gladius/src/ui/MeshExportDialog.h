@@ -132,6 +132,7 @@ namespace gladius::ui
         // Color export options
         bool m_exportWithColors = true;  ///< Export with volumetric colors (3MF only)
         bool m_convertToSrgb = true;  ///< Convert linear RGB to sRGB for display
+        io::ColorMode m_colorMode = io::ColorMode::PerFace; ///< Color export mode
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
 

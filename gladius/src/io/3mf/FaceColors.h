@@ -96,6 +96,15 @@ namespace gladius::io
     };
 
     /**
+     * @brief Color export mode for 3MF
+     */
+    enum class ColorMode
+    {
+        PerFace,  ///< Flat shading, one color per triangle (most compatible)
+        PerVertex ///< Smooth shading, three colors per triangle (interpolated)
+    };
+
+    /**
  * @brief Per-face color data for mesh export (single color per face)
  *
  * Stores a color for each face (triangle) of a mesh. The number of colors
