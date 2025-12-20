@@ -117,6 +117,7 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> m_indexBuffer;
         std::unique_ptr<cl::Buffer> m_countBuffer;
         std::unique_ptr<cl::Buffer> m_offsetBuffer;
+        std::unique_ptr<cl::Buffer> m_edgeComponentBuffer;
 
             // CPU copies for topology reconstruction
             std::vector<OctreeNode> m_cpuOctreeNodes;

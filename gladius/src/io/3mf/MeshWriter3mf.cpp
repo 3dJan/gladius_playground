@@ -17,11 +17,13 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <sstream>
 #include <system_error>
 #include <tuple>
+#include <unordered_map>
 
 namespace
 {
@@ -657,6 +659,59 @@ namespace gladius::io
         {
             throw std::runtime_error(
               "3MF export failed: all triangles were invalid/degenerate after filtering");
+        }
+
+        if (std::getenv("GLADIUS_DEBUG_3MF_TOPOLOGY") != nullptr)
+        {
+            // Diagnostic: Check vertex sharing ratio
+            std::size_t const totalVertexRefs = trianglesAdded * 3U;
+            std::size_t const uniqueVertexCount = vertexMap.size();
+            std::cout << "[3MF export] Vertex deduplication: " << totalVertexRefs
+                      << " vertex refs -> " << uniqueVertexCount << " unique vertices"
+                      << " (sharing ratio: "
+                      << (static_cast<double>(totalVertexRefs) /
+                          static_cast<double>(uniqueVertexCount))
+                      << ", expected ~6 for closed manifold)" << std::endl;
+
+            // Diagnostic: Count boundary edges in the lib3mf mesh
+            std::unordered_map<std::uint64_t, std::uint32_t> edgeCounts;
+            auto const triCount = meshObject->GetTriangleCount();
+            edgeCounts.reserve(static_cast<std::size_t>(triCount) * 3U);
+
+            auto makeKey = [](Lib3MF_uint32 a, Lib3MF_uint32 b) -> std::uint64_t
+            {
+                auto lo = std::min(a, b);
+                auto hi = std::max(a, b);
+                return (static_cast<std::uint64_t>(lo) << 32U) | hi;
+            };
+
+            for (Lib3MF_uint32 ti = 0; ti < triCount; ++ti)
+            {
+                auto tri = meshObject->GetTriangle(ti);
+                ++edgeCounts[makeKey(tri.m_Indices[0], tri.m_Indices[1])];
+                ++edgeCounts[makeKey(tri.m_Indices[1], tri.m_Indices[2])];
+                ++edgeCounts[makeKey(tri.m_Indices[2], tri.m_Indices[0])];
+            }
+
+            std::size_t boundaryEdges = 0U;
+            std::size_t nonManifoldEdges = 0U;
+            for (auto const & [key, count] : edgeCounts)
+            {
+                (void)key;
+                if (count == 1U)
+                {
+                    ++boundaryEdges;
+                }
+                else if (count > 2U)
+                {
+                    ++nonManifoldEdges;
+                }
+            }
+
+            std::cout << "[3MF export] lib3mf mesh check: " << triCount
+                      << " triangles, " << edgeCounts.size()
+                      << " edges, boundaryEdges=" << boundaryEdges
+                      << ", nonManifoldEdges=" << nonManifoldEdges << std::endl;
         }
 
         if (m_logger && (skippedNonFinite + skippedZeroArea + skippedCollapsed + skippedLib3mf) > 0U)

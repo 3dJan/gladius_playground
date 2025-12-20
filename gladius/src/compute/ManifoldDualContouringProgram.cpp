@@ -156,6 +156,7 @@ namespace gladius::compute
         cl::Buffer const & octreeBuffer,
         cl::Buffer const & offsetBuffer,
         cl::Buffer & vertexBuffer,
+        cl::Buffer & edgeComponentBuffer,
         std::size_t nodeCount,
         Eigen::Vector3f const & bboxMin,
         Eigen::Vector3f const & bboxMax,
@@ -177,6 +178,7 @@ namespace gladius::compute
                            octreeBuffer,
                            offsetBuffer,
                            vertexBuffer,
+                           edgeComponentBuffer,
                            static_cast<int>(nodeCount),
                            clBboxMin,
                            clBboxMax,
@@ -210,6 +212,7 @@ namespace gladius::compute
     void ManifoldDualContouringProgram::generateIndices(
         cl::Buffer const & octreeBuffer,
         cl::Buffer const & vertexOffsetBuffer,
+        cl::Buffer const & edgeComponentBuffer,
         cl::Buffer const & indexOffsetBuffer,
         cl::Buffer & indexBuffer,
         std::size_t nodeCount,
@@ -226,6 +229,7 @@ namespace gladius::compute
                            global,
                            octreeBuffer,
                            vertexOffsetBuffer,
+                           edgeComponentBuffer,
                            indexOffsetBuffer,
                            indexBuffer,
                            static_cast<int>(nodeCount),
@@ -279,22 +283,24 @@ namespace gladius::compute
         cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
         cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
 
-        // Iterative halo generation: repeat until convergence (no new nodes created)
-        // This solves the "cascading halo problem" where halos need their own neighbors
-        std::size_t iteration = 0;
-        std::size_t previousNodeCount = 0;
-        constexpr std::size_t MAX_ITERATIONS = 5;
-        std::size_t totalHaloNodesAdded = 0;
+        // Iterative halo completion.
+        // Rationale: the adaptive octree construction can miss some cells required for watertight
+        // quad emission. We first create missing neighbor cells as halos, then recompute their
+        // edge/internal masks on the GPU and promote halos that actually contain the surface.
+        // Any newly promoted surface cells may require additional halos, hence the loop.
 
-        std::cout << "Starting iterative halo generation..." << std::endl;
+        constexpr std::size_t MAX_ITERATIONS = 8;
+        std::size_t iteration = 0;
+        std::size_t totalNodesAdded = 0;
 
         while (iteration < MAX_ITERATIONS)
         {
-            // Sort the octree so binary search works
             std::size_t const nodeCountAtStart = nodeCount;
+
+            // Sort the octree so binary search works.
             sortOctreeByMorton(octreeBuffer, nodeCount);
 
-            // 1. Count halo neighbors needed per cell (including existing halos from previous iterations)
+            // 1. Count halo neighbors needed per cell
             auto haloCountBuffer = std::make_unique<cl::Buffer>(
                 m_ComputeContext->GetContext(),
                 CL_MEM_READ_WRITE,
@@ -324,12 +330,9 @@ namespace gladius::compute
 
             if (totalHaloNodes == 0)
             {
-                // Convergence reached - no more halo nodes needed
-                std::cout << "  Iteration " << iteration << ": Convergence reached (no new halos needed)" << std::endl;
+                // Converged: all required neighbors are present.
                 break;
             }
-
-            std::cout << "  Iteration " << iteration << ": Adding " << totalHaloNodes << " halo nodes" << std::endl;
 
             auto haloOffsetBuffer = std::make_unique<cl::Buffer>(
                 m_ComputeContext->GetContext(),
@@ -359,12 +362,9 @@ namespace gladius::compute
                                    static_cast<std::size_t>(totalHaloNodes) * sizeof(OctreeNode),
                                    haloNodes.data());
 
-            // Deduplicate halo nodes (same Morton code = same position)
-            // Since we set edgeMask=0 for all halos now, we don't need to merge edgeMasks
             std::sort(haloNodes.begin(), haloNodes.end(),
                      [](OctreeNode const & a, OctreeNode const & b)
                      { return a.mortonCode < b.mortonCode; });
-
             haloNodes.erase(std::unique(haloNodes.begin(), haloNodes.end(),
                                        [](OctreeNode const & a, OctreeNode const & b)
                                        { return a.mortonCode == b.mortonCode; }),
@@ -372,31 +372,22 @@ namespace gladius::compute
 
             if (haloNodes.empty())
             {
-                std::cout << "  Iteration " << iteration << ": All halos were duplicates, convergence reached" << std::endl;
+                // All halos were duplicates of existing nodes.
                 break;
             }
 
-            std::cout << "  After deduplication: " << haloNodes.size() << " unique halo nodes" << std::endl;
-
-            // Note: some halos may already exist in the octree; we count actual additions
-            // after merging + deduplication below.
             std::vector<OctreeNode> originalNodes(nodeCount);
             queue.enqueueReadBuffer(*octreeBuffer, CL_TRUE, 0,
                                    nodeCount * sizeof(OctreeNode),
                                    originalNodes.data());
 
-            // 6. Merge and sort
-            previousNodeCount = nodeCount;
             originalNodes.insert(originalNodes.end(), haloNodes.begin(), haloNodes.end());
             std::sort(originalNodes.begin(), originalNodes.end(),
                      [](OctreeNode const & a, OctreeNode const & b)
                      { return a.mortonCode < b.mortonCode; });
 
-            // 6b. Deduplicate (original nodes may already contain some halos from previous iterations).
-            // When duplicates exist, we must never allow the halo-flag to override a real surface node.
             std::vector<OctreeNode> mergedNodes;
             mergedNodes.reserve(originalNodes.size());
-
             for (auto const & node : originalNodes)
             {
                 if (mergedNodes.empty() || mergedNodes.back().mortonCode != node.mortonCode)
@@ -406,8 +397,6 @@ namespace gladius::compute
                 }
 
                 OctreeNode & dst = mergedNodes.back();
-
-                // Merge masks conservatively. (Halos currently have edgeMask/internalMask==0)
                 dst.edgeMask |= node.edgeMask;
                 dst.internalMask |= node.internalMask;
                 dst.depth = std::max(dst.depth, node.depth);
@@ -415,29 +404,23 @@ namespace gladius::compute
                 bool const dstIsHalo = (dst.padding[0] == 1);
                 bool const srcIsHalo = (node.padding[0] == 1);
                 dst.padding[0] = (dstIsHalo && srcIsHalo) ? 1 : 0;
-
-                // Any node that participates in surface extraction must not be treated as halo.
                 if (dst.edgeMask != 0)
                 {
                     dst.padding[0] = 0;
                 }
-
-                // Keep remaining padding bytes deterministic.
                 std::memset(&dst.padding[1], 0, sizeof(dst.padding) - 1);
             }
 
-            // 7. Write back to new buffer
             std::size_t const newNodeCount = mergedNodes.size();
             octreeBuffer = std::make_unique<cl::Buffer>(
                 m_ComputeContext->GetContext(),
                 CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 newNodeCount * sizeof(OctreeNode),
                 mergedNodes.data());
-
             nodeCount = newNodeCount;
 
-            // 7b. Recompute edge masks for halo nodes and promote any halo that actually
-            // contains the surface (clears padding[0] in the kernel).
+            // 5. Recompute edge/internal masks for any halo nodes and promote halos that
+            // actually contain the surface (kernel clears padding[0]).
             {
                 cl::NDRange globalRecompute(nodeCount);
                 m_programFront->run("recompute_halo_edge_masks",
@@ -453,27 +436,19 @@ namespace gladius::compute
 
             if (nodeCount > nodeCountAtStart)
             {
-                totalHaloNodesAdded += (nodeCount - nodeCountAtStart);
+                totalNodesAdded += (nodeCount - nodeCountAtStart);
             }
 
             ++iteration;
 
-            // Check for convergence
-            if (nodeCount == previousNodeCount)
+            // If nodeCount didn't grow, a subsequent iteration should also yield zero halos.
+            if (nodeCount == nodeCountAtStart)
             {
-                std::cout << "  Iteration " << iteration << ": Convergence reached (no new unique nodes)" << std::endl;
                 break;
             }
         }
 
-        if (iteration >= MAX_ITERATIONS)
-        {
-            std::cout << "  Warning: Reached maximum iterations (" << MAX_ITERATIONS 
-                      << ") without full convergence" << std::endl;
-        }
-
-        std::cout << "Iterative halo generation complete: " << totalHaloNodesAdded 
-                  << " total halo nodes added in " << iteration << " iterations" << std::endl;
+        std::cout << "Halo generation complete: " << totalNodesAdded << " nodes added in " << iteration << " iterations" << std::endl;
     }
 
     ManifoldDualContouringProgram::DiagnosticCounters ManifoldDualContouringProgram::runQuadDiagnostics(

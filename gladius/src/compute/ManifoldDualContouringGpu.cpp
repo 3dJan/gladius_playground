@@ -15,10 +15,12 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <array>
 #include <cstdlib>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace gladius::compute
@@ -31,6 +33,597 @@ namespace gladius::compute
             cl_float4 normal;
         };
     }
+        namespace
+        {
+            struct TriangleKey
+            {
+                std::uint32_t a{0U};
+                std::uint32_t b{0U};
+                std::uint32_t c{0U};
+                std::size_t triIndex{0U};
+            };
+
+            [[nodiscard]] bool triangleKeyLess(TriangleKey const & lhs, TriangleKey const & rhs)
+            {
+                if (lhs.a != rhs.a)
+                {
+                    return lhs.a < rhs.a;
+                }
+                if (lhs.b != rhs.b)
+                {
+                    return lhs.b < rhs.b;
+                }
+                return lhs.c < rhs.c;
+            }
+
+            [[nodiscard]] bool triangleKeyEqual(TriangleKey const & lhs, TriangleKey const & rhs)
+            {
+                return lhs.a == rhs.a && lhs.b == rhs.b && lhs.c == rhs.c;
+            }
+
+            void removeDegenerateAndDuplicateTriangles(ManifoldDualContouringMesh & mesh)
+            {
+                if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
+                {
+                    return;
+                }
+
+                auto const isFiniteVec3 = [](Eigen::Vector3f const & v)
+                {
+                    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+                };
+
+                std::size_t const originalTriangleCount = mesh.indices.size() / 3U;
+                std::vector<TriangleKey> keys;
+                keys.reserve(originalTriangleCount);
+
+                std::size_t degenerateCount = 0U;
+                for (std::size_t tri = 0U; tri < originalTriangleCount; ++tri)
+                {
+                    std::uint32_t const i0 = mesh.indices[tri * 3U + 0U];
+                    std::uint32_t const i1 = mesh.indices[tri * 3U + 1U];
+                    std::uint32_t const i2 = mesh.indices[tri * 3U + 2U];
+
+                    if (i0 == i1 || i1 == i2 || i2 == i0)
+                    {
+                        ++degenerateCount;
+                        continue;
+                    }
+
+                    if (i0 >= mesh.positions.size() || i1 >= mesh.positions.size() ||
+                        i2 >= mesh.positions.size())
+                    {
+                        ++degenerateCount;
+                        continue;
+                    }
+
+                    Eigen::Vector3f const & p0 = mesh.positions[i0];
+                    Eigen::Vector3f const & p1 = mesh.positions[i1];
+                    Eigen::Vector3f const & p2 = mesh.positions[i2];
+                    if (!isFiniteVec3(p0) || !isFiniteVec3(p1) || !isFiniteVec3(p2))
+                    {
+                        ++degenerateCount;
+                        continue;
+                    }
+
+                    // Also cull geometrically degenerate triangles (zero area). Some consumers
+                    // discard these at import time, which can make an otherwise "closed" mesh
+                    // appear to have holes.
+                    Eigen::Vector3f const cross = (p1 - p0).cross(p2 - p0);
+                    if (cross.squaredNorm() <= 1e-12F)
+                    {
+                        ++degenerateCount;
+                        continue;
+                    }
+
+                    // Canonicalize triangle key independent of winding.
+                    std::uint32_t a = i0;
+                    std::uint32_t b = i1;
+                    std::uint32_t c = i2;
+                    if (a > b)
+                    {
+                        std::swap(a, b);
+                    }
+                    if (b > c)
+                    {
+                        std::swap(b, c);
+                    }
+                    if (a > b)
+                    {
+                        std::swap(a, b);
+                    }
+
+                    keys.push_back({a, b, c, tri});
+                }
+
+                if (keys.empty())
+                {
+                    if (degenerateCount > 0U)
+                    {
+                        mesh.indices.clear();
+                    }
+                    return;
+                }
+
+                std::sort(keys.begin(), keys.end(), triangleKeyLess);
+
+                std::vector<std::uint32_t> dedupedIndices;
+                dedupedIndices.reserve(keys.size() * 3U);
+
+                TriangleKey prevKey = keys.front();
+                {
+                    std::size_t const tri = prevKey.triIndex;
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 0U]);
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 1U]);
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 2U]);
+                }
+
+                std::size_t duplicateCount = 0U;
+                for (std::size_t i = 1U; i < keys.size(); ++i)
+                {
+                    TriangleKey const & key = keys[i];
+                    if (triangleKeyEqual(key, prevKey))
+                    {
+                        ++duplicateCount;
+                        continue;
+                    }
+
+                    std::size_t const tri = key.triIndex;
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 0U]);
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 1U]);
+                    dedupedIndices.push_back(mesh.indices[tri * 3U + 2U]);
+                    prevKey = key;
+                }
+
+                std::size_t const newTriangleCount = dedupedIndices.size() / 3U;
+                if (degenerateCount > 0U || duplicateCount > 0U)
+                {
+                    std::cout << "  Triangle cleanup: removed " << degenerateCount
+                              << " degenerate and " << duplicateCount
+                              << " duplicate triangles (" << originalTriangleCount
+                              << " -> " << newTriangleCount << ")" << std::endl;
+                }
+
+                mesh.indices = std::move(dedupedIndices);
+            }
+
+            [[nodiscard]] bool shouldRepairNonManifoldEdges()
+            {
+                // Keep this opt-in / strict-mode only: building an edge incidence map over
+                // millions of triangles is expensive. Tests enable strict enforcement via
+                // GLADIUS_REQUIRE_WATERTIGHT=1.
+                return (std::getenv("GLADIUS_REQUIRE_WATERTIGHT") != nullptr) ||
+                       (std::getenv("GLADIUS_MDC_REPAIR_NONMANIFOLD_EDGES") != nullptr);
+            }
+
+            struct EdgeIncidence
+            {
+                std::uint32_t count{0U};
+                std::array<std::uint32_t, 4> triIds{};
+            };
+
+            [[nodiscard]] std::uint64_t makeEdgeKey(std::uint32_t a, std::uint32_t b)
+            {
+                std::uint32_t const lo = std::min(a, b);
+                std::uint32_t const hi = std::max(a, b);
+                return (static_cast<std::uint64_t>(lo) << 32U) | static_cast<std::uint64_t>(hi);
+            }
+
+            [[nodiscard]] Eigen::Vector3f triangleNormal(ManifoldDualContouringMesh const & mesh,
+                                                         std::uint32_t i0,
+                                                         std::uint32_t i1,
+                                                         std::uint32_t i2)
+            {
+                Eigen::Vector3f const & p0 = mesh.positions[i0];
+                Eigen::Vector3f const & p1 = mesh.positions[i1];
+                Eigen::Vector3f const & p2 = mesh.positions[i2];
+                Eigen::Vector3f const n = (p1 - p0).cross(p2 - p0);
+                float const len = n.norm();
+                if (len <= 1e-12F)
+                {
+                    return Eigen::Vector3f::Zero();
+                }
+                return n / len;
+            }
+
+            void orientTriangleToNormal(ManifoldDualContouringMesh const & mesh,
+                                        Eigen::Vector3f const & targetNormal,
+                                        std::uint32_t & io0,
+                                        std::uint32_t & io1,
+                                        std::uint32_t & io2)
+            {
+                Eigen::Vector3f const n = triangleNormal(mesh, io0, io1, io2);
+                if (n.isZero(1e-12F) || targetNormal.isZero(1e-12F))
+                {
+                    return;
+                }
+                if (n.dot(targetNormal) < 0.0F)
+                {
+                    std::swap(io1, io2);
+                }
+            }
+
+            void repairNonManifoldDegree4Edges(ManifoldDualContouringMesh & mesh)
+            {
+                if (!shouldRepairNonManifoldEdges())
+                {
+                    return;
+                }
+
+                if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
+                {
+                    return;
+                }
+
+                std::size_t const vertexCount = mesh.positions.size();
+                std::size_t const triangleCount = mesh.indices.size() / 3U;
+
+                // Build edge incidence map (undirected).
+                std::unordered_map<std::uint64_t, EdgeIncidence> incidence;
+                incidence.reserve(triangleCount * 3U);
+
+                auto addEdge = [&incidence](std::uint32_t a, std::uint32_t b, std::uint32_t triId)
+                {
+                    std::uint64_t const key = makeEdgeKey(a, b);
+                    auto & info = incidence[key];
+                    if (info.count < info.triIds.size())
+                    {
+                        info.triIds[info.count] = triId;
+                    }
+                    ++info.count;
+                };
+
+                for (std::size_t tri = 0U; tri < triangleCount; ++tri)
+                {
+                    std::uint32_t const i0 = mesh.indices[tri * 3U + 0U];
+                    std::uint32_t const i1 = mesh.indices[tri * 3U + 1U];
+                    std::uint32_t const i2 = mesh.indices[tri * 3U + 2U];
+
+                    if (static_cast<std::size_t>(i0) >= vertexCount ||
+                        static_cast<std::size_t>(i1) >= vertexCount ||
+                        static_cast<std::size_t>(i2) >= vertexCount)
+                    {
+                        continue;
+                    }
+
+                    addEdge(i0, i1, static_cast<std::uint32_t>(tri));
+                    addEdge(i1, i2, static_cast<std::uint32_t>(tri));
+                    addEdge(i2, i0, static_cast<std::uint32_t>(tri));
+                }
+
+                std::vector<std::uint64_t> candidates;
+                candidates.reserve(4096);
+                for (auto const & [key, info] : incidence)
+                {
+                    if (info.count == 4U)
+                    {
+                        candidates.push_back(key);
+                    }
+                }
+
+                if (candidates.empty())
+                {
+                    return;
+                }
+
+                std::vector<std::uint32_t> newIndices = mesh.indices;
+                std::vector<bool> triTouched(triangleCount, false);
+
+                auto unpackEdgeKey = [](std::uint64_t key) -> std::pair<std::uint32_t, std::uint32_t>
+                {
+                    std::uint32_t const a = static_cast<std::uint32_t>(key >> 32U);
+                    std::uint32_t const b = static_cast<std::uint32_t>(key & 0xFFFFFFFFULL);
+                    return {a, b};
+                };
+
+                std::size_t repairedEdges = 0U;
+                for (std::uint64_t const key : candidates)
+                {
+                    auto const it = incidence.find(key);
+                    if (it == incidence.end() || it->second.count != 4U)
+                    {
+                        continue;
+                    }
+
+                    auto const [a, b] = unpackEdgeKey(key);
+                    std::array<std::uint32_t, 4> triIds = it->second.triIds;
+
+                    // Skip if any triangle already changed in this pass.
+                    bool anyTouched = false;
+                    for (std::uint32_t const t : triIds)
+                    {
+                        if (t < triTouched.size() && triTouched[t])
+                        {
+                            anyTouched = true;
+                            break;
+                        }
+                    }
+                    if (anyTouched)
+                    {
+                        continue;
+                    }
+
+                    // Gather normals and "third" vertices for each incident triangle.
+                    struct TriInfo
+                    {
+                        std::uint32_t triId{0U};
+                        std::uint32_t third{0U};
+                        Eigen::Vector3f normal{Eigen::Vector3f::Zero()};
+                    };
+                    std::array<TriInfo, 4> tris;
+
+                    bool valid = true;
+                    for (std::size_t i = 0U; i < 4U; ++i)
+                    {
+                        std::uint32_t const triId = triIds[i];
+                        if (triId >= triangleCount)
+                        {
+                            valid = false;
+                            break;
+                        }
+
+                        std::uint32_t const i0 = newIndices[triId * 3U + 0U];
+                        std::uint32_t const i1 = newIndices[triId * 3U + 1U];
+                        std::uint32_t const i2 = newIndices[triId * 3U + 2U];
+
+                        // Identify the vertex not on the edge (a,b).
+                        std::uint32_t third = 0U;
+                        if (i0 != a && i0 != b)
+                        {
+                            third = i0;
+                        }
+                        else if (i1 != a && i1 != b)
+                        {
+                            third = i1;
+                        }
+                        else if (i2 != a && i2 != b)
+                        {
+                            third = i2;
+                        }
+                        else
+                        {
+                            valid = false;
+                            break;
+                        }
+
+                        Eigen::Vector3f const n = triangleNormal(mesh, i0, i1, i2);
+                        if (n.isZero(1e-12F))
+                        {
+                            valid = false;
+                            break;
+                        }
+
+                        tris[i] = TriInfo{triId, third, n};
+                    }
+
+                    if (!valid)
+                    {
+                        continue;
+                    }
+
+                    // Choose a pairing (perfect matching) that maximizes within-pair normal similarity.
+                    auto dotAbs = [](Eigen::Vector3f const & n0, Eigen::Vector3f const & n1)
+                    { return std::abs(n0.dot(n1)); };
+
+                    struct Matching
+                    {
+                        std::array<std::array<int, 2>, 2> pairs{};
+                        float score{0.0F};
+                    };
+
+                    std::array<Matching, 3> matchings;
+                    matchings[0].pairs[0] = {0, 1};
+                    matchings[0].pairs[1] = {2, 3};
+                    matchings[1].pairs[0] = {0, 2};
+                    matchings[1].pairs[1] = {1, 3};
+                    matchings[2].pairs[0] = {0, 3};
+                    matchings[2].pairs[1] = {1, 2};
+
+                    for (auto & m : matchings)
+                    {
+                        m.score = dotAbs(tris[m.pairs[0][0]].normal, tris[m.pairs[0][1]].normal) +
+                                  dotAbs(tris[m.pairs[1][0]].normal, tris[m.pairs[1][1]].normal);
+                    }
+
+                    auto const bestIt = std::max_element(matchings.begin(),
+                                                       matchings.end(),
+                                                       [](Matching const & lhs, Matching const & rhs)
+                                                       { return lhs.score < rhs.score; });
+                    Matching const & best = *bestIt;
+
+                    auto attemptFlipPair = [&](std::array<int, 2> const & p) -> bool
+                    {
+                        TriInfo const & t0 = tris[p[0]];
+                        TriInfo const & t1 = tris[p[1]];
+                        std::uint32_t const c = t0.third;
+                        std::uint32_t const d = t1.third;
+                        if (c == d)
+                        {
+                            return false;
+                        }
+
+                        // Avoid creating a new degree-4 edge on the opposite diagonal.
+                        std::uint64_t const cdKey = makeEdgeKey(c, d);
+                        auto const cdIt = incidence.find(cdKey);
+                        if (cdIt != incidence.end() && cdIt->second.count >= 2U)
+                        {
+                            return false;
+                        }
+
+                        Eigen::Vector3f targetNormal = t0.normal + t1.normal;
+                        if (targetNormal.isZero(1e-6F))
+                        {
+                            targetNormal = t0.normal;
+                        }
+                        else
+                        {
+                            targetNormal.normalize();
+                        }
+
+                        // Replace both triangles with the flipped diagonal (c,d):
+                        // (a,c,d) and (b,d,c)
+                        std::uint32_t n0_0 = a;
+                        std::uint32_t n0_1 = c;
+                        std::uint32_t n0_2 = d;
+                        std::uint32_t n1_0 = b;
+                        std::uint32_t n1_1 = d;
+                        std::uint32_t n1_2 = c;
+
+                        orientTriangleToNormal(mesh, targetNormal, n0_0, n0_1, n0_2);
+                        orientTriangleToNormal(mesh, targetNormal, n1_0, n1_1, n1_2);
+
+                        newIndices[t0.triId * 3U + 0U] = n0_0;
+                        newIndices[t0.triId * 3U + 1U] = n0_1;
+                        newIndices[t0.triId * 3U + 2U] = n0_2;
+
+                        newIndices[t1.triId * 3U + 0U] = n1_0;
+                        newIndices[t1.triId * 3U + 1U] = n1_1;
+                        newIndices[t1.triId * 3U + 2U] = n1_2;
+
+                        triTouched[t0.triId] = true;
+                        triTouched[t1.triId] = true;
+                        return true;
+                    };
+
+                    // Flip exactly one of the two surface sheets using this edge.
+                    // Prefer flipping the less-coplanar pair (smaller abs dot), so the remaining
+                    // (a,b) edge corresponds to the more coherent surface patch.
+                    auto const pair0 = best.pairs[0];
+                    auto const pair1 = best.pairs[1];
+                    float const sim0 = dotAbs(tris[pair0[0]].normal, tris[pair0[1]].normal);
+                    float const sim1 = dotAbs(tris[pair1[0]].normal, tris[pair1[1]].normal);
+
+                    bool flipped = false;
+                    if (sim0 < sim1)
+                    {
+                        flipped = attemptFlipPair(pair0) || attemptFlipPair(pair1);
+                    }
+                    else
+                    {
+                        flipped = attemptFlipPair(pair1) || attemptFlipPair(pair0);
+                    }
+
+                    if (flipped)
+                    {
+                        ++repairedEdges;
+                    }
+                }
+
+                if (repairedEdges > 0U)
+                {
+                    std::cout << "  Non-manifold repair: flipped diagonals for " << repairedEdges
+                              << " degree-4 edges (" << candidates.size() << " candidates)" << std::endl;
+                    mesh.indices = std::move(newIndices);
+                }
+            }
+
+            struct TopologyStats
+            {
+                std::size_t triangleCount{0U};
+                std::size_t uniqueEdgeCount{0U};
+                std::size_t openEdgeCount{0U};
+                std::size_t nonManifoldEdgeCount{0U};
+                std::size_t invalidTriangleCount{0U};
+            };
+
+            [[nodiscard]] bool debugMdcTopologyStagesEnabled()
+            {
+                return std::getenv("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES") != nullptr;
+            }
+
+            [[nodiscard]] TopologyStats computeTopologyStats(ManifoldDualContouringMesh const & mesh)
+            {
+                TopologyStats stats;
+
+                if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
+                {
+                    return stats;
+                }
+
+                std::size_t const vertexCount = mesh.positions.size();
+                std::size_t const triangleCount = mesh.indices.size() / 3U;
+                stats.triangleCount = triangleCount;
+
+                // Count undirected edge usage.
+                // key = (minIndex << 32) | maxIndex
+                std::unordered_map<std::uint64_t, std::uint32_t> edgeUseCount;
+                edgeUseCount.reserve(triangleCount * 3U);
+
+                for (std::size_t tri = 0U; tri < triangleCount; ++tri)
+                {
+                    std::uint32_t const i0 = mesh.indices[tri * 3U + 0U];
+                    std::uint32_t const i1 = mesh.indices[tri * 3U + 1U];
+                    std::uint32_t const i2 = mesh.indices[tri * 3U + 2U];
+
+                    if (static_cast<std::size_t>(i0) >= vertexCount ||
+                        static_cast<std::size_t>(i1) >= vertexCount ||
+                        static_cast<std::size_t>(i2) >= vertexCount)
+                    {
+                        ++stats.invalidTriangleCount;
+                        continue;
+                    }
+
+                    auto addEdge = [&edgeUseCount](std::uint32_t a, std::uint32_t b)
+                    {
+                        std::uint32_t const lo = std::min(a, b);
+                        std::uint32_t const hi = std::max(a, b);
+                        std::uint64_t const key =
+                          (static_cast<std::uint64_t>(lo) << 32U) | static_cast<std::uint64_t>(hi);
+                        auto const it = edgeUseCount.find(key);
+                        if (it == edgeUseCount.end())
+                        {
+                            edgeUseCount.emplace(key, 1U);
+                        }
+                        else
+                        {
+                            ++it->second;
+                        }
+                    };
+
+                    addEdge(i0, i1);
+                    addEdge(i1, i2);
+                    addEdge(i2, i0);
+                }
+
+                stats.uniqueEdgeCount = edgeUseCount.size();
+                for (auto const & kv : edgeUseCount)
+                {
+                    std::uint32_t const count = kv.second;
+                    if (count == 1U)
+                    {
+                        ++stats.openEdgeCount;
+                    }
+                    else if (count > 2U)
+                    {
+                        ++stats.nonManifoldEdgeCount;
+                    }
+                }
+
+                return stats;
+            }
+
+            void dumpTopologyStats(char const * stageLabel, ManifoldDualContouringMesh const & mesh)
+            {
+                if (!debugMdcTopologyStagesEnabled())
+                {
+                    return;
+                }
+
+                TopologyStats const stats = computeTopologyStats(mesh);
+                std::cout << "[mdc-topology] " << stageLabel
+                          << ": verts=" << mesh.positions.size()
+                          << ", tris=" << stats.triangleCount
+                          << ", uniqueEdges=" << stats.uniqueEdgeCount
+                          << ", openEdges=" << stats.openEdgeCount
+                          << ", nonManifoldEdges=" << stats.nonManifoldEdgeCount;
+                if (stats.invalidTriangleCount > 0U)
+                {
+                    std::cout << ", invalidTris=" << stats.invalidTriangleCount;
+                }
+                std::cout << std::endl;
+            }
+        }
+
 
     ManifoldDualContouringGpu::ManifoldDualContouringGpu(ComputeCore & core)
         : m_core(core)
@@ -262,10 +855,28 @@ namespace gladius::compute
                 }
                 weldBoundaryVertices(weldTolerance);
 
+                dumpTopologyStats("chunked after weldBoundaryVertices", m_mesh);
+
                 // Fill gaps between unconnected boundary edges
                 // Use voxel size as search radius - edges from neighboring chunks
                 // should be within this distance
                 fillBoundaryGaps(chunkVoxelSize * 1.5F);
+
+                dumpTopologyStats("chunked after fillBoundaryGaps", m_mesh);
+            }
+
+            // Chunk processing can still produce duplicate triangles at overlap boundaries
+            // and occasional degenerate bridging triangles. Clean these up before any
+            // downstream analysis/export.
+            if (!m_mesh.indices.empty())
+            {
+                repairNonManifoldDegree4Edges(m_mesh);
+
+                dumpTopologyStats("chunked after non-manifold repair", m_mesh);
+
+                removeDegenerateAndDuplicateTriangles(m_mesh);
+
+                dumpTopologyStats("chunked after triangle cleanup", m_mesh);
             }
 
             // Reset chunked mode flag
@@ -279,6 +890,8 @@ namespace gladius::compute
             generateVertices();
             generateIndices();
 
+            dumpTopologyStats("after generateIndices", m_mesh);
+
             // Fill gaps between disconnected boundary edges.
             // This helps close holes caused by missing neighbor cells in the octree.
             // The function skips edges on the bbox boundary to avoid creating
@@ -286,6 +899,19 @@ namespace gladius::compute
             if (!m_mesh.indices.empty())
             {
                 fillBoundaryGaps(voxelSize * 1.5F);
+
+                dumpTopologyStats("after fillBoundaryGaps", m_mesh);
+
+                repairNonManifoldDegree4Edges(m_mesh);
+
+                dumpTopologyStats("after non-manifold repair", m_mesh);
+
+                // Non-hierarchical index generation and gap filling can emit duplicate triangles in rare
+                // ambiguous configurations (leading to non-manifold edges). Remove exact duplicates and
+                // degenerate triangles as a conservative post-process.
+                removeDegenerateAndDuplicateTriangles(m_mesh);
+
+                dumpTopologyStats("after triangle cleanup", m_mesh);
             }
         }
     }
@@ -488,11 +1114,18 @@ namespace gladius::compute
         // Allocate vertex buffer (float4 position + float4 normal = 32 bytes)
         m_vertexBuffer = context->createBufferChecked(CL_MEM_READ_WRITE, totalVertices * 32);
 
+                // Per-node (not per-vertex) component map: 12 local edges per node.
+                // This is used by the watertight index generation kernel to pick the correct
+                // component vertex for each participating cell.
+                m_edgeComponentBuffer =
+                    context->createBufferChecked(CL_MEM_READ_WRITE, numNodes * 12U * sizeof(cl_uchar));
+
         try
         {
             m_program->generateVertices(*m_octreeBuffer,
                                         *m_offsetBuffer,
                                         *m_vertexBuffer,
+                                        *m_edgeComponentBuffer,
                                         numNodes,
                                         bboxMin,
                                         bboxMax,
@@ -706,13 +1339,25 @@ namespace gladius::compute
             m_indexBuffer =
               context->createBufferChecked(CL_MEM_READ_WRITE, totalIndices * sizeof(std::uint32_t));
 
-            m_program->generateIndices(*m_octreeBuffer,
-                                       *m_offsetBuffer,
-                                       *indexOffsetBuffer,
-                                       *m_indexBuffer,
-                                       numNodes,
-                                       maxCoord,
-                                       disableBoundaryChecks);
+                        if (!m_edgeComponentBuffer)
+                        {
+                                // Should have been produced during generateVertices(). Keep a safe default to
+                                // avoid undefined reads in the kernel if something goes wrong.
+                                std::vector<cl_uchar> zeros(numNodes * 12U, 0);
+                                m_edgeComponentBuffer = context->createBufferChecked(
+                                    CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                    zeros.size() * sizeof(cl_uchar),
+                                    zeros.data());
+                        }
+
+                        m_program->generateIndices(*m_octreeBuffer,
+                                                                             *m_offsetBuffer,
+                                                                             *m_edgeComponentBuffer,
+                                                                             *indexOffsetBuffer,
+                                                                             *m_indexBuffer,
+                                                                             numNodes,
+                                                                             maxCoord,
+                                                                             disableBoundaryChecks);
 
             // 5. Read back indices
             m_mesh.indices.resize(static_cast<std::size_t>(totalIndices));
@@ -1957,8 +2602,9 @@ namespace gladius::compute
                 return;
             }
 
-            // Use a small fraction of the search radius as weld tolerance.
-            float const tolerance = std::max(1e-6F, searchRadius * 0.25F);
+            // Use a *very* small fraction of the search radius as weld tolerance.
+            // This is meant to collapse numerical jitter, not to pull geometry together.
+            float const tolerance = std::max(1e-6F, searchRadius * 0.05F);
             float const toleranceSq = tolerance * tolerance;
 
             // Simple union-find over the (small) boundary-vertex set.
@@ -2164,28 +2810,176 @@ namespace gladius::compute
         // Build edge info, then do a conservative boundary-vertex weld and rebuild once.
         buildEdgeInfo();
 
-        // Get bounding box for filtering - edges on bbox faces should not be filled
-        // as they are legitimate open boundaries (surface clipped at bbox)
-        Eigen::Vector3f bboxMin(std::numeric_limits<float>::max(),
-                                std::numeric_limits<float>::max(),
-                                std::numeric_limits<float>::max());
-        Eigen::Vector3f bboxMax(std::numeric_limits<float>::lowest(),
-                                std::numeric_limits<float>::lowest(),
-                                std::numeric_limits<float>::lowest());
-        for (auto const & pos : m_mesh.positions)
-        {
-            bboxMin = bboxMin.cwiseMin(pos);
-            bboxMax = bboxMax.cwiseMax(pos);
-        }
-        float const bboxTolerance = searchRadius * 0.5F; // Tolerance for bbox face detection
+        // Classify "bbox boundary" edges.
+        //
+        // Default: use the *padded domain bbox* used for octree construction/SDF evaluation.
+        // This avoids misclassifying holes near the shape's AABB as "bbox boundary".
+        //
+        // Special case (auto-detected): for models where the SDF intentionally contains a
+        // clipping box (e.g. ImplicitGyroid clipped by a bbox via max()), the relevant
+        // boundary loops lie on the *original* (un-padded) model bbox faces. In that case
+        // routing those edges through the bbox-face capping path produces better results.
+        Eigen::Vector3f const paddedBboxMin = m_cachedBboxMin;
+        Eigen::Vector3f const paddedBboxMax = m_cachedBboxMax;
 
-        // Helper to check if a point is on a bounding box face
-        auto isOnBboxFace = [&bboxMin, &bboxMax, bboxTolerance](Eigen::Vector3f const & p) -> bool
+        Eigen::Vector3f chosenBboxMin = paddedBboxMin;
+        Eigen::Vector3f chosenBboxMax = paddedBboxMax;
+
+        Eigen::Vector3f originalBboxMin = paddedBboxMin;
+        Eigen::Vector3f originalBboxMax = paddedBboxMax;
+        bool hasOriginalBbox = false;
+        if (m_cachedBoundingBox.has_value())
         {
-            return p.x() <= bboxMin.x() + bboxTolerance || p.x() >= bboxMax.x() - bboxTolerance ||
-                   p.y() <= bboxMin.y() + bboxTolerance || p.y() >= bboxMax.y() - bboxTolerance ||
-                   p.z() <= bboxMin.z() + bboxTolerance || p.z() >= bboxMax.z() - bboxTolerance;
+            originalBboxMin = Eigen::Vector3f(m_cachedBoundingBox->min.s[0],
+                                              m_cachedBoundingBox->min.s[1],
+                                              m_cachedBoundingBox->min.s[2]);
+            originalBboxMax = Eigen::Vector3f(m_cachedBoundingBox->max.s[0],
+                                              m_cachedBoundingBox->max.s[1],
+                                              m_cachedBoundingBox->max.s[2]);
+            hasOriginalBbox = true;
+        }
+
+        // Use a tolerance derived from the voxel size at the extraction depth.
+        // Using searchRadius here is unsafe because it can be larger than the padding margin
+        // (2 voxels), which would incorrectly mark many interior edges as "bbox boundary".
+        Eigen::Vector3f const domainSize = paddedBboxMax - paddedBboxMin;
+        float const maxExtent = domainSize.maxCoeff();
+        float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+        // Tight tolerance: we only want to classify edges that are *really* on a clipping plane.
+        // A too-large tolerance will misclassify near-boundary interior cracks as bbox-boundary
+        // and can lead to bad capping/stitching artifacts.
+        float const bboxTolerance = voxelSize * 0.1F;
+
+        auto faceMask = [bboxTolerance](Eigen::Vector3f const & p,
+                                        Eigen::Vector3f const & bMin,
+                                        Eigen::Vector3f const & bMax) -> std::uint8_t
+        {
+            std::uint8_t mask = 0U;
+            if (p.x() <= bMin.x() + bboxTolerance)
+            {
+                mask |= 1U << 0U;
+            }
+            if (p.x() >= bMax.x() - bboxTolerance)
+            {
+                mask |= 1U << 1U;
+            }
+            if (p.y() <= bMin.y() + bboxTolerance)
+            {
+                mask |= 1U << 2U;
+            }
+            if (p.y() >= bMax.y() - bboxTolerance)
+            {
+                mask |= 1U << 3U;
+            }
+            if (p.z() <= bMin.z() + bboxTolerance)
+            {
+                mask |= 1U << 4U;
+            }
+            if (p.z() >= bMax.z() - bboxTolerance)
+            {
+                mask |= 1U << 5U;
+            }
+            return mask;
         };
+
+        auto isOnSameBboxFace = [&faceMask](Eigen::Vector3f const & p0,
+                                            Eigen::Vector3f const & p1,
+                                            Eigen::Vector3f const & bMin,
+                                            Eigen::Vector3f const & bMax) -> bool
+        {
+            std::uint8_t const m0 = faceMask(p0, bMin, bMax);
+            std::uint8_t const m1 = faceMask(p1, bMin, bMax);
+            auto isSingleFace = [](std::uint8_t mask) -> bool
+            {
+                return mask != 0U && (mask & static_cast<std::uint8_t>(mask - 1U)) == 0U;
+            };
+
+            // Only accept edges where both endpoints clearly belong to exactly one face,
+            // and it is the *same* face. Points on bbox edges/corners are ambiguous
+            // (multiple face bits set) and should be treated as internal boundaries.
+            if (!isSingleFace(m0) || !isSingleFace(m1))
+            {
+                return false;
+            }
+            return m0 == m1;
+        };
+
+        auto countBboxLikeBoundaryEdges = [&](Eigen::Vector3f const & bMin,
+                                              Eigen::Vector3f const & bMax) -> std::size_t
+        {
+            std::size_t count = 0U;
+            for (auto const & [edge, info] : edgeInfo)
+            {
+                if (info.count != 1U)
+                {
+                    continue;
+                }
+                Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
+                Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
+                if (isOnSameBboxFace(p0, p1, bMin, bMax))
+                {
+                    ++count;
+                }
+            }
+            return count;
+        };
+
+        // Compute the AABB of boundary vertices (edges with usage==1). This often matches
+        // the clipping volume for SDFs built via max()/min() against an axis-aligned box.
+        Eigen::Vector3f boundaryAabbMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::infinity());
+        Eigen::Vector3f boundaryAabbMax = Eigen::Vector3f::Constant(-std::numeric_limits<float>::infinity());
+        std::size_t boundaryEdgeCount = 0U;
+        for (auto const & [edge, info] : edgeInfo)
+        {
+            if (info.count != 1U)
+            {
+                continue;
+            }
+            ++boundaryEdgeCount;
+            Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
+            Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
+            boundaryAabbMin = boundaryAabbMin.cwiseMin(p0);
+            boundaryAabbMin = boundaryAabbMin.cwiseMin(p1);
+            boundaryAabbMax = boundaryAabbMax.cwiseMax(p0);
+            boundaryAabbMax = boundaryAabbMax.cwiseMax(p1);
+        }
+
+        // Auto-select bbox for face classification.
+        if (hasOriginalBbox)
+        {
+            std::size_t const paddedFaceEdges = countBboxLikeBoundaryEdges(paddedBboxMin, paddedBboxMax);
+            std::size_t const originalFaceEdges = countBboxLikeBoundaryEdges(originalBboxMin, originalBboxMax);
+
+            std::size_t boundaryFaceEdges = 0U;
+            if (boundaryEdgeCount > 0U)
+            {
+                boundaryFaceEdges = countBboxLikeBoundaryEdges(boundaryAabbMin, boundaryAabbMax);
+            }
+
+            // If we see no face edges on the padded domain, but a significant number on the
+            // original bbox, assume an internal clipping boundary and use the original bbox.
+            // Prefer the boundary-vertex AABB when it indicates a strong axis-aligned clipping boundary.
+            if (paddedFaceEdges == 0U && boundaryFaceEdges > 1024U)
+            {
+                chosenBboxMin = boundaryAabbMin;
+                chosenBboxMax = boundaryAabbMax;
+                if (debugEnabled)
+                {
+                    std::cout << "  Gap filling: Using BOUNDARY-VERTEX AABB for face classification (boundaryFaceEdges="
+                              << boundaryFaceEdges << ", paddedFaceEdges=" << paddedFaceEdges << ")" << std::endl;
+                }
+            }
+            else if (paddedFaceEdges == 0U && originalFaceEdges > 1024U)
+            {
+                chosenBboxMin = originalBboxMin;
+                chosenBboxMax = originalBboxMax;
+                if (debugEnabled)
+                {
+                    std::cout << "  Gap filling: Using ORIGINAL bbox for face classification (originalFaceEdges="
+                              << originalFaceEdges << ", paddedFaceEdges=" << paddedFaceEdges << ")" << std::endl;
+                }
+            }
+        }
 
         // Collect boundary edges (used by only 1 triangle) with their original direction
         // Separate internal edges from bbox boundary edges for different handling
@@ -2206,11 +3000,11 @@ namespace gladius::compute
             {
                 if (info.count == 1U)
                 {
-                    // Check if both vertices are on bbox faces
+                    // Check if both vertices are on the same bbox face
                     Eigen::Vector3f const & p0 = m_mesh.positions[info.directedEdge.v0];
                     Eigen::Vector3f const & p1 = m_mesh.positions[info.directedEdge.v1];
 
-                    if (isOnBboxFace(p0) && isOnBboxFace(p1))
+                    if (isOnSameBboxFace(p0, p1, chosenBboxMin, chosenBboxMax))
                     {
                         // Collect bbox boundary edges for capping (CSG intersection boundaries)
                         bboxBoundaryEdges.push_back({info.directedEdge, info.thirdVertex});
@@ -2258,6 +3052,22 @@ namespace gladius::compute
         {
             std::cout << "  Gap filling: No boundary edges found - mesh is closed" << std::endl;
             return;
+        }
+
+        // Heuristic: bbox-face capping/stitching works best for relatively simple boundaries.
+        // For very large boundary sets (often produced by complex clipped implicit surfaces),
+        // it can introduce a large amount of duplicate geometry and non-manifold edges.
+        // In those cases, treat bbox-boundary edges as internal boundaries and use the
+        // loop-based internal capping path instead.
+        if (bboxBoundaryEdges.size() > 1024U)
+        {
+            if (debugEnabled)
+            {
+                std::cout << "  Gap filling: Treating " << bboxBoundaryEdges.size()
+                          << " bbox-boundary edges as internal due to complexity" << std::endl;
+            }
+            boundaryEdges.insert(boundaryEdges.end(), bboxBoundaryEdges.begin(), bboxBoundaryEdges.end());
+            bboxBoundaryEdges.clear();
         }
 
         std::cout << "  Gap filling: Found " << boundaryEdges.size() << " internal boundary edges"
@@ -2463,8 +3273,8 @@ namespace gladius::compute
                         }
                     }
 
-                    // Allow bridging across small cracks. Use a somewhat generous threshold
-                    // (still tiny compared to the model bbox) to cope with deep settings.
+                    // Allow bridging across small cracks. Keep this conservative to avoid
+                    // introducing non-manifold geometry by connecting unrelated boundaries.
                     float avgEdgeLen = 0.0F;
                     if (!componentEdgeIndices.empty())
                     {
@@ -2478,7 +3288,7 @@ namespace gladius::compute
                         avgEdgeLen /= static_cast<float>(componentEdgeIndices.size());
                     }
 
-                    float const maxBridgeLength = std::max(searchRadius * 12.0F, avgEdgeLen * 8.0F);
+                    float const maxBridgeLength = std::max(searchRadius * 2.0F, avgEdgeLen * 2.0F);
                     float const maxBridgeLengthSq = maxBridgeLength * maxBridgeLength;
 
                     std::size_t bridgesAdded = 0U;
@@ -2799,51 +3609,303 @@ namespace gladius::compute
                         avgNormal.normalize();
                     }
 
-                    // Add centroid vertex for a stable fan triangulation.
-                    Eigen::Vector3f centroidF = Eigen::Vector3f::Zero();
-                    for (std::uint32_t v : loopVertices)
+                    // Robust-ish triangulation:
+                    // Project the polygon to 2D in the (avgNormal) plane and ear-clip.
+                    // This avoids the centroid fan degeneracies that can leave open edges or
+                    // create non-manifold overlaps on concave / non-uniform loops.
+                    auto triangulateLoopEarClipping =
+                      [this, &capTriangles](std::vector<std::uint32_t> const & loop,
+                                            Eigen::Vector3f const & targetNormal) -> bool
                     {
-                        centroidF += m_mesh.positions[v];
-                    }
-                    centroidF /= static_cast<float>(loopVertices.size());
-
-                    std::uint32_t const centroidIndex = static_cast<std::uint32_t>(m_mesh.positions.size());
-                    m_mesh.positions.push_back(centroidF);
-                    if (!m_mesh.normals.empty())
-                    {
-                        m_mesh.normals.push_back(avgNormal);
-                    }
-
-                    for (std::size_t i = 0U; i < loopVertices.size(); ++i)
-                    {
-                        std::uint32_t const v0 = loopVertices[i];
-                        std::uint32_t const v1 = loopVertices[(i + 1U) % loopVertices.size()];
-
-                        if (v0 == v1 || v0 == centroidIndex || v1 == centroidIndex)
+                        // Remove consecutive duplicates (including wrap-around).
+                        std::vector<std::uint32_t> poly;
+                        poly.reserve(loop.size());
+                        for (std::uint32_t v : loop)
                         {
-                            continue;
+                            if (poly.empty() || poly.back() != v)
+                            {
+                                poly.push_back(v);
+                            }
+                        }
+                        if (poly.size() >= 2U && poly.front() == poly.back())
+                        {
+                            poly.pop_back();
+                        }
+                        if (poly.size() < 3U)
+                        {
+                            return false;
                         }
 
-                        Eigen::Vector3f const & p0 = m_mesh.positions[v0];
-                        Eigen::Vector3f const & p1 = m_mesh.positions[v1];
-                        Eigen::Vector3f const & pc = m_mesh.positions[centroidIndex];
-                        Eigen::Vector3f const triNormal = (p1 - p0).cross(pc - p0);
-                        if (triNormal.squaredNorm() < 1e-12F)
+                        // Build 2D basis from targetNormal.
+                        Eigen::Vector3f n = targetNormal;
+                        if (n.squaredNorm() < 1e-12F)
                         {
-                            continue;
+                            // Fallback: derive a normal from first non-degenerate triple.
+                            for (std::size_t i = 0U; i + 2U < poly.size(); ++i)
+                            {
+                                Eigen::Vector3f const & a = m_mesh.positions[poly[i]];
+                                Eigen::Vector3f const & b = m_mesh.positions[poly[i + 1U]];
+                                Eigen::Vector3f const & c = m_mesh.positions[poly[i + 2U]];
+                                Eigen::Vector3f const nn = (b - a).cross(c - a);
+                                if (nn.squaredNorm() > 1e-12F)
+                                {
+                                    n = nn.normalized();
+                                    break;
+                                }
+                            }
+                        }
+                        if (n.squaredNorm() < 1e-12F)
+                        {
+                            return false;
+                        }
+                        n.normalize();
+
+                        Eigen::Vector3f ref = (std::abs(n.x()) < 0.9F) ? Eigen::Vector3f::UnitX()
+                                                                     : Eigen::Vector3f::UnitY();
+                        Eigen::Vector3f u = n.cross(ref);
+                        if (u.squaredNorm() < 1e-12F)
+                        {
+                            ref = Eigen::Vector3f::UnitZ();
+                            u = n.cross(ref);
+                        }
+                        u.normalize();
+                        Eigen::Vector3f const v = n.cross(u);
+
+                        struct Vec2
+                        {
+                            float x;
+                            float y;
+                        };
+                        std::vector<Vec2> poly2;
+                        poly2.reserve(poly.size());
+                        for (std::uint32_t idx : poly)
+                        {
+                            Eigen::Vector3f const & p = m_mesh.positions[idx];
+                            poly2.push_back({p.dot(u), p.dot(v)});
                         }
 
-                        if (avgNormal.squaredNorm() == 0.0F || triNormal.dot(avgNormal) >= 0.0F)
+                        auto signedArea = [&poly2]() -> float
                         {
-                            capTriangles.push_back(v0);
-                            capTriangles.push_back(v1);
-                            capTriangles.push_back(centroidIndex);
+                            double area = 0.0;
+                            for (std::size_t i = 0U; i < poly2.size(); ++i)
+                            {
+                                Vec2 const & a = poly2[i];
+                                Vec2 const & b = poly2[(i + 1U) % poly2.size()];
+                                area += static_cast<double>(a.x) * static_cast<double>(b.y) -
+                                        static_cast<double>(b.x) * static_cast<double>(a.y);
+                            }
+                            return static_cast<float>(0.5 * area);
+                        };
+
+                        float const area = signedArea();
+                        if (std::abs(area) < 1e-8F)
+                        {
+                            return false;
                         }
-                        else
+                        bool const isCcw = (area > 0.0F);
+
+                        auto cross2 = [](Vec2 const & a, Vec2 const & b, Vec2 const & c) -> float
                         {
-                            capTriangles.push_back(v0);
-                            capTriangles.push_back(centroidIndex);
-                            capTriangles.push_back(v1);
+                            // Cross of (b-a) x (c-a) in 2D (z-component)
+                            float const abx = b.x - a.x;
+                            float const aby = b.y - a.y;
+                            float const acx = c.x - a.x;
+                            float const acy = c.y - a.y;
+                            return abx * acy - aby * acx;
+                        };
+
+                        auto pointInTri = [](Vec2 const & p, Vec2 const & a, Vec2 const & b, Vec2 const & c) -> bool
+                        {
+                            // Barycentric test in 2D
+                            float const v0x = c.x - a.x;
+                            float const v0y = c.y - a.y;
+                            float const v1x = b.x - a.x;
+                            float const v1y = b.y - a.y;
+                            float const v2x = p.x - a.x;
+                            float const v2y = p.y - a.y;
+
+                            float const dot00 = v0x * v0x + v0y * v0y;
+                            float const dot01 = v0x * v1x + v0y * v1y;
+                            float const dot02 = v0x * v2x + v0y * v2y;
+                            float const dot11 = v1x * v1x + v1y * v1y;
+                            float const dot12 = v1x * v2x + v1y * v2y;
+
+                            float const denom = dot00 * dot11 - dot01 * dot01;
+                            if (std::abs(denom) < 1e-12F)
+                            {
+                                return false;
+                            }
+                            float const invDenom = 1.0F / denom;
+                            float const uu = (dot11 * dot02 - dot01 * dot12) * invDenom;
+                            float const vv = (dot00 * dot12 - dot01 * dot02) * invDenom;
+                            return (uu >= -1e-6F) && (vv >= -1e-6F) && (uu + vv <= 1.0F + 1e-6F);
+                        };
+
+                        // Work on a mutable index list.
+                        std::vector<std::size_t> indices(poly.size());
+                        for (std::size_t i = 0U; i < indices.size(); ++i)
+                        {
+                            indices[i] = i;
+                        }
+
+                        std::size_t emittedTris = 0U;
+                        std::size_t safety = 0U;
+                        std::size_t const maxSteps = poly.size() * poly.size();
+                        while (indices.size() >= 3U && safety++ < maxSteps)
+                        {
+                            bool earFound = false;
+                            for (std::size_t ii = 0U; ii < indices.size(); ++ii)
+                            {
+                                std::size_t const iPrev = indices[(ii + indices.size() - 1U) % indices.size()];
+                                std::size_t const iCurr = indices[ii];
+                                std::size_t const iNext = indices[(ii + 1U) % indices.size()];
+
+                                Vec2 const & a = poly2[iPrev];
+                                Vec2 const & b = poly2[iCurr];
+                                Vec2 const & c = poly2[iNext];
+
+                                float const cr = cross2(a, b, c);
+                                if (isCcw)
+                                {
+                                    if (cr <= 1e-8F)
+                                    {
+                                        continue; // Not convex
+                                    }
+                                }
+                                else
+                                {
+                                    if (cr >= -1e-8F)
+                                    {
+                                        continue; // Not convex
+                                    }
+                                }
+
+                                bool containsPoint = false;
+                                for (std::size_t jj = 0U; jj < indices.size(); ++jj)
+                                {
+                                    std::size_t const k = indices[jj];
+                                    if (k == iPrev || k == iCurr || k == iNext)
+                                    {
+                                        continue;
+                                    }
+                                    if (pointInTri(poly2[k], a, b, c))
+                                    {
+                                        containsPoint = true;
+                                        break;
+                                    }
+                                }
+                                if (containsPoint)
+                                {
+                                    continue;
+                                }
+
+                                std::uint32_t const vA = poly[iPrev];
+                                std::uint32_t const vB = poly[iCurr];
+                                std::uint32_t const vC = poly[iNext];
+                                if (vA == vB || vB == vC || vC == vA)
+                                {
+                                    indices.erase(indices.begin() + static_cast<std::ptrdiff_t>(ii));
+                                    earFound = true;
+                                    break;
+                                }
+
+                                // Emit with winding consistent with targetNormal.
+                                Eigen::Vector3f const & pA = m_mesh.positions[vA];
+                                Eigen::Vector3f const & pB = m_mesh.positions[vB];
+                                Eigen::Vector3f const & pC = m_mesh.positions[vC];
+                                Eigen::Vector3f const triN = (pB - pA).cross(pC - pA);
+                                if (triN.squaredNorm() < 1e-12F)
+                                {
+                                    indices.erase(indices.begin() + static_cast<std::ptrdiff_t>(ii));
+                                    earFound = true;
+                                    break;
+                                }
+
+                                if (triN.dot(n) >= 0.0F)
+                                {
+                                    capTriangles.push_back(vA);
+                                    capTriangles.push_back(vB);
+                                    capTriangles.push_back(vC);
+                                }
+                                else
+                                {
+                                    capTriangles.push_back(vA);
+                                    capTriangles.push_back(vC);
+                                    capTriangles.push_back(vB);
+                                }
+
+                                ++emittedTris;
+
+                                indices.erase(indices.begin() + static_cast<std::ptrdiff_t>(ii));
+                                earFound = true;
+                                break;
+                            }
+
+                            if (!earFound)
+                            {
+                                return false;
+                            }
+                        }
+
+                        // If we hit the safety limit or didn't fully reduce to a line segment,
+                        // treat as failure so we can fall back to a more conservative method.
+                        if (indices.size() >= 3U || safety >= maxSteps || emittedTris == 0U)
+                        {
+                            return false;
+                        }
+
+                        return true;
+                    };
+
+                    if (!triangulateLoopEarClipping(loopVertices, avgNormal))
+                    {
+                        // Fall back to the previous centroid fan if ear clipping fails.
+                        Eigen::Vector3f centroidF = Eigen::Vector3f::Zero();
+                        for (std::uint32_t vtx : loopVertices)
+                        {
+                            centroidF += m_mesh.positions[vtx];
+                        }
+                        centroidF /= static_cast<float>(loopVertices.size());
+
+                        std::uint32_t const centroidIndex =
+                          static_cast<std::uint32_t>(m_mesh.positions.size());
+                        m_mesh.positions.push_back(centroidF);
+                        if (!m_mesh.normals.empty())
+                        {
+                            m_mesh.normals.push_back(avgNormal);
+                        }
+
+                        for (std::size_t i = 0U; i < loopVertices.size(); ++i)
+                        {
+                            std::uint32_t const v0 = loopVertices[i];
+                            std::uint32_t const v1 = loopVertices[(i + 1U) % loopVertices.size()];
+
+                            if (v0 == v1 || v0 == centroidIndex || v1 == centroidIndex)
+                            {
+                                continue;
+                            }
+
+                            Eigen::Vector3f const & p0 = m_mesh.positions[v0];
+                            Eigen::Vector3f const & p1 = m_mesh.positions[v1];
+                            Eigen::Vector3f const & pc = m_mesh.positions[centroidIndex];
+                            Eigen::Vector3f const triNormal = (p1 - p0).cross(pc - p0);
+                            if (triNormal.squaredNorm() < 1e-12F)
+                            {
+                                continue;
+                            }
+
+                            if (avgNormal.squaredNorm() == 0.0F || triNormal.dot(avgNormal) >= 0.0F)
+                            {
+                                capTriangles.push_back(v0);
+                                capTriangles.push_back(v1);
+                                capTriangles.push_back(centroidIndex);
+                            }
+                            else
+                            {
+                                capTriangles.push_back(v0);
+                                capTriangles.push_back(centroidIndex);
+                                capTriangles.push_back(v1);
+                            }
                         }
                     }
                 }
@@ -2873,7 +3935,8 @@ namespace gladius::compute
                 }
                 avgRemainingEdgeLen /= static_cast<float>(remainingEdges.size());
 
-                float const stitchRadius = std::max(searchRadius * 16.0F, avgRemainingEdgeLen * 16.0F);
+                // Stitching is a last resort. Keep the radius tight so we only bridge tiny cracks.
+                float const stitchRadius = std::max(searchRadius * 2.0F, avgRemainingEdgeLen * 2.0F);
                 float const stitchRadiusSq = stitchRadius * stitchRadius;
                 float const cellSize = stitchRadius * 2.0F;
                 float const invCellSize = 1.0F / cellSize;

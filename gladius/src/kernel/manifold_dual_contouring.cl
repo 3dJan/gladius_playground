@@ -80,6 +80,27 @@ float3 findEdgeIntersection(float3 p0, float3 p1, float v0, float v1);
 // pointing in incompatible directions (dot product < threshold), we have
 // a discontinuity requiring multiple vertices per cell.
 
+// Default cosine threshold for clustering normals into components.
+// Higher values create MORE components (stricter clustering).
+// Lower values create FEWER components (more permissive clustering).
+//
+// The single-pass (non-hierarchical) pipeline is especially sensitive to
+// inconsistent component assignment across neighboring cells, which can
+// manifest as tiny cracks (open edges) even when all quads were emitted.
+// Keeping this value permissive reduces spurious splitting.
+#ifndef MDC_DISCONTINUITY_ANGLE_THRESHOLD
+#define MDC_DISCONTINUITY_ANGLE_THRESHOLD -1.0f
+#endif
+
+// Emit triangular "caps" for MIN-corner edges (0/3/8) when the normal quad owner cell
+// doesn't exist. This is a stopgap for missing neighbor cells, but it can introduce
+// non-manifold edges when used in interior situations.
+//
+// Keep disabled by default; prefer creating/keeping halo cells so full quads can be emitted.
+#ifndef MDC_EMIT_MIN_EDGE_TRI_CAPS
+#define MDC_EMIT_MIN_EDGE_TRI_CAPS 0
+#endif
+
 /// Result of discontinuity analysis
 typedef struct
 {
@@ -290,7 +311,7 @@ __kernel void count_vertices(
     
     // Detect gradient discontinuities - cluster normals by direction
     // Threshold 0.3 corresponds to ~72° angle between normals
-    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
     
     // Store component count in padding[1] for use by emit_vertices
     int componentCount = discResult.componentCount;
@@ -748,6 +769,7 @@ __kernel void emit_vertices(
     __global OctreeNode* nodes,
     __global int const* offsets,
     __global Vertex* outputVertices,
+    __global uchar* edgeComponents,
     const int numNodes,
     const float3 bboxMin,
     const float3 bboxMax,
@@ -760,6 +782,15 @@ __kernel void emit_vertices(
 
     OctreeNode node = nodes[id];
     int vertexIndex = offsets[id];
+
+    // Edge->component map is indexed by node id and local edge number (0..11).
+    // Initialize to 0 for all nodes (including halo and empty nodes) so index generation
+    // can safely read it without additional checks.
+    int edgeBase = id * 12;
+    for (int e = 0; e < 12; ++e)
+    {
+        edgeComponents[edgeBase + e] = (uchar)0;
+    }
     
     // Get cell bounds (needed for both surface and halo nodes)
     ulong3 coords = decodeMorton3(node.mortonCode);
@@ -885,7 +916,7 @@ __kernel void emit_vertices(
     else
     {
         // Multiple components: detect discontinuities and solve separate QEF per component
-        DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+        DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
         
         // For each component, collect its samples and solve QEF
         for (int comp = 0; comp < componentCount; comp++)
@@ -941,20 +972,23 @@ __kernel void emit_vertices(
             }
         }
         
-        // Store edge→component mapping for edges 5, 6, 10 (used by emit_indices)
-        // Default to component 0 for edges not in the sample list
-        uchar edge5Comp = 0, edge6Comp = 0, edge10Comp = 0;
+        // Store per-edge component mapping for all local edges.
+        // For each edge intersection sample, the discontinuity classifier assigns a component
+        // index local to this cell. Index generation uses this map (with proper local-edge
+        // remapping for neighbor cells) to keep disconnected surface components separate.
         for (int i = 0; i < intersectionCount; i++)
         {
             int edgeIdx = edgeIndices[i];
-            uchar comp = (uchar)discResult.componentIndices[i];
-            if (edgeIdx == 5) edge5Comp = comp;
-            else if (edgeIdx == 6) edge6Comp = comp;
-            else if (edgeIdx == 10) edge10Comp = comp;
+            if (edgeIdx >= 0 && edgeIdx < 12)
+            {
+                edgeComponents[edgeBase + edgeIdx] = (uchar)discResult.componentIndices[i];
+            }
         }
-        nodes[id].padding[2] = edge5Comp;
-        nodes[id].padding[3] = edge6Comp;
-        nodes[id].padding[4] = edge10Comp;
+
+        // Keep the legacy padding[2-4] mapping up-to-date for debugging/backward compatibility.
+        nodes[id].padding[2] = edgeComponents[edgeBase + 5];
+        nodes[id].padding[3] = edgeComponents[edgeBase + 6];
+        nodes[id].padding[4] = edgeComponents[edgeBase + 10];
     }
 }
 
@@ -1585,6 +1619,7 @@ __kernel void count_quads(
     // We emit if that cell doesn't exist AND we have 2 neighbors
     if (node.edgeMask & (1 << 0))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.y > 0 && coords.z > 0))
         {
             // Check if normal owner exists
@@ -1607,12 +1642,16 @@ __kernel void count_quads(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     // Edge 3: Y-axis at (x=min, z=min), corners 0-2
     // Normally owned by cell (x-1, y, z-1) via its edge 5
     if (node.edgeMask & (1 << 3))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.x > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
@@ -1632,12 +1671,16 @@ __kernel void count_quads(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     // Edge 8: Z-axis at (x=min, y=min), corners 0-4
     // Normally owned by cell (x-1, y-1, z) via its edge 10
     if (node.edgeMask & (1 << 8))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.x > 0 && coords.y > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
@@ -1657,6 +1700,9 @@ __kernel void count_quads(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     // Quads = 6 indices each, triangles = 3 indices each
@@ -1692,6 +1738,76 @@ int getEdgeComponentOffset(OctreeNode node, int edgeNum)
     */
 }
 
+/// Emit a quad as two triangles.
+/// The quad is specified in boundary order a->b->c->d.
+/// - If useDiagonalAC is false, split along diagonal (b,d) (historic behavior).
+/// - If useDiagonalAC is true,  split along diagonal (a,c).
+/// flipWinding reverses triangle winding (swaps the last two indices of each triangle).
+inline void emitQuadTriangles(__global uint * out,
+                              int baseOffset,
+                              uint a,
+                              uint b,
+                              uint c,
+                              uint d,
+                              bool flipWinding,
+                              bool useDiagonalAC)
+{
+    if (useDiagonalAC)
+    {
+        // Diagonal a-c: (a,b,c) and (a,c,d)
+        uint t0_0 = a;
+        uint t0_1 = b;
+        uint t0_2 = c;
+        uint t1_0 = a;
+        uint t1_1 = c;
+        uint t1_2 = d;
+
+        if (flipWinding)
+        {
+            uint tmp = t0_1;
+            t0_1 = t0_2;
+            t0_2 = tmp;
+            tmp = t1_1;
+            t1_1 = t1_2;
+            t1_2 = tmp;
+        }
+
+        out[baseOffset + 0] = t0_0;
+        out[baseOffset + 1] = t0_1;
+        out[baseOffset + 2] = t0_2;
+        out[baseOffset + 3] = t1_0;
+        out[baseOffset + 4] = t1_1;
+        out[baseOffset + 5] = t1_2;
+    }
+    else
+    {
+        // Diagonal b-d: (a,b,d) and (b,c,d)
+        uint t0_0 = a;
+        uint t0_1 = b;
+        uint t0_2 = d;
+        uint t1_0 = b;
+        uint t1_1 = c;
+        uint t1_2 = d;
+
+        if (flipWinding)
+        {
+            uint tmp = t0_1;
+            t0_1 = t0_2;
+            t0_2 = tmp;
+            tmp = t1_1;
+            t1_1 = t1_2;
+            t1_2 = tmp;
+        }
+
+        out[baseOffset + 0] = t0_0;
+        out[baseOffset + 1] = t0_1;
+        out[baseOffset + 2] = t0_2;
+        out[baseOffset + 3] = t1_0;
+        out[baseOffset + 4] = t1_1;
+        out[baseOffset + 5] = t1_2;
+    }
+}
+
 /// Emit indices for quads (second pass after prefix sum)
 /// Must use the same edges as count_quads (6, 5, 10)
 /// Winding order is determined by the sign of corner 7 (the max corner)
@@ -1699,6 +1815,7 @@ int getEdgeComponentOffset(OctreeNode node, int edgeNum)
 __kernel void emit_indices(
     __global OctreeNode const* nodes,
     __global int const* vertexOffsets,
+    __global uchar const* edgeComponents,
     __global int const* indexOffsets,
     __global uint* outputIndices,
     const int numNodes,
@@ -1709,6 +1826,12 @@ __kernel void emit_indices(
     if (id >= numNodes) return;
 
     OctreeNode node = nodes[id];
+
+    // Keep in sync with count_quads: halo nodes must not emit geometry.
+    if (node.padding[0] == 1)
+    {
+        return;
+    }
     
     // Skip cells without surface
     if (node.edgeMask == 0) return;
@@ -1719,16 +1842,20 @@ __kernel void emit_indices(
     
     // Corner 7 is at (1,1,1), bit 7 in internalMask
     bool corner7Inside = (node.internalMask & (1 << 7)) != 0;
+
     
-    // Get vertex index for a cell, accounting for edge→component mapping
-    // For edge 5, 6, 10, use the stored component offset from padding[2-4]
-    // For multi-component cells: vertex = vertexOffsets[nodeIdx] + componentOffset
-    #define GET_VERTEX_FOR_EDGE(nodeIdx, edgeNum) \
-        ((uint)(vertexOffsets[nodeIdx] + getEdgeComponentOffset(nodes[nodeIdx], edgeNum)))
-    
-    // Fallback for boundary edges (0, 3, 8) which don't have component mapping
-    // These are only used for partial boundary triangles, and always use component 0
-    #define GET_VERTEX(nodeIdx) ((uint)vertexOffsets[nodeIdx])
+    // Vertex selection for multi-component cells:
+    // Each node stores a 12-entry component map (one per local edge number).
+    // We always select the component corresponding to the local edge that matches
+    // the global quad edge for this node.
+    #define EDGE_COMPONENT(nodeIdx, localEdgeNum) \
+        ((uint)edgeComponents[(nodeIdx) * 12 + (localEdgeNum)])
+
+    #define GET_VERTEX_FOR_LOCAL_EDGE(nodeIdx, localEdgeNum) \
+        ((uint)(vertexOffsets[nodeIdx] + EDGE_COMPONENT((nodeIdx), (localEdgeNum))))
+
+    // Fallback: always use component 0 (base vertex).
+    #define GET_VERTEX_BASE(nodeIdx) ((uint)vertexOffsets[nodeIdx])
     
     // Edge 6: X-axis at (y=max, z=max), corners 7-6: (1,1,1)-(0,1,1)
     // Shared by: (x,y,z), (x,y+1,z), (x,y,z+1), (x,y+1,z+1)
@@ -1746,35 +1873,30 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX_FOR_EDGE(id, 6);
-                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 6);
-                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 6);
-                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 6);
-                
-                // Emit 2 triangles for quad
-                // Winding depends on whether corner 7 is inside
-                if (corner7Inside)
-                {
-                    // Corner 7 inside: wind CCW when viewed from +X
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v2;
-                    outputIndices[writeOffset + 2] = v1;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v2;
-                    outputIndices[writeOffset + 5] = v3;
-                }
-                else
-                {
-                    // Corner 7 outside: wind CW when viewed from +X
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v1;
-                    outputIndices[writeOffset + 2] = v2;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v3;
-                    outputIndices[writeOffset + 5] = v2;
-                }
+                // The shared global edge corresponds to different local edge numbers in each of
+                // the 4 participating cells.
+                // Owner cell (x,y,z): local edge 6 (X at y=max,z=max)
+                // (x,y+1,z):          local edge 4 (X at y=min,z=max)
+                // (x,y,z+1):          local edge 2 (X at y=max,z=min)
+                // (x,y+1,z+1):        local edge 0 (X at y=min,z=min)
+                uint v0 = GET_VERTEX_FOR_LOCAL_EDGE(id, 6);
+                uint v1 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx1, 4);
+                uint v2 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx2, 2);
+                uint v3 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx3, 0);
+
+                // Boundary order around the quad in the yz-plane is: v0 -> v1 -> v3 -> v2.
+                // Historically we always split along diagonal (v1,v2). Alternate diagonals reduce
+                // rare non-manifold cases where a quad diagonal coincides with a neighboring quad edge.
+                uint a = v0;
+                uint b = v1;
+                uint c = v3;
+                uint d = v2;
+
+                // Keep the historical diagonal (b,d) == (v1,v2). This is required for
+                // watertight output with the current vertex ordering.
+                bool useDiagonalAC = false;
+                bool flipWinding = corner7Inside;
+                emitQuadTriangles(outputIndices, writeOffset, a, b, c, d, flipWinding, useDiagonalAC);
                 
                 writeOffset += 6;
             }
@@ -1797,34 +1919,26 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX_FOR_EDGE(id, 5);
-                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 5);
-                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 5);
-                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 5);
-                
-                // INVERTED logic compared to edges 6 and 10
-                if (corner7Inside)
-                {
-                    // Need -Y: base winding gives -Y, so NO swap
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v1;
-                    outputIndices[writeOffset + 2] = v2;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v3;
-                    outputIndices[writeOffset + 5] = v2;
-                }
-                else
-                {
-                    // Need +Y: swap to get +Y
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v2;
-                    outputIndices[writeOffset + 2] = v1;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v2;
-                    outputIndices[writeOffset + 5] = v3;
-                }
+                // Owner cell (x,y,z): local edge 5 (Y at x=max,z=max)
+                // (x+1,y,z):          local edge 7 (Y at x=min,z=max)
+                // (x,y,z+1):          local edge 1 (Y at x=max,z=min)
+                // (x+1,y,z+1):        local edge 3 (Y at x=min,z=min)
+                uint v0 = GET_VERTEX_FOR_LOCAL_EDGE(id, 5);
+                uint v1 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx1, 7);
+                uint v2 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx2, 1);
+                uint v3 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx3, 3);
+
+                // Boundary order around the quad in the xz-plane is: v0 -> v1 -> v3 -> v2.
+                uint a = v0;
+                uint b = v1;
+                uint c = v3;
+                uint d = v2;
+
+                bool useDiagonalAC = false;
+
+                // INVERTED winding condition compared to edges 6 and 10
+                bool flipWinding = !corner7Inside;
+                emitQuadTriangles(outputIndices, writeOffset, a, b, c, d, flipWinding, useDiagonalAC);
                 
                 writeOffset += 6;
             }
@@ -1847,31 +1961,24 @@ __kernel void emit_indices(
             
             if (nIdx1 >= 0 && nIdx2 >= 0 && nIdx3 >= 0)
             {
-                uint v0 = GET_VERTEX_FOR_EDGE(id, 10);
-                uint v1 = GET_VERTEX_FOR_EDGE(nIdx1, 10);
-                uint v2 = GET_VERTEX_FOR_EDGE(nIdx2, 10);
-                uint v3 = GET_VERTEX_FOR_EDGE(nIdx3, 10);
-                
-                if (corner7Inside)
-                {
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v2;
-                    outputIndices[writeOffset + 2] = v1;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v2;
-                    outputIndices[writeOffset + 5] = v3;
-                }
-                else
-                {
-                    outputIndices[writeOffset + 0] = v0;
-                    outputIndices[writeOffset + 1] = v1;
-                    outputIndices[writeOffset + 2] = v2;
-                    
-                    outputIndices[writeOffset + 3] = v1;
-                    outputIndices[writeOffset + 4] = v3;
-                    outputIndices[writeOffset + 5] = v2;
-                }
+                // Owner cell (x,y,z): local edge 10 (Z at x=max,y=max)
+                // (x+1,y,z):          local edge 11 (Z at x=min,y=max)
+                // (x,y+1,z):          local edge 9  (Z at x=max,y=min)
+                // (x+1,y+1,z):        local edge 8  (Z at x=min,y=min)
+                uint v0 = GET_VERTEX_FOR_LOCAL_EDGE(id, 10);
+                uint v1 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx1, 11);
+                uint v2 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx2, 9);
+                uint v3 = GET_VERTEX_FOR_LOCAL_EDGE(nIdx3, 8);
+
+                // Boundary order around the quad in the xy-plane is: v0 -> v1 -> v3 -> v2.
+                uint a = v0;
+                uint b = v1;
+                uint c = v3;
+                uint d = v2;
+
+                bool useDiagonalAC = false;
+                bool flipWinding = corner7Inside;
+                emitQuadTriangles(outputIndices, writeOffset, a, b, c, d, flipWinding, useDiagonalAC);
                 
                 writeOffset += 6;
             }
@@ -1887,6 +1994,7 @@ __kernel void emit_indices(
     // Normally owned by cell (x, y-1, z-1) via its edge 6
     if (node.edgeMask & (1 << 0))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.y > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x, coords.y - 1, coords.z - 1);
@@ -1902,9 +2010,9 @@ __kernel void emit_indices(
                 
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    uint v0 = GET_VERTEX(id);
-                    uint v1 = GET_VERTEX(idx1);  // y-1
-                    uint v2 = GET_VERTEX(idx2);  // z-1
+                    uint v0 = GET_VERTEX_BASE(id);
+                    uint v1 = GET_VERTEX_BASE(idx1);  // y-1
+                    uint v2 = GET_VERTEX_BASE(idx2);  // z-1
                     
                     // Corner 0 is at (0,0,0), bit 0 in internalMask
                     bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
@@ -1927,11 +2035,15 @@ __kernel void emit_indices(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     // Edge 3: Y-axis at (x=min, z=min)
     if (node.edgeMask & (1 << 3))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.x > 0 && coords.z > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y, coords.z - 1);
@@ -1947,9 +2059,9 @@ __kernel void emit_indices(
                 
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    uint v0 = GET_VERTEX(id);
-                    uint v1 = GET_VERTEX(idx1);
-                    uint v2 = GET_VERTEX(idx2);
+                    uint v0 = GET_VERTEX_BASE(id);
+                    uint v1 = GET_VERTEX_BASE(idx1);
+                    uint v2 = GET_VERTEX_BASE(idx2);
                     
                     bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
                     
@@ -1970,11 +2082,15 @@ __kernel void emit_indices(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     // Edge 8: Z-axis at (x=min, y=min)
     if (node.edgeMask & (1 << 8))
     {
+#if MDC_EMIT_MIN_EDGE_TRI_CAPS
         if (disableBoundaryChecks || (coords.x > 0 && coords.y > 0))
         {
             ulong ownerMorton = encodeMorton3(coords.x - 1, coords.y - 1, coords.z);
@@ -1990,9 +2106,9 @@ __kernel void emit_indices(
                 
                 if (idx1 >= 0 && idx2 >= 0)
                 {
-                    uint v0 = GET_VERTEX(id);
-                    uint v1 = GET_VERTEX(idx1);
-                    uint v2 = GET_VERTEX(idx2);
+                    uint v0 = GET_VERTEX_BASE(id);
+                    uint v1 = GET_VERTEX_BASE(idx1);
+                    uint v2 = GET_VERTEX_BASE(idx2);
                     
                     bool corner0Inside = (node.internalMask & (1 << 0)) != 0;
                     
@@ -2013,6 +2129,9 @@ __kernel void emit_indices(
                 }
             }
         }
+#else
+        (void)disableBoundaryChecks;
+#endif
     }
     
     #undef GET_VERTEX
@@ -2471,7 +2590,7 @@ __kernel void count_discontinuities_diagnostic(
     }
     
     // Detect gradient discontinuities
-    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, 0.3f);
+    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
     
     // Update counters
     atomic_inc(&discontinuityCounters[4]); // Total cells

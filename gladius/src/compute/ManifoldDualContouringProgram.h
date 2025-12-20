@@ -63,6 +63,7 @@ namespace gladius::compute
             cl::Buffer const & octreeBuffer,
             cl::Buffer const & offsetBuffer,
             cl::Buffer & vertexBuffer,
+            cl::Buffer & edgeComponentBuffer,
             std::size_t nodeCount,
             Eigen::Vector3f const & bboxMin,
             Eigen::Vector3f const & bboxMax,
@@ -84,6 +85,7 @@ namespace gladius::compute
         void generateIndices(
             cl::Buffer const & octreeBuffer,
             cl::Buffer const & vertexOffsetBuffer,
+            cl::Buffer const & edgeComponentBuffer,
             cl::Buffer const & indexOffsetBuffer,
             cl::Buffer & indexBuffer,
             std::size_t nodeCount,
