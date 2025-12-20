@@ -55,6 +55,16 @@ namespace gladius::io
             return {};
         }
 
+        for (std::size_t i = 0; i < faces.size(); ++i)
+        {
+            auto const& face = faces[i];
+            if (face[0] >= vertices.size() || face[1] >= vertices.size() || face[2] >= vertices.size())
+            {
+                throw std::runtime_error(
+                  "FaceColorSampler::sampleFaceColors: face index out of bounds for vertices array");
+            }
+        }
+
         // Step 1: Compute face centroids
         auto centroids = computeCentroids(vertices, faces);
         std::size_t const numFaces = centroids.size();
@@ -75,6 +85,12 @@ namespace gladius::io
             // Sample colors for this batch
             std::vector<Eigen::Vector3f> batchColors;
             samplingProgram.sampleColors(batchPositions, batchColors, primitives);
+
+                        if (batchColors.size() != batchPositions.size())
+                        {
+                                throw std::runtime_error(
+                                    "FaceColorSampler::sampleFaceColors: GPU sampling returned unexpected number of colors");
+                        }
 
             // Copy results to output
             for (std::size_t i = 0; i < batchCount; ++i)
@@ -124,6 +140,16 @@ namespace gladius::io
             return {};
         }
 
+        for (std::size_t i = 0; i < faces.size(); ++i)
+        {
+            auto const& face = faces[i];
+            if (face[0] >= vertices.size() || face[1] >= vertices.size() || face[2] >= vertices.size())
+            {
+                throw std::runtime_error(
+                  "FaceColorSampler::sampleVertexColors: face index out of bounds for vertices array");
+            }
+        }
+
         std::size_t const numFaces = faces.size();
 
         // Collect all unique vertex indices that we need to sample
@@ -166,6 +192,12 @@ namespace gladius::io
 
             std::vector<Eigen::Vector3f> batchColors;
             samplingProgram.sampleColors(batchPositions, batchColors, primitives);
+
+                        if (batchColors.size() != batchPositions.size())
+                        {
+                                throw std::runtime_error(
+                                    "FaceColorSampler::sampleVertexColors: GPU sampling returned unexpected number of colors");
+                        }
 
             for (std::size_t i = 0; i < batchCount; ++i)
             {

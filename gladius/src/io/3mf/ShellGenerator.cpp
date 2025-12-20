@@ -6,6 +6,8 @@
 #include "compute/ManifoldDualContouringGpu.h"
 #include "kernel/types.h"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 
 namespace
@@ -88,20 +90,36 @@ namespace gladius::io
 
     namespace
     {
-        [[nodiscard]] float sampleCumulativeThickness(std::vector<float> const & lut,
-                                                      int lutResolution)
+                [[nodiscard]] float sampleCumulativeThickness(std::vector<float> const & lut,
+                                                                                                            int lutResolution,
+                                                                                                            Eigen::Vector3f const & representativeColor)
         {
             if (lut.empty() || lutResolution <= 1)
             {
                 return 0.0F;
             }
 
-            // Use the brightest corner (r=g=b=lutResolution-1) as a representative maximum thickness.
-            std::size_t const idx =
-              (static_cast<std::size_t>(lutResolution - 1) * static_cast<std::size_t>(lutResolution) +
-               static_cast<std::size_t>(lutResolution - 1)) * static_cast<std::size_t>(lutResolution) +
-              static_cast<std::size_t>(lutResolution - 1);
-            return idx < lut.size() ? lut[idx] : 0.0F;
+                        // The LUT maps target RGB to cumulative thickness. Sampling the brightest corner
+                        // often yields the maximum thickness (e.g., when the stack cannot reproduce white),
+                        // which can push iso-values outside the implicit field range and produce empty meshes.
+                        // Instead, sample at a representative color for the current layer.
+                        float const denom = static_cast<float>(lutResolution - 1);
+                        auto toIndex = [lutResolution, denom](float v) -> int
+                        {
+                                v = std::clamp(v, 0.0F, 1.0F);
+                                return std::clamp(static_cast<int>(std::lround(v * denom)), 0, lutResolution - 1);
+                        };
+
+                        int const r = toIndex(representativeColor.x());
+                        int const g = toIndex(representativeColor.y());
+                        int const b = toIndex(representativeColor.z());
+
+                        std::size_t const idx =
+                            (static_cast<std::size_t>(r) * static_cast<std::size_t>(lutResolution) +
+                             static_cast<std::size_t>(g)) * static_cast<std::size_t>(lutResolution) +
+                            static_cast<std::size_t>(b);
+
+                        return idx < lut.size() ? lut[idx] : 0.0F;
         }
 
         [[nodiscard]] compute::ManifoldDualContouringConfig toComputeConfig(
@@ -185,13 +203,19 @@ namespace gladius::io
 
             if (useVariableThickness)
             {
-                float thickness = 0.0F;
+                Eigen::Vector3f const representativeColor =
+                  stack[static_cast<std::size_t>(i)].reflectanceColor.cwiseMax(0.0F).cwiseMin(1.0F);
+
+                // LUT values are cumulative thicknesses (sum from current layer to top).
+                // Convert to per-layer thickness by subtracting the thickness already
+                // accumulated from layers above (currentOffset).
+                float cumulativeThickness = 0.0F;
                 if (precomputedLuts != nullptr &&
                     i < static_cast<int>(precomputedLuts->size()) &&
                     !precomputedLuts->at(static_cast<std::size_t>(i)).empty())
                 {
-                    thickness = sampleCumulativeThickness(
-                        precomputedLuts->at(static_cast<std::size_t>(i)), thicknessLutResolution);
+                    cumulativeThickness = sampleCumulativeThickness(
+                        precomputedLuts->at(static_cast<std::size_t>(i)), thicknessLutResolution, representativeColor);
                 }
                 else if (lutSolver)
                 {
@@ -199,7 +223,13 @@ namespace gladius::io
                         *lutSolver,
                         static_cast<std::size_t>(i),
                         thicknessLutResolution);
-                    thickness = sampleCumulativeThickness(lut, thicknessLutResolution);
+                    cumulativeThickness = sampleCumulativeThickness(lut, thicknessLutResolution, representativeColor);
+                }
+
+                float thickness = 0.0F;
+                if (cumulativeThickness > 0.0F)
+                {
+                    thickness = std::max(0.0F, cumulativeThickness - currentOffset);
                 }
 
                 if (thickness <= 0.0F)

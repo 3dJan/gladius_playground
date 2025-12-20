@@ -117,7 +117,6 @@ namespace gladius::io
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
             verifyFileWritten(filePath);
-            verifyFileWritten(filePath);
 
             if (m_logger)
             {
@@ -189,7 +188,6 @@ namespace gladius::io
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
-            verifyFileWritten(filePath);
             verifyFileWritten(filePath);
 
             if (m_logger)
@@ -358,6 +356,7 @@ namespace gladius::io
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
 
             if (m_logger)
             {
@@ -432,6 +431,7 @@ namespace gladius::io
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
 
             if (m_logger)
             {
