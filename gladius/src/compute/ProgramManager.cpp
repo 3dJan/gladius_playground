@@ -324,9 +324,14 @@ namespace gladius
 
     [[nodiscard]] bool ProgramManager::isAnyCompilationInProgress() const
     {
-        return m_optimizedRenderProgram->isCompilationInProgress() ||
-               m_slicerProgram->isCompilationInProgress() ||
-               (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress());
+         ProfileFunction;
+         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+         return (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
+             (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
+             (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
+             (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
+             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
     }
 
     ComputeContext & ProgramManager::getComputeContext() const
@@ -526,8 +531,8 @@ namespace gladius
 
     std::string ProgramManager::getDebugStateSummary() const
     {
-                std::lock_guard<std::mutex> lock(m_modelSourceMutex);
-                std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+          std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+          std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
         std::stringstream ss;
         ss << "ProgramManager: modelSource="
            << (m_modelSource.empty() ? 0 : (int) m_modelSource.size())

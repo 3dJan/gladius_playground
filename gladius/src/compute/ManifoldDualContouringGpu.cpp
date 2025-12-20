@@ -3564,6 +3564,16 @@ namespace gladius::compute
             std::cout << "  WARNING: Mesh has non-manifold edges!" << std::endl;
         }
 
+        // The hierarchical path can also fail silently (e.g., due to numerical issues or
+        // degenerate iso-surfaces) and return an empty mesh while reporting no boundary
+        // or non-manifold edges. Treat empty output as a failure and fall back.
+        if (m_mesh.positions.empty() || m_mesh.indices.empty())
+        {
+            std::cout << "  Falling back to non-hierarchical MDC because hierarchical output is empty." << std::endl;
+            generateMeshNonHierarchical();
+            return;
+        }
+
         // The GlobalMortonOctree path is still experimental. If it produces a mesh that
         // fails basic watertight/manifold criteria, fall back to the proven GPU octree
         // path (single-pass or chunked). This preserves export correctness for users.
