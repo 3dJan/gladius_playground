@@ -13,6 +13,7 @@
 #include "DualContouringSamplingProgram.h"
 
 #include "compute/ComputeCore.h"
+#include "compute/ManifoldDualContouringGpu.h"
 #include "compute/ProgramManager.h"
 
 #include "io/3mf/FaceColorSampler.h"
@@ -30,6 +31,8 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
+#include <unistd.h>
 #include <set>
 #include <vector>
 
@@ -51,8 +54,13 @@ namespace gladius_tests::color_export
                 GTEST_SKIP() << "OpenCL context not available";
             }
 
-            // Create output directory for test files
-            m_outputDir = std::filesystem::temp_directory_path() / "gladius_color_export_tests";
+                        // Create a unique output directory for test files.
+                        // These gtests are also registered as individual CTest tests and may run in parallel.
+                        auto const * testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
+                        std::string const suffix =
+                            testInfo ? (std::string(testInfo->test_suite_name()) + "_" + testInfo->name()) : "unknown";
+                        m_outputDir = std::filesystem::temp_directory_path() /
+                                                 ("gladius_color_export_tests_" + std::to_string(static_cast<long>(::getpid())) + "_" + suffix);
             std::filesystem::create_directories(m_outputDir);
         }
 
@@ -83,40 +91,49 @@ namespace gladius_tests::color_export
         std::pair<std::vector<Eigen::Vector3f>, std::vector<std::array<std::uint32_t, 3>>>
         extractMesh([[maybe_unused]] ComputeCore& core)
         {
-            // TODO: Restore after manifold_dc::ManifoldDualContouring API is available
-            // GTEST_SKIP() << "manifold_dc::ManifoldDualContouring API not available";
-            return {{}, {}}; // Return empty data - tests will be skipped above this call
-            
-            /* ORIGINAL CODE - COMMENTED OUT UNTIL API EXISTS
             EXPECT_TRUE(core.updateBBox());
 
             auto const bbox = core.getBoundingBox();
             EXPECT_TRUE(bbox.has_value());
+            if (!bbox.has_value())
+            {
+                return {{}, {}};
+            }
 
-            manifold_dc::ManifoldDualContouring extractor(core.getContext(), &core);
-            auto result = extractor.extractMeshSynchronous(
-                bbox.value(),
-                5U,  // initialDepth (Draft quality)
-                7U,  // maxDepth
-                0.0F // isoValue
-            );
+            // Use the currently available Manifold Dual Contouring GPU pipeline.
+            // For unit tests we explicitly disable the experimental hierarchical path
+            // to keep results stable and avoid empty-mesh edge cases.
+            compute::ManifoldDualContouringGpu extractor(core);
+            compute::ManifoldDualContouringConfig cfg{};
+            cfg.initialDepth = 5U;
+            cfg.maxDepth = 7U;
+            cfg.isoValue = 0.0F;
+            cfg.enableGpu = true;
+            cfg.enableCpuFallback = true;
+            cfg.enableCaching = false;
+            cfg.enableHierarchicalOctree = false;
+            cfg.enableQualityImprovement = true;
+            cfg.qualityImprovementPasses = 3U;
+            cfg.qualityMinAngleThreshold = 15.0F;
+            cfg.projectToSurface = true;
 
-            std::vector<Eigen::Vector3f> vertices = std::move(result.vertices);
-            std::vector<std::uint32_t> indices = std::move(result.indices);
+            extractor.setConfig(cfg);
+            extractor.generateMesh();
 
-            // Convert flat indices to face triples
-            EXPECT_EQ(indices.size() % 3, 0U);
+            auto const & result = extractor.getMesh();
+
+            std::vector<Eigen::Vector3f> vertices = result.positions;
+            std::vector<std::uint32_t> const & indices = result.indices;
+
+            EXPECT_EQ(indices.size() % 3U, 0U);
             std::vector<std::array<std::uint32_t, 3>> faces;
-            faces.reserve(indices.size() / 3);
-            for (std::size_t i = 0; i < indices.size(); i += 3)
+            faces.reserve(indices.size() / 3U);
+            for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
             {
                 faces.push_back({indices[i], indices[i + 1], indices[i + 2]});
             }
 
             return {std::move(vertices), std::move(faces)};
-            */
-            
-            return {{}, {}}; // Return empty data for now
         }
 
         std::shared_ptr<ComputeContext> m_context;

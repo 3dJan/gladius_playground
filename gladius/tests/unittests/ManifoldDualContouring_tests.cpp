@@ -6,6 +6,7 @@
 #include "SurfaceExtractionOptions.h"
 #include "compute/ManifoldDualContouringGpu.h"
 #include "io/ManifoldDualContouringStlExporter.h"
+#include "io/3mf/Lib3mfLoader.h"
 #include <gtest/gtest.h>
 
 #include <Eigen/Core>
@@ -17,7 +18,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -85,6 +88,7 @@ namespace gladius::compute::tests
 
         [[nodiscard]] bool gpuTestsEnabled()
         {
+            return true;
             char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
             if (env == nullptr)
             {
@@ -140,6 +144,150 @@ namespace gladius::compute::tests
             }
 
             return stats;
+        }
+
+        [[nodiscard]] bool debugTopologyEnabled()
+        {
+            return std::getenv("GLADIUS_DEBUG_MESH_TOPOLOGY") != nullptr;
+        }
+
+        struct EdgeUsageInfo
+        {
+            std::uint32_t count{0U};
+            std::array<std::uint32_t, 6> triangleIds{}; // store up to 6 incident triangles
+            std::uint32_t triangleIdCount{0U};
+        };
+
+        void dumpNonManifoldEdges(ManifoldDualContouringMesh const & mesh,
+                                  std::size_t maxEdgesToPrint = 25U)
+        {
+            if (!debugTopologyEnabled())
+            {
+                return;
+            }
+
+            if (mesh.indices.size() < 3U || (mesh.indices.size() % 3U) != 0U)
+            {
+                std::cout << "[topology] mesh indices invalid ("
+                          << mesh.indices.size() << " indices)" << std::endl;
+                return;
+            }
+
+            std::unordered_map<EdgeKey, EdgeUsageInfo, EdgeKeyHash> usage;
+            usage.reserve(mesh.indices.size());
+
+            auto addEdge = [&usage](std::uint32_t i0, std::uint32_t i1, std::uint32_t triId)
+            {
+                EdgeKey key{std::min(i0, i1), std::max(i0, i1)};
+                auto & info = usage[key];
+                ++info.count;
+                if (info.triangleIdCount < info.triangleIds.size())
+                {
+                    info.triangleIds[info.triangleIdCount] = triId;
+                    ++info.triangleIdCount;
+                }
+            };
+
+            std::size_t triangleCount = mesh.indices.size() / 3U;
+            for (std::size_t tri = 0U; tri < triangleCount; ++tri)
+            {
+                std::uint32_t const a = mesh.indices[tri * 3U + 0U];
+                std::uint32_t const b = mesh.indices[tri * 3U + 1U];
+                std::uint32_t const c = mesh.indices[tri * 3U + 2U];
+                addEdge(a, b, static_cast<std::uint32_t>(tri));
+                addEdge(b, c, static_cast<std::uint32_t>(tri));
+                addEdge(c, a, static_cast<std::uint32_t>(tri));
+            }
+
+            std::vector<std::pair<EdgeKey, EdgeUsageInfo>> nonManifold;
+            nonManifold.reserve(4096);
+
+            std::map<std::uint32_t, std::size_t> countHistogram;
+            for (auto const & [key, info] : usage)
+            {
+                ++countHistogram[info.count];
+                if (info.count > 2U)
+                {
+                    nonManifold.emplace_back(key, info);
+                }
+            }
+
+            std::sort(nonManifold.begin(),
+                      nonManifold.end(),
+                      [](auto const & lhs, auto const & rhs)
+                      { return lhs.second.count > rhs.second.count; });
+
+            std::cout << "\n[topology] Edge usage histogram (unique edges):" << std::endl;
+            for (auto const & [count, numEdges] : countHistogram)
+            {
+                std::cout << "  count=" << count << ": " << numEdges << std::endl;
+            }
+
+            std::cout << "[topology] Non-manifold edges: " << nonManifold.size() << std::endl;
+            if (nonManifold.empty())
+            {
+                return;
+            }
+
+            std::size_t const toPrint = std::min(maxEdgesToPrint, nonManifold.size());
+            std::cout << "[topology] Top " << toPrint << " non-manifold edges:" << std::endl;
+
+            for (std::size_t i = 0U; i < toPrint; ++i)
+            {
+                EdgeKey const & edge = nonManifold[i].first;
+                EdgeUsageInfo const & info = nonManifold[i].second;
+
+                Eigen::Vector3f p0 = Eigen::Vector3f::Zero();
+                Eigen::Vector3f p1 = Eigen::Vector3f::Zero();
+                if (edge.a < mesh.positions.size())
+                {
+                    p0 = mesh.positions[edge.a];
+                }
+                if (edge.b < mesh.positions.size())
+                {
+                    p1 = mesh.positions[edge.b];
+                }
+                Eigen::Vector3f const mid = 0.5F * (p0 + p1);
+
+                std::cout << "  edge " << edge.a << "-" << edge.b
+                          << " count=" << info.count
+                          << " len=" << (p1 - p0).norm()
+                          << " mid=[" << mid.transpose() << "]";
+
+                std::cout << " tris=";
+                for (std::uint32_t t = 0U; t < info.triangleIdCount; ++t)
+                {
+                    std::cout << info.triangleIds[t];
+                    if (t + 1U < info.triangleIdCount)
+                    {
+                        std::cout << ",";
+                    }
+                }
+                if (info.triangleIdCount == info.triangleIds.size())
+                {
+                    std::cout << ",...";
+                }
+                std::cout << std::endl;
+
+                // Print the vertex indices of incident triangles (helps identify whether this is a
+                // duplicated quad-diagonal or a more complex non-manifold configuration).
+                std::cout << "    incident triangles:" << std::endl;
+                for (std::uint32_t t = 0U; t < info.triangleIdCount; ++t)
+                {
+                    std::uint32_t const triId = info.triangleIds[t];
+                    std::size_t const base = static_cast<std::size_t>(triId) * 3U;
+                    if (base + 2U >= mesh.indices.size())
+                    {
+                        continue;
+                    }
+                    std::uint32_t const i0 = mesh.indices[base + 0U];
+                    std::uint32_t const i1 = mesh.indices[base + 1U];
+                    std::uint32_t const i2 = mesh.indices[base + 2U];
+                    std::cout << "    tri " << triId << ": (" << i0 << "," << i1 << "," << i2
+                              << ")" << std::endl;
+                }
+            }
+            std::cout << std::endl;
         }
 
         /// Analyze face normals to check winding consistency.
@@ -441,6 +589,256 @@ namespace gladius::compute::tests
           private:
             std::filesystem::path m_path;
         };
+
+        struct Lib3mfTriangle
+        {
+            Eigen::Vector3f v0;
+            Eigen::Vector3f v1;
+            Eigen::Vector3f v2;
+        };
+
+        [[nodiscard]] EdgeKey makeCanonicalEdge(std::uint32_t a, std::uint32_t b) noexcept
+        {
+            if (a <= b)
+            {
+                return {a, b};
+            }
+            return {b, a};
+        }
+
+        struct OrientedEdgeStats
+        {
+            std::size_t totalEdges{0U};
+            std::size_t boundaryEdges{0U};
+            std::size_t nonManifoldEdges{0U};
+            std::size_t orientationConflicts{0U};
+            std::size_t degenerateEdges{0U};
+        };
+
+        struct OrientedEdgeAccum
+        {
+            std::uint32_t totalCount{0U};
+            std::uint32_t minToMaxCount{0U};
+            std::uint32_t maxToMinCount{0U};
+        };
+
+        [[nodiscard]] OrientedEdgeStats
+        analyzeLib3mfMeshOrientedEdges(Lib3MF::PMeshObject const & meshObject)
+        {
+            OrientedEdgeStats stats;
+
+            auto const triCount = static_cast<std::size_t>(meshObject->GetTriangleCount());
+            if (triCount == 0U)
+            {
+                return stats;
+            }
+
+            std::unordered_map<EdgeKey, OrientedEdgeAccum, EdgeKeyHash> edges;
+            edges.reserve(triCount * 3U);
+
+            auto addOrientedEdge = [&edges](std::uint32_t from, std::uint32_t to)
+            {
+                if (from == to)
+                {
+                    return;
+                }
+
+                std::uint32_t const lo = std::min(from, to);
+                std::uint32_t const hi = std::max(from, to);
+                EdgeKey const key{lo, hi};
+                auto & accum = edges[key];
+                ++accum.totalCount;
+                if (from == lo)
+                {
+                    ++accum.minToMaxCount;
+                }
+                else
+                {
+                    ++accum.maxToMinCount;
+                }
+            };
+
+            for (Lib3MF_uint32 triIndex = 0U; triIndex < meshObject->GetTriangleCount(); ++triIndex)
+            {
+                auto const tri = meshObject->GetTriangle(triIndex);
+                std::uint32_t const i0 = tri.m_Indices[0];
+                std::uint32_t const i1 = tri.m_Indices[1];
+                std::uint32_t const i2 = tri.m_Indices[2];
+
+                // Skip degenerate triangles; they can create spurious edge counts.
+                if (i0 == i1 || i1 == i2 || i2 == i0)
+                {
+                    continue;
+                }
+
+                addOrientedEdge(i0, i1);
+                addOrientedEdge(i1, i2);
+                addOrientedEdge(i2, i0);
+            }
+
+            stats.totalEdges = edges.size();
+            for (auto const & [key, accum] : edges)
+            {
+                (void)key;
+                if (accum.totalCount == 1U)
+                {
+                    ++stats.boundaryEdges;
+                    continue;
+                }
+
+                if (accum.totalCount > 2U)
+                {
+                    ++stats.nonManifoldEdges;
+                    continue;
+                }
+
+                // For an oriented 2-manifold, a shared edge must be traversed in opposite
+                // directions by the two incident triangles.
+                if (accum.minToMaxCount == 2U || accum.maxToMinCount == 2U)
+                {
+                    ++stats.orientationConflicts;
+                }
+            }
+
+            return stats;
+        }
+
+        [[nodiscard]] MeshEdgeStats analyzeLib3mfMeshEdges(Lib3MF::PMeshObject const & meshObject)
+        {
+            MeshEdgeStats stats;
+
+            auto const triCount = static_cast<std::size_t>(meshObject->GetTriangleCount());
+            if (triCount == 0U)
+            {
+                return stats;
+            }
+
+            std::unordered_map<EdgeKey, std::uint32_t, EdgeKeyHash> edgeUseCounts;
+            edgeUseCounts.reserve(triCount * 3U);
+
+            for (Lib3MF_uint32 triIndex = 0U; triIndex < meshObject->GetTriangleCount(); ++triIndex)
+            {
+                auto const tri = meshObject->GetTriangle(triIndex);
+                std::uint32_t const i0 = tri.m_Indices[0];
+                std::uint32_t const i1 = tri.m_Indices[1];
+                std::uint32_t const i2 = tri.m_Indices[2];
+
+                // Ignore degenerate topology for edge statistics.
+                if (i0 == i1 || i1 == i2 || i2 == i0)
+                {
+                    continue;
+                }
+
+                ++edgeUseCounts[makeCanonicalEdge(i0, i1)];
+                ++edgeUseCounts[makeCanonicalEdge(i1, i2)];
+                ++edgeUseCounts[makeCanonicalEdge(i2, i0)];
+            }
+
+            stats.totalEdges = edgeUseCounts.size();
+            for (auto const & entry : edgeUseCounts)
+            {
+                std::uint32_t const count = entry.second;
+                if (count == 1U)
+                {
+                    ++stats.openEdges;
+                }
+                else if (count > 2U)
+                {
+                    ++stats.nonManifoldEdges;
+                }
+            }
+
+            return stats;
+        }
+
+        [[nodiscard]] std::vector<Lib3mfTriangle>
+        collectTrianglesFrom3mf(std::filesystem::path const & filePath)
+        {
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+            reader->ReadFromFile(filePath.string());
+
+            std::vector<Lib3mfTriangle> triangles;
+
+            auto objectIterator = model->GetObjects();
+            while (objectIterator->MoveNext())
+            {
+                auto const object = objectIterator->GetCurrentObject();
+                if (!object->IsMeshObject())
+                {
+                    continue;
+                }
+
+                auto const meshObject = model->GetMeshObjectByID(object->GetUniqueResourceID());
+                auto const triCount = meshObject->GetTriangleCount();
+                triangles.reserve(triangles.size() + static_cast<std::size_t>(triCount));
+
+                for (Lib3MF_uint32 triIndex = 0U; triIndex < triCount; ++triIndex)
+                {
+                    auto const tri = meshObject->GetTriangle(triIndex);
+                    auto const p0 = meshObject->GetVertex(tri.m_Indices[0]);
+                    auto const p1 = meshObject->GetVertex(tri.m_Indices[1]);
+                    auto const p2 = meshObject->GetVertex(tri.m_Indices[2]);
+
+                    Lib3mfTriangle t;
+                    t.v0 = Eigen::Vector3f{static_cast<float>(p0.m_Coordinates[0]),
+                                           static_cast<float>(p0.m_Coordinates[1]),
+                                           static_cast<float>(p0.m_Coordinates[2])};
+                    t.v1 = Eigen::Vector3f{static_cast<float>(p1.m_Coordinates[0]),
+                                           static_cast<float>(p1.m_Coordinates[1]),
+                                           static_cast<float>(p1.m_Coordinates[2])};
+                    t.v2 = Eigen::Vector3f{static_cast<float>(p2.m_Coordinates[0]),
+                                           static_cast<float>(p2.m_Coordinates[1]),
+                                           static_cast<float>(p2.m_Coordinates[2])};
+                    triangles.push_back(t);
+                }
+            }
+
+            return triangles;
+        }
+
+        void writeBinaryStl(std::filesystem::path const & filePath,
+                            std::vector<Lib3mfTriangle> const & triangles)
+        {
+            std::ofstream out(filePath, std::ios::binary);
+            if (!out)
+            {
+                throw std::runtime_error("Failed to open STL output file for writing");
+            }
+
+            std::array<char, 80> header{};
+            out.write(header.data(), static_cast<std::streamsize>(header.size()));
+
+            std::uint32_t const triCount = static_cast<std::uint32_t>(triangles.size());
+            out.write(reinterpret_cast<char const *>(&triCount), sizeof(triCount));
+
+            for (auto const & tri : triangles)
+            {
+                Eigen::Vector3f const n = (tri.v1 - tri.v0).cross(tri.v2 - tri.v0).normalized();
+
+                auto writeVec3 = [&out](Eigen::Vector3f const & v)
+                {
+                    out.write(reinterpret_cast<char const *>(&v.x()), sizeof(float));
+                    out.write(reinterpret_cast<char const *>(&v.y()), sizeof(float));
+                    out.write(reinterpret_cast<char const *>(&v.z()), sizeof(float));
+                };
+
+                writeVec3(n);
+                writeVec3(tri.v0);
+                writeVec3(tri.v1);
+                writeVec3(tri.v2);
+
+                std::uint16_t const attributeByteCount = 0U;
+                out.write(reinterpret_cast<char const *>(&attributeByteCount), sizeof(attributeByteCount));
+            }
+
+            out.flush();
+            if (!out)
+            {
+                throw std::runtime_error("Failed while writing STL output file");
+            }
+        }
     }
 
     class ManifoldDualContouringGpu_Test : public ::testing::Test
@@ -788,6 +1186,11 @@ namespace gladius::compute::tests
             return;
         }
 
+                if (stats.openEdges != 0U || stats.nonManifoldEdges != 0U)
+                {
+                        dumpNonManifoldEdges(mesh);
+                }
+
         EXPECT_EQ(stats.openEdges, 0U)
           << "Mesh contains " << stats.openEdges << " open edges out of " << stats.totalEdges
           << " unique edges";
@@ -1053,6 +1456,129 @@ namespace gladius::compute::tests
         MeshEdgeStats const stats = analyzeMeshEdges(mesh);
         EXPECT_EQ(stats.openEdges, 0U) << "Export-dialog default config should not produce boundary/open edges";
         EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Export-dialog default config should not produce non-manifold edges";
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_Export3mf_Readback_IsWatertight)
+    {
+                // Automated 3MF validation without involving external slicers:
+                // 1) export to 3MF via the exporter
+                // 2) read back via lib3mf
+                // 3) verify boundary/non-manifold edge counts on the read-back mesh
+                // 4) (optional) roundtrip to STL and validate with admesh if available
+
+                auto bundle = loadDocument("testdata/SphereInACage.3mf");
+                ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+                gladius::io::ManifoldDualContouringOptions exportDefaults{};
+                exportDefaults.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+                exportDefaults.applyPreset();
+                exportDefaults.enableHierarchicalOctree = true;
+                exportDefaults.minFeatureSize = 0.0F;
+                exportDefaults.enableChunking = true;
+                exportDefaults.projectToSurface = true;
+                exportDefaults.enableSharpFeaturePostProcess = false;
+                exportDefaults.simplificationMethod = gladius::io::SimplificationMethod::None;
+                exportDefaults.enableSimplification = false;
+
+                auto temp3mf = makeUniqueTempFile("mdc_export_roundtrip_", ".3mf");
+                TempFileGuard cleanup3mf(temp3mf);
+
+                gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+                exporter.setOptions(exportDefaults);
+                exporter.setOutputFormat(gladius::io::MeshOutputFileFormat::ThreeMF);
+                exporter.setDocument(bundle.document.get());
+                exporter.setExportWithColors(false);
+
+                exporter.beginExport(temp3mf, *bundle.core);
+                while (exporter.advanceExport(*bundle.core))
+                {
+                }
+                exporter.finalize();
+
+                ASSERT_FALSE(exporter.hasError()) << "3MF export failed: " << exporter.errorMessage();
+                ASSERT_TRUE(std::filesystem::exists(temp3mf)) << "3MF file should exist";
+                ASSERT_GT(std::filesystem::file_size(temp3mf), static_cast<std::uintmax_t>(0))
+                    << "3MF file should not be empty";
+
+                // Read back and validate topology via lib3mf.
+                {
+                        auto wrapper = gladius::io::loadLib3mfScoped();
+                        auto model = wrapper->CreateModel();
+                        auto reader = model->QueryReader("3mf");
+                        reader->ReadFromFile(temp3mf.string());
+
+                        std::size_t meshObjectsSeen = 0U;
+                        auto objectIterator = model->GetObjects();
+                        while (objectIterator->MoveNext())
+                        {
+                                auto const object = objectIterator->GetCurrentObject();
+                                if (!object->IsMeshObject())
+                                {
+                                        continue;
+                                }
+                                ++meshObjectsSeen;
+
+                                auto const meshObject = model->GetMeshObjectByID(object->GetUniqueResourceID());
+
+                                MeshEdgeStats const stats = analyzeLib3mfMeshEdges(meshObject);
+                                EXPECT_EQ(stats.openEdges, 0U)
+                                    << "3MF readback mesh has boundary/open edges (meshObject=" << meshObjectsSeen
+                                    << ", totalEdges=" << stats.totalEdges << ")";
+                                EXPECT_EQ(stats.nonManifoldEdges, 0U)
+                                    << "3MF readback mesh has non-manifold edges (meshObject=" << meshObjectsSeen
+                                    << ", totalEdges=" << stats.totalEdges << ")";
+
+                                OrientedEdgeStats const oriented = analyzeLib3mfMeshOrientedEdges(meshObject);
+                                EXPECT_EQ(oriented.boundaryEdges, 0U)
+                                    << "3MF readback mesh has boundary edges (oriented check) (meshObject="
+                                    << meshObjectsSeen << ", totalEdges=" << oriented.totalEdges << ")";
+                                EXPECT_EQ(oriented.nonManifoldEdges, 0U)
+                                    << "3MF readback mesh has non-manifold edges (oriented check) (meshObject="
+                                    << meshObjectsSeen << ", totalEdges=" << oriented.totalEdges << ")";
+                                EXPECT_EQ(oriented.orientationConflicts, 0U)
+                                    << "3MF readback mesh has orientation conflicts along shared edges (meshObject="
+                                    << meshObjectsSeen << ", totalEdges=" << oriented.totalEdges << ")";
+                        }
+                        ASSERT_GT(meshObjectsSeen, 0U) << "No mesh objects found in exported 3MF";
+                }
+
+                if (!isAdmeshAvailable())
+                {
+                        GTEST_SKIP() << "admesh not available; skipping STL roundtrip validation";
+                }
+
+                auto triangles = collectTrianglesFrom3mf(temp3mf);
+                ASSERT_GT(triangles.size(), 0U) << "Expected triangles after reading back 3MF";
+
+        auto tempStl = makeUniqueTempFile("mdc_export_roundtrip_", ".stl");
+        // Set to true to keep files for inspection, false for normal test cleanup.
+        bool const keepFilesForInspection = false;
+        std::optional<TempFileGuard> cleanupStl;
+        if (!keepFilesForInspection)
+        {
+            cleanupStl.emplace(tempStl);
+        }
+        else
+        {
+            std::cout << "You can inspect the roundtrip STL at: " << tempStl << std::endl;
+        }
+
+               
+                ASSERT_NO_THROW(writeBinaryStl(tempStl, triangles));
+
+                int exitCode = -1;
+                std::string const output = runCommandAndCapture("admesh \"" + tempStl.string() + "\" 2>&1", exitCode);
+                ASSERT_EQ(exitCode, 0) << "admesh failed\n" << output;
+
+                auto const metrics = parseAdmeshMetrics(output);
+                EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+                    << "admesh detected disconnected facets after 3MF->STL roundtrip\n" << output;
+                EXPECT_EQ(metrics.facetsWith1DisconnectedEdge.final, 0)
+                    << "admesh detected facets with 1 disconnected edge after 3MF->STL roundtrip\n" << output;
+                EXPECT_EQ(metrics.facetsWith2DisconnectedEdges.final, 0)
+                    << "admesh detected facets with 2 disconnected edges after 3MF->STL roundtrip\n" << output;
+                EXPECT_EQ(metrics.facetsWith3DisconnectedEdges.final, 0)
+                    << "admesh detected facets with 3 disconnected edges after 3MF->STL roundtrip\n" << output;
     }
 
     TEST_F(ManifoldDualContouringGpu_Test,
@@ -1430,6 +1956,61 @@ namespace gladius::compute::tests
         std::cout << "\nCompare with standard sparse octree approach:" << std::endl;
         std::cout << "  If disconnected facets are lower, hierarchical approach is working"
                   << std::endl;
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithWristsupport_ExportDialogDefaults_IsWatertight)
+    {
+        // Mirrors the export dialog defaults for high quality MDC:
+        // - UltraFine preset (initialDepth=7, maxDepth=9)
+        // - hierarchical octree enabled (watertight-by-construction)
+        // - chunking enabled by default, but inactive because minFeatureSize == 0
+        // - project-to-surface enabled
+        auto bundle = loadDocument("testdata/wristsupport.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        gladius::io::ManifoldDualContouringOptions exportDefaults{};
+        exportDefaults.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportDefaults.applyPreset();
+        exportDefaults.enableHierarchicalOctree = true;
+        exportDefaults.minFeatureSize = 0.0F;
+        exportDefaults.enableChunking = true;
+        exportDefaults.projectToSurface = true;
+        exportDefaults.enableSharpFeaturePostProcess = false;
+        exportDefaults.simplificationMethod = gladius::io::SimplificationMethod::None;
+        exportDefaults.enableSimplification = false;
+
+        ManifoldDualContouringGpu mesher(*bundle.core);
+        ManifoldDualContouringConfig config;
+        config.enableGpu = exportDefaults.enableGpu;
+        config.enableCpuFallback = exportDefaults.enableCpuFallback;
+        config.enableCaching = exportDefaults.enableCaching;
+        config.initialDepth = exportDefaults.initialDepth;
+        config.maxDepth = exportDefaults.maxDepth;
+        config.isoValue = exportDefaults.isoValue;
+        config.minFeatureSize = exportDefaults.minFeatureSize;
+        config.enableChunking = exportDefaults.enableChunking;
+        config.enableHierarchicalOctree = exportDefaults.enableHierarchicalOctree;
+        config.enableSharpFeaturePostProcess = exportDefaults.enableSharpFeaturePostProcess;
+        config.sharpFeatureAngleThreshold = exportDefaults.sharpFeatureAngleThreshold;
+        config.subdivisionIterations = exportDefaults.subdivisionIterations;
+        config.projectToSurface = exportDefaults.projectToSurface;
+        config.simplificationMethod = SimplificationMethod::None;
+        mesher.setConfig(config);
+
+        mesher.generateMesh();
+
+        auto const & mesh = mesher.getMesh();
+        ASSERT_FALSE(mesh.indices.empty());
+
+        MeshEdgeStats const stats = analyzeMeshEdges(mesh);
+        std::cout << "Wristsupport export-defaults (UltraFine hierarchical):" << std::endl;
+        std::cout << "  Vertices: " << mesh.positions.size() << std::endl;
+        std::cout << "  Triangles: " << (mesh.indices.size() / 3U) << std::endl;
+        std::cout << "  Open edges: " << stats.openEdges << std::endl;
+        std::cout << "  Non-manifold edges: " << stats.nonManifoldEdges << std::endl;
+
+        EXPECT_EQ(stats.openEdges, 0U) << "Wristsupport UltraFine hierarchical should be watertight";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Wristsupport UltraFine hierarchical should be manifold";
     }
 
     /// Test mesh generation with filamentholder model

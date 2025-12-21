@@ -15,6 +15,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <unistd.h>
 
 namespace gladius_tests
 {
@@ -44,8 +46,13 @@ namespace gladius_tests
             m_mesh->addFace(v1, v2, v3); // Right face
             m_mesh->addFace(v2, v0, v3); // Left face
 
-            // Create output directory for test files
-            m_outputDir = std::filesystem::temp_directory_path() / "gladius_color_tests";
+                        // Create a unique output directory for test files.
+                        // These gtests are also registered as individual CTest tests and may run in parallel.
+                        auto const * testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
+                        std::string const suffix =
+                            testInfo ? (std::string(testInfo->test_suite_name()) + "_" + testInfo->name()) : "unknown";
+                        m_outputDir = std::filesystem::temp_directory_path() /
+                                                 ("gladius_color_tests_" + std::to_string(static_cast<long>(::getpid())) + "_" + suffix);
             std::filesystem::create_directories(m_outputDir);
         }
 
@@ -231,7 +238,8 @@ namespace gladius_tests
         ASSERT_TRUE(colorGroupIterator->MoveNext());
 
         auto colorGroup = colorGroupIterator->GetCurrentColorGroup();
-        EXPECT_EQ(colorGroup->GetCount(), 4u); // 4 unique colors
+        // MeshWriter3mf reserves index 0 as a transparent placeholder color.
+        EXPECT_EQ(colorGroup->GetCount(), 5u); // 4 unique colors + placeholder
     }
 
     TEST_F(MeshWriter3mfColorTest, ExportMeshWithColors_DuplicateColorsAreDeduped)
@@ -258,7 +266,8 @@ namespace gladius_tests
         ASSERT_TRUE(colorGroupIterator->MoveNext());
 
         auto colorGroup = colorGroupIterator->GetCurrentColorGroup();
-        EXPECT_EQ(colorGroup->GetCount(), 2u); // Only 2 unique colors (red and blue)
+        // MeshWriter3mf reserves index 0 as a transparent placeholder color.
+        EXPECT_EQ(colorGroup->GetCount(), 3u); // 2 unique colors + placeholder
     }
 
     TEST_F(MeshWriter3mfColorTest, ExportMeshWithColors_MismatchedCountThrows)
