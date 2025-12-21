@@ -46,3 +46,4 @@ _CPack_Packages/*
 gladius/.serena/*
 gladius/debug.cl
 Testing/Temporary/*
+gladius/test_output.log
