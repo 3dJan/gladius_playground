@@ -397,6 +397,21 @@ namespace gladius::ui
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
+        // Detect completion of async file load and refresh editors to the new Assembly.
+        // (MainWindow::open() starts the async load; we defer resetEditorState() until loading finishes.)
+        if (m_computeAvailable && m_doc)
+        {
+            bool const loadingNow = m_doc->isLoadingInProgress();
+            if (m_deferEditorResetUntilLoadFinished && m_wasLoadingInProgress && !loadingNow)
+            {
+                resetEditorState();
+                m_renderWindow.invalidateViewDuetoModelUpdate();
+                m_renderWindow.centerView();
+                m_deferEditorResetUntilLoadFinished = false;
+            }
+            m_wasLoadingInProgress = loadingNow;
+        }
+
         // Check if welcome screen is visible first
         bool welcomeScreenVisible = m_welcomeScreen.isVisible();
 
@@ -843,9 +858,11 @@ namespace gladius::ui
         {
             m_currentAssemblyFileName = filename;
             m_welcomeScreen.hide();
+
+            // Defer editor reset until the new Assembly has been loaded.
+            m_deferEditorResetUntilLoadFinished = true;
             m_doc->loadNonBlocking(filename);
-            resetEditorState();
-            m_renderWindow.centerView();
+            m_wasLoadingInProgress = true;
             addToRecentFiles(filename);
             // Close the save-before-file-operation popup
             m_showSaveBeforeFileOperation = false;
@@ -1411,9 +1428,11 @@ namespace gladius::ui
 
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
+
+        // Defer editor reset until the new Assembly has been loaded.
+        m_deferEditorResetUntilLoadFinished = true;
         m_doc->loadNonBlocking(filename);
-        resetEditorState();
-        m_renderWindow.centerView();
+        m_wasLoadingInProgress = true;
 
         // Add to recent files list
         addToRecentFiles(filename);
@@ -1792,10 +1811,6 @@ namespace gladius::ui
                     {
                         const auto context =
                           std::make_shared<ComputeContext>(EnableGLOutput::enabled);
-                        context->setLogger(m_logger);
-                        gladius::setGlobalLogger(m_logger);
-                        context->setDebugOutputEnabled(m_openclDebugEnabled);
-                        if (!context->isValid())
                         {
                             throw OpenCLContextCreationError("Context invalid after retry");
                         }
@@ -1901,9 +1916,11 @@ namespace gladius::ui
                         // Direct file open (e.g., from recent files)
                         m_currentAssemblyFileName = m_pendingOpenFilename.value();
                         m_welcomeScreen.hide();
+
+                        // Defer editor reset until the new Assembly has been loaded.
+                        m_deferEditorResetUntilLoadFinished = true;
                         m_doc->loadNonBlocking(m_pendingOpenFilename.value());
-                        resetEditorState();
-                        m_renderWindow.centerView();
+                        m_wasLoadingInProgress = true;
                         addToRecentFiles(m_pendingOpenFilename.value());
                         return true;
                     }
@@ -2067,6 +2084,12 @@ namespace gladius::ui
 
     void MainWindow::updateModel()
     {
+        // Avoid touching document/compute state while a file is being loaded on a background thread.
+        if (m_doc && m_doc->isLoadingInProgress())
+        {
+            return;
+        }
+
         auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
 
         if (timeSinceLastUpdate <

@@ -254,6 +254,10 @@ namespace gladius::ui
         std::shared_ptr<Document> m_doc;
         events::SharedLogger m_logger;
 
+        // Async file loading coordination
+        bool m_wasLoadingInProgress{false};
+        bool m_deferEditorResetUntilLoadFinished{false};
+
         // Flag to remember if library browser was visible
         bool m_isLibraryBrowserVisible = false;
 
