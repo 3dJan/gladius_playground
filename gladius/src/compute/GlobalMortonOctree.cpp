@@ -1775,8 +1775,8 @@ namespace gladius::compute
         // Remove strictly degenerate triangles.
         //
         // NOTE: Be conservative here. Position/area-based filtering can remove very small but
-        // valid triangles at high depth and open cracks (boundary edges). We only drop triangles
-        // that are degenerate by index.
+        // topologically necessary triangles at high depth and open cracks (boundary edges).
+        // We only drop triangles that are degenerate by index.
         {
             std::vector<std::uint32_t> filtered;
             filtered.reserve(indices.size());
@@ -3095,6 +3095,9 @@ namespace gladius::compute
             bool const diag12Ok = (c.area12a >= MIN_AREA) && (c.area12b >= MIN_AREA);
             bool const diag03Ok = (c.area03a >= MIN_AREA) && (c.area03b >= MIN_AREA);
 
+            float const min12 = std::min(c.area12a, c.area12b);
+            float const min03 = std::min(c.area03a, c.area03b);
+
             bool useDiag12 = diag12Ok;
             if (!diag12Ok && diag03Ok)
             {
@@ -3102,7 +3105,13 @@ namespace gladius::compute
             }
             else if (diag12Ok && diag03Ok)
             {
-                useDiag12 = std::min(c.area12a, c.area12b) >= std::min(c.area03a, c.area03b);
+                useDiag12 = min12 >= min03;
+            }
+            else if (!diag12Ok && !diag03Ok)
+            {
+                // Neither diagonal is "good" by threshold, but we still must pick one.
+                // Choose the less-bad one (bigger minimum area) to minimize sliver facets.
+                useDiag12 = min12 >= min03;
             }
 
             // Hard rule: never pick a diagonal that equals any perimeter edge in the full quad set.
@@ -3116,6 +3125,10 @@ namespace gladius::compute
             auto const& chosen = useDiag12 ? c.diag12Tris : c.diag03Tris;
             float const chosenAreaA = useDiag12 ? c.area12a : c.area03a;
             float const chosenAreaB = useDiag12 ? c.area12b : c.area03b;
+
+            // Track near-degenerate quads for diagnostics, but never drop triangles here.
+            // Even very small triangles can be topologically required to keep the surface
+            // closed (dropping them creates boundary edges).
             if (chosenAreaA < MIN_AREA || chosenAreaB < MIN_AREA)
             {
                 ++halfDegenerateQuads;
