@@ -2,7 +2,9 @@
 #include "Profiling.h"
 #include "TimeMeasurement.h"
 #include "gpgpu.h"
+#include <algorithm>
 #include <boost/functional/hash.hpp>
+#include <cctype>
 #include <chrono>
 #include <cmrc/cmrc.hpp>
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #include <cstdlib>
@@ -726,7 +729,9 @@ namespace gladius
             }
 
             auto file = fs.open(resourceFilename);
-            m_staticSources.emplace_back(std::string(file.begin(), file.end()));
+            std::string content(file.begin(), file.end());
+
+            m_staticSources.emplace_back(std::move(content));
         }
 
         // Update combined sources for compatibility

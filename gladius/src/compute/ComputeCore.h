@@ -5,6 +5,7 @@
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
+#include <kernel/types.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>
@@ -18,8 +19,10 @@
 
 #include <compute/ProgramManager.h>
 
-#include <string_view>
+#include <array>
 #include <mutex>
+#include <optional>
+#include <string_view>
 
 namespace cl
 {
@@ -536,13 +539,20 @@ namespace gladius
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// Get the program manager for direct access to specialized programs
+        [[nodiscard]] ProgramManager & getProgramManager();
+        [[nodiscard]] ProgramManager const & getProgramManager() const;
+
       private:
         bool updateBoundingBoxFast();
+                [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
+                [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
         cl_int2 determineBufferSize(float2 pixelSize_mm) const;
         void reinitIfNecssary();
+        [[nodiscard]] bool requiresNanoVdbLocked() const;
 
         [[nodiscard]] int layerNumber() const;
 

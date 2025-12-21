@@ -706,6 +706,12 @@ namespace gladius::ui
 
     void ModelEditor::onCreateNode()
     {
+        // Block node creation during export
+        if (m_exportState != nullptr && m_exportState->isExportInProgress())
+        {
+            return;
+        }
+        
         // Re-introduce the node-editor creation block so the node-editor can
         // query new-node/link gestures. The implementation was unintentionally
         // removed in a refactor — this restores the behavior that opens the
@@ -765,6 +771,12 @@ namespace gladius::ui
 
     void ModelEditor::onDeleteNode()
     {
+        // Block node deletion during export
+        if (m_exportState != nullptr && m_exportState->isExportInProgress())
+        {
+            return;
+        }
+        
         if (ed::BeginDelete())
         {
             ed::NodeId deletedNodeId = 0;
@@ -1665,6 +1677,13 @@ namespace gladius::ui
         }
 
         m_outline.setDocument(m_doc);
+    }
+
+    void ModelEditor::setExportState(ExportState * state)
+    {
+        m_exportState = state;
+        m_resourceView.setExportState(state);
+        m_beamLatticeView.setExportState(state);
     }
 
     void ModelEditor::setAssembly(nodes::SharedAssembly assembly)

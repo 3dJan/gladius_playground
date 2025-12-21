@@ -1,17 +1,33 @@
 #pragma once
 
 #include "Document.h"
+#include "ExportState.h"
+#include "FileDialogService.h"
 
 namespace gladius::ui
 {
+    /// @brief Identifies async file dialog operations in ResourceView
+    enum class ResourceViewDialogOp
+    {
+        None,
+        ImportImageStack,
+        AddMesh
+    };
 
     class ResourceView
     {
       public:
         void render(SharedDocument document);
 
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state)
+        {
+            m_exportState = state;
+        }
+
       private:
-        void addMesh(SharedDocument document) const;
+        void addMesh(SharedDocument document);
+        void processAsyncFileDialog(SharedDocument document);
 
         /**
          * @brief Renders a dropdown for selecting a VolumeData resource for a mesh
@@ -39,5 +55,12 @@ namespace gladius::ui
         bool m_showStlToBeamLatticeDialog = false;
         std::string m_beamLatticeStlFilename;
         float m_beamDiameter = 1.0f;
+
+        // Async file dialog
+        AsyncFileDialog m_asyncFileDialog;
+        ResourceViewDialogOp m_asyncDialogOp{ResourceViewDialogOp::None};
+
+        // Export state for blocking UI modifications
+        ExportState * m_exportState{nullptr};
     };
 }

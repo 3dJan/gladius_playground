@@ -110,7 +110,7 @@ namespace gladius::nodes
                                    [&](auto & port)
                                    {
                                        return port.second->getUniqueName() ==
-                                              parameter.second.getSource().value().uniqueName; //
+                                              parameter.second.getSource().value().uniqueName;
                                    });
 
                     if (portIter == std::end(m_outPorts))

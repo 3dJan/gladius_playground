@@ -3,6 +3,7 @@
 #include "Buffer.h"
 #include "ImageRGBA.h"
 #include "ImageStackOCLBuffer.h"
+#include "kernel/types.h"
 #include "Primitives.h"
 #include "ResourceManager.h"
 

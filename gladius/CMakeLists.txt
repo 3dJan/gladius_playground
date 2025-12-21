@@ -251,6 +251,7 @@ configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
 configure_file(src/kernel/sdf.h src/kernel/sdf.h COPYONLY)
 configure_file(src/kernel/rendering.cl src/kernel/rendering.cl COPYONLY)
 configure_file(src/kernel/sdf_generator.cl src/kernel/sdf_generator.cl COPYONLY)
+configure_file(src/kernel/manifold_dual_contouring.cl src/kernel/manifold_dual_contouring.cl COPYONLY)
 
 # Copy CNanoVDB.h from vcpkg OpenVDB installation instead of using manually maintained copy
 find_path(NANOVDB_INCLUDE_DIR

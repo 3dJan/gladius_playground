@@ -21,6 +21,7 @@ namespace gladius::nodes
 {
 
     TypeRules operatorFunctionRules();
+    TypeRules multiplicationDivisionRules();
     TypeRules functionRules();
 
     TypeRules twoParameterFuncRules();
@@ -837,7 +838,7 @@ namespace gladius::nodes
             : CloneableABtoResult<Multiplication>(NodeName("Multiplication"), id, Category::Math)
         {
 
-            m_typeRules = operatorFunctionRules();
+            m_typeRules = multiplicationDivisionRules();
             applyTypeRule(m_typeRules.front());
 
             updateNodeIds();
@@ -885,7 +886,7 @@ namespace gladius::nodes
             : CloneableABtoResult<Division>(NodeName("Division"), id, Category::Math)
         {
 
-            m_typeRules = operatorFunctionRules();
+            m_typeRules = multiplicationDivisionRules();
             applyTypeRule(m_typeRules.front());
 
             updateNodeIds();

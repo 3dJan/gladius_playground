@@ -546,10 +546,10 @@ void kernel adoptVertexOfMeshToSurface(__global float4 * in, __global float4 * o
     int const index = get_global_id(0);
     float3 pos = in[index].xyz;
     float sdf = FLT_MAX;
-    float const step = 0.001f;
     float minDist = FLT_MAX;
     float3 bestPos = pos;
-    for (int i = 0; i < 1000; ++i)
+    
+    for (int i = 0; i < 100; ++i)
     {
         float3 const normal = surfaceNormalModelOnly(pos, PASS_PAYLOAD_ARGS).xyz;
         sdf = model(pos, PASS_PAYLOAD_ARGS).w;
@@ -558,8 +558,8 @@ void kernel adoptVertexOfMeshToSurface(__global float4 * in, __global float4 * o
             minDist = fabs(sdf);
             bestPos = pos;
         }
-        sdf = clamp(sdf, -0.01f, 0.01f);
-        sdf *= 0.01f;
+        sdf = clamp(sdf, -1.0f, 1.0f);
+        sdf *= 0.5f;
         pos = pos - normal * sdf;
     }
 

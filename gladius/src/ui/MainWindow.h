@@ -9,10 +9,11 @@
 #include "../Document.h"
 #include "AboutDialog.h"
 #include "CliExportDialog.h"
+#include "ExportState.h"
+#include "FileDialogService.h"
 #include "GLView.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
-#include "MeshExportDialog3mf.h"
 #include "ModelEditor.h"
 #include "Outline.h"
 #include "RenderWindow.h"
@@ -34,6 +35,24 @@ namespace gladius::ui
         None,
         NewModel,
         OpenFile
+    };
+
+    /// @brief Identifies which async file dialog operation is pending
+    enum class AsyncDialogOperation
+    {
+        None,
+        ExportCliCurrentLayer,
+        ExportCliSliced,
+        ExportSvgCurrentLayer,
+        ExportVdb,
+        ExportNvdb,
+        Import,
+        Open,
+        Merge,
+        SaveAs,
+        SaveCurrentFunction,
+        ImportImageStack,
+        OpenAfterSavePrompt  ///< Open dialog triggered from "save before opening" popup
     };
 
     class MainWindow
@@ -121,6 +140,24 @@ namespace gladius::ui
             return m_doc;
         }
 
+        /**
+         * @brief Get the export state for checking if export is in progress
+         * @return Reference to the export state
+         */
+        ExportState & getExportState()
+        {
+            return m_exportState;
+        }
+
+        /**
+         * @brief Get the export state (const version)
+         * @return Const reference to the export state
+         */
+        ExportState const & getExportState() const
+        {
+            return m_exportState;
+        }
+
       private:
         void render();
         void nodeEditor();
@@ -130,7 +167,6 @@ namespace gladius::ui
         void mainMenu();
         void sliceWindow();
         void meshExportDialog();
-        void meshExportDialog3mf();
         void cliExportDialog();
         void showExitPopUp();
         void showSaveBeforeFileOperationPopUp();
@@ -208,7 +244,6 @@ namespace gladius::ui
 
         bool m_showAuthoringTools{true};
         MeshExportDialog m_meshExporterDialog;
-        MeshExportDialog3mf m_meshExporterDialog3mf;
         CliExportDialog m_cliExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
@@ -261,5 +296,15 @@ namespace gladius::ui
 
         // Instance-level flag to propagate OpenCL debug verbosity to contexts we create
         bool m_openclDebugEnabled{false};
+
+        // Async file dialog for non-blocking file/directory selection
+        AsyncFileDialog m_asyncFileDialog;
+        AsyncDialogOperation m_asyncDialogOp{AsyncDialogOperation::None};
+
+        /// @brief Process async file dialog results and execute pending operations
+        void processAsyncFileDialog();
+
+        // Export state for blocking UI modifications during mesh export
+        ExportState m_exportState;
     };
 }

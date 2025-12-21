@@ -62,15 +62,26 @@ namespace gladius::io
     {
         auto const resX =
           generator.getResourceContext()->getDistanceMipMaps()[m_qualityLevel]->getWidth();
-        auto const width_mm = generator.getResourceContext()->getClippingArea().z -
-                              generator.getResourceContext()->getClippingArea().x;
+        auto const clippingArea = generator.getResourceContext()->getClippingArea();
+        auto const width_mm = clippingArea.z - clippingArea.x;
         auto const voxelSize = width_mm / static_cast<float>(resX);
 
         m_grid = openvdb::FloatGrid::create(m_bandwidth_mm);
         m_grid->setGridClass(openvdb::GRID_LEVEL_SET);
         m_grid->setName("SDF computed by gladius");
-        m_grid->setTransform(
-          openvdb::math::Transform::createLinearTransform(static_cast<double>(voxelSize)));
+        
+        // Create transform with scale and translation to world coordinates
+        // Grid coordinates (x,y) map to world coordinates:
+        // world_x = clippingArea.x + x * voxelSize
+        // world_y = clippingArea.y + y * voxelSize
+        // world_z = z * voxelSize (z is already computed as m_currentHeight_mm / voxelSize)
+        openvdb::math::Transform::Ptr transformation =
+          openvdb::math::Transform::createLinearTransform();
+        transformation->preScale(static_cast<double>(voxelSize));
+        transformation->postTranslate(openvdb::Vec3d{static_cast<double>(clippingArea.x),
+                                                     static_cast<double>(clippingArea.y),
+                                                     0.0});
+        m_grid->setTransform(transformation);
     }
 
     bool LayerBasedMeshExporter::processLayer(ComputeCore & generator)

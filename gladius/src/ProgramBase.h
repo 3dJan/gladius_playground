@@ -63,6 +63,7 @@ namespace gladius
 
         std::string m_modelKernel;
         bool m_isFirstBuild = true;
+        bool m_modelKernelChanged = false;  // Tracks if model kernel changed since last compile
 
         bool m_enableVdb = false;
 

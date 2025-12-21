@@ -14,6 +14,7 @@
 #include <set>
 #include <stack>
 #include <stdexcept>
+#include <typeindex>
 
 namespace gladius
 {
@@ -23,7 +24,7 @@ namespace gladius
     std::map<std::string, ArgumentType> ExpressionToGraphConverter::s_beginNodeArguments;
 
     // Track the current variable context for Begin node port resolution
-    thread_local std::string ExpressionToGraphConverter::s_currentVariableContext;
+    thread_local std::vector<std::string> ExpressionToGraphConverter::s_variableContextStack;
 
     nodes::NodeId ExpressionToGraphConverter::convertExpressionToGraph(
       std::string const & expression,
@@ -36,6 +37,7 @@ namespace gladius
         s_componentMap.clear();
         s_vectorDecomposeNodes.clear();
         s_beginNodeArguments.clear();
+        s_variableContextStack.clear();
 
         // Check for function call with component access BEFORE parser validation
         // because muParser doesn't understand this syntax
@@ -94,7 +96,7 @@ namespace gladius
             }
         }
 
-        // Debug: Check expression parsing
+        // Validate expression with the parser before building graph nodes
         bool parseResult = parser.parseExpression(expression);
         bool hasValid = parser.hasValidExpression();
 
@@ -119,7 +121,7 @@ namespace gladius
             // Use function arguments to create properly typed input nodes
             variableNodes = createArgumentNodes(arguments, model);
 
-            // Debug: Check if argument nodes were created
+            // Ensure argument nodes were created successfully
             if (variableNodes.empty())
             {
                 return 0;
@@ -137,7 +139,7 @@ namespace gladius
         // Parse the expression and build the graph
         nodes::NodeId result = parseAndBuildGraph(expression, model, variableNodes);
 
-        // Debug: Check if parseAndBuildGraph succeeded
+        // Ensure parseAndBuildGraph produced a valid node
         if (result == 0)
         {
             // parseAndBuildGraph failed
@@ -390,7 +392,7 @@ namespace gladius
         if (varIt != variableNodes.end())
         {
             // Set the current variable context for Begin node port resolution
-            s_currentVariableContext = cleanExpr;
+            s_variableContextStack.push_back(cleanExpr);
             return varIt->second;
         }
 
@@ -768,11 +770,11 @@ namespace gladius
         // Check if this is a Begin node - if so, use the current variable context
         if (dynamic_cast<nodes::Begin *>(node) != nullptr)
         {
-            if (!s_currentVariableContext.empty())
+            if (!s_variableContextStack.empty())
             {
                 // Clear the context after use
-                std::string context = s_currentVariableContext;
-                s_currentVariableContext.clear();
+                std::string context = s_variableContextStack.back();
+                s_variableContextStack.pop_back();
                 return context; // Return the argument name as the port name
             }
             return nodes::FieldNames::Value; // Fallback
@@ -954,7 +956,7 @@ namespace gladius
             // For Begin nodes, set the context so getOutputPortName knows which argument to use
             if (isBeginNode)
             {
-                s_currentVariableContext = argName;
+                s_variableContextStack.push_back(argName);
             }
 
             if (!connectNodes(model,
@@ -1100,81 +1102,38 @@ namespace gladius
     bool ExpressionToGraphConverter::validateOutputType(nodes::Model & model,
                                                         nodes::NodeId resultNodeId,
                                                         ArgumentType expectedType)
-    {
-        auto nodeOpt = model.getNode(resultNodeId);
-        if (!nodeOpt.has_value())
         {
-            return false; // Node not found
-        }
-
-        nodes::NodeBase * node = nodeOpt.value();
-        std::string nodeTypeName = node->name();
-
-        // Determine the type of the result node
-        bool isVectorResult = false;
-        bool isScalarResult = false;
-
-        // Check for vector-producing nodes
-        if (nodeTypeName.find("ConstantVector") != std::string::npos ||
-            nodeTypeName.find("VectorCompose") != std::string::npos)
-        {
-            isVectorResult = true;
-        }
-        // Check for scalar-producing nodes
-        else if (nodeTypeName.find("ConstantScalar") != std::string::npos ||
-                 nodeTypeName.find("DecomposeVector") != std::string::npos)
-        {
-            isScalarResult = true;
-        }
-        // Math operation nodes can produce either scalar or vector results
-        // depending on their inputs - for now, be permissive
-        else if (nodeTypeName.find("Addition") != std::string::npos ||
-                 nodeTypeName.find("Subtraction") != std::string::npos ||
-                 nodeTypeName.find("Multiplication") != std::string::npos ||
-                 nodeTypeName.find("Division") != std::string::npos ||
-                 nodeTypeName.find("Sine") != std::string::npos ||
-                 nodeTypeName.find("Cosine") != std::string::npos ||
-                 nodeTypeName.find("Tangent") != std::string::npos ||
-                 nodeTypeName.find("Exp") != std::string::npos ||
-                 nodeTypeName.find("Log") != std::string::npos ||
-                 nodeTypeName.find("Sqrt") != std::string::npos ||
-                 nodeTypeName.find("Arc") != std::string::npos ||
-                 nodeTypeName.find("Clamp") != std::string::npos ||
-                 nodeTypeName == "Input") // Begin node outputs can be scalar or vector
-        {
-            // For Begin node, check the actual argument type
-            if (nodeTypeName == "Input")
+            auto nodeOpt = model.getNode(resultNodeId);
+            if (!nodeOpt.has_value())
             {
-                // This is a Begin node, check if we have argument type information
-                // For now, we'll be more permissive and allow it
-                return true;
+                return false; // Node not found
             }
 
-            // For math operations, allow both scalar and vector outputs
-            // The actual behavior depends on the inputs - if inputs are vectors,
-            // the operation should be element-wise and produce vectors
-            isVectorResult = (expectedType == ArgumentType::Vector);
-            isScalarResult = (expectedType == ArgumentType::Scalar);
-        }
-        else
-        {
-            // For other unknown nodes, be permissive and allow the expected type
-            isVectorResult = (expectedType == ArgumentType::Vector);
-            isScalarResult = (expectedType == ArgumentType::Scalar);
-        }
+            nodes::NodeBase * node = nodeOpt.value();
+            std::string const outputPortName = getOutputPortName(model, resultNodeId);
+            nodes::Port * outputPort = node->findOutputPort(outputPortName);
+            if (outputPort == nullptr)
+            {
+                return false; // Unable to determine output port
+            }
 
-        // Validate type compatibility
-        if (expectedType == ArgumentType::Scalar && !isScalarResult)
-        {
-            return false; // Expected scalar but got vector
-        }
-        if (expectedType == ArgumentType::Vector && !isVectorResult)
-        {
-            return false; // Expected vector but got scalar
-        }
+            std::type_index const portType = outputPort->getTypeIndex();
+            ArgumentType actualType = ArgumentType::Scalar;
+            if (portType == std::type_index(typeid(nodes::float3)))
+            {
+                actualType = ArgumentType::Vector;
+            }
 
-        return true;
-    }
+            // If the caller explicitly expects a vector but the expression produces a scalar,
+            // treat this as an error. Otherwise allow the conversion and let downstream logic
+            // adapt the End node to the actual output type.
+            if (expectedType == ArgumentType::Vector && actualType != ArgumentType::Vector)
+            {
+                return false;
+            }
+
+            return true;
+        }
 
     bool ExpressionToGraphConverter::connectToEndNode(nodes::Model & model,
                                                       nodes::NodeId resultNodeId,
@@ -1193,20 +1152,46 @@ namespace gladius
             }
         }
 
-        // Add the output parameter to the End node
-        if (output.type == ArgumentType::Scalar)
+        // Inspect the result node output type to determine the correct End node parameter
+        auto resultNodeOpt = model.getNode(resultNodeId);
+        if (!resultNodeOpt.has_value())
         {
-            nodes::VariantParameter parameter(float{0.0f});
-            model.addFunctionOutput(output.name, parameter);
+            return false;
         }
-        else if (output.type == ArgumentType::Vector)
+
+        nodes::NodeBase * resultNode = resultNodeOpt.value();
+        std::string resultPortName = getOutputPortName(model, resultNodeId);
+        nodes::Port * resultPort = resultNode->findOutputPort(resultPortName);
+        if (resultPort == nullptr)
+        {
+            return false;
+        }
+
+        ArgumentType actualType = ArgumentType::Scalar;
+        std::type_index const resultType = resultPort->getTypeIndex();
+        if (resultType == std::type_index(typeid(nodes::float3)))
+        {
+            actualType = ArgumentType::Vector;
+        }
+
+        ArgumentType parameterType = output.type;
+        if (parameterType != actualType)
+        {
+            parameterType = actualType;
+        }
+
+        if (parameterType == ArgumentType::Vector)
         {
             nodes::VariantParameter parameter(nodes::float3{0.0f, 0.0f, 0.0f});
             model.addFunctionOutput(output.name, parameter);
         }
+        else
+        {
+            nodes::VariantParameter parameter(float{0.0f});
+            model.addFunctionOutput(output.name, parameter);
+        }
 
         // Connect the result node to the End node's input parameter
-        std::string resultPortName = getOutputPortName(model, resultNodeId);
         return connectNodes(model, resultNodeId, resultPortName, endNode->getId(), output.name);
     }
 

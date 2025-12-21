@@ -6,6 +6,10 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <vector>
+#include <atomic>
+#include <iosfwd>
 
 #include "EventLogger.h"
 
@@ -45,8 +49,10 @@ namespace gladius
         bool correctlyRoundedDivedSqrt{false};
         bool cpu{false};
         bool gpu{false};
+        bool rusticl{false};
         double performanceEstimation{}; // very rough estimation: number of compute units times max
                                         // clock frequency
+        bool imageSupport{false};
         OpenCLVersion openCLVersion{1.0};
     };
 
@@ -87,6 +93,12 @@ namespace gladius
         [[nodiscard]] bool isValid() const;
 
         [[nodiscard]] const cl::Device & GetDevice() const;
+
+        [[nodiscard]] Capabilities const & getCapabilities() const;
+
+        [[nodiscard]] bool supportsFp64() const;
+
+        [[nodiscard]] bool hasImageSupport() const;
 
         // Logger injection
         void setLogger(events::SharedLogger logger)
@@ -211,6 +223,7 @@ namespace gladius
         mutable std::mutex m_queuesMutex;
 
         cl::Device m_device;
+        Capabilities m_capabilities{};
 
         bool m_isValid = false;
         EnableGLOutput m_outputGL = EnableGLOutput::disabled;

@@ -1,0 +1,1226 @@
+#include "MeshSimplification.h"
+
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace gladius::compute
+{
+    // ============================================================================
+    // Quadric Implementation
+    // ============================================================================
+
+    Quadric Quadric::fromPlane(Eigen::Vector3f const & normal, float d)
+    {
+        // Plane equation: n.x * x + n.y * y + n.z * z + d = 0
+        // Quadric matrix: p * p^T where p = [n.x, n.y, n.z, d]
+        Quadric q;
+        float const a = normal.x();
+        float const b = normal.y();
+        float const c = normal.z();
+
+        // Row 0: [a*a, a*b, a*c, a*d]
+        q.data[0] = a * a;
+        q.data[1] = a * b;
+        q.data[2] = a * c;
+        q.data[3] = a * d;
+
+        // Row 1: [    b*b, b*c, b*d]
+        q.data[4] = b * b;
+        q.data[5] = b * c;
+        q.data[6] = b * d;
+
+        // Row 2: [        c*c, c*d]
+        q.data[7] = c * c;
+        q.data[8] = c * d;
+
+        // Row 3: [            d*d]
+        q.data[9] = d * d;
+
+        return q;
+    }
+
+    Quadric Quadric::fromTriangle(Eigen::Vector3f const & v0,
+                                   Eigen::Vector3f const & v1,
+                                   Eigen::Vector3f const & v2)
+    {
+        Eigen::Vector3f const edge1 = v1 - v0;
+        Eigen::Vector3f const edge2 = v2 - v0;
+        Eigen::Vector3f normal = edge1.cross(edge2);
+
+        float const length = normal.norm();
+        if (length < 1e-10F)
+        {
+            // Degenerate triangle - return zero quadric
+            return Quadric{};
+        }
+
+        normal /= length;
+        float const d = -normal.dot(v0);
+
+        return fromPlane(normal, d);
+    }
+
+    Quadric & Quadric::operator+=(Quadric const & other)
+    {
+        for (int i = 0; i < 10; ++i)
+        {
+            data[i] += other.data[i];
+        }
+        return *this;
+    }
+
+    Quadric Quadric::operator+(Quadric const & other) const
+    {
+        Quadric result = *this;
+        result += other;
+        return result;
+    }
+
+    float Quadric::evaluate(Eigen::Vector3f const & v) const
+    {
+        // Compute v^T * Q * v for homogeneous coordinates [v.x, v.y, v.z, 1]
+        // Q is symmetric 4x4 matrix stored as upper triangle
+        //
+        // Full expansion:
+        // data[0]*x*x + 2*data[1]*x*y + 2*data[2]*x*z + 2*data[3]*x +
+        // data[4]*y*y + 2*data[5]*y*z + 2*data[6]*y +
+        // data[7]*z*z + 2*data[8]*z +
+        // data[9]
+
+        float const x = v.x();
+        float const y = v.y();
+        float const z = v.z();
+
+        return data[0] * x * x + 2.0F * data[1] * x * y + 2.0F * data[2] * x * z +
+               2.0F * data[3] * x + data[4] * y * y + 2.0F * data[5] * y * z +
+               2.0F * data[6] * y + data[7] * z * z + 2.0F * data[8] * z + data[9];
+    }
+
+    std::optional<Eigen::Vector3f> Quadric::optimalVertex() const
+    {
+        // Find v that minimizes v^T * Q * v
+        // Taking derivative and setting to zero: A * v = -b
+        // where A is 3x3 top-left block and b is top-right 3x1 column
+
+        Eigen::Matrix3f A = getA();
+        Eigen::Vector3f b = getB();
+
+        // Use SVD for numerical stability with potentially singular matrices
+        Eigen::JacobiSVD<Eigen::Matrix3f> svd(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+
+        // Check condition number
+        auto const & singularValues = svd.singularValues();
+        if (singularValues(0) < 1e-10F)
+        {
+            // Matrix is essentially zero - no valid solution
+            return std::nullopt;
+        }
+
+        float const conditionNumber = singularValues(0) / singularValues(2);
+        if (conditionNumber > 1e6F)
+        {
+            // Matrix is too ill-conditioned
+            return std::nullopt;
+        }
+
+        Eigen::Vector3f const solution = svd.solve(-b);
+        return solution;
+    }
+
+    Eigen::Matrix3f Quadric::getA() const
+    {
+        Eigen::Matrix3f A;
+        A(0, 0) = data[0];
+        A(0, 1) = data[1];
+        A(0, 2) = data[2];
+        A(1, 0) = data[1];
+        A(1, 1) = data[4];
+        A(1, 2) = data[5];
+        A(2, 0) = data[2];
+        A(2, 1) = data[5];
+        A(2, 2) = data[7];
+        return A;
+    }
+
+    Eigen::Vector3f Quadric::getB() const
+    {
+        return Eigen::Vector3f(data[3], data[6], data[8]);
+    }
+
+    float Quadric::getC() const
+    {
+        return data[9];
+    }
+
+    void Quadric::reset()
+    {
+        for (int i = 0; i < 10; ++i)
+        {
+            data[i] = 0.0F;
+        }
+    }
+
+    // ============================================================================
+    // QemMeshSimplifier Implementation
+    // ============================================================================
+
+    void QemMeshSimplifier::setConfig(QemSimplificationConfig const & config)
+    {
+        m_config = config;
+    }
+
+    void QemMeshSimplifier::setGpuSdfEvaluator(GpuSdfEvaluator evaluator)
+    {
+        m_gpuSdfEvaluator = std::move(evaluator);
+    }
+
+    void QemMeshSimplifier::setGpuSdfGradientEvaluator(GpuSdfGradientEvaluator evaluator)
+    {
+        m_gpuSdfGradientEvaluator = std::move(evaluator);
+    }
+
+    void QemMeshSimplifier::setProgressCallback(SimplificationProgressCallback callback)
+    {
+        m_progressCallback = std::move(callback);
+    }
+
+    void QemMeshSimplifier::buildVertexQuadrics(std::vector<Eigen::Vector3f> const & positions,
+                                                 std::vector<std::uint32_t> const & indices)
+    {
+        m_vertexQuadrics.clear();
+        m_vertexQuadrics.resize(positions.size());
+
+        std::size_t const numTriangles = indices.size() / 3;
+        for (std::size_t t = 0; t < numTriangles; ++t)
+        {
+            std::uint32_t const i0 = indices[t * 3 + 0];
+            std::uint32_t const i1 = indices[t * 3 + 1];
+            std::uint32_t const i2 = indices[t * 3 + 2];
+
+            // Skip degenerate triangles
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+
+            Quadric const triQuadric =
+                Quadric::fromTriangle(positions[i0], positions[i1], positions[i2]);
+
+            m_vertexQuadrics[i0] += triQuadric;
+            m_vertexQuadrics[i1] += triQuadric;
+            m_vertexQuadrics[i2] += triQuadric;
+        }
+    }
+
+    void QemMeshSimplifier::recalculateVertexQuadric(
+        std::uint32_t vertexIndex,
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<std::uint32_t> const & indices,
+        std::vector<std::vector<std::size_t>> const & vertexToTriangles)
+    {
+        m_vertexQuadrics[vertexIndex].reset();
+
+        for (std::size_t triIndex : vertexToTriangles[vertexIndex])
+        {
+            std::uint32_t const i0 = indices[triIndex * 3 + 0];
+            std::uint32_t const i1 = indices[triIndex * 3 + 1];
+            std::uint32_t const i2 = indices[triIndex * 3 + 2];
+
+            // Skip degenerate triangles
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+
+            Quadric const triQuadric =
+                Quadric::fromTriangle(positions[i0], positions[i1], positions[i2]);
+
+            m_vertexQuadrics[vertexIndex] += triQuadric;
+        }
+    }
+
+    std::vector<CollapseCandidate> QemMeshSimplifier::collectCandidates(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<Eigen::Vector3f> const & normals,
+        std::vector<std::uint32_t> const & indices) const
+    {
+        // Build edge map: edge -> list of triangles that use it
+        struct EdgeHash
+        {
+            std::size_t operator()(std::pair<std::uint32_t, std::uint32_t> const & e) const
+            {
+                return std::hash<std::uint64_t>{}(
+                    static_cast<std::uint64_t>(e.first) << 32U | e.second);
+            }
+        };
+
+        std::unordered_map<std::pair<std::uint32_t, std::uint32_t>,
+                           std::vector<std::size_t>,
+                           EdgeHash>
+            edgeToTriangles;
+
+        std::size_t const numTriangles = indices.size() / 3;
+        for (std::size_t t = 0; t < numTriangles; ++t)
+        {
+            std::uint32_t const i0 = indices[t * 3 + 0];
+            std::uint32_t const i1 = indices[t * 3 + 1];
+            std::uint32_t const i2 = indices[t * 3 + 2];
+
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+
+            auto addEdge = [&](std::uint32_t a, std::uint32_t b)
+            {
+                auto const edge = std::minmax(a, b);
+                edgeToTriangles[edge].push_back(t);
+            };
+
+            addEdge(i0, i1);
+            addEdge(i1, i2);
+            addEdge(i2, i0);
+        }
+
+        std::vector<CollapseCandidate> candidates;
+        candidates.reserve(edgeToTriangles.size());
+
+        for (auto const & [edge, triangles] : edgeToTriangles)
+        {
+            CollapseCandidate candidate;
+            candidate.vertexA = edge.first;
+            candidate.vertexB = edge.second;
+
+            // Compute edge length
+            candidate.edgeLength = (positions[candidate.vertexA] - positions[candidate.vertexB]).norm();
+
+            // Boundary edge: only 1 adjacent triangle
+            candidate.isBoundaryEdge = (triangles.size() == 1);
+
+            // Sharp feature detection: check angle between adjacent triangle normals
+            // Also collect neighbor vertices to compute neighbor edge lengths
+            std::unordered_set<std::uint32_t> neighborVertices;
+            if (triangles.size() == 2)
+            {
+                auto computeTriangleNormal = [&](std::size_t triIdx) -> Eigen::Vector3f
+                {
+                    std::uint32_t const ti0 = indices[triIdx * 3 + 0];
+                    std::uint32_t const ti1 = indices[triIdx * 3 + 1];
+                    std::uint32_t const ti2 = indices[triIdx * 3 + 2];
+                    Eigen::Vector3f const e1 = positions[ti1] - positions[ti0];
+                    Eigen::Vector3f const e2 = positions[ti2] - positions[ti0];
+                    return e1.cross(e2).normalized();
+                };
+
+                Eigen::Vector3f const n0 = computeTriangleNormal(triangles[0]);
+                Eigen::Vector3f const n1 = computeTriangleNormal(triangles[1]);
+                float const normalDot = n0.dot(n1);
+
+                candidate.isSharpFeatureEdge = (normalDot < m_config.sharpEdgeAngleThreshold);
+                
+                // Collect vertices from adjacent triangles (excluding edge vertices)
+                for (std::size_t triIdx : triangles)
+                {
+                    for (std::size_t vi = 0; vi < 3; ++vi)
+                    {
+                        std::uint32_t const v = indices[triIdx * 3 + vi];
+                        if (v != candidate.vertexA && v != candidate.vertexB)
+                        {
+                            neighborVertices.insert(v);
+                        }
+                    }
+                }
+            }
+            
+            // Compute max neighbor edge length (edges from target position to neighbor vertices)
+            // This helps detect if collapsing would create unusually long edges
+            candidate.maxNeighborEdgeLength = candidate.edgeLength;
+            for (std::uint32_t neighborV : neighborVertices)
+            {
+                float const neighborEdgeLen = (positions[neighborV] - positions[candidate.vertexA]).norm();
+                candidate.maxNeighborEdgeLength = std::max(candidate.maxNeighborEdgeLength, neighborEdgeLen);
+                float const neighborEdgeLen2 = (positions[neighborV] - positions[candidate.vertexB]).norm();
+                candidate.maxNeighborEdgeLength = std::max(candidate.maxNeighborEdgeLength, neighborEdgeLen2);
+            }
+
+            // Compute combined quadric for edge
+            Quadric const combinedQuadric =
+                m_vertexQuadrics[candidate.vertexA] + m_vertexQuadrics[candidate.vertexB];
+
+            // Compute edge midpoint as fallback/baseline
+            Eigen::Vector3f const edgeMidpoint =
+                (positions[candidate.vertexA] + positions[candidate.vertexB]) * 0.5F;
+            
+            // Find optimal target position from QEM
+            auto optimalPos = combinedQuadric.optimalVertex();
+            if (optimalPos.has_value())
+            {
+                Eigen::Vector3f const qemPos = optimalPos.value();
+                
+                // Check if QEM position is too far from edge midpoint
+                // This prevents placing vertices far from the original surface
+                float const qemDistance = (qemPos - edgeMidpoint).norm();
+                
+                // If QEM position is more than half the edge length away from midpoint,
+                // use midpoint instead (QEM is likely ill-conditioned or placing vertex off-surface)
+                if (qemDistance < candidate.edgeLength * 0.5F)
+                {
+                    candidate.targetPosition = qemPos;
+                }
+                else
+                {
+                    // QEM is pulling vertex too far - use midpoint for stability
+                    candidate.targetPosition = edgeMidpoint;
+                }
+            }
+            else
+            {
+                // Fall back to edge midpoint
+                candidate.targetPosition = edgeMidpoint;
+            }
+
+            // Compute QEM error at target position
+            candidate.qemError = combinedQuadric.evaluate(candidate.targetPosition);
+
+            // SDF error and normal deviation will be filled in by GPU evaluation
+            candidate.sdfError = 0.0F;
+            candidate.edgeSdfError = 0.0F;
+            candidate.normalDeviation = 0.0F;
+
+            candidates.push_back(candidate);
+        }
+
+        return candidates;
+    }
+
+    void QemMeshSimplifier::evaluateSdfErrorsGpu(
+        std::vector<CollapseCandidate> & candidates,
+        std::vector<Eigen::Vector3f> const & meshPositions,
+        std::vector<std::uint32_t> const & indices,
+        std::vector<std::vector<std::size_t>> const & vertexToTriangles)
+    {
+        if (!m_gpuSdfEvaluator || candidates.empty())
+        {
+            return;
+        }
+
+        // Multi-point SDF sampling along edges for better curved surface handling
+        std::size_t const sampleCount = std::max(std::size_t{1}, m_config.edgeSdfSampleCount);
+        
+        // Process in batches, accounting for multiple samples per edge
+        for (std::size_t batchStart = 0; batchStart < candidates.size();
+             batchStart += m_config.batchSize)
+        {
+            std::size_t const batchEnd =
+                std::min(batchStart + m_config.batchSize, candidates.size());
+            std::size_t const batchSize = batchEnd - batchStart;
+
+            // Collect all sample positions for this batch
+            // For each edge: target position + (sampleCount-1) points along edge
+            std::vector<Eigen::Vector3f> positions;
+            positions.reserve(batchSize * sampleCount);
+            
+            for (std::size_t i = batchStart; i < batchEnd; ++i)
+            {
+                auto const & candidate = candidates[i];
+                
+                // Always include target position first
+                positions.push_back(candidate.targetPosition);
+                
+                // Sample points along the original edge (before collapse)
+                // These detect if the edge cuts through high curvature areas
+                if (sampleCount > 1)
+                {
+                    Eigen::Vector3f const & posA = meshPositions[candidate.vertexA];
+                    Eigen::Vector3f const & posB = meshPositions[candidate.vertexB];
+                    
+                    for (std::size_t s = 1; s < sampleCount; ++s)
+                    {
+                        float const t = static_cast<float>(s) / static_cast<float>(sampleCount);
+                        Eigen::Vector3f const samplePos = posA + t * (posB - posA);
+                        positions.push_back(samplePos);
+                    }
+                }
+            }
+
+            // Evaluate SDF on GPU for all sample points
+            std::vector<float> sdfValues = m_gpuSdfEvaluator(positions);
+
+            // Process results: target SDF and max edge deviation
+            std::size_t sampleIdx = 0;
+            for (std::size_t i = batchStart; i < batchEnd; ++i)
+            {
+                // First sample is target position
+                candidates[i].sdfError = std::abs(sdfValues[sampleIdx++]);
+                
+                // Remaining samples are along the edge - find max deviation
+                float maxEdgeSdf = 0.0F;
+                for (std::size_t s = 1; s < sampleCount; ++s)
+                {
+                    maxEdgeSdf = std::max(maxEdgeSdf, std::abs(sdfValues[sampleIdx++]));
+                }
+                candidates[i].edgeSdfError = maxEdgeSdf;
+            }
+        }
+
+        // Evaluate normal deviation if gradient evaluator is available
+        if (m_gpuSdfGradientEvaluator && m_config.normalDeviationWeight > 0.0F)
+        {
+            // For each candidate, compute the maximum normal deviation for affected triangles
+            // after the collapse. We evaluate SDF gradients at triangle centroids.
+            
+            for (auto & candidate : candidates)
+            {
+                std::uint32_t const vA = candidate.vertexA;
+                std::uint32_t const vB = candidate.vertexB;
+                Eigen::Vector3f const & newPos = candidate.targetPosition;
+                
+                // Collect triangles that will be modified (not removed) by this collapse
+                std::vector<std::size_t> affectedTriangles;
+                std::unordered_set<std::size_t> allTriangles;
+                
+                for (std::size_t t : vertexToTriangles[vA])
+                {
+                    allTriangles.insert(t);
+                }
+                for (std::size_t t : vertexToTriangles[vB])
+                {
+                    allTriangles.insert(t);
+                }
+                
+                for (std::size_t triIdx : allTriangles)
+                {
+                    std::uint32_t const i0 = indices[triIdx * 3 + 0];
+                    std::uint32_t const i1 = indices[triIdx * 3 + 1];
+                    std::uint32_t const i2 = indices[triIdx * 3 + 2];
+                    
+                    // Check if triangle will be removed (contains both vertices)
+                    bool const hasA = (i0 == vA || i1 == vA || i2 == vA);
+                    bool const hasB = (i0 == vB || i1 == vB || i2 == vB);
+                    
+                    if (hasA && hasB)
+                    {
+                        continue;  // Triangle will be removed
+                    }
+                    
+                    if (hasA || hasB)
+                    {
+                        affectedTriangles.push_back(triIdx);
+                    }
+                }
+                
+                if (affectedTriangles.empty())
+                {
+                    candidate.normalDeviation = 0.0F;
+                    continue;
+                }
+                
+                // Compute centroids of affected triangles after collapse
+                std::vector<Eigen::Vector3f> centroids;
+                std::vector<Eigen::Vector3f> triangleNormals;
+                centroids.reserve(affectedTriangles.size());
+                triangleNormals.reserve(affectedTriangles.size());
+                
+                for (std::size_t triIdx : affectedTriangles)
+                {
+                    std::uint32_t const i0 = indices[triIdx * 3 + 0];
+                    std::uint32_t const i1 = indices[triIdx * 3 + 1];
+                    std::uint32_t const i2 = indices[triIdx * 3 + 2];
+                    
+                    // Get positions after collapse
+                    auto getPos = [&](std::uint32_t idx) -> Eigen::Vector3f
+                    {
+                        if (idx == vA || idx == vB)
+                        {
+                            return newPos;
+                        }
+                        return meshPositions[idx];
+                    };
+                    
+                    Eigen::Vector3f const p0 = getPos(i0);
+                    Eigen::Vector3f const p1 = getPos(i1);
+                    Eigen::Vector3f const p2 = getPos(i2);
+                    
+                    // Compute centroid
+                    Eigen::Vector3f const centroid = (p0 + p1 + p2) / 3.0F;
+                    centroids.push_back(centroid);
+                    
+                    // Compute triangle normal
+                    Eigen::Vector3f const triNormal = (p1 - p0).cross(p2 - p0).normalized();
+                    triangleNormals.push_back(triNormal);
+                }
+                
+                // Evaluate SDF gradients at centroids
+                std::vector<Eigen::Vector3f> sdfNormals = m_gpuSdfGradientEvaluator(centroids);
+                
+                // Compute maximum normal deviation
+                float maxDeviation = 0.0F;
+                for (std::size_t i = 0; i < centroids.size(); ++i)
+                {
+                    float const dotProduct = std::abs(triangleNormals[i].dot(sdfNormals[i]));
+                    float const deviation = 1.0F - dotProduct;  // 0 = perfect alignment, 1 = perpendicular
+                    maxDeviation = std::max(maxDeviation, deviation);
+                }
+                
+                candidate.normalDeviation = maxDeviation;
+            }
+        }
+
+        // Compute combined error for all candidates
+        // Also collect statistics for debugging
+        std::size_t rejectedBySdf = 0;
+        std::size_t rejectedByEdgeSdf = 0;
+        std::size_t rejectedByQem = 0;
+        std::size_t rejectedByNormal = 0;
+        std::size_t rejectedByBoundary = 0;
+        std::size_t rejectedByEdgeLength = 0;
+        
+        for (auto & candidate : candidates)
+        {
+            // Count rejection reasons (for debugging)
+            if (candidate.sdfError > m_config.maxSdfError)
+            {
+                ++rejectedBySdf;
+            }
+            if (candidate.edgeSdfError > m_config.maxSdfError)
+            {
+                ++rejectedByEdgeSdf;
+            }
+            if (candidate.qemError > m_config.maxQemError)
+            {
+                ++rejectedByQem;
+            }
+            if (candidate.normalDeviation > m_config.maxNormalDeviation)
+            {
+                ++rejectedByNormal;
+            }
+            if (candidate.isBoundaryEdge)
+            {
+                ++rejectedByBoundary;
+            }
+            
+            // Check edge length constraint: would collapse create edges much longer than neighbors?
+            // After collapse, edges from target to neighbor vertices shouldn't be too long
+            float edgeLengthPenalty = 0.0F;
+            if (candidate.maxNeighborEdgeLength > 0.0F)
+            {
+                // Compute average neighbor edge length as reference
+                float const avgNeighborLen = candidate.maxNeighborEdgeLength;
+                
+                // New edges will be from targetPosition to each neighbor vertex
+                // The max such length is approximately: distance(target, farthest neighbor)
+                // For now, use a heuristic: if edge being collapsed is very short compared to neighbors,
+                // collapsing is good. If it's already long, be more careful.
+                float const edgeLengthRatio = candidate.edgeLength / avgNeighborLen;
+                
+                // Penalize collapsing already-long edges (they span larger areas)
+                if (edgeLengthRatio > m_config.maxEdgeLengthRatio)
+                {
+                    edgeLengthPenalty = (edgeLengthRatio - m_config.maxEdgeLengthRatio) * 0.5F;
+                    ++rejectedByEdgeLength;
+                }
+            }
+            
+            float error = candidate.sdfError * m_config.sdfErrorWeight +
+                          candidate.edgeSdfError * m_config.edgeSdfErrorWeight +
+                          candidate.qemError * m_config.qemErrorWeight +
+                          candidate.normalDeviation * m_config.normalDeviationWeight +
+                          edgeLengthPenalty;
+
+            // Apply penalties for special edges
+            if (candidate.isBoundaryEdge)
+            {
+                error *= m_config.boundaryEdgeLockFactor;
+            }
+            if (candidate.isSharpFeatureEdge)
+            {
+                error *= 10.0F; // Significant penalty but not absolute lock
+            }
+
+            candidate.combinedError = error;
+        }
+        
+        std::cout << "Candidate rejection stats (of " << candidates.size() << " total):" << std::endl;
+        std::cout << "  SDF error > " << m_config.maxSdfError << ": " << rejectedBySdf << std::endl;
+        std::cout << "  Edge SDF error > " << m_config.maxSdfError << ": " << rejectedByEdgeSdf << std::endl;
+        std::cout << "  Edge length ratio > " << m_config.maxEdgeLengthRatio << ": " << rejectedByEdgeLength << std::endl;
+        std::cout << "  QEM error > " << m_config.maxQemError << ": " << rejectedByQem << std::endl;
+        std::cout << "  Normal deviation > " << m_config.maxNormalDeviation << ": " << rejectedByNormal << std::endl;
+        std::cout << "  Boundary edges: " << rejectedByBoundary << std::endl;
+    }
+
+    bool QemMeshSimplifier::wouldCreateDegenerateTriangles(
+        CollapseCandidate const & candidate,
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<std::uint32_t> const & indices,
+        std::vector<std::vector<std::size_t>> const & vertexToTriangles) const
+    {
+        std::uint32_t const vA = candidate.vertexA;
+        std::uint32_t const vB = candidate.vertexB;
+        Eigen::Vector3f const & newPos = candidate.targetPosition;
+
+        // Check all triangles incident to either vertex
+        std::unordered_set<std::size_t> trianglesToCheck;
+        for (std::size_t t : vertexToTriangles[vA])
+        {
+            trianglesToCheck.insert(t);
+        }
+        for (std::size_t t : vertexToTriangles[vB])
+        {
+            trianglesToCheck.insert(t);
+        }
+
+        // Minimum normal preservation threshold (cos of max allowed angle deviation)
+        // PrusaSlicer uses 0.2 (~80 degrees), but we use a more conservative value
+        // to prevent visible normal discontinuities on smooth surfaces.
+        // 0.2 = ~80 degrees, 0.5 = 60 degrees, 0.7 = ~45 degrees
+        float constexpr kMinNormalDotProduct = 0.5F;  // ~60 degrees max (relaxed from 0.9)
+        
+        // Minimum triangle quality (aspect ratio) threshold
+        // Ratio of shortest edge to longest edge, below this is too thin
+        float constexpr kMinAspectRatio = 0.15F;
+        
+        // Minimum area relative to original triangle
+        float constexpr kMinAreaRatio = 0.05F;
+
+        for (std::size_t triIdx : trianglesToCheck)
+        {
+            std::uint32_t i0 = indices[triIdx * 3 + 0];
+            std::uint32_t i1 = indices[triIdx * 3 + 1];
+            std::uint32_t i2 = indices[triIdx * 3 + 2];
+
+            // Skip triangles that will be removed (contain both vA and vB)
+            bool const hasA = (i0 == vA || i1 == vA || i2 == vA);
+            bool const hasB = (i0 == vB || i1 == vB || i2 == vB);
+            if (hasA && hasB)
+            {
+                continue;
+            }
+
+            // Get original vertex positions
+            Eigen::Vector3f const oldP0 = positions[i0];
+            Eigen::Vector3f const oldP1 = positions[i1];
+            Eigen::Vector3f const oldP2 = positions[i2];
+
+            // Get new vertex positions after collapse
+            auto getNewPos = [&](std::uint32_t idx) -> Eigen::Vector3f
+            {
+                if (idx == vA || idx == vB)
+                {
+                    return newPos;
+                }
+                return positions[idx];
+            };
+
+            Eigen::Vector3f const p0 = getNewPos(i0);
+            Eigen::Vector3f const p1 = getNewPos(i1);
+            Eigen::Vector3f const p2 = getNewPos(i2);
+
+            // Compute new triangle properties
+            Eigen::Vector3f const e1 = p1 - p0;
+            Eigen::Vector3f const e2 = p2 - p0;
+            Eigen::Vector3f const e3 = p2 - p1;
+            Eigen::Vector3f const newNormalUnnorm = e1.cross(e2);
+            float const newArea = newNormalUnnorm.norm();
+
+            // Check for degenerate triangle (near-zero area)
+            if (newArea < 1e-10F)
+            {
+                return true; // Degenerate
+            }
+
+            Eigen::Vector3f const newNormal = newNormalUnnorm / newArea;
+
+            // Check aspect ratio (triangle quality)
+            float const len1 = e1.norm();
+            float const len2 = e2.norm();
+            float const len3 = e3.norm();
+            float const maxLen = std::max({len1, len2, len3});
+            float const minLen = std::min({len1, len2, len3});
+            
+            if (maxLen > 1e-10F && (minLen / maxLen) < kMinAspectRatio)
+            {
+                return true; // Too thin/elongated
+            }
+            
+            // PrusaSlicer "triangle beauty" check:
+            // Check for very thin triangles by looking at edge angles.
+            // If normalized edge vectors are nearly parallel (high dot product),
+            // the triangle is degenerate/very thin.
+            // threshold of 0.999 corresponds to ~2.5 degree angle between edges
+            float constexpr kTriangleBeautyThreshold = 0.999F;
+            
+            if (len1 > 1e-10F && len2 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e1.normalized().dot(e2.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
+            if (len1 > 1e-10F && len3 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e1.normalized().dot(e3.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
+            if (len2 > 1e-10F && len3 > 1e-10F)
+            {
+                float const edgeDot = std::abs(e2.normalized().dot(e3.normalized()));
+                if (edgeDot > kTriangleBeautyThreshold)
+                {
+                    return true; // Nearly degenerate thin triangle
+                }
+            }
+
+            // For triangles that will be modified (contain one of the collapsed vertices)
+            if (hasA || hasB)
+            {
+                Eigen::Vector3f const oldNormalUnnorm = (oldP1 - oldP0).cross(oldP2 - oldP0);
+                float const oldArea = oldNormalUnnorm.norm();
+                
+                if (oldArea > 1e-10F)
+                {
+                    Eigen::Vector3f const oldNormal = oldNormalUnnorm / oldArea;
+                    float const normalDot = oldNormal.dot(newNormal);
+
+                    // Check for inverted triangle (normal flipped)
+                    if (normalDot < 0.0F)
+                    {
+                        return true; // Inverted
+                    }
+
+                    // Check for excessive normal deviation
+                    // This is the key check that prevents "lumpy" surfaces!
+                    if (normalDot < kMinNormalDotProduct)
+                    {
+                        return true; // Normal changed too much
+                    }
+
+                    // Check for excessive area reduction
+                    if ((newArea / oldArea) < kMinAreaRatio)
+                    {
+                        return true; // Triangle shrunk too much
+                    }
+                }
+            }
+        }
+
+        // PrusaSlicer-inspired "create_no_volume" check:
+        // After collapse, check that no two triangles that share an edge would form
+        // a zero-volume fold (i.e., triangles with opposite orientations sharing an edge).
+        // This prevents the mesh from folding onto itself.
+        
+        // Build a map of edges to triangles that will exist after collapse
+        std::unordered_map<std::uint64_t, std::vector<std::pair<std::size_t, Eigen::Vector3f>>> edgeToTriangleNormals;
+        
+        auto makeEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+        {
+            if (a > b) std::swap(a, b);
+            return (static_cast<std::uint64_t>(a) << 32) | b;
+        };
+        
+        for (std::size_t triIdx : trianglesToCheck)
+        {
+            std::uint32_t i0 = indices[triIdx * 3 + 0];
+            std::uint32_t i1 = indices[triIdx * 3 + 1];
+            std::uint32_t i2 = indices[triIdx * 3 + 2];
+            
+            // Map collapsed vertices
+            if (i0 == vB) i0 = vA;
+            if (i1 == vB) i1 = vA;
+            if (i2 == vB) i2 = vA;
+            
+            // Skip degenerate triangles (those that collapse because they contain both vA and vB)
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+            
+            // Get positions after collapse
+            auto getPosAfterCollapse = [&](std::uint32_t idx) -> Eigen::Vector3f
+            {
+                if (idx == vA || idx == vB)
+                {
+                    return newPos;
+                }
+                return positions[idx];
+            };
+            
+            Eigen::Vector3f const p0 = getPosAfterCollapse(i0);
+            Eigen::Vector3f const p1 = getPosAfterCollapse(i1);
+            Eigen::Vector3f const p2 = getPosAfterCollapse(i2);
+            
+            Eigen::Vector3f const normal = (p1 - p0).cross(p2 - p0).normalized();
+            
+            // Add each edge of this triangle to the map
+            std::uint64_t const edge01 = makeEdgeKey(i0, i1);
+            std::uint64_t const edge12 = makeEdgeKey(i1, i2);
+            std::uint64_t const edge20 = makeEdgeKey(i2, i0);
+            
+            edgeToTriangleNormals[edge01].emplace_back(triIdx, normal);
+            edgeToTriangleNormals[edge12].emplace_back(triIdx, normal);
+            edgeToTriangleNormals[edge20].emplace_back(triIdx, normal);
+        }
+        
+        // Check for zero-volume folds: if two triangles share an edge and have
+        // nearly opposite normals, they form a fold
+        float constexpr kNoVolumeDotThreshold = -0.5F; // normals more opposite than ~120 degrees
+        
+        for (auto const & [edge, triangles] : edgeToTriangleNormals)
+        {
+            if (triangles.size() >= 2)
+            {
+                // Check all pairs of triangles sharing this edge
+                for (std::size_t i = 0; i < triangles.size(); ++i)
+                {
+                    for (std::size_t j = i + 1; j < triangles.size(); ++j)
+                    {
+                        float const dot = triangles[i].second.dot(triangles[j].second);
+                        if (dot < kNoVolumeDotThreshold)
+                        {
+                            // These triangles would form a fold
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool QemMeshSimplifier::performCollapse(
+        CollapseCandidate const & candidate,
+        std::vector<Eigen::Vector3f> & positions,
+        std::vector<Eigen::Vector3f> & normals,
+        std::vector<std::uint32_t> & indices,
+        std::vector<std::vector<std::size_t>> & vertexToTriangles,
+        std::vector<bool> & vertexRemoved)
+    {
+        std::uint32_t const vA = candidate.vertexA;
+        std::uint32_t const vB = candidate.vertexB;
+
+        // Check if already removed
+        if (vertexRemoved[vA] || vertexRemoved[vB])
+        {
+            return false;
+        }
+
+        // Check for degenerate results
+        if (wouldCreateDegenerateTriangles(candidate, positions, indices, vertexToTriangles))
+        {
+            return false;
+        }
+
+        // Move vA to target position
+        positions[vA] = candidate.targetPosition;
+
+        // Compute new normal as average of incident faces (will be recalculated properly later)
+        normals[vA] = (normals[vA] + normals[vB]).normalized();
+
+        // Mark vB as removed
+        vertexRemoved[vB] = true;
+
+        // Update all references from vB to vA in index buffer
+        // and track which triangles become degenerate
+        std::vector<std::size_t> trianglesToRemove;
+
+        for (std::size_t triIdx : vertexToTriangles[vB])
+        {
+            std::uint32_t & i0 = indices[triIdx * 3 + 0];
+            std::uint32_t & i1 = indices[triIdx * 3 + 1];
+            std::uint32_t & i2 = indices[triIdx * 3 + 2];
+
+            // Replace vB with vA
+            if (i0 == vB)
+                i0 = vA;
+            if (i1 == vB)
+                i1 = vA;
+            if (i2 == vB)
+                i2 = vA;
+
+            // Check if triangle became degenerate
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                trianglesToRemove.push_back(triIdx);
+            }
+            else
+            {
+                // Add this triangle to vA's list
+                vertexToTriangles[vA].push_back(triIdx);
+            }
+        }
+
+        // Clear vB's triangle list
+        vertexToTriangles[vB].clear();
+
+        // Remove degenerate triangles from vA's list
+        auto & vATriangles = vertexToTriangles[vA];
+        vATriangles.erase(
+            std::remove_if(vATriangles.begin(),
+                           vATriangles.end(),
+                           [&](std::size_t t)
+                           {
+                               return std::find(trianglesToRemove.begin(),
+                                                trianglesToRemove.end(),
+                                                t) != trianglesToRemove.end();
+                           }),
+            vATriangles.end());
+
+        // Recalculate quadric for vA from its new incident triangles
+        if (m_config.recalculateQuadricsAfterCollapse)
+        {
+            recalculateVertexQuadric(vA, positions, indices, vertexToTriangles);
+
+            // Also recalculate for neighbors
+            std::unordered_set<std::uint32_t> neighbors;
+            for (std::size_t triIdx : vertexToTriangles[vA])
+            {
+                neighbors.insert(indices[triIdx * 3 + 0]);
+                neighbors.insert(indices[triIdx * 3 + 1]);
+                neighbors.insert(indices[triIdx * 3 + 2]);
+            }
+            neighbors.erase(vA);
+
+            for (std::uint32_t neighbor : neighbors)
+            {
+                if (!vertexRemoved[neighbor])
+                {
+                    recalculateVertexQuadric(neighbor, positions, indices, vertexToTriangles);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void QemMeshSimplifier::compactMesh(std::vector<Eigen::Vector3f> & positions,
+                                         std::vector<Eigen::Vector3f> & normals,
+                                         std::vector<std::uint32_t> & indices,
+                                         std::vector<bool> const & vertexRemoved)
+    {
+        // Build vertex remapping
+        std::vector<std::uint32_t> remap(positions.size(), UINT32_MAX);
+        std::vector<Eigen::Vector3f> newPositions;
+        std::vector<Eigen::Vector3f> newNormals;
+        newPositions.reserve(positions.size());
+        newNormals.reserve(normals.size());
+
+        for (std::size_t i = 0; i < positions.size(); ++i)
+        {
+            if (!vertexRemoved[i])
+            {
+                remap[i] = static_cast<std::uint32_t>(newPositions.size());
+                newPositions.push_back(positions[i]);
+                newNormals.push_back(normals[i]);
+            }
+        }
+
+        // Compact index buffer, removing degenerate triangles
+        std::vector<std::uint32_t> newIndices;
+        newIndices.reserve(indices.size());
+
+        std::size_t const numTriangles = indices.size() / 3;
+        for (std::size_t t = 0; t < numTriangles; ++t)
+        {
+            std::uint32_t const i0 = indices[t * 3 + 0];
+            std::uint32_t const i1 = indices[t * 3 + 1];
+            std::uint32_t const i2 = indices[t * 3 + 2];
+
+            // Skip degenerate triangles
+            if (i0 == i1 || i1 == i2 || i2 == i0)
+            {
+                continue;
+            }
+
+            std::uint32_t const r0 = remap[i0];
+            std::uint32_t const r1 = remap[i1];
+            std::uint32_t const r2 = remap[i2];
+
+            // Skip if any vertex was removed
+            if (r0 == UINT32_MAX || r1 == UINT32_MAX || r2 == UINT32_MAX)
+            {
+                continue;
+            }
+
+            newIndices.push_back(r0);
+            newIndices.push_back(r1);
+            newIndices.push_back(r2);
+        }
+
+        positions = std::move(newPositions);
+        normals = std::move(newNormals);
+        indices = std::move(newIndices);
+    }
+
+    std::size_t QemMeshSimplifier::simplify(std::vector<Eigen::Vector3f> & positions,
+                                             std::vector<Eigen::Vector3f> & normals,
+                                             std::vector<std::uint32_t> & indices)
+    {
+        if (positions.empty() || indices.size() < 3)
+        {
+            return 0;
+        }
+
+        std::size_t const initialTriangles = indices.size() / 3;
+        std::size_t totalCollapsed = 0;
+
+        std::cout << "QEM Simplification starting with " << initialTriangles << " triangles"
+                  << std::endl;
+
+        // Build initial vertex quadrics
+        buildVertexQuadrics(positions, indices);
+
+        for (std::size_t pass = 0; pass < m_config.maxPasses; ++pass)
+        {
+            std::size_t const currentTriangles = indices.size() / 3;
+
+            // Check termination conditions
+            if (m_config.targetTriangleCount.has_value() &&
+                currentTriangles <= m_config.targetTriangleCount.value())
+            {
+                std::cout << "Target triangle count reached" << std::endl;
+                break;
+            }
+
+            if (m_config.targetReductionPercent.has_value())
+            {
+                float const reduction =
+                    100.0F * static_cast<float>(initialTriangles - currentTriangles) /
+                    static_cast<float>(initialTriangles);
+                if (reduction >= m_config.targetReductionPercent.value())
+                {
+                    std::cout << "Target reduction percentage reached" << std::endl;
+                    break;
+                }
+            }
+
+            // Build vertex-to-triangle adjacency
+            std::vector<std::vector<std::size_t>> vertexToTriangles(positions.size());
+            std::size_t const numTriangles = indices.size() / 3;
+            for (std::size_t t = 0; t < numTriangles; ++t)
+            {
+                std::uint32_t const i0 = indices[t * 3 + 0];
+                std::uint32_t const i1 = indices[t * 3 + 1];
+                std::uint32_t const i2 = indices[t * 3 + 2];
+                if (i0 != i1 && i1 != i2 && i2 != i0)
+                {
+                    vertexToTriangles[i0].push_back(t);
+                    vertexToTriangles[i1].push_back(t);
+                    vertexToTriangles[i2].push_back(t);
+                }
+            }
+
+            // Collect edge collapse candidates
+            auto candidates = collectCandidates(positions, normals, indices);
+
+            if (candidates.empty())
+            {
+                std::cout << "No more collapse candidates" << std::endl;
+                break;
+            }
+
+            // Evaluate SDF errors and normal deviations on GPU
+            evaluateSdfErrorsGpu(candidates, positions, indices, vertexToTriangles);
+
+            // Sort by combined error (lowest first)
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [](CollapseCandidate const & a, CollapseCandidate const & b)
+                      { return a.combinedError < b.combinedError; });
+
+            // Track removed vertices
+            std::vector<bool> vertexRemoved(positions.size(), false);
+            std::vector<bool> vertexTouched(positions.size(), false);
+
+            std::size_t passCollapsed = 0;
+
+            for (auto const & candidate : candidates)
+            {
+                // Skip if error exceeds bounds
+                if (candidate.sdfError > m_config.maxSdfError)
+                {
+                    continue;
+                }
+                if (candidate.qemError > m_config.maxQemError)
+                {
+                    continue;
+                }
+                // Temporarily disabled: normal deviation check needs debugging
+                // The gradient evaluator may not be returning correct values
+                // if (candidate.normalDeviation > m_config.maxNormalDeviation)
+                // {
+                //     continue;
+                // }
+
+                // Skip boundary edges entirely (watertight preservation)
+                if (candidate.isBoundaryEdge)
+                {
+                    continue;
+                }
+
+                // Skip if either vertex was already touched this pass
+                if (vertexTouched[candidate.vertexA] || vertexTouched[candidate.vertexB])
+                {
+                    continue;
+                }
+
+                // Attempt collapse
+                if (performCollapse(
+                        candidate, positions, normals, indices, vertexToTriangles, vertexRemoved))
+                {
+                    vertexTouched[candidate.vertexA] = true;
+                    vertexTouched[candidate.vertexB] = true;
+                    ++passCollapsed;
+                    ++totalCollapsed;
+                }
+            }
+
+            std::cout << "Pass " << (pass + 1) << ": collapsed " << passCollapsed << " edges"
+                      << std::endl;
+
+            if (passCollapsed == 0)
+            {
+                std::cout << "No edges collapsed in this pass, stopping" << std::endl;
+                break;
+            }
+
+            // Compact mesh
+            compactMesh(positions, normals, indices, vertexRemoved);
+
+            // Rebuild quadrics for next pass
+            buildVertexQuadrics(positions, indices);
+
+            // Progress callback
+            if (m_progressCallback)
+            {
+                std::size_t const targetTris =
+                    m_config.targetTriangleCount.value_or(initialTriangles / 2);
+                m_progressCallback(indices.size() / 3, targetTris, totalCollapsed);
+            }
+        }
+
+        std::size_t const finalTriangles = indices.size() / 3;
+        float const reductionPercent =
+            100.0F * static_cast<float>(initialTriangles - finalTriangles) /
+            static_cast<float>(initialTriangles);
+
+        std::cout << "QEM Simplification complete:" << std::endl;
+        std::cout << "  Triangles: " << initialTriangles << " -> " << finalTriangles << " ("
+                  << std::fixed << std::setprecision(1) << reductionPercent << "% reduction)"
+                  << std::endl;
+        std::cout << "  Vertices: " << positions.size() << std::endl;
+        std::cout << "  Total edges collapsed: " << totalCollapsed << std::endl;
+
+        return totalCollapsed;
+    }
+
+} // namespace gladius::compute

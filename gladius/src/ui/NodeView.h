@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../nodes/Model.h"
+#include "FileDialogService.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -301,6 +302,11 @@ namespace gladius::ui
         std::string m_draggingGroup;
         bool m_isDraggingGroup = false;
         ImVec2 m_groupDragStartPos;
+
+        /// Async file dialog for filename parameters
+        AsyncFileDialog m_asyncFileDialog;
+        nodes::NodeId m_asyncFileDialogNodeId{0};  ///< Node whose filename is being edited
+        std::string m_asyncFileDialogParamName;    ///< Parameter name being edited
 
         ColumnWidths & getOrCreateColumnWidths(nodes::NodeId nodeId);
     };

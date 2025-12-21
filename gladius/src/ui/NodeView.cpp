@@ -1357,28 +1357,42 @@ namespace gladius::ui
                 m_modelEditor->clearNodeFocus();
             }
 
+            // Check for async file dialog result for this node/parameter
+            if (parameter.first == FieldNames::Filename && 
+                m_asyncFileDialogNodeId == node.getId() && 
+                m_asyncFileDialogParamName == parameter.first)
+            {
+                if (auto result = m_asyncFileDialog.checkResult())
+                {
+                    m_asyncFileDialogNodeId = 0;
+                    m_asyncFileDialogParamName.clear();
+                    if (*result)
+                    {
+                        const std::filesystem::path filename{result->value()};
+                        *name = filename.string();
+                        m_modelEditor->invalidatePrimitiveData();
+                        m_modelEditor->markModelAsModified();
+                        m_parameterChanged = true;
+                    }
+                }
+            }
+
             bool changed = ImGui::InputText("", name);
 
             if (parameter.first == FieldNames::Filename)
             {
                 ImGui::SameLine();
                 const auto baseDir = m_assembly->getFilename().remove_filename();
-                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN)))
+                bool const dialogActive = m_asyncFileDialog.isActive();
+                ImGui::BeginDisabled(dialogActive);
+                if (ImGui::Button(reinterpret_cast<const char *>(
+                      dialogActive ? ICON_FA_SPINNER : ICON_FA_FOLDER_OPEN)))
                 {
-
-                    const auto queriedFilename = queryLoadFilename({{"*.stl"}}, baseDir);
-
-                    if (queriedFilename && queriedFilename->has_filename())
-                    {
-                        const std::filesystem::path filename{queriedFilename.value()};
-
-                        *name = filename.string();
-                        changed = true;
-                        m_modelEditor->invalidatePrimitiveData();
-                        m_modelEditor->markModelAsModified();
-                        m_parameterChanged = true;
-                    }
+                    m_asyncFileDialogNodeId = node.getId();
+                    m_asyncFileDialogParamName = parameter.first;
+                    m_asyncFileDialog.openFile({{"*.stl"}}, baseDir);
                 }
+                ImGui::EndDisabled();
                 ImGui::SameLine();
                 if (ImGui::Button("Make relative"))
                 {
