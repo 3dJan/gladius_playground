@@ -1,0 +1,4 @@
+Project: Gladius (C++). Purpose: 3D/implicit modeling + meshing; contains Manifold Dual Contouring (MDC) CPU/GPU implementations and tests.
+Tech stack: modern C++ (C++11+), CMake presets, Ninja, GoogleTest/GoogleMock; OpenCL/GPU components present.
+Repo structure (high level): `gladius/src` main code, `gladius/tests/unittests` GTest suite, `docs/` and `gladius/docs/` design notes.
+Coding conventions (from .github/copilot-instructions.md): Allman braces, 4-space indent, headers `.h`/sources `.cpp`, `#pragma once`, camelCase for functions/vars, PascalCase for types, exceptions for error handling, prefer STL/smart pointers, Doxygen comments for public APIs.
