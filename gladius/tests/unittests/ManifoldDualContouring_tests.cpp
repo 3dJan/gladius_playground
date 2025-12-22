@@ -3722,10 +3722,10 @@ namespace gladius::compute::tests
         // Validate manifold properties
         EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
           << "Mesh should have no disconnected facets after processing";
-                // admesh's "degenerate facets" detection is sensitive to extremely thin sliver triangles.
-                // We still require this to remain *very* small to catch regressions, but allow a handful
-                // to avoid platform-/driver-specific flakes.
-                EXPECT_LE(metrics.degenerateFacets, 16) << "Mesh should have minimal degenerate facets";
+        // admesh's "degenerate facets" detection is sensitive to extremely thin sliver triangles.
+        // We still require this to remain *very* small to catch regressions, but allow a handful
+        // to avoid platform-/driver-specific flakes.
+        EXPECT_LE(metrics.degenerateFacets, 16) << "Mesh should have minimal degenerate facets";
 
         double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
                                      static_cast<double>(metrics.numberOfFacets.original);
