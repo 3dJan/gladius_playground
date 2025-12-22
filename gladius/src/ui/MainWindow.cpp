@@ -1809,8 +1809,12 @@ namespace gladius::ui
                 {
                     try
                     {
-                        const auto context =
+                        auto const context =
                           std::make_shared<ComputeContext>(EnableGLOutput::enabled);
+                        context->setLogger(m_logger);
+                        gladius::setGlobalLogger(m_logger);
+                        context->setDebugOutputEnabled(m_openclDebugEnabled);
+                        if (!context->isValid())
                         {
                             throw OpenCLContextCreationError("Context invalid after retry");
                         }

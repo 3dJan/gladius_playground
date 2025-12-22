@@ -1550,6 +1550,8 @@ namespace gladius
 
         glFinish();
 
+        // Only render if precomputed SDF is available. When SDF is invalid (e.g., after parameter
+        // change), we keep the previous preview visible until async SDF precomputation completes.
         if (!m_precompSdfIsValid)
         {
             LOG_LOCATION;

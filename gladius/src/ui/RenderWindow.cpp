@@ -180,6 +180,7 @@ namespace gladius::ui
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+            m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
             notifyAsyncEpochIncrement();
         }
         else
@@ -195,6 +196,7 @@ namespace gladius::ui
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+            m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
         }
     }
 
@@ -212,6 +214,7 @@ namespace gladius::ui
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+        m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
 
         // Release progressive buffer on epoch change
         if (m_asyncProgressiveBuffer)
@@ -257,12 +260,14 @@ namespace gladius::ui
             auto * frontBuf = m_asyncController->frontBuffer();
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
 
-            // Only use front buffer if it matches current epoch and is not actively rendering
-            // During progressive rendering (state.isRendering), always show m_resultImage for live
-            // updates
-            bool const useFrontBuffer = frontBuf && frontBuf->image &&
-                                        frontBuf->epoch == currentEpoch &&
-                                        !m_renderWindowState.isRendering;
+            // For HQ frames (front buffer from progressive rendering) we require an epoch match
+            // to avoid showing stale HQ results from an old parameter set.
+            // For low-res preview during rapid parameter edits, we fall back to m_resultImage
+            // which is updated synchronously and always shows *something* recent.
+            bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
+            bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
+                                        !m_renderWindowState.isRendering &&
+                                        !m_renderWindowState.isMoving;
 
             if (useFrontBuffer)
             {
@@ -656,6 +661,9 @@ namespace gladius::ui
             if (m_core->isSdfValid() || wasSdfValid)
             {
                 m_lowResFeedbackPending.store(false, std::memory_order_release);
+                // Track that low-res preview is now up-to-date with the current epoch
+                m_lastLowResPreviewEpoch.store(m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                               std::memory_order_release);
             }
             m_lastLowResRenderTime = std::chrono::system_clock::now();
             return;
@@ -1348,6 +1356,7 @@ namespace gladius::ui
                 }
                 m_asyncController->setLatestEpoch(sdfJob.epoch);
                 m_asyncSdfJobInFlight.store(true, std::memory_order_release);
+                m_asyncSdfInFlightEpoch.store(sdfJob.epoch, std::memory_order_release);
                 m_asyncController->enqueueJob(sdfJob);
             }
 
@@ -1498,6 +1507,7 @@ namespace gladius::ui
             auto token = m_core->requestComputeToken();
             if (token.has_value())
             {
+                // renderLowResPreview requires a valid SDF. Check before/after to detect success.
                 bool const wasSdfValid = m_core->isSdfValid();
                 m_core->renderLowResPreview();
                 bool const isSdfValidNow = m_core->isSdfValid();
@@ -1505,6 +1515,10 @@ namespace gladius::ui
                 {
                     m_lowResFeedbackPending.store(false, std::memory_order_release);
                     m_lastLowResRenderTime = std::chrono::system_clock::now();
+                    // Track that low-res preview is now up-to-date with the current epoch
+                    m_lastLowResPreviewEpoch.store(
+                      m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                      std::memory_order_release);
                     lowResSuccessful = true;
                 }
             }
@@ -1535,6 +1549,17 @@ namespace gladius::ui
               std::chrono::system_clock::now() - m_lastLowResRenderTime;
             if (timeSinceLastLowResRender < std::chrono::seconds(1))
             {
+                return;
+            }
+
+            // Only start HQ progressive rendering if the low-res preview is up-to-date with
+            // the current epoch. This prevents starting HQ rendering with stale parameters.
+            auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+            auto const previewEpoch = m_lastLowResPreviewEpoch.load(std::memory_order_acquire);
+            if (previewEpoch < currentEpoch)
+            {
+                // Trigger a low-res render to update the preview epoch
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
                 return;
             }
         }
@@ -1570,14 +1595,17 @@ namespace gladius::ui
             ZoneScopedN("ProcessSingleResult");
             auto & result = *resultOpt;
 
-            if (result.epoch < m_asyncCurrentEpoch.load(std::memory_order_acquire))
-            {
-                continue;
-            }
+            auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+            bool const isOutdated = result.epoch < currentEpoch;
 
             if (result.jobType == async_rendering::RenderJobType::SDFPrecomputation)
             {
-                m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+                // Prevent an old SDF job from clearing the in-flight flag for a newer epoch.
+                if (result.epoch == m_asyncSdfInFlightEpoch.load(std::memory_order_acquire))
+                {
+                    m_asyncSdfJobInFlight.store(false, std::memory_order_release);
+                    m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
+                }
             }
 
             // Handle bbox update results
@@ -1593,7 +1621,14 @@ namespace gladius::ui
 
             if (result.precomputedSdfUpdated)
             {
-                m_preComputedSdfDirty.store(false, std::memory_order_release);
+                // If the update is already outdated, keep dirty=true so we schedule a new SDF job
+                // for the current parameters.
+                if (!isOutdated)
+                {
+                    m_preComputedSdfDirty.store(false, std::memory_order_release);
+                    // SDF is now valid - trigger a low-res preview render to show the updated model
+                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                }
             }
 
             if (result.cancelled)
@@ -1601,14 +1636,20 @@ namespace gladius::ui
                 if (result.epoch == m_asyncInFlightEpoch.load(std::memory_order_acquire))
                 {
                     m_asyncJobInFlight.store(false, std::memory_order_release);
+                    m_asyncInFlightEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
                 }
                 continue;
             }
 
-            size_t const maxHeight = static_cast<size_t>(result.height);
-            state.currentLine = std::min(result.completedLine, maxHeight);
-            adjustProgressFromDuration(state, result.computeDurationNs);
+            // Update progressive scheduling state only for current-epoch results.
+            // Outdated results are still presented, but must not affect scheduling.
+            if (!isOutdated)
+            {
+                size_t const maxHeight = static_cast<size_t>(result.height);
+                state.currentLine = std::min(result.completedLine, maxHeight);
+                adjustProgressFromDuration(state, result.computeDurationNs);
+            }
 
             // Promote the newest Ready buffer to Front for display
             // Note: Only happens when completedFrame=true (buffer was published)
@@ -1628,12 +1669,15 @@ namespace gladius::ui
 
             if (result.completedFrame)
             {
-                m_dirty = false;
-                state.isRendering = false;
-                // DON'T force state.isMoving = false - let camera update control this
-                // If camera is still animating, it will set isMoving=true on next frame
-                state.currentLine = 0; // Reset for next frame
-                m_view->stopAnimationMode();
+                if (!isOutdated)
+                {
+                    m_dirty = false;
+                    state.isRendering = false;
+                    // DON'T force state.isMoving = false - let camera update control this
+                    // If camera is still animating, it will set isMoving=true on next frame
+                    state.currentLine = 0; // Reset for next frame
+                    m_view->stopAnimationMode();
+                }
             }
             else
             {
@@ -1650,8 +1694,19 @@ namespace gladius::ui
                 // state.isRendering remains true to trigger next chunk scheduling
             }
 
-            m_asyncJobInFlight.store(false, std::memory_order_release);
-            m_asyncInFlightEpoch.store(0, std::memory_order_release);
+            // Clear in-flight state only for the job that is actually in flight.
+            if (result.epoch == m_asyncInFlightEpoch.load(std::memory_order_acquire))
+            {
+                m_asyncJobInFlight.store(false, std::memory_order_release);
+                m_asyncInFlightEpoch.store(0, std::memory_order_release);
+
+                // If we just consumed an outdated job result, ensure we don't block scheduling for
+                // the new epoch.
+                if (isOutdated)
+                {
+                    state.isRendering = false;
+                }
+            }
         }
     }
 
