@@ -215,6 +215,11 @@ namespace gladius::ui
         void functionCallControls(nodes::FunctionCall & node);
         void normalizeDistanceFieldControls(nodes::NormalizeDistanceField & node);
 
+        /// Helper to create a FunctionGradient node from a FunctionCall node
+        void createFunctionGradientFromCall(nodes::FunctionCall & node);
+        /// Helper to create a NormalizeDistanceField node from a FunctionCall node
+        void createNormalizeFromCall(nodes::FunctionCall & node);
+
         bool typeControl(std::string const & label, std::type_index & typeIndex);
 
         /**
