@@ -1,10 +1,82 @@
+# Gladius Project
 
+## Project Overview
+
+Gladius is a development tool and playground for the Volumetric Extension of the 3MF file format. It processes implicit geometries, particularly 3mf files with the volumetric extension and implicit namespace. The software can be used as both a library and a standalone application, featuring:
+
+- A graphical programming interface for designing parts using Constructive Solid Geometry (CSG)
+- A rendering engine for visualizing volumetric 3D models
+- Import/export capabilities for 3mf files with volumetric extension
+- API bindings for C#, C++, and Python
+
+**Target Audience**: Developers working on 3D printing software, slicers, and implicit geometry processing applications.
+
+## Tech Stack
+
+### Core Technologies
+- **Language**: C++11 and later
+- **Build System**: CMake 3.12+
+- **Package Manager**: vcpkg
+- **Graphics**: OpenGL (for rendering)
+- **Compute**: OpenCL 1.2+ (for GPU-accelerated computations)
+
+### Key Dependencies
+- **GUI**: ImGui (with docking-experimental, GLFW, OpenGL2 bindings)
+- **3D Processing**: OpenVDB, NanoVDB, OpenMesh, lib3mf
+- **Math**: Eigen3
+- **Testing**: GTest/GMock
+- **File Formats**: pugixml, lodepng, minizip, clipper2
+- **Utilities**: fmt, nlohmann-json, tracy (profiling)
+
+### Project Structure
+```
+gladius/
+├── src/                  # Main application source code
+├── library/              # Library API implementation
+├── components/           # Third-party components and submodules
+├── tests/
+│   ├── unittests/       # Unit tests using GTest
+│   └── integrationtests/# Integration tests
+├── examples/             # Example applications and usage
+├── documentation/        # Project documentation and images
+├── cmake/               # CMake configuration files
+└── vcpkg.json           # Dependency definitions
+```
+
+## Build and Test Instructions
+
+### Prerequisites
+1. Install OpenCL SDK for your platform (Intel/AMD/NVIDIA)
+2. Install vcpkg package manager
+3. Install CMake 3.12+
+4. Set environment variables:
+   - `VCPKG_ROOT` = Path to vcpkg installation
+   - `VCPKG_DEFAULT_TRIPLET` = x64-windows or linux-x64
+
+### Building
+**Windows (Visual Studio Developer Prompt):**
+```bash
+cd gladius/gladius
+mkdir build && cd build
+cmake --preset x64-release -S ../
+cmake --build .
+```
+
+**Linux:**
+```bash
+cd gladius/gladius
+mkdir build && cd build
+cmake --preset linux-release -S ../
+cmake --build ../out/build/linux-release/
+```
+
+### Testing
+- **Build Tests**: Use the "Build ALL" task
+- **Run Tests**: Use the "Run Gladius Tests" task
+- Tests are located in `tests/unittests/` and `tests/integrationtests/`
+- OpenCL tests can be enabled/disabled via `ENABLE_OPENCL_TESTS` CMake option
 
 # C++ Coding Guidelines
-
-## Build Instructions
-- **Build System**: Use the "Build ALL" task.
-- **Run Tests**: Use the "Run Gladius Tests" task.
 
 ## General
 - **Modern C++**: Use C++11 and later features. Use std::algorithm when possible.
@@ -79,6 +151,67 @@
 - **Doxygen**: Use Doxygen comments for public APIs. Use `///` for single-line comments and `/** */` for multi-line comments.
 - **TODOs**: Use `// TODO: description` for tasks to be completed later.
 - **FIXME**: Use `// FIXME: description` for known issues that need fixing.
-- **Documentatioon**: Only add comments that add additional value. Avoid stating the obvious.
+- **Documentation**: Only add comments that add additional value. Avoid stating the obvious.
+
+## Code Examples
+
+### Naming Conventions
+```cpp
+// Class (PascalCase)
+class MeshRenderer {
+private:
+    int m_vertexCount;        // Private member (m_ prefix)
+    static int s_instanceCount;  // Static member (s_ prefix)
+    
+public:
+    // Function (lowerCamelCase, verb prefix)
+    void renderMesh();
+    bool isVisible() const;   // Boolean function (is prefix)
+    
+    // Getter/Setter
+    int getVertexCount() const { return m_vertexCount; }
+};
+
+// Constants (UPPER_SNAKE_CASE)
+constexpr int MAX_VERTICES = 10000;
+
+// Namespace (lower_snake_case)
+namespace gladius_core {
+    // ...
+}
+```
+
+### Memory Management
+```cpp
+// Prefer smart pointers over raw pointers
+std::unique_ptr<Mesh> createMesh() {
+    return std::make_unique<Mesh>();
+}
+
+// Use shared_ptr for shared ownership
+std::shared_ptr<Texture> texture = std::make_shared<Texture>();
+```
+
+### East-side const
+```cpp
+// Prefer east-side const
+int const* ptr;              // Pointer to const int
+int* const ptr;              // Const pointer to int
+int const* const ptr;        // Const pointer to const int
+
+// Instead of west-side const
+const int* ptr;              // Less preferred
+```
+
+### Error Handling
+```cpp
+// Use exceptions for error handling
+void loadMesh(std::string const& filename) {
+    if (!fileExists(filename)) {
+        throw std::runtime_error("File not found: " + filename);
+    }
+    // Load mesh...
+}
+```
 
 By following these guidelines, you can ensure clean, efficient, and maintainable C++ code.
