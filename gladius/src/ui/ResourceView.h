@@ -1,31 +1,66 @@
 #pragma once
 
 #include "Document.h"
+#include "ExportState.h"
+#include "FileDialogService.h"
 
 namespace gladius::ui
 {
-
+    /// @brief Identifies async file dialog operations in ResourceView
+    enum class ResourceViewDialogOp
+    {
+        None,
+        ImportImageStack,
+        AddMesh
+    };
 
     class ResourceView
     {
       public:
-        void render(SharedDocument document) const;
+        void render(SharedDocument document);
+
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state)
+        {
+            m_exportState = state;
+        }
 
       private:
-        void addMesh(SharedDocument document) const;
-        
+        void addMesh(SharedDocument document);
+        void processAsyncFileDialog(SharedDocument document);
+
         /**
          * @brief Renders a dropdown for selecting a VolumeData resource for a mesh
-         * 
+         *
          * @param document The document containing the resources
          * @param model3mf The 3MF model containing the resources
          * @param mesh The mesh object to associate with a VolumeData resource
-         * 
+         *
          * @return true if the VolumeData association was modified
          */
-        bool renderVolumeDataDropdown(
-            SharedDocument document,
-            Lib3MF::PModel model3mf,
-            std::shared_ptr<Lib3MF::CMeshObject> mesh) const;
+        bool renderVolumeDataDropdown(SharedDocument document,
+                                      Lib3MF::PModel model3mf,
+                                      std::shared_ptr<Lib3MF::CMeshObject> mesh) const;
+
+        // Dialog state for custom box creation
+        bool m_showCustomBoxDialog = false;
+        float m_boxWidth = 400.0f;
+        float m_boxHeight = 400.0f;
+        float m_boxDepth = 400.0f;
+        float m_boxStartX = 0.0f;
+        float m_boxStartY = 0.0f;
+        float m_boxStartZ = 0.0f;
+
+        // Dialog state for STL to beam lattice import
+        bool m_showStlToBeamLatticeDialog = false;
+        std::string m_beamLatticeStlFilename;
+        float m_beamDiameter = 1.0f;
+
+        // Async file dialog
+        AsyncFileDialog m_asyncFileDialog;
+        ResourceViewDialogOp m_asyncDialogOp{ResourceViewDialogOp::None};
+
+        // Export state for blocking UI modifications
+        ExportState * m_exportState{nullptr};
     };
 }

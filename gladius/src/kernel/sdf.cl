@@ -23,7 +23,7 @@ bool equal(float3 a, float3 b)
 float modImpl(float a, float b)
 {
     return mod(uintBitsToFloat(floatBitsToUint(a) + 1u),
-               b); // T ODO: Implement uintBitsToFloat and floatBitsToUint
+               b); // TODO: Implement uintBitsToFloat and floatBitsToUint
 }
 #endif
 
@@ -535,6 +535,16 @@ float meshPrimitive(float3 pos, int index, PAYLOAD_ARGS)
     return meshNode(pos, index, primitives, data);
 }
 
+#ifdef ENABLE_VDB
+
+// Helper: Create a pnanovdb buffer from the global data array at the specified offset
+static inline pnanovdb_buf_t make_vdb_buf(__global float* data, int start)
+{
+    pnanovdb_buf_t buf;
+    buf.data = (__global uint32_t*)(&data[start]);
+    return buf;
+}
+
 float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[index];
@@ -544,48 +554,45 @@ float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
     {
 
         // Trilinear interpolation, see https://en.wikipedia.org/wiki/Trilinear_interpolation
-        cnanovdb_readaccessor acc;
-
-        global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-        cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
+        pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+        pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+        pnanovdb_readaccessor_t acc;
+        pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
         float3 posVoxel = pos * node.scaling;
         int3 coordVoxel = convert_int3(floor(posVoxel));
 
-        cnanovdb_coord coordCenter;
-        coordCenter.mVec[0] = coordVoxel.x;
-        coordCenter.mVec[1] = coordVoxel.y;
-        coordCenter.mVec[2] = coordVoxel.z;
+        pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coordVoxel.x, coordVoxel.y, coordVoxel.z);
 
         float3 relPos = (posVoxel - floor(posVoxel));
-        cnanovdb_coord coords[8];
+        pnanovdb_coord_t coords[8];
         coords[0] = coordCenter; // 000
 
         coords[1] = coordCenter; // 100
-        coords[1].mVec[0] += 1;
+        coords[1].x += 1;
 
         coords[2] = coordCenter; // 110
-        coords[2].mVec[0] += 1;
-        coords[2].mVec[1] += 1;
+        coords[2].x += 1;
+        coords[2].y += 1;
 
         coords[3] = coordCenter; // 010
-        coords[3].mVec[1] += 1;
+        coords[3].y += 1;
 
         coords[4] = coordCenter; // 001
-        coords[4].mVec[2] += 1;
+        coords[4].z += 1;
 
         coords[5] = coordCenter; // 101
-        coords[5].mVec[0] += 1;
-        coords[5].mVec[2] += 1;
+        coords[5].x += 1;
+        coords[5].z += 1;
 
         coords[6] = coordCenter; // 111
-        coords[6].mVec[0] += 1;
-        coords[6].mVec[1] += 1;
-        coords[6].mVec[2] += 1;
+        coords[6].x += 1;
+        coords[6].y += 1;
+        coords[6].z += 1;
 
         coords[7] = coordCenter; // 011
-        coords[7].mVec[1] += 1;
-        coords[7].mVec[2] += 1;
+        coords[7].y += 1;
+        coords[7].z += 1;
 
         float c[8];
 
@@ -593,7 +600,7 @@ float vdbModel(float3 pos, int index, PAYLOAD_ARGS)
         // __attribute__((opencl_unroll_hint(1))) // compile error on some platforms
         for (int i = zero; i < 8; ++i)
         {
-            c[i] = cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coords[i]);
+            c[i] = pnanovdb_read_float_value(buf, &acc, coords[i]);
         }
 
         float const c00 = mix(c[0], c[1], relPos.x);
@@ -616,20 +623,16 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
     // float const bandwidth = 50.f;
     // if (boundingBox < bandwidth)
     {
-        struct PrimitiveMeta node = primitives[index];
-        cnanovdb_readaccessor acc;
+        pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+        pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+        pnanovdb_readaccessor_t acc;
+        pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
-        global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-        cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
         pos *= node.scaling;
-        cnanovdb_coord coordCenter;
-        
         int3 coord = convert_int3(pos);
-        coordCenter.mVec[0] = coord.x;
-        coordCenter.mVec[1] = coord.y;
-        coordCenter.mVec[2] = coord.z;
+        pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
 
-        return cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coordCenter);
+        return pnanovdb_read_float_value(buf, &acc, coordCenter);
     }
     // return boundingBox + bandwidth;
 }
@@ -637,33 +640,29 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
 float vdbValue(int3 coord, int index, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[index];
-    cnanovdb_readaccessor acc;
+    pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+    pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init_float(&acc, buf, grid);
 
-    global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-    cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootF(cnanovdb_griddata_tree(grid)));
-    cnanovdb_coord coordCenter;
-    coordCenter.mVec[0] = coord.x;
-    coordCenter.mVec[1] = coord.y;
-    coordCenter.mVec[2] = coord.z;
-
-    return cnanovdb_readaccessor_getValueF((cnanovdb_readaccessor *) &acc, &coordCenter);
+    pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
+    return pnanovdb_read_float_value(buf, &acc, coordCenter);
 }
 
 int faceIndexFromGrid(float3 pos, int primitiveIndex, PAYLOAD_ARGS)
 {
     struct PrimitiveMeta node = primitives[primitiveIndex];
 
-    cnanovdb_readaccessor acc;
-    global cnanovdb_griddata * grid = (global cnanovdb_griddata *) (&data[node.start]);
-    cnanovdb_readaccessor_init(&acc, cnanovdb_treedata_rootI32(cnanovdb_griddata_tree(grid)));
-    pos *= node.scaling;
-    cnanovdb_coord coordCenter;
-    int3 coord = convert_int3(pos);
-    coordCenter.mVec[0] = coord.x;
-    coordCenter.mVec[1] = coord.y;
-    coordCenter.mVec[2] = coord.z;
+    pnanovdb_buf_t buf = make_vdb_buf(data, node.start);
+    pnanovdb_grid_handle_t grid = pnanovdb_make_grid_handle(0);
+    pnanovdb_readaccessor_t acc;
+    pnanovdb_readaccessor_init_int32(&acc, buf, grid);
 
-    return cnanovdb_readaccessor_getValueI32((cnanovdb_readaccessor *) &acc, &coordCenter);
+    pos *= node.scaling;
+    int3 coord = convert_int3(pos);
+    pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
+
+    return pnanovdb_read_int32_value(buf, &acc, coordCenter);
 }
 
 float meshDist(float3 pos, int meshIndex, int faceIndex, PAYLOAD_ARGS)
@@ -715,6 +714,8 @@ float closestFaceDist(float3 pos,
             }
     return sqrt(minDist);
 }
+
+#endif // ENABLE_VDB
 
 // #define TRI_EPSILON 1E-6f
 #define TRI_EPSILON 0.f
@@ -853,6 +854,8 @@ float4 sampleImageNearest4f(float3 uvw, float3 dimensions, int start, int3 tileS
     return color;
 }
 
+#ifdef ENABLE_VDB
+
 float4 sampleImageNearest4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS)
 {
     float4 color = (float4) (0.0f);
@@ -912,6 +915,8 @@ float4 sampleImageLinear4fvdb(float3 uvw, float3 dimensions, int start, int3 til
     return color;
 }
 
+#endif // ENABLE_VDB
+
 float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS)
 {
     float4 color = (float4) (0.0f);
@@ -955,6 +960,447 @@ float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileSt
     return color;
 }
 
+
+/// @brief Distance to ball
+float ballDistance(float3 pos, __global const struct BallData* ball)
+{
+    return length(pos - ball->positionRadius.xyz) - ball->positionRadius.w;
+}
+
+/// @brief Distance to beam (conical cylinder with caps) - GPU optimized
+/// @param pos World position to evaluate
+/// @param startPos Beam start position
+/// @param endPos Beam end position
+/// @param startRadius Radius at start of beam
+/// @param endRadius Radius at end of beam
+/// @param startCapStyle Cap style at start (0=hemisphere, 1=sphere, 2=butt)
+/// @param endCapStyle Cap style at end (0=hemisphere, 1=sphere, 2=butt)
+/// @return Signed distance to beam surface
+float sdToBeam(float3 pos, 
+               float3 startPos, 
+               float3 endPos, 
+               float startRadius, 
+               float endRadius, 
+               int startCapStyle, 
+               int endCapStyle)
+{
+    float3 axis = endPos - startPos;
+    float lengthSq = dot(axis, axis);
+    float length_val = sqrt(lengthSq);
+    
+    // Handle degenerate beam (zero length) - treat as sphere
+    if (length_val < 1e-6f) {
+        float radius = fmax(startRadius, endRadius);
+        return length(pos - startPos) - radius;
+    }
+    
+    // Normalize axis (reuse length calculation)
+    float invLength = 1.0f / length_val;
+    axis *= invLength;
+    
+    // Project point onto beam axis
+    float3 toPoint = pos - startPos;
+    float t_unclamped = dot(toPoint, axis);
+    float t = clamp(t_unclamped, 0.0f, length_val);
+    
+    // Interpolate radius at projection point
+    float alpha = t * invLength;
+    float radius = fma(endRadius - startRadius, alpha, startRadius);  // mix optimized as FMA
+    
+    // Calculate distance to axis (optimized vector ops)
+    float3 projection = fma(axis, t, startPos);  // startPos + t * axis
+    float3 toAxisVec = pos - projection;
+    float distToAxis = length(toAxisVec);
+    
+    // Distance to cylindrical surface
+    float surfaceDist = distToAxis - radius;
+    
+    // Reduce branch divergence by using conditional selection instead of switches
+    // Handle caps based on cap style
+    float startCapDist = FLT_MAX;
+    float endCapDist = FLT_MAX;
+    
+    // Calculate cap distances conditionally (reduces branching)
+    bool nearStart = (t_unclamped <= 0.0f);
+    bool nearEnd = (t_unclamped >= length_val);
+    
+    if (nearStart) {
+        float distToStart = length(pos - startPos);
+        // Combine hemisphere/sphere cases (both use same calculation)
+        float sphereDist = distToStart - startRadius;
+        float buttDist = fmax(surfaceDist, -t_unclamped);
+        startCapDist = (startCapStyle == 2) ? buttDist : sphereDist;
+        return startCapDist;
+    }
+    
+    if (nearEnd) {
+        float distToEnd = length(pos - endPos);
+        float overrun = t_unclamped - length_val;
+        // Combine hemisphere/sphere cases (both use same calculation)
+        float sphereDist = distToEnd - endRadius;
+        float buttDist = fmax(surfaceDist, overrun);
+        endCapDist = (endCapStyle == 2) ? buttDist : sphereDist;
+        return endCapDist;
+    }
+    
+    return surfaceDist;
+}
+
+
+/// @brief Evaluate beam lattice distance using clean BVH traversal 
+/// @details Simplified and optimized BVH traversal implementation
+float evaluateBeamLatticeBVH(
+    float3 pos,
+    int latticeIndex,
+    int primitiveIndicesIndex, 
+    int beamIndex,
+    int ballIndex,
+    PAYLOAD_ARGS)
+{
+    // Extract data ranges once at the beginning to avoid repeated PrimitiveMeta loads
+    int bvhDataStart = primitives[latticeIndex].start;
+    int bvhDataEnd = primitives[latticeIndex].end;
+    int primitiveIndicesStart = primitives[primitiveIndicesIndex].start;
+    int primitiveIndicesEnd = primitives[primitiveIndicesIndex].end;
+    int beamDataStart = primitives[beamIndex].start;
+    int beamDataEnd = primitives[beamIndex].end;
+    int ballDataStart = primitives[ballIndex].start;
+    int ballDataEnd = primitives[ballIndex].end;
+    
+    // Compute number of BVH nodes from data size (10 floats per node)
+    int latticeDataSize = bvhDataEnd - bvhDataStart;
+    int numBVHNodes = latticeDataSize / 10;
+    
+    if (numBVHNodes <= 0) {
+        return FLT_MAX; // No BVH data
+    }
+    
+    float minDist = FLT_MAX;
+    
+    // BVH traversal using optimized stack management
+    int stack[32];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0; // Start with root node (index 0)
+    
+   
+    while (stackPtr > 0) {
+        int nodeIndex = stack[--stackPtr];
+                
+        // Bounds check with branch prediction optimization
+        if (nodeIndex >= numBVHNodes || nodeIndex < 0) {
+            continue; // Skip invalid nodes
+        }
+        
+        // Read BVH node data (10 floats per node) - optimized with vectorized access
+        int nodeDataStart = bvhDataStart + nodeIndex * 10;
+        
+        // Vectorized bounding box read (2 float3s = 6 floats: min.xyz + max.xyz)
+        float3 bbMin = vload3(0, &data[nodeDataStart]);
+        float3 bbMax = vload3(0, &data[nodeDataStart + 3]);
+        
+        // Check if point is potentially close to bounding box  
+        float bbDist = bbBox(pos, bbMin, bbMax);
+        if (bbDist > minDist) {
+            continue; // Skip if already found closer primitive
+        }
+        
+        // Node metadata (4 floats: leftChild, rightChild, primitiveStart, primitiveCount)
+        float4 nodeMetadata = vload4(0, &data[nodeDataStart + 6]);
+        int leftChild = (int)nodeMetadata.x;
+        int rightChild = (int)nodeMetadata.y;
+        int primitiveStart = (int)nodeMetadata.z;
+        int primitiveCount = (int)nodeMetadata.w;
+        
+        // Check if this is a leaf node (-1 means no child)
+        bool isLeaf = (leftChild == -1 && rightChild == -1);
+        
+        if (isLeaf) {
+            // Process primitives in this leaf node
+            for (int i = 0; i < primitiveCount; ++i) {
+                int primitiveDataIndex = primitiveIndicesStart + (primitiveStart + i) * 3;
+                
+                if (primitiveDataIndex + 2 >= primitiveIndicesEnd) {
+                    break; // Safety check for bounds
+                }
+                
+                // Read primitive index entry (type, index, unused) - vectorized
+                float3 primitiveData = vload3(0, &data[primitiveDataIndex]);
+                int primitiveType = (int)primitiveData.x;
+                int primitiveIndex = (int)primitiveData.y;
+                
+                float dist = FLT_MAX;
+                
+                // Branchless primitive type selection using conditional assignments
+                float beamDist = FLT_MAX;
+                float ballDist = FLT_MAX;
+                
+                // Calculate beam distance (will be ignored if not beam)
+                if (primitiveType == 0) {
+                    int beamDataIndex = beamDataStart + primitiveIndex * 11;
+                    if (beamDataIndex + 10 < beamDataEnd) {
+                        float3 startPos = vload3(0, &data[beamDataIndex]);
+                        float3 endPos = vload3(0, &data[beamDataIndex + 3]);
+                        float2 radii = vload2(0, &data[beamDataIndex + 6]);
+                        int2 capStyles = convert_int2(vload2(0, &data[beamDataIndex + 8]));
+                        
+                        beamDist = sdToBeam(pos, startPos, endPos, radii.x, radii.y, capStyles.x, capStyles.y);
+                    }
+                }
+                
+                // Calculate ball distance (will be ignored if not ball)
+                if (primitiveType == 1) {
+                    int ballDataIndex = ballDataStart + primitiveIndex * 4;
+                    if (ballDataIndex + 3 < ballDataEnd && ballDataIndex >= ballDataStart) {
+                        if ((ballDataIndex % 4) == 0) {
+                            __global const struct BallData* ball = (__global const struct BallData*)&data[ballDataIndex];
+                            ballDist = length(pos - ball->positionRadius.xyz) - ball->positionRadius.w;
+                        } else {
+                            float3 ballPos = vload3(0, &data[ballDataIndex]);
+                            float ballRadius = data[ballDataIndex + 3];
+                            ballDist = length(pos - ballPos) - ballRadius;
+                        }
+                    }
+                }
+                
+                // Select distance based on primitive type
+                dist = (primitiveType == 0) ? beamDist : ballDist;
+                
+                minDist = min(minDist, dist);
+            }
+        } else {
+            // Internal node - add children to stack for traversal
+            // Add right child first so left is processed first (depth-first)
+            if (rightChild >= 0 && rightChild < numBVHNodes && stackPtr < 31) {
+                stack[stackPtr++] = rightChild;
+            }
+            if (leftChild >= 0 && leftChild < numBVHNodes && stackPtr < 31) {
+                stack[stackPtr++] = leftChild;
+            }
+        }
+    }
+    
+    return minDist;
+}
+
+/// @brief Sample primitive index from voxel grid
+/// @details Helper function to sample 3D voxel grid data
+uint primitiveIndexFromVoxelGrid(float3 pos, int voxelGridIndex, PAYLOAD_ARGS)
+{
+    struct PrimitiveMeta voxelGrid = primitives[voxelGridIndex];
+    
+    // Get voxel grid parameters from data
+    int dataStart = voxelGrid.start;
+    if (dataStart + 9 >= voxelGrid.end) {
+        return 0; // Invalid voxel grid
+    }
+    
+    // Voxel grid header: origin (3), dimensions (3), voxel size (1), max distance (1), total voxels (1)
+    float3 origin = (float3)(data[dataStart], data[dataStart + 1], data[dataStart + 2]);
+    int3 dimensions = (int3)((int)data[dataStart + 3], (int)data[dataStart + 4], (int)data[dataStart + 5]);
+    float voxelSize = data[dataStart + 6];
+    int voxelDataStart = dataStart + 9;
+    
+    // Convert position to voxel coordinates
+    float3 localPos = (pos - origin) / voxelSize;
+    int3 voxelCoord = (int3)((int)floor(localPos.x), (int)floor(localPos.y), (int)floor(localPos.z));
+    
+    // Check bounds
+    if (voxelCoord.x < 0 || voxelCoord.x >= dimensions.x ||
+        voxelCoord.y < 0 || voxelCoord.y >= dimensions.y ||
+        voxelCoord.z < 0 || voxelCoord.z >= dimensions.z) {
+        return 0; // Outside grid
+    }
+    
+    // Calculate linear voxel index
+    int voxelIndex = voxelCoord.z * dimensions.y * dimensions.x + voxelCoord.y * dimensions.x + voxelCoord.x;
+    int dataIndex = voxelDataStart + voxelIndex;
+    
+    if (dataIndex >= voxelGrid.end) {
+        return 0; // Out of bounds
+    }
+    
+    return (uint)data[dataIndex];
+}
+
+/// @brief GPU-optimized helper to load beam data with coalesced memory access
+/// @param beamDataStart Starting index in data array
+/// @param data Global memory array
+/// @param startPos Output: beam start position
+/// @param endPos Output: beam end position  
+/// @param startRadius Output: start radius
+/// @param endRadius Output: end radius
+/// @param startCapStyle Output: start cap style
+/// @param endCapStyle Output: end cap style
+/// @return true if data was loaded successfully
+inline bool loadBeamData(int beamDataStart, __global const float* data, int dataEnd,
+                        float3* startPos, float3* endPos, 
+                        float* startRadius, float* endRadius,
+                        int* startCapStyle, int* endCapStyle)
+{
+    if (beamDataStart + 10 >= dataEnd) {
+        return false;
+    }
+    
+    // Use vector loads for better memory coalescing where possible
+    // Load position data as vectors when alignment allows
+    __global const float* beamData = &data[beamDataStart];
+    
+    *startPos = (float3)(beamData[0], beamData[1], beamData[2]);
+    *endPos = (float3)(beamData[3], beamData[4], beamData[5]);
+    *startRadius = beamData[6];
+    *endRadius = beamData[7];
+    *startCapStyle = (int)beamData[8];
+    *endCapStyle = (int)beamData[9];
+    
+    return true;
+}
+
+/// @brief Extract primitive type from encoded index (if encoding is used)
+/// @details If voxel grid uses type encoding, extract type from upper bits
+inline uint primitiveTypeFromVoxelGrid(uint encodedIndex)
+{
+    // If encoding is used, type is in upper bit (bit 31)
+    return (encodedIndex >> 31) & 1u; // 0 = beam, 1 = ball
+}
+
+/// @brief GPU-optimized helper to evaluate a single primitive
+/// @param pos Position to evaluate
+/// @param primitiveIndex Index of primitive
+/// @param primitiveType Type of primitive (0=beam, 1=ball)
+/// @param beamPrimitive Beam primitive metadata
+/// @param ballPrimitive Ball primitive metadata
+/// @param data Global data array
+/// @return Distance to primitive
+inline float evaluateSinglePrimitive(float3 pos, uint primitiveIndex, uint primitiveType,
+                                    int beamDataStart, int beamDataEnd,
+                                    int ballDataStart, int ballDataEnd,
+                                    __global const float* data)
+{
+    if (primitiveType == 0) { // BEAM primitive
+        int beamDataIndex = beamDataStart + primitiveIndex * 11;
+        
+        float3 startPos, endPos;
+        float startRadius, endRadius;
+        int startCapStyle, endCapStyle;
+        
+        if (loadBeamData(beamDataIndex, data, beamDataEnd,
+                        &startPos, &endPos, &startRadius, &endRadius,
+                        &startCapStyle, &endCapStyle)) {
+            return sdToBeam(pos, startPos, endPos, startRadius, endRadius, startCapStyle, endCapStyle);
+        }
+    } else { // BALL primitive (primitiveType == 1)
+        int ballDataIndex = ballDataStart + primitiveIndex * 4; // 4 floats per BallData struct
+        if (ballDataIndex + 3 < ballDataEnd && ballDataIndex >= ballDataStart) {
+            // Ensure proper alignment for BallData struct access
+            if ((ballDataIndex % 4) == 0) { // Verify 16-byte alignment boundary
+                __global const struct BallData* ball = (__global const struct BallData*)&data[ballDataIndex];
+                return length(pos - ball->positionRadius.xyz) - ball->positionRadius.w;
+            } else {
+                // Fallback to manual access if alignment is wrong
+                float3 ballPos = (float3)(data[ballDataIndex], data[ballDataIndex + 1], data[ballDataIndex + 2]);
+                float ballRadius = data[ballDataIndex + 3];
+                return length(pos - ballPos) - ballRadius;
+            }
+        }
+    }
+    return FLT_MAX;
+}
+
+/// @brief Evaluate beam lattice distance using voxel acceleration - GPU optimized
+/// @details Uses pre-computed voxel grid to find candidate primitives efficiently
+float evaluateBeamLatticeVoxel(
+    float3 pos,
+    int latticeIndex,
+    int voxelGridIndex,
+    int beamIndex,
+    int ballIndex,
+    PAYLOAD_ARGS)
+{
+    // Extract data ranges once at the beginning to avoid repeated PrimitiveMeta loads
+    int beamDataStart = primitives[beamIndex].start;
+    int beamDataEnd = primitives[beamIndex].end;
+    int ballDataStart = primitives[ballIndex].start;
+    int ballDataEnd = primitives[ballIndex].end;
+    
+    float minDist = FLT_MAX;
+    
+    // Get voxel grid parameters
+    struct PrimitiveMeta voxelGrid = primitives[voxelGridIndex];
+    float voxelSize = data[voxelGrid.start + 6]; // Voxel size from header
+    
+    // Calculate voxel diagonal distance (sqrt(3) * voxelSize) - precompute for efficiency
+    float voxelDiagonal = 1.732050808f * voxelSize; // sqrt(3) ≈ 1.732050808
+    
+    // First, check distance at current position only
+    uint encodedIndex = primitiveIndexFromVoxelGrid(pos, voxelGridIndex, PASS_PAYLOAD_ARGS);
+    
+    if (encodedIndex != 0) {
+        // Extract primitive index and type (combine bit operations)
+        uint primitiveIndex = encodedIndex & 0x7FFFFFFF; // Lower 31 bits
+        uint primitiveType = encodedIndex >> 31; // Upper bit (optimized vs function call)
+        
+        float dist = evaluateSinglePrimitive(pos, primitiveIndex, primitiveType, 
+                                           beamDataStart, beamDataEnd, ballDataStart, ballDataEnd, data);
+        minDist = fmin(minDist, dist);
+    }
+    
+    // Early exit if we're far from any primitives (GPU-friendly branching)
+    // Use squared comparison to avoid sqrt in fabs
+    float minDistSq = minDist * minDist;
+    float voxelDiagonalSq = voxelDiagonal * voxelDiagonal;
+    
+    if (minDistSq > voxelDiagonalSq) {
+        return minDist;
+    }
+    
+    // Optimized neighborhood sampling with reduced branching
+    // Unroll the loop partially for better GPU utilization
+    // Check neighbors in order of likely importance (closer first)
+    
+    // Define neighbor offsets in a more cache-friendly order
+    const int3 neighborOffsets[26] = {
+        // Face neighbors (6) - most likely to be important
+        (int3)(-1, 0, 0), (int3)(1, 0, 0), (int3)(0, -1, 0), 
+        (int3)(0, 1, 0), (int3)(0, 0, -1), (int3)(0, 0, 1),
+        // Edge neighbors (12)  
+        (int3)(-1, -1, 0), (int3)(-1, 1, 0), (int3)(1, -1, 0), (int3)(1, 1, 0),
+        (int3)(-1, 0, -1), (int3)(-1, 0, 1), (int3)(1, 0, -1), (int3)(1, 0, 1),
+        (int3)(0, -1, -1), (int3)(0, -1, 1), (int3)(0, 1, -1), (int3)(0, 1, 1),
+        // Corner neighbors (8)
+        (int3)(-1, -1, -1), (int3)(-1, -1, 1), (int3)(-1, 1, -1), (int3)(-1, 1, 1),
+        (int3)(1, -1, -1), (int3)(1, -1, 1), (int3)(1, 1, -1), (int3)(1, 1, 1)
+    };
+    
+    // Process neighbors with early exit potential
+    #pragma unroll 8  // Partial unroll for GPU optimization
+    for (int i = 0; i < 26; ++i) {
+        int3 offset = neighborOffsets[i];
+        float3 samplePos = pos + convert_float3(offset) * voxelSize;
+        uint neighborEncodedIndex = primitiveIndexFromVoxelGrid(samplePos, voxelGridIndex, PASS_PAYLOAD_ARGS);
+        if (neighborEncodedIndex == encodedIndex) {
+            continue; // Skip if same as already evaluated
+        }
+        
+        if (neighborEncodedIndex != 0) {
+            // Extract primitive index and type (optimized bit operations)
+            uint neighborPrimitiveIndex = neighborEncodedIndex & 0x7FFFFFFF;
+            uint neighborPrimitiveType = neighborEncodedIndex >> 31;
+            
+            float dist = evaluateSinglePrimitive(pos, neighborPrimitiveIndex, neighborPrimitiveType,
+                                               beamDataStart, beamDataEnd, ballDataStart, ballDataEnd, data);
+            
+            minDist = fmin(minDist, dist);
+            
+            // Early exit if we're very close (GPU-friendly condition)
+            // This reduces unnecessary computation for nearby surfaces
+            if (dist < voxelSize * 0.1f) {
+                break; // Found very close primitive, no need to check others
+            }
+        }
+    }
+    
+    return minDist;
+}
 
 float payloadPrimitives(float3 pos, bool useApproximation, PAYLOAD_ARGS)
 {
@@ -1015,6 +1461,59 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             }
             return sdf;
 #endif
+        }
+
+        if (primitive.primitiveType == SDF_BEAM_LATTICE)
+        {
+            // Find associated primitive indices, beam, and ball primitives
+            int primitiveIndicesIndex = -1;
+            int voxelGridIndex = -1;
+            int beamIndex = -1;
+            int ballIndex = -1;
+            
+            // Look for voxel grid acceleration first
+            if (i + 1 < endIndex && primitives[i + 1].primitiveType == SDF_BEAM_LATTICE_VOXEL_INDEX) {
+                voxelGridIndex = i + 1;
+            }
+            
+            // Look for primitive indices (usually next after beam lattice or voxel grid)
+            int nextIndex = (voxelGridIndex >= 0) ? voxelGridIndex + 1 : i + 1;
+            if (nextIndex < endIndex && primitives[nextIndex].primitiveType == SDF_PRIMITIVE_INDICES) {
+                primitiveIndicesIndex = nextIndex;
+            }
+            
+            // Look for beam primitive (usually after primitive indices)
+            nextIndex = (primitiveIndicesIndex >= 0) ? primitiveIndicesIndex + 1 : nextIndex + 1;
+            if (nextIndex < endIndex && primitives[nextIndex].primitiveType == SDF_BEAM) {
+                beamIndex = nextIndex;
+            }
+            
+            // Look for ball primitive (usually after beam)
+            nextIndex = beamIndex + 1;
+            if (nextIndex < endIndex && primitives[nextIndex].primitiveType == SDF_BALL) {
+                ballIndex = nextIndex;
+            }
+            
+            float dist = FLT_MAX;
+            
+            // Choose evaluation method based on available acceleration structures
+            if (voxelGridIndex >= 0 && beamIndex >= 0) {
+                // Use voxel acceleration if available
+                dist = evaluateBeamLatticeVoxel(pos, i, voxelGridIndex, beamIndex, ballIndex, PASS_PAYLOAD_ARGS);
+            } else if (primitiveIndicesIndex >= 0) {
+                // Fall back to BVH traversal
+                dist = evaluateBeamLatticeBVH(pos, i, primitiveIndicesIndex, beamIndex, ballIndex, PASS_PAYLOAD_ARGS);
+            }
+            
+            if (dist != FLT_MAX) {
+                sdf = uniteSmooth(sdf, dist, 0.0f);
+            }
+            
+            // Skip processed primitives to avoid double processing
+            if (voxelGridIndex >= 0) i = voxelGridIndex;
+            if (primitiveIndicesIndex >= 0) i = primitiveIndicesIndex;
+            if (beamIndex >= 0) i = beamIndex;
+            if (ballIndex >= 0) i = ballIndex;
         }
     }
     return sdf;

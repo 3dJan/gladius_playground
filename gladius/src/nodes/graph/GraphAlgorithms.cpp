@@ -1,12 +1,12 @@
 ﻿#include "GraphAlgorithms.h"
-#include "graph/IDirectedGraph.h"
 #include "Profiling.h"
+#include "graph/IDirectedGraph.h"
 
+#include <algorithm>
 #include <list>
 #include <queue>
 #include <sstream>
 #include <stack>
-#include <algorithm>
 
 namespace gladius::nodes::graph
 {
@@ -121,7 +121,7 @@ namespace gladius::nodes::graph
         {
             return false;
         }
-        
+
         if (id < 0 || dependencyInQuestion < 0)
         {
             return false;
@@ -131,7 +131,6 @@ namespace gladius::nodes::graph
             return true;
         }
 
-      
         std::vector<bool> visited(graph.getSize() + 1u, false);
         std::queue<Identifier> nodesToVisit;
 
@@ -290,11 +289,14 @@ namespace gladius::nodes::graph
               std::max(currentNode.depth, result[currentNode.identifier]);
             nodesToVisit.pop_front();
 
-            auto const successorList = determineSuccessor(graph, currentNode.identifier);
-            for (auto successorId : successorList)
+            // Traverse backward through dependencies (predecessors)
+            // This ensures we capture all nodes that contribute to the output,
+            // including constant nodes and disconnected inputs
+            auto const predecessorList = determineDirectDependencies(graph, currentNode.identifier);
+            for (auto predecessorId : predecessorList)
             {
-                nodesToVisit.push_back({successorId, currentNode.depth + 1});
-                visited[successorId] = true;
+                nodesToVisit.push_back({predecessorId, currentNode.depth + 1});
+                visited[predecessorId] = true;
             }
         }
         return result;

@@ -5,8 +5,8 @@
 
 #include "BuildParameter.h"
 #include "Port.h"
-#include "nodesfwd.h"
 #include "ResourceKey.h"
+#include "nodesfwd.h"
 #include "types.h"
 
 #include <array>
@@ -61,6 +61,11 @@ namespace gladius::nodes
         virtual void setSource(OptionalSource const & source) = 0;
 
         virtual auto getSource() -> OptionalSource &
+        {
+            return m_source;
+        };
+
+        virtual auto getConstSource() const -> OptionalSource const &
         {
             return m_source;
         };
@@ -295,6 +300,11 @@ namespace gladius::nodes
             return m_value;
         }
 
+        [[nodiscard]] auto Value() const -> T const &
+        {
+            return m_value;
+        }
+
         void setInputFromPort(Port & port) override
         {
             Source newSource;
@@ -312,7 +322,7 @@ namespace gladius::nodes
             return m_source;
         }
 
-        OptionalSource const & getConstSource() const
+        OptionalSource const & getConstSource() const override
         {
             return m_source;
         }

@@ -1,11 +1,17 @@
 #include "Importer3mf.h"
+#include "BeamLatticeImporter.h"
 
+#include "Lib3mfLoader.h"
+#include <algorithm>
+#include <fmt/format.h>
 #include <lib3mf_abi.hpp>
 #include <lib3mf_implicit.hpp>
 #include <lib3mf_types.hpp>
+#include <map>
 #include <set>
 #include <vector>
 
+#include "BeamLatticeResource.h"
 #include "Builder.h"
 #include "Document.h"
 #include "FunctionComparator.h"
@@ -13,6 +19,7 @@
 #include "Parameter.h"
 #include "Profiling.h"
 #include "VdbImporter.h"
+#include "nodes/DerivedNodes.h"
 #include "nodes/utils.h"
 #include <Eigen/Core>
 #include <variant>
@@ -28,17 +35,62 @@ namespace gladius
 namespace gladius::io
 {
 
+    // Convert 3MF model unit to scaling from millimeters to model units
+    // Returns units_per_mm so that: position_in_model_units = position_in_mm * units_per_mm
+    static float computeUnitsPerMM(Lib3MF::PModel const & model)
+    {
+        if (!model)
+        {
+            return 1.0f;
+        }
+        Lib3MF::eModelUnit unit = model->GetUnit();
+        // mm per unit
+        double mm_per_unit = 1.0;
+        switch (unit)
+        {
+        case Lib3MF::eModelUnit::MicroMeter:
+            mm_per_unit = 0.001; // 1 µm = 0.001 mm
+            break;
+        case Lib3MF::eModelUnit::MilliMeter:
+            mm_per_unit = 1.0;
+            break;
+        case Lib3MF::eModelUnit::CentiMeter:
+            mm_per_unit = 10.0;
+            break;
+        case Lib3MF::eModelUnit::Meter:
+            mm_per_unit = 1000.0;
+            break;
+        case Lib3MF::eModelUnit::Inch:
+            mm_per_unit = 25.4;
+            break;
+        case Lib3MF::eModelUnit::Foot:
+            mm_per_unit = 304.8;
+            break;
+        default:
+            mm_per_unit = 1.0; // Default/fallback to millimeters
+            break;
+        }
+        // units per mm
+        double units_per_mm = 1.0 / mm_per_unit;
+        return static_cast<float>(units_per_mm);
+    }
+
     Importer3mf::Importer3mf(events::SharedLogger logger)
         : m_eventLogger(logger)
     {
         ProfileFunction
         try
         {
-            m_wrapper = Lib3MF::CWrapper::loadLibrary();
+            m_wrapper = gladius::io::loadLib3mfScoped();
         }
         catch (std::exception & e)
         {
-            std::cout << e.what() << std::endl;
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Error initializing Importer3mf: {}", e.what()),
+                   events::Severity::Error});
+            }
             return;
         }
     }
@@ -73,7 +125,7 @@ namespace gladius::io
             return gladius::nodes::VariantParameter(float3{0.f, 0.f, 0.f});
         case Lib3MF::eImplicitPortType::Matrix:
         {
-            return VariantParameter(Matrix4x4(), ContentType::Transformation);
+            return gladius::nodes::VariantParameter(Matrix4x4(), ContentType::Transformation);
         }
         default:
             return gladius::nodes::VariantParameter(0);
@@ -101,6 +153,11 @@ namespace gladius::io
     gladius::nodes::NodeBase * createNode(gladius::nodes::Model & model,
                                           Lib3MF::eImplicitNodeType type)
     {
+        // TODO(NormalizeDistanceField-3MF): Add import support for NormalizeDistanceField
+        // nodes once the 3MF implicit function extension defines a corresponding node type.
+        // TODO(FunctionGradient-3MF): Add import support for FunctionGradient nodes once
+        // the 3MF implicit function extension defines a corresponding node type.
+
         ProfileFunction using namespace gladius;
         switch (type)
         {
@@ -206,6 +263,12 @@ namespace gladius::io
             return model.create<nodes::UnsignedDistanceToMesh>();
         case Lib3MF::eImplicitNodeType::Mod:
             return model.create<nodes::Mod>();
+        case Lib3MF::eImplicitNodeType::BeamLattice:
+            return model.create<nodes::SignedDistanceToBeamLattice>();
+        case Lib3MF::eImplicitNodeType::FunctionGradient:
+            return model.create<nodes::FunctionGradient>();
+        case Lib3MF::eImplicitNodeType::NormalizeDistance:
+            return model.create<nodes::NormalizeDistanceField>();
         default:
             throw std::runtime_error("Unknown node type");
             return nullptr;
@@ -308,8 +371,13 @@ namespace gladius::io
         {
             if (duplicate.duplicateFunction)
             {
-                std::cout << "Duplicate function found with ID: "
-                          << duplicate.duplicateFunction->GetUniqueResourceID() << std::endl;
+                if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent(
+                      {fmt::format("Duplicate function detected with ID: {}",
+                                   duplicate.duplicateFunction->GetUniqueResourceID()),
+                       events::Severity::Info});
+                }
             }
         }
 
@@ -424,12 +492,6 @@ namespace gladius::io
             return;
         }
 
-        if (m_eventLogger)
-        {
-            m_eventLogger->addEvent({fmt::format("Creating model: {}", func->GetUniqueResourceID()),
-                                     events::Severity::Info});
-        }
-
         assembly.addModelIfNotExisting(func->GetModelResourceID());
 
         auto & idToNode = m_nodeMaps[func->GetModelResourceID()];
@@ -500,6 +562,22 @@ namespace gladius::io
                                            typeIndexFrom3mfType(output->GetType()));
                 }
             }
+
+            // For ComposeMatrix, MatrixFromColumns and MatrixFromRows replace "Matrix" output with
+            // "Result"
+            if (node3mf->GetNodeType() == Lib3MF::eImplicitNodeType::ComposeMatrix ||
+                node3mf->GetNodeType() == Lib3MF::eImplicitNodeType::MatrixFromColumns ||
+                node3mf->GetNodeType() == Lib3MF::eImplicitNodeType::MatrixFromRows)
+            {
+                auto * port = newNode->findOutputPort("Matrix");
+                if (port)
+                {
+                    newNode->getOutputs().erase("Matrix");
+                    port->setUniqueName(newNode->getUniqueName() + "_" + "Result");
+                    port->setShortName("Result");
+                    newNode->getOutputs()["Result"] = *port;
+                }
+            }
             newNode->setUniqueName(node3mf->GetIdentifier());
             // tag
             newNode->setTag(node3mf->GetTag());
@@ -537,11 +615,18 @@ namespace gladius::io
             auto input = inputIter->GetCurrent();
             auto parameterName = makeValidVariableName(input->GetIdentifier());
             auto * parameter = node->getParameter(parameterName);
-            bool const nodeIsFunctionCall =
-              node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::FunctionCall;
-            if (!parameter && nodeIsFunctionCall)
+            auto const nodeType = node3mf.GetNodeType();
+            bool const nodeIsFunctionCall = nodeType == Lib3MF::eImplicitNodeType::FunctionCall;
+            bool const nodeIsFunctionGradient =
+              nodeType == Lib3MF::eImplicitNodeType::FunctionGradient;
+            bool const nodeIsNormalizeDistance =
+              nodeType == Lib3MF::eImplicitNodeType::NormalizeDistance;
+
+            bool const allowDynamicInputs =
+              nodeIsFunctionCall || nodeIsFunctionGradient || nodeIsNormalizeDistance;
+
+            if (!parameter && allowDynamicInputs)
             {
-                // create the parameter
                 parameter = node->addInput(parameterName);
             }
 
@@ -559,6 +644,23 @@ namespace gladius::io
 
             *parameter = parameterFromType(input->GetType());
             parameter->setParentId(node->getId());
+
+            if (parameterName == nodes::FieldNames::FunctionId)
+            {
+                parameter->setInputSourceRequired(false);
+            }
+            else if (parameterName == nodes::FieldNames::StepSize)
+            {
+                parameter->setInputSourceRequired(false);
+                parameter->setModifiable(true);
+                parameter->setValue(1e-3f);
+            }
+            else if (allowDynamicInputs)
+            {
+                parameter->marksAsArgument();
+                parameter->setInputSourceRequired(true);
+            }
+
             auto sourcePort = resolveInput(model, input);
             if (sourcePort)
             {
@@ -580,6 +682,7 @@ namespace gladius::io
             if (parameter)
             {
                 parameter->setValue(static_cast<float>(value));
+                parameter->setInputSourceRequired(false); // Fix: Constants don't need input sources
             }
         }
         else if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::ConstVec)
@@ -600,6 +703,8 @@ namespace gladius::io
                 if (parameter)
                 {
                     parameter->setValue(static_cast<float>(value.m_Coordinates[i]));
+                    parameter->setInputSourceRequired(
+                      false); // Fix: Constants don't need input sources
                 }
                 i++;
             }
@@ -637,6 +742,8 @@ namespace gladius::io
                 if (parameter)
                 {
                     parameter->setValue(static_cast<float>(matrix.m_Field[row][col]));
+                    parameter->setInputSourceRequired(
+                      false); // Fix: Constants don't need input sources
                 }
                 i++;
             }
@@ -669,6 +776,29 @@ namespace gladius::io
             }
             auto resourceId = resource->GetModelResourceID();
             resourceNode->setResourceId(resourceId);
+        }
+
+        if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::FunctionGradient)
+        {
+            auto gradientNode3mf = dynamic_cast<Lib3MF::CFunctionGradientNode *>(&node3mf);
+            auto gradientNode = dynamic_cast<nodes::FunctionGradient *>(node);
+            if (gradientNode && gradientNode3mf)
+            {
+                gradientNode->setSelectedScalarOutput(gradientNode3mf->GetScalarOutputName());
+                gradientNode->setSelectedVectorInput(gradientNode3mf->GetVectorInputName());
+                gradientNode->resolveFunctionId();
+            }
+        }
+        else if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::NormalizeDistance)
+        {
+            auto normalizeNode3mf = dynamic_cast<Lib3MF::CNormalizeDistanceNode *>(&node3mf);
+            auto normalizeNode = dynamic_cast<nodes::NormalizeDistanceField *>(node);
+            if (normalizeNode && normalizeNode3mf)
+            {
+                normalizeNode->setSelectedScalarOutput(normalizeNode3mf->GetScalarOutputName());
+                normalizeNode->setSelectedVectorInput(normalizeNode3mf->GetVectorInputName());
+                normalizeNode->resolveFunctionId();
+            }
         }
     }
 
@@ -771,19 +901,58 @@ namespace gladius::io
             sourceNode = sourceNodeIter->second;
         }
 
+        auto & outputs = sourceNode->getOutputs();
         auto sourcePortName = makeValidVariableName(extractOutputName(refName));
-        auto sourcePortIter = sourceNode->getOutputs().find(sourcePortName);
-        if (sourcePortIter == sourceNode->getOutputs().end())
+        auto sourcePortIter = outputs.find(sourcePortName);
+        if (sourcePortIter == outputs.end())
         {
+            // Legacy files used ".matrix" as the output name; newer versions use "Result"
+            std::string lowerRef = refName;
+            std::transform(lowerRef.begin(), lowerRef.end(), lowerRef.begin(), ::tolower);
+            auto matrixPos = lowerRef.rfind(".matrix");
+            if (matrixPos != std::string::npos)
+            {
+                std::string legacyRef = refName;
+                std::string fallbackRef = refName.substr(0, matrixPos) + ".Result";
+                auto fallbackPortName = makeValidVariableName(extractOutputName(fallbackRef));
+                auto fallbackIter = outputs.find(fallbackPortName);
+
+                if (fallbackIter == outputs.end())
+                {
+                    // Also try lowercase variant for safety
+                    fallbackRef = refName.substr(0, matrixPos) + ".result";
+                    fallbackPortName = makeValidVariableName(extractOutputName(fallbackRef));
+                    fallbackIter = outputs.find(fallbackPortName);
+                }
+
+                if (fallbackIter != outputs.end())
+                {
+                    input->SetReference(fallbackRef);
+                    if (m_eventLogger)
+                    {
+                        m_eventLogger->addEvent({fmt::format("Resolved legacy reference {} to {}",
+                                                             legacyRef,
+                                                             fallbackRef),
+                                                 events::Severity::Info});
+                    }
+                    return &fallbackIter->second;
+                }
+            }
+
             if (m_eventLogger)
             {
+                std::string suggestion;
+                if (!outputs.empty())
+                {
+                    suggestion = outputs.begin()->first;
+                }
                 m_eventLogger->addEvent(
-                  {fmt::format(
-                     "Resolving {} failed. Port of node {} not found: {}. Did you mean {}?\n",
-                     refName,
-                     sourceNodeName,
-                     sourcePortName,
-                     sourceNode->getOutputs().begin()->first),
+                  {fmt::format("Resolving {} failed. Port of node {} not found: {}{}",
+                               refName,
+                               sourceNodeName,
+                               sourcePortName,
+                               suggestion.empty() ? std::string{}
+                                                  : fmt::format(". Did you mean {}?", suggestion)),
                    events::Severity::Error});
             }
 
@@ -1028,6 +1197,10 @@ namespace gladius::io
                 auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
                 loadMeshIfNecessary(model, meshObj, doc);
             }
+            else
+            {
+                // Skip non-mesh objects
+            }
         }
     }
 
@@ -1035,6 +1208,7 @@ namespace gladius::io
     {
         ProfileFunction auto objectIterator = model->GetObjects();
         nodes::Builder builder;
+        float const units_per_mm = computeUnitsPerMM(model);
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
@@ -1051,7 +1225,7 @@ namespace gladius::io
                                           matrix4x4From3mfTransform(component->GetTransform())});
                 }
 
-                builder.addCompositeModel(doc, object->GetResourceID(), components);
+                builder.addCompositeModel(doc, object->GetResourceID(), components, units_per_mm);
             }
         }
     }
@@ -1060,8 +1234,10 @@ namespace gladius::io
                                           Lib3MF::PMeshObject meshObject,
                                           Document & doc)
     {
-        ProfileFunction auto key = ResourceKey(static_cast<int>(meshObject->GetModelResourceID()));
+        ProfileFunction auto key =
+          ResourceKey(static_cast<uint32_t>(meshObject->GetModelResourceID()), ResourceType::Mesh);
         key.setDisplayName(meshObject->GetName());
+
         if (doc.getGeneratorContext().resourceManager.hasResource(key))
         {
             return;
@@ -1082,9 +1258,126 @@ namespace gladius::io
 
         if (mesh.indices.size() == 0u)
         {
+            // Still check for beam lattice even if mesh has no triangles
+            loadBeamLatticeIfNecessary(model, meshObject, doc);
             return;
         }
         doc.getGeneratorContext().resourceManager.addResource(key, std::move(mesh));
+
+        // Also load beam lattice if present
+        loadBeamLatticeIfNecessary(model, meshObject, doc);
+    }
+
+    void Importer3mf::loadBeamLatticeIfNecessary(Lib3MF::PModel model,
+                                                 Lib3MF::PMeshObject meshObject,
+                                                 Document & doc)
+    {
+        ProfileFunction
+
+        try
+        {
+            // Create resource key for beam lattice (use same resource ID but different type)
+            auto key = ResourceKey(static_cast<uint32_t>(meshObject->GetModelResourceID()),
+                                   ResourceType::BeamLattice);
+            key.setDisplayName(meshObject->GetName() + "_BeamLattice");
+
+            // Check if beam lattice resource already exists
+            if (doc.getGeneratorContext().resourceManager.hasResource(key))
+            {
+                return;
+            }
+
+            // Use the new BeamLatticeImporter for unified processing
+            BeamLatticeImporter importer(m_eventLogger);
+            if (!importer.process(meshObject))
+            {
+                return; // No beam lattice or processing failed
+            }
+
+            // Get processed data from importer
+            const auto & beams = importer.getBeams();
+            const auto & balls = importer.getBalls();
+            const auto & ballConfig = importer.getBallConfig();
+
+            if (beams.empty())
+            {
+                // Having a beam lattice without beams is permitted by the 3MF spec
+                // and should not be treated as a warning. Log as informational and skip.
+                if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent({fmt::format("BeamLattice {} has no beams — skipping",
+                                                         meshObject->GetModelResourceID()),
+                                             gladius::events::Severity::Info});
+                }
+                return;
+            }
+
+            // Read clipping information from beam lattice (separate from main processing)
+            Lib3MF::eBeamLatticeClipMode clippingMode = Lib3MF::eBeamLatticeClipMode::NoClipMode;
+            Lib3MF_uint32 clippingMeshResourceId = 0;
+
+            try
+            {
+                Lib3MF::PBeamLattice beamLattice = meshObject->BeamLattice();
+                if (beamLattice)
+                {
+                    beamLattice->GetClipping(clippingMode, clippingMeshResourceId);
+                }
+            }
+            catch (const std::exception & e)
+            {
+                // If clipping info is not available, continue with no clipping
+                clippingMode = Lib3MF::eBeamLatticeClipMode::NoClipMode;
+                if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent(
+                      {fmt::format(
+                         "Warning: Could not read clipping information from beam lattice {}: {}",
+                         meshObject->GetModelResourceID(),
+                         e.what()),
+                       gladius::events::Severity::Warning});
+                }
+            }
+
+            // Create beam lattice resource with processed data
+            auto beamLatticeResource =
+              std::make_unique<BeamLatticeResource>(key,
+                                                    std::move(std::vector<BeamData>(beams)),
+                                                    std::move(std::vector<BallData>(balls)),
+                                                    ballConfig);
+
+            // Update display name to include ball information
+            std::string displayName = meshObject->GetName() + "_BeamLattice";
+            if (!balls.empty())
+            {
+                displayName += fmt::format(" ({} balls)", balls.size());
+            }
+            key.setDisplayName(displayName);
+
+            // Add the resource to the manager
+            doc.getGeneratorContext().resourceManager.addResource(key,
+                                                                  std::move(beamLatticeResource));
+
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Successfully loaded beam lattice {} with {} beams and {} balls",
+                               meshObject->GetModelResourceID(),
+                               beams.size(),
+                               balls.size()),
+                   gladius::events::Severity::Info});
+            }
+        }
+        catch (const std::exception & e)
+        {
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({fmt::format("Error loading beam lattice from mesh {}: {}",
+                                                     meshObject->GetModelResourceID(),
+                                                     e.what()),
+                                         gladius::events::Severity::Error});
+            }
+        }
     }
 
     BoundingBox Importer3mf::computeBoundingBox(Lib3MF::PMeshObject mesh)
@@ -1125,9 +1418,9 @@ namespace gladius::io
         if (mesh)
         {
             auto volume = mesh->GetVolumeData();
-
-            auto coordinateSystemPort =
-              builder.addTransformationToInputCs(*doc.getAssembly()->assemblyModel(), trafo);
+            float const units_per_mm = computeUnitsPerMM(model);
+            auto coordinateSystemPort = builder.addTransformationToInputCs(
+              *doc.getAssembly()->assemblyModel(), trafo, units_per_mm);
 
             if (requiresMesh)
             {
@@ -1138,6 +1431,91 @@ namespace gladius::io
             if (volume)
             {
                 addVolumeData(volume, model, doc, builder, coordinateSystemPort);
+            }
+        }
+    }
+
+    void Importer3mf::addBeamLatticeObject(Lib3MF::PModel model,
+                                           ResourceKey const & key,
+                                           Lib3MF::PMeshObject meshObject,
+                                           nodes::Matrix4x4 const & trafo,
+                                           Document & doc)
+    {
+        // BEAM_LATTICE_VERIFICATION_MARKER_2025_09_05
+        nodes::Builder builder;
+
+        if (meshObject)
+        {
+            // Check if mesh object has a beam lattice (same pattern as in
+            // loadBeamLatticeIfNecessary)
+            Lib3MF::PBeamLattice beamLattice = meshObject->BeamLattice();
+            if (beamLattice)
+            {
+                float const units_per_mm = computeUnitsPerMM(model);
+                auto coordinateSystemPort = builder.addTransformationToInputCs(
+                  *doc.getAssembly()->assemblyModel(), trafo, units_per_mm);
+
+                // Read clipping information from beam lattice
+                Lib3MF::eBeamLatticeClipMode clippingMode =
+                  Lib3MF::eBeamLatticeClipMode::NoClipMode;
+                Lib3MF_uint32 clippingMeshResourceId = 0;
+
+                try
+                {
+                    beamLattice->GetClipping(clippingMode, clippingMeshResourceId);
+                }
+                catch (const std::exception & e)
+                {
+                    // If clipping info is not available, continue with no clipping
+                    clippingMode = Lib3MF::eBeamLatticeClipMode::NoClipMode;
+                    if (m_eventLogger)
+                    {
+                        m_eventLogger->addEvent({fmt::format("Warning: Could not read clipping "
+                                                             "information from beam lattice {}: {}",
+                                                             meshObject->GetModelResourceID(),
+                                                             e.what()),
+                                                 gladius::events::Severity::Warning});
+                    }
+                }
+
+                // Handle clipping based on the mode
+                if (clippingMode == Lib3MF::eBeamLatticeClipMode::NoClipMode)
+                {
+                    // No clipping - use the current behavior
+                    builder.addBeamLatticeRef(
+                      *doc.getAssembly()->assemblyModel(), key, coordinateSystemPort);
+                }
+                else
+                {
+                    // Clipping required - get clipping mesh resource key
+                    auto clippingMeshKey = ResourceKey(clippingMeshResourceId, ResourceType::Mesh);
+
+                    // Check if clipping mesh resource exists
+                    if (!doc.getGeneratorContext().resourceManager.hasResource(clippingMeshKey))
+                    {
+                        if (m_eventLogger)
+                        {
+                            m_eventLogger->addEvent(
+                              {fmt::format(
+                                 "Error: Clipping mesh resource {} not found for beam lattice {}",
+                                 clippingMeshResourceId,
+                                 meshObject->GetModelResourceID()),
+                               gladius::events::Severity::Error});
+                        }
+                        // Fallback to no clipping
+                        builder.addBeamLatticeRef(
+                          *doc.getAssembly()->assemblyModel(), key, coordinateSystemPort);
+                    }
+                    else
+                    {
+                        // Apply clipping
+                        builder.addBeamLatticeWithClipping(*doc.getAssembly()->assemblyModel(),
+                                                           key,
+                                                           clippingMeshKey,
+                                                           static_cast<int>(clippingMode),
+                                                           coordinateSystemPort);
+                    }
+                }
             }
         }
     }
@@ -1239,14 +1617,18 @@ namespace gladius::io
                 channelName = "shape";
             }
 
-            auto buildItemCoordinateSystemPort =
-              builder.addTransformationToInputCs(*doc.getAssembly()->assemblyModel(), trafo);
+            float const units_per_mm = computeUnitsPerMM(model);
+            auto buildItemCoordinateSystemPort = builder.addTransformationToInputCs(
+              *doc.getAssembly()->assemblyModel(), trafo, units_per_mm);
 
             auto levelSetTransform = levelSet->GetTransform();
             auto levelSetTrafo = matrix4x4From3mfTransform(levelSetTransform);
 
-            auto levelSetCoordinateSystemPort = builder.insertTransformation(
-              *doc.getAssembly()->assemblyModel(), buildItemCoordinateSystemPort, levelSetTrafo);
+            auto levelSetCoordinateSystemPort =
+              builder.insertTransformation(*doc.getAssembly()->assemblyModel(),
+                                           buildItemCoordinateSystemPort,
+                                           levelSetTrafo,
+                                           1.0f);
 
             auto mesh = levelSet->GetMesh();
             if (!mesh)
@@ -1258,26 +1640,31 @@ namespace gladius::io
                 }
                 return;
             }
+
+            // Calculate the bounding box for this level set
+            BoundingBox bbox;
             if (levelSet->GetMeshBBoxOnly())
             {
-                auto const bbox = computeBoundingBox(mesh);
-                builder.addBoundingBox(
-                  *doc.getAssembly()->assemblyModel(), bbox, buildItemCoordinateSystemPort);
+                bbox = computeBoundingBox(mesh);
             }
             else
             {
 
-                auto referencedMeshKey = ResourceKey(mesh->GetModelResourceID());
+                bbox = computeBoundingBox(mesh);
+                // Also load the mesh reference if needed
+                auto referencedMeshKey =
+                  ResourceKey(mesh->GetModelResourceID(), ResourceType::Mesh);
                 loadMeshIfNecessary(model, mesh, doc);
-                builder.addResourceRef(*doc.getAssembly()->assemblyModel(),
-                                       referencedMeshKey,
-                                       buildItemCoordinateSystemPort);
             }
 
-            builder.appendIntersectionWithFunction(*doc.getAssembly()->assemblyModel(),
-                                                   *gladiusFunction,
-                                                   levelSetCoordinateSystemPort,
-                                                   channelName);
+            // Use the new method that creates a complete level set operation:
+            // (function ∩ bounding_box) and unions it with existing level sets
+            builder.addLevelSetWithDomain(*doc.getAssembly()->assemblyModel(),
+                                          *gladiusFunction,
+                                          levelSetCoordinateSystemPort,
+                                          channelName,
+                                          bbox,
+                                          buildItemCoordinateSystemPort);
 
             doc.getAssembly()->setFallbackValueLevelSet((levelSet->GetFallBackValue()));
 
@@ -1303,7 +1690,6 @@ namespace gladius::io
         {
             throw std::runtime_error(fmt::format("Could not open file {}", filename.string()));
         }
-        extractor.printAllFiles();
 
         try
         {
@@ -1311,10 +1697,6 @@ namespace gladius::io
             {
                 auto image3d = image3dIterator->GetCurrentImage3D();
                 auto & resMan = doc.getGeneratorContext().resourceManager;
-                if (resMan.hasResource(ResourceKey{image3d->GetModelResourceID()}))
-                {
-                    continue;
-                }
 
                 if (image3d->IsImageStack())
                 {
@@ -1338,13 +1720,38 @@ namespace gladius::io
                     bool const useVdb = extractor.determinePixelFormat(fileList.front()) ==
                                         PixelFormat::GRAYSCALE_8BIT;
 
-                    auto key = ResourceKey{image3d->GetModelResourceID()};
+                    ResourceType resourceType =
+                      useVdb ? ResourceType::Vdb : ResourceType::ImageStack;
+                    auto key = ResourceKey{image3d->GetModelResourceID(), resourceType};
+
+                    // Check if resource already exists
+                    if (resMan.hasResource(key))
+                    {
+                        continue;
+                    }
+
                     key.setDisplayName(image3d->GetName());
+                    if (m_eventLogger)
+                    {
+                        m_eventLogger->addEvent(
+                          {fmt::format("Creating Image3D resource key id={}, type={}, name=\"{}\"",
+                                       image3d->GetModelResourceID(),
+                                       static_cast<int>(resourceType),
+                                       image3d->GetName()),
+                           events::Severity::Info});
+                    }
                     if (useVdb)
                     {
                         auto grid = extractor.loadAsVdbGrid(fileList, FileLoaderType::Archive);
-
                         resMan.addResource(key, std::move(grid));
+                        if (m_eventLogger)
+                        {
+                            m_eventLogger->addEvent(
+                              {fmt::format("Added VDB resource id={} (sheets: {})",
+                                           image3d->GetModelResourceID(),
+                                           imageStack3mf->GetSheetCount()),
+                               events::Severity::Info});
+                        }
                     }
                     else
                     {
@@ -1353,6 +1760,14 @@ namespace gladius::io
                         imageStack.setResourceId(image3d->GetModelResourceID());
 
                         resMan.addResource(key, std::move(imageStack));
+                        if (m_eventLogger)
+                        {
+                            m_eventLogger->addEvent(
+                              {fmt::format("Added ImageStack resource id={} (sheets: {})",
+                                           image3d->GetModelResourceID(),
+                                           imageStack3mf->GetSheetCount()),
+                               events::Severity::Info});
+                        }
                     }
                 }
             }
@@ -1441,19 +1856,61 @@ namespace gladius::io
 
                     buildItemIter->addComponent(
                       {componentObj->GetModelResourceID(), componentTrafo});
-                    auto key = ResourceKey{componentObj->GetModelResourceID()};
+                    // Create a typed ResourceKey for components
+                    ResourceKey key{componentObj->GetModelResourceID()};
                     key.setDisplayName(componentObj->GetName());
+
+                    // Determine the correct resource type for mesh components (Mesh vs BeamLattice)
+                    if (componentObj->IsMeshObject())
+                    {
+                        auto mesh = model->GetMeshObjectByID(componentObj->GetUniqueResourceID());
+                        if (mesh && mesh->BeamLattice())
+                        {
+                            // Beam lattice component
+                            key =
+                              ResourceKey{static_cast<uint32_t>(componentObj->GetModelResourceID()),
+                                          ResourceType::BeamLattice};
+                            key.setDisplayName(componentObj->GetName() + "_BeamLattice");
+                        }
+                        else
+                        {
+                            // Regular mesh component
+                            key =
+                              ResourceKey{static_cast<uint32_t>(componentObj->GetModelResourceID()),
+                                          ResourceType::Mesh};
+                            key.setDisplayName(componentObj->GetName());
+                        }
+                    }
 
                     createObject(*componentObj, model, key, componentTrafo, doc);
                 }
             }
             else
             {
-                auto key = ResourceKey{objectRes->GetModelResourceID()};
+                auto key = ResourceKey{objectRes->GetModelResourceID(), ResourceType::Mesh};
                 key.setDisplayName(currentBuildItem->GetObjectResource()->GetName());
+
+                // Check if this object has a beam lattice to determine the correct resource type
+                if (objectRes->IsMeshObject())
+                {
+                    auto mesh = model->GetMeshObjectByID(objectRes->GetUniqueResourceID());
+                    if (mesh && mesh->BeamLattice())
+                    {
+                        // This is a beam lattice object - create key with BeamLattice type
+                        key = ResourceKey{static_cast<uint32_t>(objectRes->GetModelResourceID()),
+                                          ResourceType::BeamLattice};
+                        key.setDisplayName(currentBuildItem->GetObjectResource()->GetName() +
+                                           "_BeamLattice");
+                    }
+                }
+
                 createObject(*objectRes, model, key, trafo, doc);
             }
         }
+
+        // Normalize distances to mm via Builder helper
+        nodes::Builder::applyDistanceNormalization(*doc.getAssembly()->assemblyModel(),
+                                                   computeUnitsPerMM(model));
     }
 
     void Importer3mf::createObject(Lib3MF::CObject & objectRes,
@@ -1465,7 +1922,20 @@ namespace gladius::io
         if (objectRes.IsMeshObject())
         {
             auto mesh = model->GetMeshObjectByID(objectRes.GetUniqueResourceID());
-            addMeshObject(model, key, mesh, trafo, doc);
+
+            // Check for beam lattice first (using same pattern as loadBeamLatticeIfNecessary)
+            if (mesh)
+            {
+                if (mesh->GetTriangleCount() > 0)
+                {
+                    addMeshObject(model, key, mesh, trafo, doc);
+                }
+                Lib3MF::PBeamLattice beamLattice = mesh->BeamLattice();
+                if (beamLattice)
+                {
+                    addBeamLatticeObject(model, key, mesh, trafo, doc);
+                }
+            }
         }
         else if (objectRes.IsLevelSetObject())
         {
@@ -1505,6 +1975,7 @@ namespace gladius::io
 
         loadImageStacks(filename, model, doc);
         loadImplicitFunctions(model, doc);
+        loadMeshes(model, doc);
         // loadComponentObjects(model, doc);
         loadBuildItems(model, doc);
     }
@@ -1638,4 +2109,4 @@ namespace gladius::io
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
         importer.merge(filename, doc);
     }
-}
+} // namespace gladius::io

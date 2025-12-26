@@ -10,24 +10,45 @@ namespace gladius
 {
     class ProgramBase
     {
-    public:
+      public:
         explicit ProgramBase(SharedComputeContext context, const SharedResources resources);
         void recompileNonBlocking();
         void recompileBlocking();
         void buildKernelLib() const;
 
-        void setOnProgramSwapCallBack(const std::function<void()>& callBack);
+        void setOnProgramSwapCallBack(const std::function<void()> & callBack);
         bool isCompilationInProgress() const;
         bool isValid() const;
 
-        void setModelKernel(const std::string& newModelKernelSource);
+        void setModelKernel(const std::string & newModelKernelSource);
         void setEnableVdb(bool enableVdb);
+
+        /// Set a shared logger that will be propagated to the underlying CLProgram
+        void setLogger(events::SharedLogger logger);
 
         void waitForCompilation() const;
 
         void dumpSource(std::filesystem::path const & path) const;
 
-    protected:
+        // Binary caching support
+        void setCacheDirectory(const std::filesystem::path & path);
+        void clearCache();
+        void setCacheEnabled(bool enabled);
+        [[nodiscard]] bool isCacheEnabled() const;
+
+        /**
+         * @brief Get current compilation progress (0.0 = not started/idle, 1.0 = complete).
+         * @return Progress value between 0.0 and 1.0
+         */
+        [[nodiscard]] float getCompilationProgress() const noexcept;
+
+        /**
+         * @brief Check if the last compilation succeeded.
+         * @return true if compilation completed successfully, false if failed or in progress
+         */
+        [[nodiscard]] bool compilationSucceeded() const noexcept;
+
+      protected:
         void swapProgramsIfNeeded();
         static void noOp()
         {
@@ -42,10 +63,16 @@ namespace gladius
 
         std::string m_modelKernel;
         bool m_isFirstBuild = true;
+        bool m_modelKernelChanged = false;  // Tracks if model kernel changed since last compile
 
         bool m_enableVdb = false;
 
-        FileNames m_sourceFilesProgram;
-        FileNames m_sourceFilesLib;
+        FileNames m_sourceFiles;
+
+        events::SharedLogger m_logger{};
+
+        // Compilation progress tracking
+        std::atomic<float> m_compilationProgress{0.0f};  // 0.0 = idle, 1.0 = complete
+        std::atomic<bool> m_compilationSucceeded{false};
     };
 }

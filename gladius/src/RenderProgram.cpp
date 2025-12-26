@@ -1,7 +1,7 @@
 #include "RenderProgram.h"
-#include "gpgpu.h"
-#include "ProgramBase.h"
 #include "Profiling.h"
+#include "ProgramBase.h"
+#include "gpgpu.h"
 
 #include <CL/cl_platform.h>
 #include <algorithm>
@@ -13,17 +13,17 @@ namespace gladius
     RenderProgram::RenderProgram(SharedComputeContext context, const SharedResources & resources)
         : ProgramBase(context, resources)
     {
-        m_sourceFilesProgram = {"arguments.h",
-                                "types.h",
-                                "sdf.h",
-                                "sampler.h",
-                                "rendering.h",
-                                "CNanoVDB.h",
-                                "sdf.cl",
-                                "rendering.cl",
-                                "renderer.cl"};
-
-        m_sourceFilesLib = {"arguments.h", "types.h", "CNanoVDB.h", "sdf.h", "sampler.h"};
+        m_sourceFiles = {"types.h",
+                         "arguments.h",
+                         "sdf.h",
+                         "sampler.h",
+                         "rendering.h",
+                         "PNanoVDB_OpenCL.h",
+                         "PNanoVDB.h",
+                         "PNanoVDB_OpenCL_Helpers.h",
+                         "sdf.cl",
+                         "rendering.cl",
+                         "renderer.cl"};
     }
 
     void RenderProgram::renderScene(const Primitives & lines,
@@ -32,16 +32,54 @@ namespace gladius
                                     size_t startHeight,
                                     size_t endHeight)
     {
+        renderScene(m_ComputeContext->GetQueue(), lines, targetImage, z_mm, startHeight, endHeight);
+    }
+
+    void RenderProgram::renderScene(cl::CommandQueue const & queue,
+                                    const Primitives & lines,
+                                    ImageRGBA & targetImage,
+                                    cl_float z_mm,
+                                    size_t startHeight,
+                                    size_t endHeight)
+    {
+        try
+        {
+            cl::Event const event =
+              renderSceneAsync(queue, lines, targetImage, z_mm, startHeight, endHeight);
+            if (event())
+            {
+                queue.flush();
+                event.wait();
+                queue.finish();
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->logError(std::string("RenderProgram error: ") + e.what());
+            }
+        }
+    }
+
+    cl::Event RenderProgram::renderSceneAsync(cl::CommandQueue const & queue,
+                                              const Primitives & lines,
+                                              ImageRGBA & targetImage,
+                                              cl_float z_mm,
+                                              size_t startHeight,
+                                              size_t endHeight)
+    {
         ProfileFunction;
+        cl::Event kernelEvent{};
         if (!m_programFront->isValid())
         {
-            return;
+            return kernelEvent;
         }
         swapProgramsIfNeeded();
-        
+
         if (startHeight >= endHeight)
         {
-            return;
+            return kernelEvent;
         }
         auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
         auto const size =
@@ -49,13 +87,13 @@ namespace gladius
 
         if (size < 1 || size > 16000)
         {
-            return;
+            return kernelEvent;
         }
         cl::NDRange const origin = {0, start, 0};
         cl::NDRange const globalRange = {targetImage.getWidth(), size, 1};
 
-        GLImageBuffer * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
-        if (glImageBuffer)
+        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
+            glImageBuffer != nullptr)
         {
             glImageBuffer->invalidateContent();
         }
@@ -63,35 +101,42 @@ namespace gladius
         m_resoures->getRenderingSettings().time_s = m_resoures->getTime_s();
         m_resoures->getRenderingSettings().z_mm = z_mm;
 
+        if (!m_programFront->isValid())
+        {
+            return kernelEvent;
+        }
+
         try
         {
-            if (!m_programFront->isValid())
-            {
-                return;
-            }
-            m_programFront->run("renderScene",
-                                origin,
-                                globalRange,
-                                targetImage.getBuffer(),
-                                m_resoures->getBuildArea(),
-                                lines.primitives.getBuffer(),
-                                cl_int(lines.primitives.getSize()),
-                                lines.data.getBuffer(),
-                                cl_int(lines.data.getSize()),
-                                m_resoures->getRenderingSettings(),
-                                m_resoures->getPrecompSdfBuffer().getBuffer(),
-                                m_resoures->getParameterBuffer().getBuffer(),
-                                m_resoures->getCommandBuffer().getBuffer(),
-                                cl_int(m_resoures->getCommandBuffer().getData().size()),
-                                m_resoures->getPreCompSdfBBox(),
-                                // m_resoures->getImageStacks(),
-                                m_resoures->getEyePosition(),
-                                m_resoures->getModelViewPerspectiveMat());
+            kernelEvent = m_programFront->runNonBlocking(
+              queue,
+              "renderScene",
+              origin,
+              globalRange,
+              targetImage.getBuffer(),
+              m_resoures->getBuildArea(),
+              lines.primitives.getBuffer(),
+              cl_int(lines.primitives.getSize()),
+              lines.data.getBuffer(),
+              cl_int(lines.data.getSize()),
+              m_resoures->getRenderingSettings(),
+              m_resoures->getPrecompSdfBuffer().getBuffer(),
+              m_resoures->getParameterBuffer().getBuffer(),
+              m_resoures->getCommandBuffer().getBuffer(),
+              cl_int(m_resoures->getCommandBuffer().getData().size()),
+              m_resoures->getPreCompSdfBBox(),
+              m_resoures->getEyePosition(),
+              m_resoures->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {
-            std::cerr << (e.what());
+            if (m_logger)
+            {
+                m_logger->logError(std::string("RenderProgram error: ") + e.what());
+            }
         }
+
+        return kernelEvent;
     }
 
     void RenderProgram::resample(ImageRGBA & sourceImage,
@@ -109,10 +154,5 @@ namespace gladius
         cl::NDRange const range = {targetImage.getWidth(), endHeight, 1};
         m_programFront->run(
           "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
-    }
-
-    bool RenderProgram::isSdfVisualizationEnabled() const
-    {
-        return m_enableSdfVisualization;
     }
 }

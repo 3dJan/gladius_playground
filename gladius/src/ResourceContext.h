@@ -3,6 +3,7 @@
 #include "Buffer.h"
 #include "ImageRGBA.h"
 #include "ImageStackOCLBuffer.h"
+#include "kernel/types.h"
 #include "Primitives.h"
 #include "ResourceManager.h"
 
@@ -36,7 +37,7 @@ namespace gladius
         void initResolutions();
 
         void setClippingArea(cl_float4 clipArea, float margin = 0.0f);
-       
+
         [[nodiscard]] const Vertices & getVertices() const;
         Vertices & getVertices();
 

@@ -60,7 +60,10 @@ namespace gladius::nodes
     class Sign;
     class Fract;
     class SignedDistanceToMesh;
+    class SignedDistanceToBeamLattice;
     class FunctionCall;
+    class FunctionGradient;
+    class NormalizeDistanceField;
     class Length;
     class DecomposeVector;
     class Resource;
@@ -123,7 +126,10 @@ namespace gladius::nodes
                                  Fmod,
                                  Pow,
                                  SignedDistanceToMesh,
+                                 SignedDistanceToBeamLattice,
                                  FunctionCall,
+                                 FunctionGradient,
+                                 NormalizeDistanceField,
                                  Transformation,
                                  Length,
                                  DecomposeVector,
@@ -165,8 +171,6 @@ namespace gladius::nodes
         _3mf
     };
 
-
-
     using CategoryNamesT = std::map<Category, std::string>;
     static const CategoryNamesT CategoryNames{{Category::Internal, "Internal"},
                                               {Category::Primitive, "Primitive"},
@@ -205,6 +209,8 @@ namespace gladius::nodes
         static auto constexpr Result = "result";
         static auto constexpr Scaling = "scaling";
         static auto constexpr Vector = "vector";
+        static auto constexpr Gradient = "gradient";
+        static auto constexpr Magnitude = "magnitude";
         static auto constexpr Matrix = "matrix";
         static auto constexpr X = "x";
         static auto constexpr Y = "y";
@@ -236,12 +242,17 @@ namespace gladius::nodes
         static auto constexpr End = "end";
         // static auto constexpr Part = "part";
         static auto constexpr FunctionId = "functionID";
+        static auto constexpr StepSize = "step";
+        static auto constexpr NormalizedGradient = Vector;
+        static auto constexpr Epsilon = "epsilon";
+        static auto constexpr MaxDistance = "maxdistance";
         static auto constexpr Source = "source";
         static auto constexpr sharpness = "sharpness";
 
         static auto constexpr Filename = "filename";
         static auto constexpr ResourceId = "resourceid";
         static auto constexpr Mesh = "mesh";
+        static auto constexpr BeamLattice = "beamlatticeid";
 
         static auto constexpr Image = "image";
         static auto constexpr Red = "red";
@@ -259,7 +270,6 @@ namespace gladius::nodes
         static auto constexpr NumberOfTeeth = "numberOfTeeth";
         static auto constexpr Modulus = "modulus";
         static auto constexpr ClearanceFactor = "clearanceFactor";
-
 
         static auto constexpr OriginX = "origin_x";
         static auto constexpr OriginY = "origin_y";

@@ -48,6 +48,7 @@ namespace gladius::nodes
         void visitAssemblyNodes(Visitor & visitor);
 
         [[nodiscard]] auto getFunctions() -> Models &;
+        [[nodiscard]] auto getFunctions() const -> Models const &;
 
         auto assemblyModel() -> SharedModel &;
 
@@ -94,8 +95,6 @@ namespace gladius::nodes
         {
             return m_FallbackValueLevelSet;
         }
-
-
 
       private:
         Models m_subModels;

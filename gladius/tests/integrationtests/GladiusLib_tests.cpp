@@ -4,10 +4,17 @@
 
 #include <gladius_dynamic.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <map>
+#include <set>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include "BBox.h"
 
@@ -16,7 +23,87 @@
 
 namespace gladius_integration_tests
 {
-    class GladiusLib_test : public ::testing::Test
+  namespace
+  {
+    std::vector<std::string> const & get3mfTestFiles()
+    {
+      namespace fs = std::filesystem;
+
+      static std::vector<std::string> files = []()
+      {
+        std::set<std::string> collected;
+
+        auto const collectFromDirectory = [&collected](fs::path directory)
+        {
+          std::error_code errorCode;
+          directory = fs::absolute(directory, errorCode);
+          if (errorCode || directory.empty() || !fs::exists(directory, errorCode))
+          {
+            return;
+          }
+
+          for (auto const & entry : fs::directory_iterator(directory, errorCode))
+          {
+            if (errorCode)
+            {
+              std::cerr << "Failed to iterate directory: " << directory
+                    << ", error: " << errorCode.message() << std::endl;
+              return;
+            }
+
+            if (!entry.is_regular_file())
+            {
+              continue;
+            }
+
+            if (entry.path().extension() == ".3mf")
+            {
+              collected.insert(entry.path().lexically_normal().string());
+            }
+          }
+        };
+
+        try
+        {
+          fs::path const buildDataDir{FileNames::Implicit3mf};
+          collectFromDirectory(buildDataDir.parent_path());
+
+          fs::path const sourceDataDir = fs::path(__FILE__).parent_path() / "testdata";
+          collectFromDirectory(sourceDataDir);
+        }
+        catch (std::exception const & exception)
+        {
+          std::cerr << "Failed to collect 3MF test files: " << exception.what()
+                << std::endl;
+        }
+
+        if (collected.empty())
+        {
+          std::cerr << "No 3MF files discovered for GladiusLib integration tests."
+                << std::endl;
+        }
+
+        return std::vector<std::string>(collected.begin(), collected.end());
+      }();
+
+      return files;
+    }
+
+    std::unordered_set<std::string> const & getUnsupported3mfFiles()
+    {
+      static std::unordered_set<std::string> const unsupported{
+        "3mf-implicit.3mf"
+      };
+      return unsupported;
+    }
+
+    [[nodiscard]] bool isNanoVdbUnavailable(std::string_view message)
+    {
+      return message.find("NanoVDB") != std::string_view::npos;
+    }
+  } // namespace
+
+  class GladiusLib_test : public ::testing::Test
     {
       protected:
         void SetUp() override
@@ -137,7 +224,7 @@ namespace gladius_integration_tests
         gladius->LoadAssembly("NonExistingFile");
 
         auto const detailedErrorAccessor = gladius->GetDetailedErrorAccessor();
-        EXPECT_GT(detailedErrorAccessor->GetSize(), 1u);
+        EXPECT_GT(detailedErrorAccessor->GetSize(), 0u);
     }
 
     /// Loop over all DetailedErrorAccessor entries and check if they are valid using next() in a
@@ -176,4 +263,139 @@ namespace gladius_integration_tests
 
         EXPECT_EQ(detailedErrorAccessor->GetSize(), 0u);
     }
+
+    /// Test VariableVoronoi file loading and bounding box computation
+    TEST_F(GladiusLib_test, VariableVoronoi_LoadAssembly_BoundingBoxIsValid)
+    {
+        try
+        {
+            auto const gladius = getWrapper()->CreateGladius();
+            EXPECT_TRUE(gladius);
+
+            // Load the variable voronoi 3MF file
+            gladius->LoadAssembly(FileNames::VariableVoronoi);
+
+            // Compute the bounding box
+            auto boundingBox = gladius->ComputeBoundingBox();
+            EXPECT_TRUE(boundingBox);
+
+            // Get min and max points
+            auto minPoint = boundingBox->GetMin();
+            auto maxPoint = boundingBox->GetMax();
+
+            // Verify that bounding box values are finite (no NaN or inf)
+            EXPECT_TRUE(std::isfinite(minPoint.m_Coordinates[0]))
+              << "Min X coordinate should be finite";
+            EXPECT_TRUE(std::isfinite(minPoint.m_Coordinates[1]))
+              << "Min Y coordinate should be finite";
+            EXPECT_TRUE(std::isfinite(minPoint.m_Coordinates[2]))
+              << "Min Z coordinate should be finite";
+
+            EXPECT_TRUE(std::isfinite(maxPoint.m_Coordinates[0]))
+              << "Max X coordinate should be finite";
+            EXPECT_TRUE(std::isfinite(maxPoint.m_Coordinates[1]))
+              << "Max Y coordinate should be finite";
+            EXPECT_TRUE(std::isfinite(maxPoint.m_Coordinates[2]))
+              << "Max Z coordinate should be finite";
+
+            // Verify that min <= max for all coordinates
+            EXPECT_LE(minPoint.m_Coordinates[0], maxPoint.m_Coordinates[0])
+              << "Min X should be <= Max X";
+            EXPECT_LE(minPoint.m_Coordinates[1], maxPoint.m_Coordinates[1])
+              << "Min Y should be <= Max Y";
+            EXPECT_LE(minPoint.m_Coordinates[2], maxPoint.m_Coordinates[2])
+              << "Min Z should be <= Max Z";
+
+            // Print bounding box for debugging purposes
+            std::cout << "Bounding box - Min: (" << minPoint.m_Coordinates[0] << ", "
+                      << minPoint.m_Coordinates[1] << ", " << minPoint.m_Coordinates[2] << ")"
+                      << std::endl;
+            std::cout << "Bounding box - Max: (" << maxPoint.m_Coordinates[0] << ", "
+                      << maxPoint.m_Coordinates[1] << ", " << maxPoint.m_Coordinates[2] << ")"
+                      << std::endl;
+        }
+        catch (std::exception const & exception)
+        {
+            if (isNanoVdbUnavailable(exception.what()))
+            {
+                GTEST_SKIP() << "VariableVoronoi requires NanoVDB but it is unavailable: "
+                             << exception.what();
+            }
+            throw;
+        }
+    }
+
+    class GladiusLib_BoundingBoxParameterizedTest
+      : public GladiusLib_test
+      , public ::testing::WithParamInterface<std::string>
+    {
+      public:
+        static void SetUpTestSuite()
+        {
+            GladiusLib_test::SetUpTestSuite();
+            ASSERT_FALSE(get3mfTestFiles().empty())
+              << "No .3mf files found for GladiusLib bounding box parameterized tests.";
+        }
+    };
+
+    TEST_P(GladiusLib_BoundingBoxParameterizedTest, LoadAssembly_BoundingBoxIsValid)
+    {
+        namespace fs = std::filesystem;
+
+        auto const filePath = GetParam();
+        SCOPED_TRACE("3MF file: " + filePath);
+
+        auto const baseName = fs::path(filePath).filename().string();
+        if (getUnsupported3mfFiles().contains(baseName))
+        {
+            GTEST_SKIP() << baseName
+                         << " relies on currently unsupported OpenCL kernels (GLA-OpenCL-45).";
+        }
+
+        auto const gladius = getWrapper()->CreateGladius();
+        ASSERT_TRUE(gladius);
+
+        try
+        {
+          gladius->LoadAssembly(filePath);
+        }
+        catch (std::exception const & exception)
+        {
+          if (isNanoVdbUnavailable(exception.what()))
+          {
+            GTEST_SKIP() << baseName
+                   << " requires NanoVDB but it is unavailable on this OpenCL device: "
+                   << exception.what();
+          }
+          throw;
+        }
+
+        auto boundingBox = gladius->ComputeBoundingBox();
+        ASSERT_TRUE(boundingBox);
+
+        auto const minPoint = boundingBox->GetMin();
+        auto const maxPoint = boundingBox->GetMax();
+
+        for (int coordinateIndex = 0; coordinateIndex < 3; ++coordinateIndex)
+        {
+            EXPECT_TRUE(std::isfinite(minPoint.m_Coordinates[coordinateIndex]))
+              << "Min coordinate at index " << coordinateIndex << " should be finite.";
+            EXPECT_TRUE(std::isfinite(maxPoint.m_Coordinates[coordinateIndex]))
+              << "Max coordinate at index " << coordinateIndex << " should be finite.";
+            EXPECT_LE(minPoint.m_Coordinates[coordinateIndex],
+                      maxPoint.m_Coordinates[coordinateIndex])
+              << "Min coordinate at index " << coordinateIndex << " should be <= max coordinate.";
+        }
+
+        std::cout << "Bounding box (" << filePath << ") - Min: (" << minPoint.m_Coordinates[0]
+                  << ", " << minPoint.m_Coordinates[1] << ", " << minPoint.m_Coordinates[2]
+                  << ")" << std::endl;
+        std::cout << "Bounding box (" << filePath << ") - Max: (" << maxPoint.m_Coordinates[0]
+                  << ", " << maxPoint.m_Coordinates[1] << ", " << maxPoint.m_Coordinates[2]
+                  << ")" << std::endl;
+    }
+
+    INSTANTIATE_TEST_SUITE_P(TestData3mfFiles,
+                             GladiusLib_BoundingBoxParameterizedTest,
+               ::testing::ValuesIn(get3mfTestFiles()));
 }

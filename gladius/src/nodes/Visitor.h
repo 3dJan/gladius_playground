@@ -49,7 +49,10 @@ namespace gladius::nodes
         virtual void visit(Mod & mod);
         virtual void visit(Pow & pow);
         virtual void visit(SignedDistanceToMesh & signedDistanceToMesh);
+        virtual void visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice);
         virtual void visit(FunctionCall & functionCall);
+        virtual void visit(FunctionGradient & functionGradient);
+        virtual void visit(NormalizeDistanceField & normalizeDistanceField);
         virtual void visit(Length & length);
         virtual void visit(DecomposeVector & decomposeVector);
         virtual void visit(Resource & resource);
@@ -81,8 +84,6 @@ namespace gladius::nodes
         virtual void visit(UnsignedDistanceToMesh & unsignedDistanceToMesh);
 
         virtual void visit(NodeBase & baseNode);
-
-        
 
       protected:
         Model * m_currentModel{nullptr};

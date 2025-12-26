@@ -11,14 +11,19 @@
 #include "compute/ComputeCore.h"
 #include "exceptions.h"
 #include "imguinodeeditor.h"
+#include "io/3mf/BeamLatticeExporter.h"
 #include "io/3mf/ImageExtractor.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
+#include "io/DualContouringStlExporter.h"
 #include "io/ImporterVdb.h"
+#include "io/ManifoldDualContouringStlExporter.h"
 #include "io/VdbImporter.h"
 #include "nodes/GraphFlattener.h"
+#include "nodes/LowerFunctionGradient.h"
+#include "nodes/LowerNormalizeDistanceField.h"
 #include "nodes/Model.h"
 #include "nodes/OptimizeOutputs.h"
 #include "nodes/ToCommandStreamVisitor.h"
@@ -73,15 +78,15 @@ namespace gladius
     Document::Document(std::shared_ptr<ComputeCore> core)
         : m_core(std::move(core))
     {
-        m_channels.push_back(BitmapChannel{"DownSkin", [&](float z_mm, Vector2 pixelSize_mm) {
-                                               return m_core->generateDownSkinMap(
-                                                 z_mm, std::move(pixelSize_mm));
-                                           }});
+        m_channels.push_back(
+          BitmapChannel{"DownSkin",
+                        [&](float z_mm, Vector2 pixelSize_mm)
+                        { return m_core->generateDownSkinMap(z_mm, std::move(pixelSize_mm)); }});
 
-        m_channels.push_back(BitmapChannel{"UpSkin", [&](float z_mm, Vector2 pixelSize_mm) {
-                                               return m_core->generateUpSkinMap(
-                                                 z_mm, std::move(pixelSize_mm));
-                                           }});
+        m_channels.push_back(
+          BitmapChannel{"UpSkin",
+                        [&](float z_mm, Vector2 pixelSize_mm)
+                        { return m_core->generateUpSkinMap(z_mm, std::move(pixelSize_mm)); }});
 
         newModel();
         resetGeneratorContext();
@@ -96,7 +101,7 @@ namespace gladius
         {
             return;
         }
-        saveBackup();
+        // saveBackup();
         {
             m_futureModelRefresh = std::async(std::launch::async, [&]() { refreshWorker(); });
         }
@@ -136,13 +141,65 @@ namespace gladius
         updateFlatAssembly();
 
         m_core->refreshProgram(m_flatAssembly);
-        m_core->recompileBlockingNoLock();
-        m_core->invalidatePreCompSdf();
-        m_core->resetBoundingBox();
-        if (m_core->precomputeSdfForWholeBuildPlatform())
+
+        // Use non-blocking compilation with polling
+        m_core->recompileIfRequired();
+
+        // Wait for compilation to complete with periodic checks
+        while (m_core->isCompilationInProgress())
         {
-            meshResourceState->signalCompilationFinished();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+
+        // One more pass ensures ProgramManager updates its internal ModelState flags
+        // (signalCompilationFinished) so subsequent steps observe up-to-date slicer state.
+        m_core->recompileIfRequired();
+
+        // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
+        // The async computation will atomically replace it
+        m_core->resetBoundingBox();
+
+        // Launch async SDF precomputation with OpenCL events
+        auto const & queue = m_core->getComputeContext()->GetQueue();
+        cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
+        bool const sdfEventValid = sdfEvent() != nullptr;
+
+        bool sdfUpdated = false;
+        bool sdfUpdatedViaAsync = false;
+
+        // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
+        if (sdfEventValid)
+        {
+            sdfEvent.wait();
+            sdfUpdated = true;
+            sdfUpdatedViaAsync = true;
+        }
+        else
+        {
+            // Fallback to synchronous computation if async launch failed
+            if (m_core->precomputeSdfForWholeBuildPlatform())
+            {
+                sdfUpdated = true;
+            }
+            else {}
+        }
+
+        if (sdfUpdated)
+        {
+            m_core->setSdfValid(true);
+            if (sdfUpdatedViaAsync)
+            {
+                // Now that the SDF exists, update the bounding box serially (still off the UI
+                // thread)
+                m_core->updateBBox();
+            }
+        }
+        else
+        {
+            m_core->invalidatePreCompSdf("refreshWorkerFailure");
+        }
+
+        meshResourceState->signalCompilationFinished();
     }
 
     void Document::updateFlatAssembly()
@@ -150,21 +207,23 @@ namespace gladius
         ProfileFunction;
         using namespace gladius::events;
 
-        nodes::Assembly assemblyToFlat;
+        if (!m_assembly)
         {
-
-            if (!m_assembly)
-            {
-                return;
-            }
-
-            if (!validateAssembly())
-            {
-                return;
-            }
-
-            assemblyToFlat = *m_assembly;
+            return;
         }
+
+        if (!validateAssembly())
+        {
+            return;
+        }
+
+        nodes::Assembly assemblyToFlat{*m_assembly};
+
+        nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
+        gradientLowering.run();
+
+        nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat, getSharedLogger()};
+        normalizeLowering.run();
 
         nodes::OptimizeOutputs optimizer{&assemblyToFlat};
         optimizer.optimize();
@@ -223,14 +282,20 @@ namespace gladius
             auto tempDir = std::filesystem::temp_directory_path();
             auto tempBackupFile = tempDir / "gladius_temp_backup.3mf";
 
+            // Preserve the original filename before saving backup
+            auto originalFilename = m_currentAssemblyFileName;
+
             // Save current model to temporary file
             saveAs(tempBackupFile, false);
 
+            // Restore the original filename (backup shouldn't change current file)
+            m_currentAssemblyFileName = originalFilename;
+
             // Get original filename for backup naming
             std::string originalName = "untitled";
-            if (m_currentAssemblyFileName.has_value() && !m_currentAssemblyFileName->empty())
+            if (originalFilename.has_value() && !originalFilename->empty())
             {
-                originalName = m_currentAssemblyFileName->stem().string();
+                originalName = originalFilename->stem().string();
             }
 
             // Create backup using BackupManager
@@ -323,18 +388,43 @@ namespace gladius
 
         updatePayload();
 
-        {
-            m_parameterDirty = m_core->tryToupdateParameter(*m_assembly);
-        }
+        // Check if we can use the fast path (parameter structure unchanged)
+        bool const canUseFastPath = m_core->isParameterSignatureCompatible(*m_assembly);
 
-        if (m_parameterDirty)
+        auto attemptParameterUpdate = [&]() -> bool
         {
-            m_parameterDirty = !m_core->precomputeSdfForWholeBuildPlatform();
+            if (!m_core->tryToupdateParameter(*m_assembly))
+            {
+                return false;
+            }
+            return true;
+        };
+
+        bool updateSucceeded = false;
+
+        if (canUseFastPath)
+        {
+            updateSucceeded = attemptParameterUpdate();
         }
         else
         {
-            m_parameterDirty = true;
+            // Slow path: parameter structure changed
+            // NOTE: We don't call refreshModelAsync() here because updateParameter()
+            // is often called FROM WITHIN refreshWorker(), which would cause recursion.
+            // Instead, we just update normally and let the signature be recaptured
+            // on the next full refresh cycle.
+            auto logger = getSharedLogger();
+            if (logger)
+            {
+                logger->addEvent(
+                  {"Parameter structure mismatch detected (will be updated on next refresh)",
+                   events::Severity::Info});
+            }
+
+            updateSucceeded = attemptParameterUpdate();
         }
+
+        m_parameterDirty = !updateSucceeded;
     }
 
     void Document::updateParameterRegistration()
@@ -483,19 +573,84 @@ namespace gladius
 
     void Document::exportAsStl(std::filesystem::path const & filename)
     {
+        exportAsStl(filename, io::StlExportOptions{});
+    }
+
+    void Document::exportAsStl(std::filesystem::path const & filename,
+                               io::StlExportOptions const & options)
+    {
         refreshModelBlocking();
 
-        vdb::MeshExporter exporter;
-        exporter.beginExport(filename, *m_core);
         auto logger = getSharedLogger();
-        while (exporter.advanceExport(*m_core))
+
+        switch (options.method)
         {
-            if (logger)
-                logger->addEvent(
-                  {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
-                   events::Severity::Info});
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+        {
+            vdb::MeshExporter exporter;
+            exporter.setQualityLevel(options.marchingCubesQualityLevel);
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core))
+            {
+                if (logger)
+                {
+                    logger->addEvent(
+                      {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
+                       events::Severity::Info});
+                }
+            }
+            exporter.finalizeExportSTL(*m_core);
+            break;
         }
-        exporter.finalizeExportSTL(*m_core);
+        case io::SurfaceExtractionMethod::DualContouring:
+        {
+            io::DualContouringOptions dualOptions = options.dualContouring;
+            io::DualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(dualOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core)) {}
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(errorText.empty() ? "Dual contouring STL export failed"
+                                                           : errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent(
+                  {fmt::format("Dual contouring STL export completed: {}", filename.string()),
+                   events::Severity::Info});
+            }
+            break;
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            io::ManifoldDualContouringOptions manifoldOptions = options.manifoldDualContouring;
+            io::ManifoldDualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(manifoldOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core)) {}
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(
+                  errorText.empty() ? "Manifold dual contouring STL export failed" : errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent({fmt::format("Manifold dual contouring STL export completed: {}",
+                                              filename.string()),
+                                  events::Severity::Info});
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported surface extraction method");
+        }
     }
 
     void Document::markFileAsChanged()
@@ -519,8 +674,65 @@ namespace gladius
 
     void Document::loadNonBlocking(std::filesystem::path filename)
     {
-        loadImpl(filename);
-        refreshModelAsync();
+        // Wait for any previous load operation to complete
+        if (m_futureFileLoad.valid())
+        {
+            try
+            {
+                m_futureFileLoad.get();
+            }
+            catch (const std::exception &)
+            {
+                // Previous load error already stored
+            }
+        }
+
+        // Clear any previous error
+        {
+            std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+            m_loadingError.clear();
+        }
+
+        m_isLoading = true;
+
+        // Launch async file loading
+        m_futureFileLoad =
+          std::async(std::launch::async,
+                     [this, filename]()
+                     {
+                         try
+                         {
+                             loadImpl(filename);
+                             // Chain into async model refresh
+                             refreshWorker();
+                         }
+                         catch (const std::exception & e)
+                         {
+                             // Store error for UI to display
+                             {
+                                 std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                                 m_loadingError = e.what();
+                             }
+                             auto logger = getSharedLogger();
+                             if (logger)
+                             {
+                                 logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                                   events::Severity::Error});
+                             }
+                         }
+                         m_isLoading = false;
+                     });
+    }
+
+    bool Document::isLoadingInProgress() const
+    {
+        return m_isLoading.load();
+    }
+
+    std::string Document::getLoadingError() const
+    {
+        std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+        return m_loadingError;
     }
 
     void Document::merge(std::filesystem::path filename)
@@ -533,7 +745,12 @@ namespace gladius
     {
         if (filename.extension() == ".3mf")
         {
-            auto computeToken = m_core->waitForComputeToken();
+            // Only acquire a compute token if we need to render a thumbnail.
+            if (writeThumbnail)
+            {
+                auto computeToken = m_core->waitForComputeToken();
+                (void) computeToken; // suppress unused warning in Release
+            }
             io::saveTo3mfFile(filename, *this, writeThumbnail);
         }
 
@@ -550,6 +767,11 @@ namespace gladius
     {
 
         return m_assembly;
+    }
+
+    std::optional<std::filesystem::path> Document::getCurrentAssemblyFilename() const
+    {
+        return m_currentAssemblyFileName;
     }
 
     float Document::getFloatParameter(ResourceId modelId,
@@ -895,6 +1117,25 @@ namespace gladius
     {
         auto computeToken = m_core->waitForComputeToken();
         m_buildItems.clear();
+        // clear event logger
+        auto logger = getSharedLogger();
+        if (logger)
+        {
+            logger->clear();
+        }
+
+        // Check if file exists before attempting to load
+        if (!std::filesystem::exists(filename))
+        {
+            if (logger)
+            {
+                logger->addEvent(
+                  {fmt::format("File not found: {}", filename.string()), events::Severity::Error});
+            }
+            newModel(); // Create empty model if file doesn't exist
+            return;
+        }
+
         resetGeneratorContext();
         m_core->reset();
         m_core->getResourceContext()->clearImageStacks();
@@ -1023,7 +1264,7 @@ namespace gladius
 
         auto & resourceManager = getGeneratorContext().resourceManager;
 
-        ResourceKey key = ResourceKey(new3mfMesh->GetModelResourceID());
+        ResourceKey key = ResourceKey(new3mfMesh->GetModelResourceID(), ResourceType::Mesh);
         key.setDisplayName(name);
         resourceManager.addResource(key, std::move(mesh));
 
@@ -1159,6 +1400,192 @@ namespace gladius
         addMeshResource(std::move(mesh), "bounding box");
     }
 
+    void Document::addCustomBoxMesh(float width,
+                                    float height,
+                                    float depth,
+                                    float startX,
+                                    float startY,
+                                    float startZ)
+    {
+        // Create a custom box mesh with user-defined dimensions
+        vdb::TriangleMesh mesh;
+
+        float minX = startX;
+        float minY = startY;
+        float minZ = startZ;
+        float maxX = startX + width;
+        float maxY = startY + height;
+        float maxZ = startZ + depth;
+
+        // Top (z = maxZ)
+        mesh.addTriangle({minX, minY, maxZ}, {maxX, minY, maxZ}, {maxX, maxY, maxZ});
+
+        mesh.addTriangle({minX, minY, maxZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ});
+
+        // Bottom (z = minZ)
+        mesh.addTriangle({minX, minY, minZ}, {maxX, minY, minZ}, {maxX, maxY, minZ});
+
+        mesh.addTriangle({minX, minY, minZ}, {maxX, maxY, minZ}, {minX, maxY, minZ});
+
+        // Front (y = minY)
+        mesh.addTriangle({minX, minY, minZ}, {maxX, minY, minZ}, {maxX, minY, maxZ});
+
+        mesh.addTriangle({minX, minY, minZ}, {maxX, minY, maxZ}, {minX, minY, maxZ});
+
+        // Back (y = maxY)
+        mesh.addTriangle({minX, maxY, minZ}, {maxX, maxY, minZ}, {maxX, maxY, maxZ});
+
+        mesh.addTriangle({minX, maxY, minZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ});
+
+        // Left (x = minX)
+        mesh.addTriangle({minX, minY, minZ}, {minX, minY, maxZ}, {minX, maxY, maxZ});
+
+        mesh.addTriangle({minX, minY, minZ}, {minX, maxY, maxZ}, {minX, maxY, minZ});
+
+        // Right (x = maxX)
+        mesh.addTriangle({maxX, minY, minZ}, {maxX, minY, maxZ}, {maxX, maxY, maxZ});
+
+        mesh.addTriangle({maxX, minY, minZ}, {maxX, maxY, maxZ}, {maxX, maxY, minZ});
+
+        std::string name = fmt::format("{}x{}x{} box", width, height, depth);
+        addMeshResource(std::move(mesh), name);
+    }
+
+    void Document::addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius)
+    {
+        // Load the STL file
+        vdb::VdbImporter reader;
+        auto logger = getSharedLogger();
+
+        try
+        {
+            reader.loadStl(stlFilename);
+        }
+        catch (const std::exception & e)
+        {
+            if (logger)
+            {
+                logger->addEvent({std::string("STL load error for beam lattice: ") + e.what(),
+                                  events::Severity::Error});
+            }
+            return;
+        }
+
+        auto const & mesh = reader.getMesh();
+
+        // Extract unique edges from the mesh triangles
+        // Use a map to store unique edges (always store with smaller vertex index first)
+        std::map<std::pair<size_t, size_t>, std::pair<openvdb::Vec3s, openvdb::Vec3s>> uniqueEdges;
+
+        for (auto const & triangle : mesh.indices)
+        {
+            // Get the three vertices of the triangle
+            auto const & v0 = mesh.vertices[triangle.x()];
+            auto const & v1 = mesh.vertices[triangle.y()];
+            auto const & v2 = mesh.vertices[triangle.z()];
+
+            // Add the three edges of the triangle
+            auto addEdge =
+              [&](size_t idx1, size_t idx2, openvdb::Vec3s const & p1, openvdb::Vec3s const & p2)
+            {
+                // Always store edge with smaller index first to ensure uniqueness
+                if (idx1 > idx2)
+                {
+                    std::swap(idx1, idx2);
+                }
+                uniqueEdges[{idx1, idx2}] = {p1, p2};
+            };
+
+            addEdge(triangle.x(), triangle.y(), v0, v1);
+            addEdge(triangle.y(), triangle.z(), v1, v2);
+            addEdge(triangle.z(), triangle.x(), v2, v0);
+        }
+
+        // Create beam data from unique edges
+        std::vector<BeamData> beams;
+        beams.reserve(uniqueEdges.size());
+
+        for (auto const & [edgeIndices, edgePoints] : uniqueEdges)
+        {
+            BeamData beam{};
+
+            // Set start and end positions
+            beam.startPos =
+              float4{{edgePoints.first.x(), edgePoints.first.y(), edgePoints.first.z(), 0.0f}};
+            beam.endPos =
+              float4{{edgePoints.second.x(), edgePoints.second.y(), edgePoints.second.z(), 0.0f}};
+
+            // Set uniform radius for both ends
+            beam.startRadius = beamRadius;
+            beam.endRadius = beamRadius;
+
+            // Set default cap styles (hemisphere = 0)
+            beam.startCapStyle = 0;
+            beam.endCapStyle = 0;
+
+            // Default material ID
+            beam.materialId = 0;
+            beam.padding = 0;
+
+            beams.push_back(beam);
+        }
+
+        // Create empty ball vector (no balls at vertices)
+        std::vector<BallData> balls;
+
+        // Configure ball mode as None
+        BeamLatticeBallConfig ballConfig;
+        ballConfig.mode = BallMode::None;
+        ballConfig.defaultRadius = 0.0f;
+
+        // Create a 3MF mesh object to hold the beam lattice
+        if (!m_3mfmodel)
+        {
+            if (logger)
+            {
+                logger->addEvent({"No 3mf model loaded", events::Severity::Error});
+            }
+            return;
+        }
+
+        auto const new3mfMesh = m_3mfmodel->AddMeshObject();
+        std::string resourceName =
+          fmt::format("{} (beam lattice)", stlFilename.filename().string());
+        new3mfMesh->SetName(resourceName);
+
+        // Use the BeamLatticeExporter to properly export beam data to 3MF format
+        io::BeamLatticeExporter exporter(logger);
+        if (!exporter.exportToMeshObject(new3mfMesh, beams, balls, ballConfig))
+        {
+            if (logger)
+            {
+                logger->addEvent(
+                  {"Failed to export beam lattice to 3MF format", events::Severity::Error});
+            }
+            return;
+        }
+
+        // Create resource key using the 3MF object's ID
+        auto & resourceManager = getGeneratorContext().resourceManager;
+        auto key = ResourceKey{new3mfMesh->GetModelResourceID(), ResourceType::BeamLattice};
+        key.setDisplayName(resourceName);
+
+        // Create beam lattice resource with BVH acceleration
+        auto beamLatticeResource = std::make_unique<BeamLatticeResource>(
+          key, std::move(beams), std::move(balls), ballConfig, BeamLatticeAcceleration::BVH);
+
+        resourceManager.addResource(key, std::move(beamLatticeResource));
+        resourceManager.loadResources();
+
+        if (logger)
+        {
+            logger->addEvent({fmt::format("Created beam lattice with {} beams from {}",
+                                          uniqueEdges.size(),
+                                          stlFilename.filename().string()),
+                              events::Severity::Info});
+        }
+    }
+
     ResourceKey Document::addImageStackResource(std::filesystem::path const & path)
     {
         io::ImageStackCreator creator;
@@ -1174,10 +1601,10 @@ namespace gladius
                    events::Severity::Error});
             }
 
-            return ResourceKey{0};
+            return ResourceKey{0, ResourceType::Unknown};
         }
         auto & resourceManager = getGeneratorContext().resourceManager;
-        auto const key = ResourceKey{stack->GetModelResourceID()};
+        auto const key = ResourceKey{stack->GetModelResourceID(), ResourceType::ImageStack};
 
         io::ImageExtractor extractor;
 
@@ -1193,7 +1620,7 @@ namespace gladius
         writer.updateModel(*this);
     }
 
-    void Document::updateDocumenFrom3mfModel(bool skipImplicitFunctions)
+    void Document::updateDocumentFrom3mfModel(bool skipImplicitFunctions)
     {
         if (!m_3mfmodel)
         {
@@ -1323,7 +1750,7 @@ namespace gladius
             {
                 // Get the model resource ID for this resource
                 Lib3MF_uint32 modelResourceId = resource->GetModelResourceID();
-                ResourceKey key{modelResourceId};
+                ResourceKey key{modelResourceId, ResourceType::Unknown};
 
                 // Check if this is actually a function (need to handle differently)
                 bool isFunction = false;

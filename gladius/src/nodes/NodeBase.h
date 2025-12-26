@@ -225,6 +225,14 @@ namespace gladius::nodes
             return {"Basic node"};
         }
 
+        /// @brief Determines if this node should be exempt from input connection validation
+        /// @return true if the node doesn't require input validation (e.g., input/output markers,
+        /// constants)
+        [[nodiscard]] virtual bool isExemptFromInputValidation() const
+        {
+            return false;
+        }
+
         bool updateTypes(nodes::Model & model);
 
         virtual void applyTypeRule(const TypeRule & rule)
@@ -235,20 +243,66 @@ namespace gladius::nodes
                 // Check if parameter already exists and has a different type
                 const auto iter = m_parameter.find(expectedName);
                 OptionalSource source;
+                ParameterId existingId{-1};
+                bool wasModifiable{true};
+                bool wasArgument{false};
+                std::string argumentAssociation;
+                bool wasVisible{true};
+                bool wasInputSourceRequired{true};
+                bool wasConsumedByFunction{false};
+                bool wasValid{true};
+
                 if (iter != m_parameter.end())
                 {
                     source = iter->second.getSource();
+                    existingId = iter->second.getId();
+                    wasModifiable = iter->second.isModifiable();
+                    wasArgument = iter->second.isArgument();
+                    argumentAssociation = iter->second.getArgumentAssoziation();
+                    wasVisible = iter->second.isVisible();
+                    wasInputSourceRequired = iter->second.isInputSourceRequired();
+                    wasConsumedByFunction = iter->second.isConsumedByFunction();
+                    wasValid = iter->second.isValid();
                 }
 
                 if (iter == m_parameter.end() || iter->second.getTypeIndex() != expectedType)
                 {
-                    // Replace parameter with a new one of the expected type
+                    // Replace parameter with a new one of the expected type and restore metadata
                     m_parameter[expectedName] = createVariantTypeFromTypeIndex(expectedType);
-                    m_parameter[expectedName].setParentId(getId());
-                    if (source.has_value())
+                }
+
+                auto & parameterRef = m_parameter[expectedName];
+                parameterRef.setParentId(getId());
+
+                if (existingId > 0)
+                {
+                    parameterRef.setId(existingId);
+                }
+                parameterRef.setModifiable(wasModifiable);
+                parameterRef.setInputSourceRequired(wasInputSourceRequired);
+                parameterRef.setConsumedByFunction(wasConsumedByFunction);
+                parameterRef.setValid(wasValid);
+
+                if (!wasVisible)
+                {
+                    parameterRef.hide();
+                }
+
+                if (wasArgument)
+                {
+                    if (!argumentAssociation.empty())
                     {
-                        m_parameter[expectedName].setSource(source.value());
+                        parameterRef.setArgumentAssoziation(argumentAssociation);
                     }
+                    else
+                    {
+                        parameterRef.marksAsArgument();
+                    }
+                }
+
+                if (source.has_value())
+                {
+                    parameterRef.setSource(source.value());
                 }
             }
 

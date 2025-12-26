@@ -6,7 +6,7 @@
             "hidden": true,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
-            "installDir": "$env{CML}/gladius/gladius-1.2.12",
+            "installDir": "$env{CML}/gladius/gladius-1.2.15",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -108,7 +108,8 @@
                 "USE_CACHE": "true",
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "ENABLE_COVERAGE": "OFF"
+                "ENABLE_COVERAGE": "OFF",
+                "ENABLE_TRACY": "TRUE"
             }
         },
         {
@@ -155,13 +156,23 @@
             "name": "ReleaseWithDebug",
             "description": "",
             "displayName": "",
-            "configurePreset": "linux-releaseWithDebug"
+            "configurePreset": "linux-releaseWithDebug",
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "verbose",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-ReleaseWithDebug.log"
+            }
         },
         {
             "name": "ReleaseWithDebug-noOpenCL",
             "description": "Tests without OpenCL requirements",
             "displayName": "RelWithDebInfo Tests (No OpenCL)",
-            "configurePreset": "linux-releaseWithDebug-noOpenCL"
+            "configurePreset": "linux-releaseWithDebug-noOpenCL",
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "verbose",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug-noOpenCL/ctest-ReleaseWithDebug-noOpenCL.log"
+            }
         }
     ]
 }

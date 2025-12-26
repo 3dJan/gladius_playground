@@ -5,6 +5,7 @@
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
+#include <kernel/types.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>
@@ -18,7 +19,15 @@
 
 #include <compute/ProgramManager.h>
 
+#include <array>
 #include <mutex>
+#include <optional>
+#include <string_view>
+
+namespace cl
+{
+    class CommandQueue;
+}
 
 namespace gladius
 {
@@ -401,11 +410,37 @@ namespace gladius
         void createBuffer();
 
         [[nodiscard]] bool renderScene(size_t startLine, size_t endLine);
+
+        /// @brief Render scene to a pure OpenCL image buffer (no GL interop required)
+        /// @param commandQueue OpenCL command queue used for dispatch
+        /// @param startLine Starting line for rendering
+        /// @param endLine Ending line for rendering
+        /// @param targetImage Pure CL image buffer to render into (no GL texture)
+        /// @return true if rendering succeeded, false otherwise
+        /// @note This method is safe to call from worker threads as it doesn't use GL
+        [[nodiscard]] bool renderSceneComputeOnly(cl::CommandQueue const & commandQueue,
+                                                  size_t startLine,
+                                                  size_t endLine,
+                                                  ImageRGBA & targetImage,
+                                                  cl::Event * completionEvent = nullptr);
+
         void renderLowResPreview() const;
 
         bool precomputeSdfForWholeBuildPlatform();
         void precomputeSdfForBBox(const BoundingBox & boundingBox);
-        [[nodiscard]] SharedGLImageBuffer getResultImage() const;        [[nodiscard]] SharedContourExtractor getContour() const;
+
+        /**
+         * @brief Asynchronously precompute SDF for the whole build platform (non-blocking).
+         * @param queue OpenCL command queue to use for async execution
+         * @return Event that can be waited on to track SDF completion
+         */
+        [[nodiscard]] cl::Event precomputeSdfAsync(cl::CommandQueue const & queue);
+
+        /// @brief Prepares the compute core for thumbnail generation in headless mode
+        /// @return true if preparation succeeded, false otherwise
+        bool prepareImageRendering();
+        [[nodiscard]] SharedGLImageBuffer getResultImage() const;
+        [[nodiscard]] SharedContourExtractor getContour() const;
 
         [[nodiscard]] cl_float getSliceHeight() const;
 
@@ -436,7 +471,7 @@ namespace gladius
 
         void refreshProgram(nodes::SharedAssembly assembly);
         void tryRefreshProgramProtected(nodes::SharedAssembly assembly);
-        
+
         [[nodiscard]] bool isRendererReady() const;
 
         [[nodiscard]] SharedComputeContext getComputeContext() const;
@@ -444,11 +479,15 @@ namespace gladius
         void compileSlicerProgramBlocking();
 
         void logMsg(std::string msg) const;
+        [[nodiscard]] std::string getProgramStateSummary() const;
 
         void computeVertexNormals(Mesh & mesh) const;
 
         void recompileIfRequired();
         void recompileBlockingNoLock();
+        
+        /// Check if OpenCL program compilation is currently in progress
+        [[nodiscard]] bool isCompilationInProgress() const;
 
         void resetBoundingBox();
 
@@ -463,7 +502,10 @@ namespace gladius
 
         std::mutex & getContourExtractorMutex();
 
-        void invalidatePreCompSdf();        [[nodiscard]] events::SharedLogger getSharedLogger() const;
+        void invalidatePreCompSdf(std::string_view reason = {});
+        void setSdfValid(bool valid);
+        [[nodiscard]] bool isSdfValid() const;
+        [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
 
@@ -484,6 +526,12 @@ namespace gladius
         [[nodiscard]] bool tryToupdateParameter(nodes::Assembly & assembly);
         [[nodiscard]] bool updateParameterBlocking(nodes::Assembly & assembly);
 
+        /// Check if parameter structure matches compiled signature (fast path possible)
+        [[nodiscard]] bool isParameterSignatureCompatible(nodes::Assembly const & assembly) const;
+
+        /// Get the compiled parameter signature from program manager
+        [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
+
         void setPreCompSdfSize(size_t size);
 
         void adoptVertexOfMeshToSurface(VertexBuffer & vertices);
@@ -491,13 +539,20 @@ namespace gladius
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// Get the program manager for direct access to specialized programs
+        [[nodiscard]] ProgramManager & getProgramManager();
+        [[nodiscard]] ProgramManager const & getProgramManager() const;
+
       private:
         bool updateBoundingBoxFast();
+                [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
+                [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
         cl_int2 determineBufferSize(float2 pixelSize_mm) const;
         void reinitIfNecssary();
+        [[nodiscard]] bool requiresNanoVdbLocked() const;
 
         [[nodiscard]] int layerNumber() const;
 

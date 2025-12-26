@@ -22,6 +22,18 @@ namespace gladius
         void renderResultImageReadPixel(DistanceMap & sourceImage, GLImageBuffer & targetImage);
         void precomputeSdf(const Primitives & lines, BoundingBox boundingBox);
 
+        /**
+         * @brief Asynchronously precompute SDF using OpenCL events (non-blocking).
+         * @param lines Primitive geometry
+         * @param boundingBox Bounding box for SDF region
+         * @param queue OpenCL command queue to use
+         * @param completionEvent Output event that will be signaled when SDF kernel completes
+         * @return Event that can be waited on or queried for completion status
+         */
+        [[nodiscard]] cl::Event precomputeSdfAsync(const Primitives & lines,
+                                                   BoundingBox boundingBox,
+                                                   cl::CommandQueue const & queue);
+
         void calculateNormals(const Primitives & lines, const Mesh & mesh);
 
         void
@@ -37,13 +49,12 @@ namespace gladius
         void
         movePointsToSurface(Primitives const & lines, VertexBuffer & input, VertexBuffer & output);
 
-
         /**
          * \brief Adopts the vertex positions of the given mesh to the surface
          */
-        void
-        adoptVertexOfMeshToSurface(Primitives const & lines, VertexBuffer & input, VertexBuffer & output);
-        
+        void adoptVertexOfMeshToSurface(Primitives const & lines,
+                                        VertexBuffer & input,
+                                        VertexBuffer & output);
 
         void computeMarchingSquareState(const Primitives & lines, cl_float z_mm);
 

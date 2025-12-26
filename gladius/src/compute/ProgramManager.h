@@ -2,6 +2,7 @@
 
 #include <BitmapLayer.h>
 #include <ContourExtractor.h>
+#include <DualContouringSamplingProgram.h>
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
@@ -9,13 +10,17 @@
 #include <RenderProgram.h>
 #include <ResourceContext.h>
 #include <SlicerProgram.h>
+#include <compute/HierarchicalDCProgram.h>
+#include <compute/ManifoldDualContouringProgram.h>
+#include <compute/ParameterSignature.h>
+#include <compute/types.h>
 #include <nodes/BuildParameter.h>
 #include <nodes/Model.h>
 #include <nodes/nodesfwd.h>
 #include <ui/OrbitalCamera.h>
-#include <compute/types.h>
 
 #include <mutex>
+#include <string>
 
 namespace gladius
 {
@@ -37,6 +42,12 @@ namespace gladius
 
         [[nodiscard]] RenderProgram * getRenderProgram() const;
 
+        [[nodiscard]] DualContouringSamplingProgram * getDualContouringSamplingProgram() const;
+
+        [[nodiscard]] HierarchicalDCProgram * getHierarchicalDCProgram() const;
+
+        [[nodiscard]] compute::ManifoldDualContouringProgram * getManifoldDualContouringProgram() const;
+
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
         [[nodiscard]] ComputeContext & getComputeContext() const;
@@ -47,6 +58,9 @@ namespace gladius
 
         void recompileIfRequired();
         void recompileBlockingNoLock();
+        
+        /// Recompile the ManifoldDualContouring program with current model source
+        void recompileBlockingForManifoldDC();
 
         void setComputeContext(std::shared_ptr<ComputeContext> context);
 
@@ -57,18 +71,39 @@ namespace gladius
 
         void setModelSource(std::string source);
 
+        void setVdbRequired(bool required);
+        [[nodiscard]] bool isVdbSupported() const;
+        [[nodiscard]] bool isVdbActive() const;
+        [[nodiscard]] bool isVdbRequired() const;
+
+        /// Debug helpers for headless diagnostics
+        [[nodiscard]] bool hasModelSource() const;
+        [[nodiscard]] std::string getModelSource() const;
+        [[nodiscard]] std::string getDebugStateSummary() const;
+
         ModelState const & getSlicerState();
         ModelState const & getRendererState();
+
+        /// Get the parameter signature from the last successful compilation
+        [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
+
+        /// Set the parameter signature after successful compilation
+        void setCompiledParameterSignature(ParameterSignature signature);
+
+        /// Check if a given assembly's parameter structure matches the compiled signature
+        [[nodiscard]] bool isParameterSignatureCompatible(nodes::Assembly const & assembly) const;
 
       private:
         void compileSlicerProgram();
         void compileRenderProgram();
 
         void throwIfNoOpenGL() const;
-        [[nodiscard]] bool isVdbRequired() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
         void reinitIfNecssary();
+
+        void updateVdbActivationLocked();
+        void propagateVdbActivationLocked();
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
 
@@ -79,6 +114,12 @@ namespace gladius
 
         std::unique_ptr<RenderProgram> m_optimizedRenderProgram;
 
+        std::unique_ptr<DualContouringSamplingProgram> m_dualContouringSamplingProgram;
+
+        std::unique_ptr<HierarchicalDCProgram> m_hierarchicalDCProgram;
+
+        std::unique_ptr<compute::ManifoldDualContouringProgram> m_manifoldDualContouringProgram;
+
         bool m_isComputationTimeLoggingEnabled = false;
 
         RequiredCapabilities m_capabilities = RequiredCapabilities::OpenGLInterop;
@@ -88,10 +129,17 @@ namespace gladius
 
         ModelState m_slicerState;
         CodeGenerator m_codeGenerator = CodeGenerator::Code;
+        bool m_isVdbSupported = false;
+        bool m_isVdbRequired = false;
+        bool m_isVdbActive = false;
+        std::string m_vdbSupportFailureReason;
 
-        bool m_enableVdb = true;
-
-        std::mutex m_modelSourceMutex;
+        mutable std::mutex m_modelSourceMutex;
         std::string m_modelSource;
+
+        /// Parameter signature from last successful compilation
+        /// Used to detect when fast-path parameter updates are possible
+        mutable std::mutex m_parameterSignatureMutex;
+        ParameterSignature m_compiledParameterSignature;
     };
 }

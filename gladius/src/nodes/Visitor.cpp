@@ -175,9 +175,24 @@ namespace gladius::nodes
         visit(static_cast<NodeBase &>(signedDistanceToMesh));
     }
 
+    void Visitor::visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice)
+    {
+        visit(static_cast<NodeBase &>(signedDistanceToBeamLattice));
+    }
+
     void Visitor::visit(FunctionCall & functionCall)
     {
         visit(static_cast<NodeBase &>(functionCall));
+    }
+
+    void Visitor::visit(FunctionGradient & functionGradient)
+    {
+        visit(static_cast<NodeBase &>(functionGradient));
+    }
+
+    void Visitor::visit(NormalizeDistanceField & normalizeDistanceField)
+    {
+        visit(static_cast<NodeBase &>(normalizeDistanceField));
     }
 
     void Visitor::visit(Mix & mix)

@@ -1,10 +1,13 @@
 #pragma once
 
+#include <chrono>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <tracy/Tracy.hpp>
-#include <chrono>
-#include <string>
+
+// Enable debug output for async rendering diagnostics
+//#define ASYNC_DEBUG_OUTPUT
 
 namespace gladius
 {
@@ -27,8 +30,18 @@ namespace gladius
     };
 
 #define LOG_LOCATION
-    //#define LOG_LOCATION std::cout << "Method: " << __FUNCTION__ << " line: " << __LINE__ << ",
-    //Thread ID: " << std::this_thread::get_id() << std::endl; #define ProfileFunction ZoneScoped;
+    // #define LOG_LOCATION std::cout << "Method: " << __FUNCTION__ << " line: " << __LINE__ << ",
+    // Thread ID: " << std::this_thread::get_id() << std::endl; #define ProfileFunction ZoneScoped;
+
+#ifdef ASYNC_DEBUG_OUTPUT
+    /// For debugging: prints text to console instead of Tracy
+    #define DebugText(text, len) std::cout << "[" << std::this_thread::get_id() << "] " << text << std::endl
+    #define DebugValue(value) std::cout << "[" << std::this_thread::get_id() << "] " << #value << " = " << value << std::endl
+#else
+    /// For profiling: sends text to Tracy
+    #define DebugText(text, len) ZoneText(text, len)
+    #define DebugValue(value) ZoneValue(value)
+#endif
 
     class ScopedTimeLogger
     {
@@ -45,7 +58,7 @@ namespace gladius
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - m_start);
             constexpr int64_t threshold = 1;
 
-            if (duration.count() > threshold)
+            //if (duration.count() > threshold)
             {
                 std::cout << m_name << " took " << duration.count() << "ms" << std::endl;
             }
@@ -57,7 +70,7 @@ namespace gladius
     };
 #define LOG_SCOPE_DURATION ScopedTimeLogger scopedTimeLogger(__FUNCTION__);
 #define LOG_SCOPE_DURATION_NAMED(name) ScopedTimeLogger scopedTimeLogger(name);
-//#define ProfileFunction LOG_SCOPE_DURATION
-//#define ProfileFunction ZoneScoped;
-#define ProfileFunction 
+// #define ProfileFunction LOG_SCOPE_DURATION
+#define ProfileFunction ZoneScoped;
+// #define ProfileFunction
 }

@@ -1,18 +1,26 @@
 #pragma once
 
+#include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
+#include "BeamLatticeView.h"
+#include "ExportState.h"
+#include "ExpressionDialog.h"
 #include "LibraryBrowser.h"
+#include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
 
 #include <filesystem>
 #include <string>
+#include <typeindex>
+#include <vector>
 
 #include "Outline.h"
 #include "ResourceView.h"
 #include "Style.h"
 #include "compute/ComputeCore.h"
 #include "nodes/Assembly.h"
+#include "nodes/FunctionExtractor.h"
 #include "nodes/Model.h"
 #include "nodes/nodesfwd.h"
 
@@ -45,6 +53,9 @@ namespace gladius::ui
 
         void setDocument(std::shared_ptr<Document> document);
 
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state);
+
         [[nodiscard]] bool modelWasModified() const;
 
         [[nodiscard]] bool isCompileRequested() const;
@@ -76,6 +87,17 @@ namespace gladius::ui
         void requestManualCompile();
         void autoLayoutNodes(float distance = 200.0f);
         void showCreateNodePopup();
+        void showExpressionDialog();
+
+        /**
+         * @brief Handle creation of a function from mathematical expression
+         * @param functionName The name for the new function
+         * @param expression The mathematical expression
+         */
+        void onCreateFunctionFromExpression(std::string const & functionName,
+                                            std::string const & expression,
+                                            std::vector<FunctionArgument> const & arguments,
+                                            FunctionOutput const & output);
 
         /**
          * @brief Switch to a specific function by its ResourceId
@@ -85,12 +107,32 @@ namespace gladius::ui
         bool switchToFunction(nodes::ResourceId functionId);
 
         /**
+         * @brief Navigate to a function and record the navigation in history.
+         *        Use this instead of switchToFunction() for user-triggered navigation.
+         */
+        bool navigateToFunction(nodes::ResourceId functionId);
+
+        // Navigation history controls
+        bool canGoBack() const;
+        bool canGoForward() const;
+        bool goBack();
+        bool goForward();
+
+        /**
          * @brief Check if mouse is hovering over the model editor
          * @return true if the model editor is being hovered
          */
         bool isHovered() const;
 
       private:
+        // Extraction helper
+        void extractSelectedNodesToFunction(const std::string & functionName);
+
+        // Copy/Paste helpers
+        void copySelectionToClipboard();
+        void pasteClipboardAtMouse();
+        bool hasClipboard() const;
+
         void readBackNodePositions();
         void autoLayout();
         void applyNodePositions();
@@ -122,6 +164,7 @@ namespace gladius::ui
         nodes::Model & copyExistingFunction(nodes::Model const & sourceModel,
                                             std::string const & name);
         void meshResourceToolBox(ImVec2 mousePos);
+        void beamLatticeResourceToolBox(ImVec2 mousePos);
         void showDeleteUnusedResourcesDialog();
         void validate();
 
@@ -140,7 +183,13 @@ namespace gladius::ui
         bool m_parameterDirty{false};
         bool m_primitiveDataDirty{false};
         bool m_nodePositionsNeedUpdate{false};
-        float m_nodeDistance = 50.f;
+        bool m_pendingPasteRequest{false};
+        // Paste UX helpers
+        bool m_hadLastPastePos{false};
+        ImVec2 m_lastPasteCanvasPos{0.f, 0.f};
+        int m_consecutivePasteCount{0};
+        float m_pasteOffsetStep{20.f};
+        float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
         float m_scale = 0.5f;
         bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};
@@ -158,6 +207,30 @@ namespace gladius::ui
         FunctionType m_selectedFunctionType{FunctionType::Empty};
         int m_selectedSourceFunctionIndex{0};
 
+        enum class LayoutStrategyChoice
+        {
+            Auto = 0,
+            OptimizedLayeredMedian,
+            BalancedGridCompact,
+            MedianSweepTightY,
+            LayeredStackClassic,
+            LayeredRowSweep,
+            ForceRefinedHybrid
+        };
+
+        struct LayoutStrategyDescriptor
+        {
+            LayoutStrategyChoice choice;
+            const char * displayName;
+        };
+
+        [[nodiscard]] static std::vector<LayoutStrategyDescriptor> layoutStrategyDescriptors();
+        [[nodiscard]] static NodeLayoutEngine::LayoutStrategy
+        makeLayoutStrategy(LayoutStrategyChoice choice);
+        [[nodiscard]] static const char * layoutStrategyLabel(LayoutStrategyChoice choice);
+
+        LayoutStrategyChoice m_selectedLayoutStrategy{LayoutStrategyChoice::Auto};
+
         nodes::SharedAssembly m_assembly;
         nodes::SharedModel m_currentModel;
 
@@ -168,6 +241,18 @@ namespace gladius::ui
         bool m_modelWasModified{false};
         bool m_outlineRenaming{true};
         bool m_showCreateNodePopUp{false};
+        bool m_showExtractDialog{false};
+        std::string m_extractFunctionName{"ExtractedFunction"};
+
+        // Extraction name editing state
+        struct ExtractNameEntry
+        {
+            std::string key;                      // stable key (unique port name)
+            std::string name;                     // editable name
+            std::type_index type = typeid(float); // for potential future display
+        };
+        std::vector<ExtractNameEntry> m_extractInputNames;  // proposed + edited
+        std::vector<ExtractNameEntry> m_extractOutputNames; // proposed + edited
 
         nodes::History m_history;
 
@@ -180,6 +265,7 @@ namespace gladius::ui
         std::shared_ptr<Document> m_doc;
 
         ResourceView m_resourceView;
+        BeamLatticeView m_beamLatticeView;
 
         Outline m_outline;
 
@@ -196,12 +282,34 @@ namespace gladius::ui
         // Library browser
         LibraryBrowser m_libraryBrowser;
 
+        // Expression dialog
+        ExpressionDialog m_expressionDialog;
+
         /// Focus management for keyboard-driven workflow
         nodes::NodeId m_nodeToFocus{0};
         bool m_shouldFocusNode{false};
 
         /// Group assignment dialog state
         bool m_showGroupAssignmentDialog{false};
+
+        // Clipboard buffer for copy/paste of nodes
+        nodes::UniqueModel m_clipboardModel;
+
+        // --- Navigation history ---
+        std::vector<nodes::ResourceId> m_navHistory; // sequence of visited function ids
+        std::size_t m_navIndex{0};                   // current index in history
+        bool m_inHistoryNav{false};                  // guard to avoid recording during back/forward
+
+        // Defer selection clearing to when an editor context is active
+        bool m_pendingClearSelection{false};
+
+        // One-time auto layout helper state
+        bool m_pendingAutoLayout{false};
+
+        // Export state for blocking UI modifications during export
+        ExportState * m_exportState{nullptr};
+
+        void initNavigationHistory();
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

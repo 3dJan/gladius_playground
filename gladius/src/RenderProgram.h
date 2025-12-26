@@ -2,8 +2,14 @@
 
 #include "GLImageBuffer.h"
 #include "Primitives.h"
-#include "ResourceContext.h"
 #include "ProgramBase.h"
+#include "ResourceContext.h"
+
+namespace cl
+{
+    class CommandQueue;
+    class Event;
+}
 
 namespace gladius
 {
@@ -18,25 +24,25 @@ namespace gladius
                          size_t startHeight,
                          size_t endHeight);
 
+  void renderScene(cl::CommandQueue const & queue,
+       const Primitives & lines,
+       ImageRGBA & targetImage,
+       cl_float z_mm,
+       size_t startHeight,
+       size_t endHeight);
+
+  [[nodiscard]] cl::Event renderSceneAsync(cl::CommandQueue const & queue,
+             const Primitives & lines,
+             ImageRGBA & targetImage,
+             cl_float z_mm,
+             size_t startHeight,
+             size_t endHeight);
+
         void resample(ImageRGBA & sourceImage,
                       ImageRGBA & targetImage,
                       size_t startHeight,
                       size_t endHeight);
 
-        bool  isSdfVisualizationEnabled() const;
-        void setSdfVisualizationEnabled(bool value)
-        {
-            m_enableSdfVisualization = value;
-            if (m_enableSdfVisualization)
-            {
-                m_programFront->addSymbol("RENDER_SDF");
-            }
-            else
-            {
-                m_programFront->removeSymbol("RENDER_SDF");
-            }
-        }
-    private:
-        bool m_enableSdfVisualization = true;
+      private:
     };
 }

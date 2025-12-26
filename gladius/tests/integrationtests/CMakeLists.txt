@@ -1,5 +1,5 @@
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.21)
 
 include(GoogleTest)
 include(CTest)
@@ -43,7 +43,7 @@ endif()
 target_link_libraries(${BINARY} PRIVATE ${CMAKE_PROJECT_NAME}_lib  ${DEPENDENCIES})
 target_include_directories(${BINARY} PUBLIC ../../src ${CMAKE_CURRENT_BINDING_DIR})
 
-file(GLOB TEST_FILES
+file(GLOB TEST_FILES CONFIGURE_DEPENDS
   "testdata/*.*"
 )
 

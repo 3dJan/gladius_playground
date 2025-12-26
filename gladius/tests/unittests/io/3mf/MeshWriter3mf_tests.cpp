@@ -14,6 +14,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "io/3mf/Lib3mfLoader.h"
 #include <lib3mf_implicit.hpp>
 
 #include <chrono>
@@ -144,7 +145,7 @@ namespace gladius_tests
             // Try to read the file with lib3mf to validate structure
             try
             {
-                auto wrapper = Lib3MF::CWrapper::loadLibrary();
+                auto wrapper = gladius::io::loadLib3mfScoped();
                 auto model = wrapper->CreateModel();
                 auto reader = model->QueryReader("3mf");
                 reader->ReadFromFile(filePath.string());
@@ -292,6 +293,27 @@ namespace gladius_tests
         EXPECT_THROW(writer.exportMesh(invalidPath, *mesh, "test_cube"), Lib3MF::ELib3MFException);
     }
 
+    TEST_F(MeshWriter3mfTest, ExportSingleMesh_WithCollapsedTriangleAfterDedup_StillCreatesValidFile)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto mesh = std::make_unique<Mesh>(*m_computeContext);
+
+        // One valid triangle
+        mesh->addFace({0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+
+        // One triangle that collapses after MeshWriter3mf's position rounding (1e-6):
+        // v1 and v2 round to the same position, but the triangle is not near-zero area prior to rounding.
+        mesh->addFace({0.0f, 0.0f, 0.0f}, {4.0e-7f, 0.0f, 0.0f}, {1000.0f, 1.0f, 0.0f});
+
+        std::filesystem::path outputPath = m_tempDir / "collapsed_triangle.3mf";
+
+        gladius::io::MeshWriter3mf writer(m_logger);
+        ASSERT_NO_THROW(writer.exportMesh(outputPath, *mesh, "collapsed_triangle_mesh"));
+
+        validate3mfFile(outputPath, 1);
+    }
+
     // File system tests
     TEST_F(MeshWriter3mfTest, ExportSingleMesh_ExistingFile_OverwritesSuccessfully)
     {
@@ -383,7 +405,7 @@ namespace gladius_tests
         // Read and validate metadata using lib3mf
         try
         {
-            auto wrapper = Lib3MF::CWrapper::loadLibrary();
+            auto wrapper = gladius::io::loadLib3mfScoped();
             auto model = wrapper->CreateModel();
             auto reader = model->QueryReader("3mf");
             reader->ReadFromFile(outputPath.string());

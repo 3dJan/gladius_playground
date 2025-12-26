@@ -120,7 +120,7 @@ namespace gladius::ui
         return propertiesChanged;
     }
 
-    void ResourceView::render(SharedDocument document) const
+    void ResourceView::render(SharedDocument document)
     {
         if (!document)
         {
@@ -131,6 +131,9 @@ namespace gladius::ui
             return;
         }
 
+        // Check if export is in progress - disable modifications
+        bool const exportInProgress = m_exportState != nullptr && m_exportState->isExportInProgress();
+        
         auto & resourceManager = document->getGeneratorContext().resourceManager;
 
         auto const & resources = resourceManager.getResourceMap();
@@ -146,6 +149,7 @@ namespace gladius::ui
         if (ImGui::TreeNodeEx("Mesh Resources", baseFlags | ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::Indent();
+            ImGui::BeginDisabled(exportInProgress);
             if (ImGui::Button("Import STL"))
             {
                 addMesh(document);
@@ -156,7 +160,66 @@ namespace gladius::ui
                 document->addBoundingBoxAsMesh();
             }
 
+            if (ImGui::Button("Add custom box..."))
+            {
+                m_showCustomBoxDialog = true;
+            }
+            ImGui::EndDisabled();
+
             ImGui::Unindent();
+
+            // Custom box creation dialog
+            if (m_showCustomBoxDialog)
+            {
+                ImVec2 const center(ImGui::GetIO().DisplaySize.x * 0.5f,
+                                    ImGui::GetIO().DisplaySize.y * 0.5f);
+                ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                ImGui::OpenPopup("Create Custom Box");
+
+                if (ImGui::BeginPopupModal("Create Custom Box",
+                                           &m_showCustomBoxDialog,
+                                           ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text("Box Dimensions:");
+                    ImGui::Separator();
+
+                    ImGui::InputFloat("Width", &m_boxWidth, 1.0f, 10.0f, "%.2f");
+                    ImGui::InputFloat("Height", &m_boxHeight, 1.0f, 10.0f, "%.2f");
+                    ImGui::InputFloat("Depth", &m_boxDepth, 1.0f, 10.0f, "%.2f");
+
+                    ImGui::Spacing();
+                    ImGui::Text("Starting Position:");
+                    ImGui::Separator();
+
+                    ImGui::InputFloat("Start X", &m_boxStartX, 1.0f, 10.0f, "%.2f");
+                    ImGui::InputFloat("Start Y", &m_boxStartY, 1.0f, 10.0f, "%.2f");
+                    ImGui::InputFloat("Start Z", &m_boxStartZ, 1.0f, 10.0f, "%.2f");
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+
+                    if (ImGui::Button("Create", ImVec2(120, 0)))
+                    {
+                        document->addCustomBoxMesh(m_boxWidth,
+                                                   m_boxHeight,
+                                                   m_boxDepth,
+                                                   m_boxStartX,
+                                                   m_boxStartY,
+                                                   m_boxStartZ);
+                        m_showCustomBoxDialog = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SetItemDefaultFocus();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                    {
+                        m_showCustomBoxDialog = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+
+                    ImGui::EndPopup();
+                }
+            }
 
             for (auto const & [key, res] : resources)
             {
@@ -319,19 +382,24 @@ namespace gladius::ui
                 }
                 ImGui::EndGroup();
                 frameOverlay(ImVec4(1.0f, 1.0f, 1.0f, 0.2f),
-                            "Mesh Resource Details\n\n"
-                            "View vertices, triangles, and properties of this mesh.\n"
-                            "Meshes define the shape of objects using triangular surfaces.");
+                             "Mesh Resource Details\n\n"
+                             "View vertices, triangles, and properties of this mesh.\n"
+                             "Meshes define the shape of objects using triangular surfaces.");
             }
             ImGui::TreePop();
         }
 
         ImGui::EndGroup();
         frameOverlay(ImVec4(0.5f, 1.0f, 0.5f, 0.1f),
-                    "Mesh Resources\n\n"
-                    "Traditional 3D models made of triangles.\n"
-                    "Meshes define the surface of your objects using connected triangles\n"
-                    "and can include properties like color and texture.");
+                     "Mesh Resources\n\n"
+                     "Traditional 3D models made of triangles.\n"
+                     "Meshes define the surface of your objects using connected triangles\n"
+                     "and can include properties like color and texture.");
+
+        // Process async file dialog results
+        processAsyncFileDialog(document);
+
+        bool const dialogActive = m_asyncFileDialog.isActive();
 
         // image stack
         ImGui::BeginGroup();
@@ -339,17 +407,13 @@ namespace gladius::ui
         {
             ImGui::Indent();
             // import image stack
+            ImGui::BeginDisabled(dialogActive);
             if (ImGui::Button("Import from directory"))
             {
-                // query directory
-                const auto directory = queryDirectory();
-                if (!directory.has_value())
-                {
-                    return;
-                }
-
-                document->addImageStackResource(directory.value());
+                m_asyncDialogOp = ResourceViewDialogOp::ImportImageStack;
+                m_asyncFileDialog.selectDirectory();
             }
+            ImGui::EndDisabled();
 
             ImGui::Unindent();
 
@@ -475,32 +539,65 @@ namespace gladius::ui
                 }
                 ImGui::EndGroup();
                 frameOverlay(ImVec4(1.0f, 1.0f, 1.0f, 0.2f),
-                            "Image Stack Details\n\n"
-                            "View and edit the 3D image data used in volumetric models.\n"
-                            "These stacked images create a full 3D representation.");
+                             "Image Stack Details\n\n"
+                             "View and edit the 3D image data used in volumetric models.\n"
+                             "These stacked images create a full 3D representation.");
             }
             ImGui::TreePop();
         }
         ImGui::EndGroup();
         frameOverlay(ImVec4(1.0f, 0.65f, 0.0f, 0.1f),
-                    "Image Stacks\n\n"
-                    "3D image data for volumetric models.\n"
-                    "Image stacks store information as voxels (3D pixels) and allow you to\n"
-                    "represent object properties that vary throughout the volume.");
+                     "Image Stacks\n\n"
+                     "3D image data for volumetric models.\n"
+                     "Image stacks store information as voxels (3D pixels) and allow you to\n"
+                     "represent object properties that vary throughout the volume.");
     }
 
-    void ResourceView::addMesh(SharedDocument document) const
+    void ResourceView::addMesh(SharedDocument document)
     {
-        if (!document)
+        if (!document || m_asyncFileDialog.isActive())
         {
             return;
         }
 
-        const auto filename = queryLoadFilename({{"*.stl"}});
-        if (!filename.has_value())
+        m_asyncDialogOp = ResourceViewDialogOp::AddMesh;
+        m_asyncFileDialog.openFile({{"*.stl"}});
+    }
+
+    void ResourceView::processAsyncFileDialog(SharedDocument document)
+    {
+        auto result = m_asyncFileDialog.checkResult();
+        if (!result)
         {
-            return;
+            return; // No result yet
         }
-        document->addMeshResource(filename.value());
+
+        auto const operation = m_asyncDialogOp;
+        m_asyncDialogOp = ResourceViewDialogOp::None;
+
+        if (!result->has_value())
+        {
+            return; // User cancelled
+        }
+
+        std::filesystem::path const path = result->value();
+
+        switch (operation)
+        {
+        case ResourceViewDialogOp::ImportImageStack:
+            if (document)
+            {
+                document->addImageStackResource(path);
+            }
+            break;
+        case ResourceViewDialogOp::AddMesh:
+            if (document)
+            {
+                document->addMeshResource(path);
+            }
+            break;
+        case ResourceViewDialogOp::None:
+            break;
+        }
     }
 }
