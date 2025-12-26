@@ -215,3 +215,10 @@ void loadMesh(std::string const& filename) {
 ```
 
 By following these guidelines, you can ensure clean, efficient, and maintainable C++ code.
+
+## Additional Resources
+
+For more information about writing effective Copilot instructions:
+- [Best practices for using GitHub Copilot](https://docs.github.com/en/copilot/get-started/best-practices)
+- [Best practices for Copilot coding agent](https://docs.github.com/en/copilot/tutorials/coding-agent/get-the-best-results)
+- [5 tips for writing better custom instructions](https://github.blog/ai-and-ml/github-copilot/5-tips-for-writing-better-custom-instructions-for-copilot/)
