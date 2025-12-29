@@ -251,6 +251,7 @@ namespace gladius::ui
         bool m_outlineRenaming{true};
         bool m_showCreateNodePopUp{false};
         bool m_showExtractDialog{false};
+        bool m_extractDialogInitialized{false};  // Track extract dialog initialization state
         std::string m_extractFunctionName{"ExtractedFunction"};
 
         // Extraction name editing state

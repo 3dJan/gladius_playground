@@ -2,7 +2,6 @@
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
 #include <imguinodeeditor.h>
-#include <iostream>
 
 #include <algorithm>
 #include <cctype>
@@ -12,8 +11,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-// #include "../ExpressionToGraphConverter.h"
-// #include "../ExpressionParser.h"
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
 #include "../FunctionArgument.h"
@@ -41,6 +38,25 @@
 namespace gladius::ui
 {
     using namespace nodes;
+
+    // Layout and positioning constants
+    namespace
+    {
+        /// Horizontal offset when placing a new node relative to a selected node
+        constexpr float kNodePlacementOffsetX = 400.0f;
+        /// Default fallback node size when actual size is unavailable
+        constexpr ImVec2 kDefaultNodeSize{500.0f, 400.0f};
+        /// Width for input text fields in dialogs
+        constexpr float kInputTextWidth = 260.0f;
+        /// Standard button width in dialogs
+        constexpr float kDialogButtonWidth = 120.0f;
+        /// Standard dialog child window height for scrollable lists
+        constexpr float kDialogListHeight = 150.0f;
+        /// Standard dialog child window width
+        constexpr float kDialogListWidth = 500.0f;
+        /// Filter input width in popups
+        constexpr float kFilterInputWidth = 200.0f;
+    } // namespace
 
     std::vector<ModelEditor::LayoutStrategyDescriptor> ModelEditor::layoutStrategyDescriptors()
     {
@@ -654,7 +670,7 @@ namespace gladius::ui
                                    m_selectedFunctionType != FunctionType::WrapExisting) ||
                                   availableFunctionCount > 0);
 
-                if (canCreate && ImGui::Button("Create", ImVec2(120, 0)))
+                if (canCreate && ImGui::Button("Create", ImVec2(kDialogButtonWidth, 0)))
                 {
                     nodes::Model * newModel = nullptr;
                     switch (m_selectedFunctionType)
@@ -691,7 +707,7 @@ namespace gladius::ui
                 }
                 ImGui::SetItemDefaultFocus();
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                if (ImGui::Button("Cancel", ImVec2(kDialogButtonWidth, 0)))
                 {
                     ImGui::CloseCurrentPopup();
                     m_showAddModel = false;
@@ -1396,9 +1412,13 @@ namespace gladius::ui
             ImGui::End();
             ImGui::PopStyleVar();
         }
-        catch (std::exception & e)
+        catch (std::exception const & e)
         {
-            std::cerr << e.what() << "\n";
+            if (m_doc && m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                    {fmt::format("Model editor error: {}", e.what()), events::Severity::Error});
+            }
         }
 
         // Extract Function dialog
@@ -1445,10 +1465,9 @@ namespace gladius::ui
                 };
 
                 // Gather selection ids and compute name proposals on first open
-                static bool initializedProposals = false;
-                if (!initializedProposals)
+                if (!m_extractDialogInitialized)
                 {
-                    initializedProposals = true;
+                    m_extractDialogInitialized = true;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
 
@@ -1623,7 +1642,7 @@ namespace gladius::ui
                         }
                     }
                     m_showExtractDialog = false;
-                    initializedProposals = false;
+                    m_extractDialogInitialized = false;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
                     ImGui::CloseCurrentPopup();
@@ -1632,7 +1651,7 @@ namespace gladius::ui
                 if (ImGui::Button("Cancel", ImVec2(120, 0)))
                 {
                     m_showExtractDialog = false;
-                    initializedProposals = false;
+                    m_extractDialogInitialized = false;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
                     ImGui::CloseCurrentPopup();
@@ -2038,17 +2057,16 @@ namespace gladius::ui
         config.groupPadding = m_nodeDistance * 0.5f;
 
         layoutEngine.setNodeSizeProvider([](nodes::NodeId nodeId) {
-            auto constexpr fallback = ImVec2(500.0F, 400.0F);
             auto * editorContext = ed::GetCurrentEditor();
             if (editorContext == nullptr)
             {
-                return fallback;
+                return kDefaultNodeSize;
             }
 
             auto size = ed::GetNodeSize(nodeId);
             if (size.x <= 0.0f || size.y <= 0.0f)
             {
-                return fallback;
+                return kDefaultNodeSize;
             }
 
             return size;
@@ -2125,7 +2143,7 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x - 400.0f;
+            createdNode.screenPos().x = screenPos.x - kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
         auto const csOutPut = createdNode.getOutputs()[nodes::FieldNames::Pos];
@@ -2169,7 +2187,7 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x + 400.0f;
+            createdNode.screenPos().x = screenPos.x + kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
         auto const shapeOutPut = createdNode.getOutputs().at(FieldNames::Shape);
@@ -2203,7 +2221,7 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x + 400.0F;
+            createdNode.screenPos().x = screenPos.x + kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
     }
@@ -2549,16 +2567,22 @@ namespace gladius::ui
                 // Failed to convert expression - remove the created function
                 m_doc->deleteFunction(newModel.getResourceId());
 
-                // TODO: Show error message to user
-                std::cerr << "Failed to convert expression to graph: " << expression << std::endl;
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                        {fmt::format("Failed to convert expression to graph: {}", expression),
+                         events::Severity::Error});
+                }
             }
         }
         catch (std::exception const & ex)
         {
-
-            // Handle conversion errors
-            std::cerr << "Error creating function from expression: " << ex.what() << std::endl;
-            // TODO: Show error message to user
+            if (m_doc && m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                    {fmt::format("Error creating function from expression: {}", ex.what()),
+                     events::Severity::Error});
+            }
         }
     }
 

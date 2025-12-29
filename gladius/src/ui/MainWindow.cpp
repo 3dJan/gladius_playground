@@ -34,9 +34,7 @@
 
 namespace gladius::ui
 {
-    using namespace std;
-
-    bool bigMenuItem(const char * label)
+    bool bigMenuItem(char const * label)
     {
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
         const bool result = ImGui::Button(label);
@@ -139,12 +137,12 @@ namespace gladius::ui
         loadRenderSettings();
     }
 
-    void MainWindow::dragParameter(const std::string & label,
+    void MainWindow::dragParameter(std::string const & label,
                                    float * valuePtr,
                                    float minVal,
                                    float maxVal)
     {
-        const bool changed = ImGui::DragFloat(label.c_str(), valuePtr, 0.001f, minVal, maxVal);
+        bool const changed = ImGui::DragFloat(label.c_str(), valuePtr, 0.001f, minVal, maxVal);
         m_contoursDirty = changed || m_contoursDirty;
         m_parameterDirty = changed || m_parameterDirty;
     }
@@ -809,9 +807,7 @@ namespace gladius::ui
         }
         case AsyncDialogOperation::Import:
         {
-            // Note: Import is not fully implemented in the original code
             throw std::runtime_error("Import not implemented");
-            break;
         }
         case AsyncDialogOperation::Open:
         {
