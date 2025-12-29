@@ -16,6 +16,7 @@
 #include "MeshExportDialog.h"
 #include "ModelEditor.h"
 #include "Outline.h"
+#include "RecentFilesManager.h"
 #include "RenderWindow.h"
 #include "SliceView.h"
 #include "WelcomeScreen.h"
@@ -67,6 +68,7 @@ namespace gladius::ui
         void setConfigManager(ConfigManager & configManager)
         {
             m_configManager = &configManager;
+            m_recentFilesManager = std::make_unique<RecentFilesManager>(m_configManager);
         }
 
         void setup(std::shared_ptr<ComputeCore> core,
@@ -208,18 +210,21 @@ namespace gladius::ui
         void onPreviewProgramSwap();
 
         /**
-         * @brief Add a file to the list of recently modified files
-         * @param filePath Path to the file that has been modified
+         * @brief Add a file to the recent files list
+         * @param filePath Path to the file
          */
-        void addToRecentFiles(const std::filesystem::path & filePath);
+        void addToRecentFiles(std::filesystem::path const & filePath);
 
         /**
-         * @brief Get the list of recently modified files
+         * @brief Get the list of recent files
          * @param maxCount Maximum number of files to return
          * @return List of pairs containing file paths and timestamps
          */
         std::vector<std::pair<std::filesystem::path, std::time_t>>
         getRecentFiles(size_t maxCount = 100) const;
+
+        /// Recent files manager
+        std::unique_ptr<RecentFilesManager> m_recentFilesManager;
 
         GLView m_mainView;
 

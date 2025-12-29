@@ -5,7 +5,9 @@
 #include "BeamLatticeView.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
+#include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
+#include "NodeClipboard.h"
 #include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
@@ -193,11 +195,6 @@ namespace gladius::ui
         bool m_primitiveDataDirty{false};
         bool m_nodePositionsNeedUpdate{false};
         bool m_pendingPasteRequest{false};
-        // Paste UX helpers
-        bool m_hadLastPastePos{false};
-        ImVec2 m_lastPasteCanvasPos{0.f, 0.f};
-        int m_consecutivePasteCount{0};
-        float m_pasteOffsetStep{20.f};
         float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
         float m_scale = 0.5f;
         bool m_nodeWidthsInitialized = false;
@@ -302,13 +299,11 @@ namespace gladius::ui
         /// Group assignment dialog state
         bool m_showGroupAssignmentDialog{false};
 
-        // Clipboard buffer for copy/paste of nodes
-        nodes::UniqueModel m_clipboardModel;
+        // Clipboard for copy/paste of nodes
+        NodeClipboard m_clipboard;
 
-        // --- Navigation history ---
-        std::vector<nodes::ResourceId> m_navHistory; // sequence of visited function ids
-        std::size_t m_navIndex{0};                   // current index in history
-        bool m_inHistoryNav{false};                  // guard to avoid recording during back/forward
+        // Navigation history for back/forward through functions
+        FunctionNavigationHistory m_navHistory;
 
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
@@ -318,8 +313,6 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};
-
-        void initNavigationHistory();
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

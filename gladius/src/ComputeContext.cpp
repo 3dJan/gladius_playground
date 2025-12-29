@@ -226,7 +226,7 @@ namespace gladius
 
                                                         if (!accelerator.capabilities.fp64)
                                                         {
-                                                                logStream << "\tDevice lacks fp64 support (required for NanoVDB); "
+                                                                logStream << "\tDevice lacks fp64 support (preferred but not required); "
                                                                                          "marking as fallback candidate.\n";
                                                                 fallbackCandidates.push_back(std::move(accelerator));
                                                                 continue;
@@ -267,8 +267,8 @@ namespace gladius
 
         if (candidates.empty() && !fallbackCandidates.empty())
         {
-            logStream << "\nNo fp64-capable OpenCL devices found. Falling back to devices without "
-                         "fp64 support; NanoVDB features will be disabled.\n";
+            logStream << "\nNo fp64-capable OpenCL devices found. Using devices without fp64 "
+                         "hardware support (NanoVDB will use emulated double precision).\n";
             candidates = std::move(fallbackCandidates);
         }
 

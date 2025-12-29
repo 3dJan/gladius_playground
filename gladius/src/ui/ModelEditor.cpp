@@ -27,6 +27,7 @@
 #include "Port.h"
 #include "ResourceView.h"
 #include "Style.h"
+#include "ValidationUtils.h"
 #include "Widgets.h"
 #include "imgui.h"
 #include "nodesfwd.h"
@@ -1435,35 +1436,6 @@ namespace gladius::ui
                 ImGui::Separator();
                 ImGui::InputText("Function name", &m_extractFunctionName);
 
-                // --- Validation helpers (local lambdas) ---
-                auto trimCopy = [](std::string s)
-                {
-                    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-                    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
-                    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
-                    return s;
-                };
-                auto isIdentifier = [](std::string const & name)
-                {
-                    if (name.empty())
-                        return false;
-                    auto c0 = static_cast<unsigned char>(name[0]);
-                    if (!(std::isalpha(c0) || c0 == '_'))
-                        return false;
-                    for (size_t i = 1; i < name.size(); ++i)
-                    {
-                        unsigned char c = static_cast<unsigned char>(name[i]);
-                        if (!(std::isalnum(c) || c == '_'))
-                            return false;
-                    }
-                    return true;
-                };
-                auto isReserved = [](std::string const & name)
-                {
-                    // Disallow known reserved parameter names
-                    return name == "FunctionId";
-                };
-
                 // Gather selection ids and compute name proposals on first open
                 if (!m_extractDialogInitialized)
                 {
@@ -1486,40 +1458,19 @@ namespace gladius::ui
                     }
                 }
 
-                // Compute validation for current names
-                std::vector<bool> inputValid(m_extractInputNames.size(), true);
-                std::vector<bool> outputValid(m_extractOutputNames.size(), true);
-                std::unordered_set<std::string> seenInputs;
-                std::unordered_set<std::string> seenOutputs;
-                bool allNamesValid = true;
-                for (size_t i = 0; i < m_extractInputNames.size(); ++i)
-                {
-                    auto nameTrim = trimCopy(m_extractInputNames[i].name);
-                    bool v = isIdentifier(nameTrim) && !isReserved(nameTrim) && !nameTrim.empty();
-                    if (v)
-                    {
-                        if (seenInputs.count(nameTrim))
-                            v = false; // duplicate in inputs
-                        else
-                            seenInputs.insert(nameTrim);
-                    }
-                    inputValid[i] = v;
-                    allNamesValid = allNamesValid && v;
-                }
-                for (size_t i = 0; i < m_extractOutputNames.size(); ++i)
-                {
-                    auto nameTrim = trimCopy(m_extractOutputNames[i].name);
-                    bool v = isIdentifier(nameTrim) && !isReserved(nameTrim) && !nameTrim.empty();
-                    if (v)
-                    {
-                        if (seenOutputs.count(nameTrim))
-                            v = false; // duplicate in outputs
-                        else
-                            seenOutputs.insert(nameTrim);
-                    }
-                    outputValid[i] = v;
-                    allNamesValid = allNamesValid && v;
-                }
+                // Compute validation for current names using validation utilities
+                std::vector<std::string> inputNames;
+                std::vector<std::string> outputNames;
+                for (auto const & e : m_extractInputNames)
+                    inputNames.push_back(e.name);
+                for (auto const & e : m_extractOutputNames)
+                    outputNames.push_back(e.name);
+
+                std::vector<bool> inputValid;
+                std::vector<bool> outputValid;
+                bool const inputsValid = validation::validateUniqueNames(inputNames, inputValid);
+                bool const outputsValid = validation::validateUniqueNames(outputNames, outputValid);
+                bool const allNamesValid = inputsValid && outputsValid;
 
                 // Editable list of argument names
                 if (!m_extractInputNames.empty())
@@ -1736,7 +1687,7 @@ namespace gladius::ui
         m_history = History();
         switchModel();
         // Initialize navigation history with the current model
-        initNavigationHistory();
+        m_navHistory.reset(m_currentModel ? m_currentModel->getResourceId() : 0u);
     }
 
     bool ModelEditor::matchesNodeFilter(const std::string & text) const
@@ -2617,29 +2568,11 @@ namespace gladius::ui
             return false;
         }
 
-        // Don't record no-op navigations
+        // Record navigation in history (returns false if no-op)
         nodes::ResourceId const currentId = m_currentModel ? m_currentModel->getResourceId() : 0u;
-        if (currentId == functionId)
+        if (!m_navHistory.recordNavigation(currentId, functionId))
         {
-            return true;
-        }
-
-        if (!m_inHistoryNav)
-        {
-            // If we're not at the end, truncate forward history
-            if (!m_navHistory.empty() && (m_navIndex + 1u) < m_navHistory.size())
-            {
-                m_navHistory.erase(m_navHistory.begin() + static_cast<long>(m_navIndex + 1u),
-                                   m_navHistory.end());
-            }
-            // If history is empty, seed with current
-            if (m_navHistory.empty() && currentId != 0u)
-            {
-                m_navHistory.push_back(currentId);
-            }
-            // Push new target and advance index
-            m_navHistory.push_back(functionId);
-            m_navIndex = m_navHistory.size() - 1u;
+            return true; // No-op navigation, already at target
         }
 
         return switchToFunction(functionId);
@@ -2647,51 +2580,30 @@ namespace gladius::ui
 
     bool ModelEditor::canGoBack() const
     {
-        return !m_navHistory.empty() && m_navIndex > 0u;
+        return m_navHistory.canGoBack();
     }
 
     bool ModelEditor::canGoForward() const
     {
-        return !m_navHistory.empty() && (m_navIndex + 1u) < m_navHistory.size();
+        return m_navHistory.canGoForward();
     }
 
     bool ModelEditor::goBack()
     {
-        if (!canGoBack())
-        {
-            return false;
-        }
-        m_inHistoryNav = true;
-        m_navIndex -= 1u;
-        auto const targetId = m_navHistory[m_navIndex];
-        bool const ok = switchToFunction(targetId);
-        m_inHistoryNav = false;
+        m_navHistory.setInHistoryNavigation(true);
+        auto const targetId = m_navHistory.goBack();
+        bool const ok = (targetId != 0u) && switchToFunction(targetId);
+        m_navHistory.setInHistoryNavigation(false);
         return ok;
     }
 
     bool ModelEditor::goForward()
     {
-        if (!canGoForward())
-        {
-            return false;
-        }
-        m_inHistoryNav = true;
-        m_navIndex += 1u;
-        auto const targetId = m_navHistory[m_navIndex];
-        bool const ok = switchToFunction(targetId);
-        m_inHistoryNav = false;
+        m_navHistory.setInHistoryNavigation(true);
+        auto const targetId = m_navHistory.goForward();
+        bool const ok = (targetId != 0u) && switchToFunction(targetId);
+        m_navHistory.setInHistoryNavigation(false);
         return ok;
-    }
-
-    void ModelEditor::initNavigationHistory()
-    {
-        m_navHistory.clear();
-        m_navIndex = 0u;
-        if (m_currentModel)
-        {
-            m_navHistory.push_back(m_currentModel->getResourceId());
-            m_navIndex = 0u;
-        }
     }
 
     bool ModelEditor::isHovered() const
@@ -2719,7 +2631,7 @@ namespace gladius::ui
 
     bool ModelEditor::hasClipboard() const
     {
-        return static_cast<bool>(m_clipboardModel);
+        return m_clipboard.hasContent();
     }
 
     void ModelEditor::copySelectionToClipboard()
@@ -2741,166 +2653,39 @@ namespace gladius::ui
             selectedIds.insert(static_cast<nodes::NodeId>(n.Get()));
         }
 
-        m_clipboardModel = std::make_unique<nodes::Model>();
-
-        std::unordered_map<nodes::NodeId, nodes::NodeBase *> cloneMap;
-
-        // Clone nodes
-        for (auto const & [id, nodePtr] : *m_currentModel)
-        {
-            if (!nodePtr || selectedIds.find(id) == selectedIds.end())
-                continue;
-            auto cloned = nodePtr->clone();
-            cloned->screenPos() = nodePtr->screenPos();
-            auto * inserted = m_clipboardModel->insert(std::move(cloned));
-            cloneMap[id] = inserted;
-        }
-
-        // Recreate intra-selection links
-        for (auto const & [origId, clonedNode] : cloneMap)
-        {
-            (void) clonedNode;
-            auto origOpt = m_currentModel->getNode(origId);
-            if (!origOpt.has_value())
-                continue;
-            nodes::NodeBase const * origNode = origOpt.value();
-            for (auto const & [paramName, param] : origNode->constParameter())
-            {
-                if (!param.getConstSource().has_value())
-                    continue;
-                auto const & src = param.getConstSource().value();
-                nodes::Port const * srcPort = m_currentModel->getPort(src.portId);
-                if (!srcPort)
-                    continue;
-                nodes::NodeId const srcNodeId = srcPort->getParentId();
-                if (cloneMap.find(srcNodeId) == cloneMap.end())
-                    continue;
-
-                nodes::Port * clonedSrcPort =
-                  cloneMap[srcNodeId]->findOutputPort(srcPort->getShortName());
-                nodes::VariantParameter * clonedTarget = cloneMap[origId]->getParameter(paramName);
-                if (clonedSrcPort && clonedTarget)
-                {
-                    m_clipboardModel->addLink(clonedSrcPort->getId(), clonedTarget->getId(), true);
-                }
-            }
-        }
+        m_clipboard.copyNodes(*m_currentModel, selectedIds);
     }
 
     void ModelEditor::pasteClipboardAtMouse()
     {
-        if (!m_currentModel || !m_clipboardModel)
+        if (!m_currentModel || !m_clipboard.hasContent())
         {
             return;
         }
 
         // Make sure we only use NodeEditor API when an editor is active
         ImVec2 mouse = ImGui::GetMousePos();
-        ImVec2 canvas = ed::ScreenToCanvas(mouse);
-        // If user pastes repeatedly, nudge new paste to avoid complete overlap
-        if (m_hadLastPastePos && std::abs(canvas.x - m_lastPasteCanvasPos.x) < 1.0f &&
-            std::abs(canvas.y - m_lastPasteCanvasPos.y) < 1.0f)
-        {
-            ++m_consecutivePasteCount;
-            canvas.x += m_pasteOffsetStep * (m_consecutivePasteCount % 5);
-            canvas.y += m_pasteOffsetStep * (m_consecutivePasteCount % 5);
-        }
-        else
-        {
-            m_consecutivePasteCount = 0;
-        }
-
-        bool first = true;
-        ImVec2 minPos{0, 0}, maxPos{0, 0};
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (!nodePtr)
-                continue;
-            ImVec2 p{nodePtr->screenPos().x, nodePtr->screenPos().y};
-            if (first)
-            {
-                minPos = maxPos = p;
-                first = false;
-            }
-            else
-            {
-                minPos.x = std::min(minPos.x, p.x);
-                minPos.y = std::min(minPos.y, p.y);
-                maxPos.x = std::max(maxPos.x, p.x);
-                maxPos.y = std::max(maxPos.y, p.y);
-            }
-        }
-
-        ImVec2 const center{(minPos.x + maxPos.x) * 0.5f, (minPos.y + maxPos.y) * 0.5f};
-        ImVec2 const delta{canvas.x - center.x, canvas.y - center.y};
+        ImVec2 rawCanvas = ed::ScreenToCanvas(mouse);
+        ImVec2 canvas = m_clipboard.getAdjustedPastePosition(rawCanvas);
 
         createUndoRestorePoint("Paste node(s)");
 
-        std::unordered_map<std::string, nodes::NodeBase *> pastedMap;
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (!nodePtr)
-                continue;
-            auto cloned = nodePtr->clone();
-            cloned->screenPos().x = nodePtr->screenPos().x + delta.x;
-            cloned->screenPos().y = nodePtr->screenPos().y + delta.y;
-            nodes::NodeBase * inserted = m_currentModel->insert(std::move(cloned));
-            pastedMap[nodePtr->getUniqueName()] = inserted;
-            ed::SetNodePosition(inserted->getId(),
-                                ImVec2(inserted->screenPos().x, inserted->screenPos().y));
-        }
+        auto pastedMap = m_clipboard.pasteNodes(*m_currentModel, canvas);
 
-        std::unordered_map<std::string, nodes::NodeBase const *> clipboardByName;
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (nodePtr)
-                clipboardByName[nodePtr->getUniqueName()] = nodePtr.get();
-        }
-
-        for (auto const & [origName, newNode] : pastedMap)
-        {
-            auto it = clipboardByName.find(origName);
-            if (it == clipboardByName.end())
-                continue;
-            nodes::NodeBase const * origNode = it->second;
-            for (auto const & [paramName, param] : origNode->constParameter())
-            {
-                if (!param.getConstSource().has_value())
-                    continue;
-                auto const & src = param.getConstSource().value();
-                nodes::Port const * origSrcPort = m_clipboardModel->getPort(src.portId);
-                if (!origSrcPort)
-                    continue;
-                std::string const srcNodeUnique = origSrcPort->getParent()->getUniqueName();
-                auto pastedSrcIt = pastedMap.find(srcNodeUnique);
-                if (pastedSrcIt == pastedMap.end())
-                    continue;
-                nodes::Port * newSrcPort =
-                  pastedSrcIt->second->findOutputPort(origSrcPort->getShortName());
-                nodes::VariantParameter * newTarget = newNode->getParameter(paramName);
-                if (newSrcPort && newTarget)
-                {
-                    m_currentModel->addLink(newSrcPort->getId(), newTarget->getId(), true);
-                }
-            }
-        }
-
-        // Select newly pasted nodes and focus
+        // Set node positions in the editor and select them
         ed::ClearSelection();
         for (auto const & [_, node] : pastedMap)
         {
             (void) _;
+            ed::SetNodePosition(node->getId(),
+                                ImVec2(node->screenPos().x, node->screenPos().y));
             ed::SelectNode(node->getId(), true);
         }
         ed::NavigateToSelection(true);
 
         markModelAsModified();
 
-        // Track last paste canvas position
-        m_lastPasteCanvasPos = canvas;
-        m_hadLastPastePos = true;
+        // Track last paste canvas position for offset nudging
+        m_clipboard.updatePastePosition(canvas);
     }
 } // namespace gladius::ui

@@ -15,23 +15,22 @@
     } while (0)
 
 /// @brief Macro to skip tests that use NanoVDB when Rusticl is the OpenCL runtime
-/// NanoVDB causes driver freezes on Rusticl, so these tests must be skipped.
-/// This should be used in tests that use MeshResource, BeamLatticeResource, or VDB grids.
+/// NOTE: This macro is now deprecated as rusticl is supported. It remains for compatibility
+/// but no longer skips tests.
 /// @param context A valid ComputeContext reference or pointer
 #define SKIP_IF_NANOVDB_UNAVAILABLE_ON_RUSTICL(context)                                            \
     do                                                                                             \
     {                                                                                              \
-        if ((context).getCapabilities().rusticl)                                                   \
-        {                                                                                          \
-            GTEST_SKIP() << "NanoVDB tests are disabled on Rusticl (causes driver freezes)";       \
-        }                                                                                          \
+        /* NanoVDB is now enabled for rusticl - no longer skipping */                              \
+        (void)(context); /* suppress unused warning */                                             \
     } while (0)
 
 /// @brief Check if NanoVDB is available on the given compute context
-/// Returns false if the runtime is Rusticl or lacks fp64 support
+/// NanoVDB is now enabled for all OpenCL runtimes including rusticl
 /// @param context A valid ComputeContext reference
 inline bool isNanoVdbAvailable(gladius::ComputeContext const & context)
 {
-    auto const & caps = context.getCapabilities();
-    return caps.fp64 && !caps.rusticl;
+    // NanoVDB is now universally available
+    (void)context; // suppress unused parameter warning
+    return true;
 }
