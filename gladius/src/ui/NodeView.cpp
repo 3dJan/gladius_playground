@@ -1160,7 +1160,7 @@ namespace gladius::ui
                 {
                     auto posIt = std::find(vectorInputCandidates.begin(),
                                            vectorInputCandidates.end(),
-                                           std::string(nodes::FieldNames::Pos));
+                                           nodes::FieldNames::Pos);
                     if (posIt != vectorInputCandidates.end())
                     {
                         gradientNode->setSelectedVectorInput(*posIt);
@@ -1187,7 +1187,7 @@ namespace gladius::ui
                 {
                     auto distIt = std::find(scalarOutputCandidates.begin(),
                                             scalarOutputCandidates.end(),
-                                            std::string(nodes::FieldNames::Distance));
+                                            nodes::FieldNames::Distance);
                     if (distIt != scalarOutputCandidates.end())
                     {
                         gradientNode->setSelectedScalarOutput(*distIt);
@@ -1276,7 +1276,7 @@ namespace gladius::ui
         }
         catch (std::exception const & e)
         {
-            std::cerr << "Failed to create FunctionGradient: " << e.what() << std::endl;
+            logError(fmt::format("Failed to create FunctionGradient: {}", e.what()));
         }
     }
 
@@ -1378,7 +1378,7 @@ namespace gladius::ui
         }
         catch (std::exception const & e)
         {
-            std::cerr << "Failed to create NormalizeDistanceField: " << e.what() << std::endl;
+            logError(fmt::format("Failed to create NormalizeDistanceField: {}", e.what()));
         }
     }
 
@@ -2230,6 +2230,19 @@ namespace gladius::ui
             it = m_columnWidths.insert({nodeId, ColumnWidths{0, 0, 0, 0, 0, 0, 0, 0}}).first;
         }
         return it->second;
+    }
+
+    void NodeView::logError(const std::string & message)
+    {
+        if (m_modelEditor && m_modelEditor->getDocument())
+        {
+            m_modelEditor->getDocument()->getSharedLogger()->addEvent(
+              {message, events::Severity::Error});
+        }
+        else
+        {
+            std::cerr << message << std::endl;
+        }
     }
 
     bool NodeView::columnWidthsAreInitialized() const

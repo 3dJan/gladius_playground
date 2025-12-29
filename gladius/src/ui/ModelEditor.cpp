@@ -680,9 +680,12 @@ namespace gladius::ui
                     if (newModel)
                     {
                         newModel->setDisplayName(m_newModelName);
+                        // Refresh assembly reference from document - it may have been replaced
+                        setAssembly(m_doc->getAssembly());
                         m_currentModel = m_assembly->findModel(newModel->getResourceId());
                         switchModel();
                         m_showAddModel = false;
+                        m_visible = true; // Ensure ModelEditor remains visible after creating function
                         ImGui::CloseCurrentPopup();
                     }
                 }

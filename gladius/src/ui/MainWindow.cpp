@@ -402,14 +402,16 @@ namespace gladius::ui
         if (m_computeAvailable && m_doc)
         {
             bool const loadingNow = m_doc->isLoadingInProgress();
-            if (m_deferEditorResetUntilLoadFinished && m_wasLoadingInProgress && !loadingNow)
+            if (m_asyncLoadState != AsyncLoadState::Idle && !loadingNow)
             {
-                resetEditorState();
-                m_renderWindow.invalidateViewDuetoModelUpdate();
-                m_renderWindow.centerView();
-                m_deferEditorResetUntilLoadFinished = false;
+                if (m_asyncLoadState == AsyncLoadState::LoadingWithReset)
+                {
+                    resetEditorState();
+                    m_renderWindow.invalidateViewDuetoModelUpdate();
+                    m_renderWindow.centerView();
+                }
+                m_asyncLoadState = AsyncLoadState::Idle;
             }
-            m_wasLoadingInProgress = loadingNow;
         }
 
         // Check if welcome screen is visible first
@@ -856,14 +858,8 @@ namespace gladius::ui
         }
         case AsyncDialogOperation::OpenAfterSavePrompt:
         {
-            m_currentAssemblyFileName = filename;
-            m_welcomeScreen.hide();
+            loadFileDeferred(filename);
 
-            // Defer editor reset until the new Assembly has been loaded.
-            m_deferEditorResetUntilLoadFinished = true;
-            m_doc->loadNonBlocking(filename);
-            m_wasLoadingInProgress = true;
-            addToRecentFiles(filename);
             // Close the save-before-file-operation popup
             m_showSaveBeforeFileOperation = false;
             m_pendingFileOperation = PendingFileOperation::None;
@@ -1426,13 +1422,17 @@ namespace gladius::ui
             return;
         }
 
+        loadFileDeferred(filename);
+    }
+
+    void MainWindow::loadFileDeferred(const std::filesystem::path & filename)
+    {
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
 
         // Defer editor reset until the new Assembly has been loaded.
-        m_deferEditorResetUntilLoadFinished = true;
+        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->loadNonBlocking(filename);
-        m_wasLoadingInProgress = true;
 
         // Add to recent files list
         addToRecentFiles(filename);
@@ -1918,14 +1918,7 @@ namespace gladius::ui
                     if (m_pendingOpenFilename.has_value())
                     {
                         // Direct file open (e.g., from recent files)
-                        m_currentAssemblyFileName = m_pendingOpenFilename.value();
-                        m_welcomeScreen.hide();
-
-                        // Defer editor reset until the new Assembly has been loaded.
-                        m_deferEditorResetUntilLoadFinished = true;
-                        m_doc->loadNonBlocking(m_pendingOpenFilename.value());
-                        m_wasLoadingInProgress = true;
-                        addToRecentFiles(m_pendingOpenFilename.value());
+                        loadFileDeferred(m_pendingOpenFilename.value());
                         return true;
                     }
                     else if (!dialogActive)

@@ -190,6 +190,12 @@ namespace gladius::ui
         void importImageStack();
 
         /**
+         * @brief Helper to load a file asynchronously and defer editor reset
+         * @param filename Path to the file to load
+         */
+        void loadFileDeferred(const std::filesystem::path & filename);
+
+        /**
          * @brief Save rendering settings to configuration
          */
         void saveRenderSettings();
@@ -254,9 +260,14 @@ namespace gladius::ui
         std::shared_ptr<Document> m_doc;
         events::SharedLogger m_logger;
 
-        // Async file loading coordination
-        bool m_wasLoadingInProgress{false};
-        bool m_deferEditorResetUntilLoadFinished{false};
+        /// @brief State for async file loading coordination
+        enum class AsyncLoadState
+        {
+            Idle,
+            Loading,
+            LoadingWithReset
+        };
+        AsyncLoadState m_asyncLoadState{AsyncLoadState::Idle};
 
         // Flag to remember if library browser was visible
         bool m_isLibraryBrowserVisible = false;

@@ -53,6 +53,15 @@ namespace gladius::ui
 
         void setDocument(std::shared_ptr<Document> document);
 
+        /**
+         * @brief Get the current document
+         * @return Shared pointer to the current document
+         */
+        [[nodiscard]] std::shared_ptr<Document> getDocument() const
+        {
+            return m_doc;
+        }
+
         /// @brief Set the export state for blocking UI modifications during export
         void setExportState(ExportState * state);
 

@@ -220,6 +220,12 @@ namespace gladius::ui
         /// Helper to create a NormalizeDistanceField node from a FunctionCall node
         void createNormalizeFromCall(nodes::FunctionCall & node);
 
+        /**
+         * @brief Log an error message to the document logger or stderr
+         * @param message The error message to log
+         */
+        void logError(const std::string & message);
+
         bool typeControl(std::string const & label, std::type_index & typeIndex);
 
         /**
