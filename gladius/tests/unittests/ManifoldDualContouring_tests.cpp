@@ -30,6 +30,8 @@ namespace gladius::compute::tests
 {
     namespace
     {
+        constexpr size_t kMaxAllowedDegenerateFacets = 16;
+
         struct EdgeKey
         {
             std::uint32_t a;
@@ -3725,7 +3727,7 @@ namespace gladius::compute::tests
         // admesh's "degenerate facets" detection is sensitive to extremely thin sliver triangles.
         // We still require this to remain *very* small to catch regressions, but allow a handful
         // to avoid platform-/driver-specific flakes.
-        EXPECT_LE(metrics.degenerateFacets, 16) << "Mesh should have minimal degenerate facets";
+        EXPECT_LE(metrics.degenerateFacets, kMaxAllowedDegenerateFacets) << "Mesh should have minimal degenerate facets";
 
         double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
                                      static_cast<double>(metrics.numberOfFacets.original);
