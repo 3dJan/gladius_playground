@@ -67,7 +67,7 @@ namespace gladius
     };
 
     /// Triangle data with vertex indices for normal lookup
-    /// @note Size: 48 bytes
+    /// @note Size: 64 bytes (extended from 48 bytes for precomputed face normal)
     /// @invariant Winding order is CCW when viewed from outside
     /// @invariant vertexIndices[i] >= 0 for all i
     struct MeshTriangle
@@ -75,11 +75,13 @@ namespace gladius
         float4 v0;          ///< First vertex position (w unused)
         float4 v1;          ///< Second vertex position (w unused)
         float4 v2;          ///< Third vertex position (w unused)
+        float4 faceNormal;  ///< Precomputed face normal (xyz normalized, w unused)
 
         MeshTriangle()
             : v0{0.f, 0.f, 0.f, 0.f}
             , v1{0.f, 0.f, 0.f, 0.f}
             , v2{0.f, 0.f, 0.f, 0.f}
+            , faceNormal{0.f, 0.f, 0.f, 0.f}
         {
         }
     };

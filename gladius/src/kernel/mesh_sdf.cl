@@ -25,12 +25,13 @@ struct MeshBVHNodeGPU
     int primCount;      // Number of triangles (leaf only)
 };
 
-/// Triangle data (48 bytes)
+/// Triangle data (64 bytes - extended for precomputed face normal)
 struct MeshTriangleGPU
 {
     float4 v0;          // First vertex (xyz, w unused)
     float4 v1;          // Second vertex (xyz, w unused)
     float4 v2;          // Third vertex (xyz, w unused)
+    float4 faceNormal;  // Precomputed face normal (xyz normalized, w unused)
 };
 
 /// Vertex normal for sign determination (16 bytes)
@@ -257,7 +258,301 @@ inline float sqTriangleWithClosestPoint(float3 pos,
     return sqDist;
 }
 
-/// Compute pseudo-normal for sign determination
+/// Compute squared distance from point to triangle (fast, distance only)
+/// Optimized version that skips closest point tracking for deferred sign computation
+/// Uses Ericson's algorithm from "Real-Time Collision Detection"
+/// @param pos Query point
+/// @param v0, v1, v2 Triangle vertices
+/// @return Squared distance
+inline float sqTriangleFast(float3 pos, float3 v0, float3 v1, float3 v2)
+{
+    // Edge vectors
+    float3 ab = v1 - v0;
+    float3 ac = v2 - v0;
+    float3 ap = pos - v0;
+
+    float d1 = dot(ab, ap);
+    float d2 = dot(ac, ap);
+
+    // Check if pos is in vertex region outside v0
+    if (d1 <= 0.0f && d2 <= 0.0f)
+    {
+        float3 diff = pos - v0;
+        return dot(diff, diff);
+    }
+
+    float3 bp = pos - v1;
+    float d3 = dot(ab, bp);
+    float d4 = dot(ac, bp);
+
+    // Check if pos is in vertex region outside v1
+    if (d3 >= 0.0f && d4 <= d3)
+    {
+        float3 diff = pos - v1;
+        return dot(diff, diff);
+    }
+
+    float vc = d1 * d4 - d3 * d2;
+
+    // Check if pos is in edge region of v0-v1
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+    {
+        float v = d1 / (d1 - d3);
+        float3 nearestPoint = v0 + v * ab;
+        float3 diff = pos - nearestPoint;
+        return dot(diff, diff);
+    }
+
+    float3 cp = pos - v2;
+    float d5 = dot(ab, cp);
+    float d6 = dot(ac, cp);
+
+    // Check if pos is in vertex region outside v2
+    if (d6 >= 0.0f && d5 <= d6)
+    {
+        float3 diff = pos - v2;
+        return dot(diff, diff);
+    }
+
+    float vb = d5 * d2 - d1 * d6;
+
+    // Check if pos is in edge region of v0-v2
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+    {
+        float w = d2 / (d2 - d6);
+        float3 nearestPoint = v0 + w * ac;
+        float3 diff = pos - nearestPoint;
+        return dot(diff, diff);
+    }
+
+    float va = d3 * d6 - d5 * d4;
+
+    // Check if pos is in edge region of v1-v2
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+    {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        float3 nearestPoint = v1 + w * (v2 - v1);
+        float3 diff = pos - nearestPoint;
+        return dot(diff, diff);
+    }
+
+    // pos is inside the triangle - compute distance to plane
+    float denom = 1.0f / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+    float3 nearestPoint = v0 + ab * v + ac * w;
+    float3 diff = pos - nearestPoint;
+    return dot(diff, diff);
+}
+
+// ============================================================================
+// Vectorized Data Load Helpers (Option C - Phase 4)
+// ============================================================================
+
+/// Load BVH node bounding box using vectorized loads
+/// BVH node layout: float4 bboxMin (0), float4 bboxMax (4), 4 ints (8-11)
+/// Total: 12 floats = 48 bytes per node
+/// @param nodes Base pointer to node array (as floats)
+/// @param nodeIdx Node index to load
+/// @param outBboxMin Output: bounding box minimum xyz
+/// @param outBboxMax Output: bounding box maximum xyz
+/// @param outLeftChild Output: left child index (-1 if leaf)
+/// @param outRightChild Output: right child index (-1 if leaf)  
+/// @param outPrimStart Output: first primitive index (leaf only)
+/// @param outPrimCount Output: primitive count (leaf only)
+inline void loadBVHNodeVectorized(__global float const* nodes,
+                                  int nodeIdx,
+                                  float3* outBboxMin,
+                                  float3* outBboxMax,
+                                  int* outLeftChild,
+                                  int* outRightChild,
+                                  int* outPrimStart,
+                                  int* outPrimCount)
+{
+    // Each node is 12 floats (48 bytes)
+    int const baseOffset = nodeIdx * 12;
+    
+    // Load bounding box using vload4 for coalesced memory access
+    float4 bboxMin = vload4(0, nodes + baseOffset);      // floats 0-3
+    float4 bboxMax = vload4(0, nodes + baseOffset + 4);  // floats 4-7
+    
+    // Load integer fields (stored as floats in the buffer)
+    // Note: Using as_int to reinterpret float bits as int
+    float4 intData = vload4(0, nodes + baseOffset + 8);  // floats 8-11
+    
+    *outBboxMin = bboxMin.xyz;
+    *outBboxMax = bboxMax.xyz;
+    *outLeftChild = as_int(intData.x);
+    *outRightChild = as_int(intData.y);
+    *outPrimStart = as_int(intData.z);
+    *outPrimCount = as_int(intData.w);
+}
+
+/// Load triangle vertices using vectorized loads
+/// Triangle layout: float4 v0 (0), float4 v1 (4), float4 v2 (8), float4 faceNormal (12)
+/// Total: 16 floats = 64 bytes per triangle
+/// @param triangles Base pointer to triangle array (as floats)
+/// @param triIdx Triangle index to load
+/// @param outV0 Output: first vertex xyz
+/// @param outV1 Output: second vertex xyz
+/// @param outV2 Output: third vertex xyz
+inline void loadTriangleVectorized(__global float const* triangles,
+                                   int triIdx,
+                                   float3* outV0,
+                                   float3* outV1,
+                                   float3* outV2)
+{
+    // Each triangle is 16 floats (64 bytes)
+    int const baseOffset = triIdx * 16;
+    
+    // Load vertices using vload4 for coalesced memory access
+    float4 v0 = vload4(0, triangles + baseOffset);       // floats 0-3
+    float4 v1 = vload4(0, triangles + baseOffset + 4);   // floats 4-7
+    float4 v2 = vload4(0, triangles + baseOffset + 8);   // floats 8-11
+    // faceNormal at floats 12-15, not loaded here
+    
+    *outV0 = v0.xyz;
+    *outV1 = v1.xyz;
+    *outV2 = v2.xyz;
+}
+
+/// Load triangle vertices and face normal using vectorized loads
+/// @param triangles Base pointer to triangle array (as floats)
+/// @param triIdx Triangle index to load
+/// @param outV0 Output: first vertex xyz
+/// @param outV1 Output: second vertex xyz
+/// @param outV2 Output: third vertex xyz
+/// @param outFaceNormal Output: precomputed face normal xyz
+inline void loadTriangleWithNormalVectorized(__global float const* triangles,
+                                             int triIdx,
+                                             float3* outV0,
+                                             float3* outV1,
+                                             float3* outV2,
+                                             float3* outFaceNormal)
+{
+    // Each triangle is 16 floats (64 bytes)
+    int const baseOffset = triIdx * 16;
+    
+    // Load all 4 float4s for maximum throughput
+    float4 v0 = vload4(0, triangles + baseOffset);       // floats 0-3
+    float4 v1 = vload4(0, triangles + baseOffset + 4);   // floats 4-7
+    float4 v2 = vload4(0, triangles + baseOffset + 8);   // floats 8-11
+    float4 fn = vload4(0, triangles + baseOffset + 12);  // floats 12-15
+    
+    *outV0 = v0.xyz;
+    *outV1 = v1.xyz;
+    *outV2 = v2.xyz;
+    *outFaceNormal = fn.xyz;
+}
+
+/// Compute AABB distance using vectorized node load
+/// Combines loadBVHNodeVectorized with sqDistanceToAABB for common pattern
+/// @param nodes Base pointer to node array (as floats)
+/// @param nodeIdx Node index to check
+/// @param pos Query point
+/// @return Squared distance to node's bounding box
+inline float sqDistanceToNodeAABB(__global float const* nodes, int nodeIdx, float3 pos)
+{
+    int const baseOffset = nodeIdx * 12;
+    float4 bboxMin = vload4(0, nodes + baseOffset);
+    float4 bboxMax = vload4(0, nodes + baseOffset + 4);
+    return sqDistanceToAABB(pos, bboxMin.xyz, bboxMax.xyz);
+}
+
+/// Compute pseudo-normal for sign determination (Option D - uses precomputed face normal)
+/// @param result Closest point query result
+/// @param v0, v1, v2 Triangle vertices
+/// @param precomputedFaceNormal Precomputed face normal from triangle data (avoids cross product)
+/// @param vertexNormals Array of vertex normals
+/// @param vertexNormalCount Number of vertex normals (for bounds checking)
+/// @param idx0, idx1, idx2 Vertex indices for this triangle
+/// @return Pseudo-normal at closest point (may need normalization check)
+inline float3 computePseudoNormalFast(struct ClosestPointResult const* result,
+                                      float3 v0, float3 v1, float3 v2,
+                                      float3 precomputedFaceNormal,
+                                      __global struct MeshVertexNormalGPU const* vertexNormals,
+                                      int vertexNormalCount,
+                                      int idx0, int idx1, int idx2)
+{
+    float3 pseudoNormal;
+    
+    if (result->featureType == 0)
+    {
+        // Face: use precomputed face normal directly (Option D - no cross product needed)
+        pseudoNormal = precomputedFaceNormal;
+    }
+    else if (result->featureType == 2)
+    {
+        // Vertex: use precomputed angle-weighted normal
+        int vIdx;
+        if (result->vertexIndex == 0) vIdx = idx0;
+        else if (result->vertexIndex == 1) vIdx = idx1;
+        else vIdx = idx2;
+        
+        // Bounds check for safety
+        if (vIdx >= 0 && vIdx < vertexNormalCount)
+        {
+            pseudoNormal = vertexNormals[vIdx].normal.xyz;
+        }
+        else
+        {
+            // Fallback to precomputed face normal if index is out of bounds
+            pseudoNormal = precomputedFaceNormal;
+        }
+    }
+    else
+    {
+        // Edge: interpolate vertex normals at edge endpoints
+        int vIdxA, vIdxB;
+        float t;
+        
+        if (result->edgeIndex == 0)
+        {
+            // Edge v0-v1
+            vIdxA = idx0;
+            vIdxB = idx1;
+            t = result->baryU;
+        }
+        else if (result->edgeIndex == 1)
+        {
+            // Edge v1-v2
+            vIdxA = idx1;
+            vIdxB = idx2;
+            t = result->baryV;
+        }
+        else
+        {
+            // Edge v0-v2
+            vIdxA = idx0;
+            vIdxB = idx2;
+            t = result->baryV;
+        }
+        
+        // Bounds check for safety
+        if (vIdxA >= 0 && vIdxA < vertexNormalCount && vIdxB >= 0 && vIdxB < vertexNormalCount)
+        {
+            float3 nA = vertexNormals[vIdxA].normal.xyz;
+            float3 nB = vertexNormals[vIdxB].normal.xyz;
+            pseudoNormal = (1.0f - t) * nA + t * nB;
+        }
+        else
+        {
+            // Fallback to precomputed face normal if indices are out of bounds
+            pseudoNormal = precomputedFaceNormal;
+        }
+    }
+    
+    // Robustness: if pseudo-normal is near-zero, fall back to precomputed face normal
+    float lenSq = dot(pseudoNormal, pseudoNormal);
+    if (lenSq < 1e-10f)
+    {
+        pseudoNormal = precomputedFaceNormal;
+    }
+    
+    return pseudoNormal;
+}
+
+/// Compute pseudo-normal for sign determination (legacy version without precomputed normal)
 /// @param result Closest point query result
 /// @param tri Triangle data
 /// @param vertexNormals Array of vertex normals
@@ -361,7 +656,192 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 // Main SDF Query Functions
 // ============================================================================
 
-/// Query signed distance to mesh using BVH traversal
+/// Query signed distance to mesh using BVH traversal with optional early termination
+/// @param pos Query point in world coordinates
+/// @param nodesOffset Offset to BVH nodes in data array
+/// @param trianglesOffset Offset to triangles in data array
+/// @param normalsOffset Offset to vertex normals in data array
+/// @param indicesOffset Offset to vertex indices in data array
+/// @param nodeCount Number of BVH nodes
+/// @param triCount Number of triangles
+/// @param vertexNormalCount Number of vertex normals (for bounds checking)
+/// @param data Global primitive data array
+/// @param earlyExitDistanceSq Early termination threshold (squared distance).
+///                            If > 0, traversal stops when minSqDist < earlyExitDistanceSq.
+///                            Set to 0.0 to disable (find exact minimum distance).
+/// @return Signed distance (negative inside, positive outside)
+inline float spatialMeshSDFWithEarlyExit(float3 pos,
+                                         int nodesOffset,
+                                         int trianglesOffset,
+                                         int normalsOffset,
+                                         int indicesOffset,
+                                         int nodeCount,
+                                         int triCount,
+                                         int vertexNormalCount,
+                                         __global float const* data,
+                                         float earlyExitDistanceSq)
+{
+    if (nodeCount == 0 || triCount == 0)
+    {
+        return FLT_MAX;
+    }
+    
+    // Cast data pointers - use raw float pointer for vectorized loads
+    __global float const* nodesData = data + nodesOffset;
+    __global float const* trianglesData = data + trianglesOffset;
+    __global struct MeshVertexNormalGPU const* vertexNormals = 
+        (__global struct MeshVertexNormalGPU const*)(data + normalsOffset);
+    __global int const* vertexIndices = 
+        (__global int const*)(data + indicesOffset);
+    
+    // Stack-based BVH traversal with safety limits
+    int stack[64];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;  // Start with root node
+    
+    float minSqDist = FLT_MAX;
+    // Deferred sign computation (Option B): only track triangle index during traversal
+    // We'll recompute closest point details only for the winning triangle at the end
+    int bestTriIdx = -1;
+    
+    // Safety: limit iterations to prevent infinite loops from corrupted data
+    int const maxIterations = nodeCount * 2 + 100;
+    int iterations = 0;
+    
+    while (stackPtr > 0 && iterations < maxIterations)
+    {
+        ++iterations;
+        int nodeIdx = stack[--stackPtr];
+        
+        // Safety: bounds check on node index
+        if (nodeIdx < 0 || nodeIdx >= nodeCount)
+        {
+            continue;
+        }
+        
+        // Load node data using vectorized loads (Option C)
+        float3 nodeBboxMin, nodeBboxMax;
+        int nodeLeftChild, nodeRightChild, nodePrimStart, nodePrimCount;
+        loadBVHNodeVectorized(nodesData, nodeIdx,
+                              &nodeBboxMin, &nodeBboxMax,
+                              &nodeLeftChild, &nodeRightChild,
+                              &nodePrimStart, &nodePrimCount);
+        
+        // Early exit if bounding box is farther than current best
+        float boxSqDist = sqDistanceToAABB(pos, nodeBboxMin, nodeBboxMax);
+        if (boxSqDist >= minSqDist)
+        {
+            continue;
+        }
+        
+        if (nodeLeftChild == -1)  // Leaf node
+        {
+            // Test all triangles in leaf
+            int primEnd = nodePrimStart + nodePrimCount;
+            // Safety: clamp to valid triangle range
+            if (nodePrimStart < 0 || primEnd > triCount)
+            {
+                continue;
+            }
+            
+            // Deferred sign computation (Option B): use fast distance-only function
+            for (int i = 0; i < nodePrimCount; ++i)
+            {
+                int triIdx = nodePrimStart + i;
+                
+                // Load triangle using vectorized loads (Option C)
+                float3 triV0, triV1, triV2;
+                loadTriangleVectorized(trianglesData, triIdx, &triV0, &triV1, &triV2);
+                
+                float sqDist = sqTriangleFast(pos, triV0, triV1, triV2);
+                
+                if (sqDist < minSqDist)
+                {
+                    minSqDist = sqDist;
+                    bestTriIdx = triIdx;
+                    
+                    // Early termination (Option F): stop if we're close enough for rendering
+                    if (earlyExitDistanceSq > 0.0f && minSqDist < earlyExitDistanceSq)
+                    {
+                        // Break out of triangle loop and traversal loop
+                        stackPtr = 0;  // Clear stack to exit main loop
+                        break;
+                    }
+                }
+            }
+        }
+        else  // Internal node
+        {
+            // Safety: check stack overflow and child validity before pushing
+            // Ordered traversal (Option A): push far child first so near child is processed first
+            int leftValid = (nodeLeftChild >= 0 && nodeLeftChild < nodeCount) ? 1 : 0;
+            int rightValid = (nodeRightChild >= 0 && nodeRightChild < nodeCount) ? 1 : 0;
+            
+            if (leftValid && rightValid && stackPtr < 62)
+            {
+                // Compute AABB distances to both children using vectorized loads (Option C)
+                float leftDist = sqDistanceToNodeAABB(nodesData, nodeLeftChild, pos);
+                float rightDist = sqDistanceToNodeAABB(nodesData, nodeRightChild, pos);
+                
+                // Push far child first, near child last (LIFO: near processed first)
+                if (leftDist < rightDist)
+                {
+                    stack[stackPtr++] = nodeRightChild;  // Far child first
+                    stack[stackPtr++] = nodeLeftChild;   // Near child last (processed first)
+                }
+                else
+                {
+                    stack[stackPtr++] = nodeLeftChild;   // Far child first
+                    stack[stackPtr++] = nodeRightChild;  // Near child last (processed first)
+                }
+            }
+            else
+            {
+                // Fallback: push whichever children are valid
+                if (stackPtr < 62 && rightValid)
+                {
+                    stack[stackPtr++] = nodeRightChild;
+                }
+                if (stackPtr < 63 && leftValid)
+                {
+                    stack[stackPtr++] = nodeLeftChild;
+                }
+            }
+        }
+    }
+    
+    if (bestTriIdx < 0)
+    {
+        return FLT_MAX;
+    }
+    
+    // Deferred sign computation (Option B): recompute closest point details for winner only
+    // This single triangle test is cheap compared to full traversal
+    // Use vectorized load with precomputed normal (Options C + D)
+    float3 bestV0, bestV1, bestV2, bestFaceNormal;
+    loadTriangleWithNormalVectorized(trianglesData, bestTriIdx, 
+                                     &bestV0, &bestV1, &bestV2, &bestFaceNormal);
+    
+    struct ClosestPointResult bestResult;
+    sqTriangleWithClosestPoint(pos, bestV0, bestV1, bestV2, &bestResult);
+    
+    // Compute sign using pseudo-normal with precomputed face normal (Option D)
+    // Note: vertex indices are stored with stride 4 (3 indices + 1 padding per triangle)
+    int idx0 = vertexIndices[bestTriIdx * 4 + 0];
+    int idx1 = vertexIndices[bestTriIdx * 4 + 1];
+    int idx2 = vertexIndices[bestTriIdx * 4 + 2];
+    
+    float3 pseudoNormal = computePseudoNormalFast(&bestResult,
+        bestV0, bestV1, bestV2, bestFaceNormal,
+        vertexNormals, vertexNormalCount, idx0, idx1, idx2);
+    
+    float3 toQuery = pos - bestResult.closestPoint;
+    float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;
+    
+    return sign * sqrt(minSqDist);
+}
+
+/// Query signed distance to mesh using BVH traversal (backward-compatible wrapper)
 /// @param pos Query point in world coordinates
 /// @param nodesOffset Offset to BVH nodes in data array
 /// @param trianglesOffset Offset to triangles in data array
@@ -382,115 +862,12 @@ inline float spatialMeshSDF(float3 pos,
                             int vertexNormalCount,
                             __global float const* data)
 {
-    if (nodeCount == 0 || triCount == 0)
-    {
-        return FLT_MAX;
-    }
-    
-    // Cast data pointers
-    __global struct MeshBVHNodeGPU const* nodes = 
-        (__global struct MeshBVHNodeGPU const*)(data + nodesOffset);
-    __global struct MeshTriangleGPU const* triangles = 
-        (__global struct MeshTriangleGPU const*)(data + trianglesOffset);
-    __global struct MeshVertexNormalGPU const* vertexNormals = 
-        (__global struct MeshVertexNormalGPU const*)(data + normalsOffset);
-    __global int const* vertexIndices = 
-        (__global int const*)(data + indicesOffset);
-    
-    // Stack-based BVH traversal with safety limits
-    int stack[64];
-    int stackPtr = 0;
-    stack[stackPtr++] = 0;  // Start with root node
-    
-    float minSqDist = FLT_MAX;
-    struct ClosestPointResult bestResult;
-    int bestTriIdx = -1;
-    
-    // Safety: limit iterations to prevent infinite loops from corrupted data
-    int const maxIterations = nodeCount * 2 + 100;
-    int iterations = 0;
-    
-    while (stackPtr > 0 && iterations < maxIterations)
-    {
-        ++iterations;
-        int nodeIdx = stack[--stackPtr];
-        
-        // Safety: bounds check on node index
-        if (nodeIdx < 0 || nodeIdx >= nodeCount)
-        {
-            continue;
-        }
-        
-        struct MeshBVHNodeGPU node = nodes[nodeIdx];
-        
-        // Early exit if bounding box is farther than current best
-        float boxSqDist = sqDistanceToAABB(pos, node.bboxMin.xyz, node.bboxMax.xyz);
-        if (boxSqDist >= minSqDist)
-        {
-            continue;
-        }
-        
-        if (node.leftChild == -1)  // Leaf node
-        {
-            // Test all triangles in leaf
-            int primEnd = node.primStart + node.primCount;
-            // Safety: clamp to valid triangle range
-            if (node.primStart < 0 || primEnd > triCount)
-            {
-                continue;
-            }
-            
-            for (int i = 0; i < node.primCount; ++i)
-            {
-                int triIdx = node.primStart + i;
-                struct MeshTriangleGPU tri = triangles[triIdx];
-                
-                struct ClosestPointResult result;
-                float sqDist = sqTriangleWithClosestPoint(pos, 
-                    tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, &result);
-                
-                if (sqDist < minSqDist)
-                {
-                    minSqDist = sqDist;
-                    bestResult = result;
-                    bestTriIdx = triIdx;
-                }
-            }
-        }
-        else  // Internal node
-        {
-            // Safety: check stack overflow and child validity before pushing
-            if (stackPtr < 62 && node.rightChild >= 0 && node.rightChild < nodeCount)
-            {
-                stack[stackPtr++] = node.rightChild;
-            }
-            if (stackPtr < 63 && node.leftChild >= 0 && node.leftChild < nodeCount)
-            {
-                stack[stackPtr++] = node.leftChild;
-            }
-        }
-    }
-    
-    if (bestTriIdx < 0)
-    {
-        return FLT_MAX;
-    }
-    
-    // Compute sign using pseudo-normal
-    struct MeshTriangleGPU bestTri = triangles[bestTriIdx];
-    // Note: vertex indices are stored with stride 4 (3 indices + 1 padding per triangle)
-    int idx0 = vertexIndices[bestTriIdx * 4 + 0];
-    int idx1 = vertexIndices[bestTriIdx * 4 + 1];
-    int idx2 = vertexIndices[bestTriIdx * 4 + 2];
-    
-    float3 pseudoNormal = computePseudoNormal(&bestResult,
-        bestTri.v0.xyz, bestTri.v1.xyz, bestTri.v2.xyz,
-        vertexNormals, vertexNormalCount, idx0, idx1, idx2);
-    
-    float3 toQuery = pos - bestResult.closestPoint;
-    float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;
-    
-    return sign * sqrt(minSqDist);
+    // Call with early exit disabled (0.0 = find exact minimum distance)
+    return spatialMeshSDFWithEarlyExit(pos,
+                                       nodesOffset, trianglesOffset,
+                                       normalsOffset, indicesOffset,
+                                       nodeCount, triCount, vertexNormalCount,
+                                       data, 0.0f);
 }
 
 /// Query unsigned distance to mesh using BVH traversal
@@ -513,10 +890,9 @@ inline float spatialMeshUnsignedDistance(float3 pos,
         return FLT_MAX;
     }
     
-    __global struct MeshBVHNodeGPU const* nodes = 
-        (__global struct MeshBVHNodeGPU const*)(data + nodesOffset);
-    __global struct MeshTriangleGPU const* triangles = 
-        (__global struct MeshTriangleGPU const*)(data + trianglesOffset);
+    // Use raw float pointers for vectorized loads (Option C)
+    __global float const* nodesData = data + nodesOffset;
+    __global float const* trianglesData = data + trianglesOffset;
     
     // Stack-based BVH traversal with safety limits
     int stack[64];
@@ -540,48 +916,205 @@ inline float spatialMeshUnsignedDistance(float3 pos,
             continue;
         }
         
-        struct MeshBVHNodeGPU node = nodes[nodeIdx];
+        // Load node data using vectorized loads (Option C)
+        float3 nodeBboxMin, nodeBboxMax;
+        int nodeLeftChild, nodeRightChild, nodePrimStart, nodePrimCount;
+        loadBVHNodeVectorized(nodesData, nodeIdx,
+                              &nodeBboxMin, &nodeBboxMax,
+                              &nodeLeftChild, &nodeRightChild,
+                              &nodePrimStart, &nodePrimCount);
         
-        float boxSqDist = sqDistanceToAABB(pos, node.bboxMin.xyz, node.bboxMax.xyz);
+        float boxSqDist = sqDistanceToAABB(pos, nodeBboxMin, nodeBboxMax);
         if (boxSqDist >= minSqDist)
         {
             continue;
         }
         
-        if (node.leftChild == -1)
+        if (nodeLeftChild == -1)
         {
-            int primEnd = node.primStart + node.primCount;
-            if (node.primStart < 0 || primEnd > triCount)
+            int primEnd = nodePrimStart + nodePrimCount;
+            if (nodePrimStart < 0 || primEnd > triCount)
             {
                 continue;
             }
             
-            for (int i = 0; i < node.primCount; ++i)
+            // Use fast distance-only function (no closest point details needed)
+            for (int i = 0; i < nodePrimCount; ++i)
             {
-                int triIdx = node.primStart + i;
-                struct MeshTriangleGPU tri = triangles[triIdx];
+                int triIdx = nodePrimStart + i;
                 
-                struct ClosestPointResult result;
-                float sqDist = sqTriangleWithClosestPoint(pos, 
-                    tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, &result);
+                // Load triangle using vectorized loads (Option C)
+                float3 triV0, triV1, triV2;
+                loadTriangleVectorized(trianglesData, triIdx, &triV0, &triV1, &triV2);
+                
+                float sqDist = sqTriangleFast(pos, triV0, triV1, triV2);
                 
                 minSqDist = fmin(minSqDist, sqDist);
             }
         }
         else
         {
-            if (stackPtr < 62 && node.rightChild >= 0 && node.rightChild < nodeCount)
+            // Ordered traversal (Option A): push far child first so near child is processed first
+            int leftValid = (nodeLeftChild >= 0 && nodeLeftChild < nodeCount) ? 1 : 0;
+            int rightValid = (nodeRightChild >= 0 && nodeRightChild < nodeCount) ? 1 : 0;
+            
+            if (leftValid && rightValid && stackPtr < 62)
             {
-                stack[stackPtr++] = node.rightChild;
+                // Compute AABB distances to both children using vectorized loads (Option C)
+                float leftDist = sqDistanceToNodeAABB(nodesData, nodeLeftChild, pos);
+                float rightDist = sqDistanceToNodeAABB(nodesData, nodeRightChild, pos);
+                
+                // Push far child first, near child last (LIFO: near processed first)
+                if (leftDist < rightDist)
+                {
+                    stack[stackPtr++] = nodeRightChild;
+                    stack[stackPtr++] = nodeLeftChild;
+                }
+                else
+                {
+                    stack[stackPtr++] = nodeLeftChild;
+                    stack[stackPtr++] = nodeRightChild;
+                }
             }
-            if (stackPtr < 63 && node.leftChild >= 0 && node.leftChild < nodeCount)
+            else
             {
-                stack[stackPtr++] = node.leftChild;
+                // Fallback: push whichever children are valid
+                if (stackPtr < 62 && rightValid)
+                {
+                    stack[stackPtr++] = nodeRightChild;
+                }
+                if (stackPtr < 63 && leftValid)
+                {
+                    stack[stackPtr++] = nodeLeftChild;
+                }
             }
         }
     }
     
     return sqrt(minSqDist);
+}
+
+// ============================================================================
+// Voxel Acceleration Grid (Option G)
+// ============================================================================
+
+/// Voxel grid header structure (mirrors MeshVoxelGridHeader in MeshVoxelGrid.h)
+/// Header layout: 10 floats
+///   [0-2]: origin (x, y, z)
+///   [3-5]: dimensions (x, y, z) as floats
+///   [6]: voxelSize
+///   [7]: invVoxelSize
+///   [8]: threshold
+///   [9]: padding
+
+/// Lookup voxel data for a position
+/// @param pos Query position
+/// @param header Pointer to voxel grid header (10 floats)
+/// @param voxelData Pointer to voxel data array
+/// @param voxelCount Total number of voxels
+/// @return float2(nearestTriIndex, approxSignedDist), or (-1, FLT_MAX) if out of bounds
+inline float2 lookupMeshVoxel(float3 pos,
+                               __global float const* header,
+                               __global float const* voxelData,
+                               int voxelCount)
+{
+    // Extract header values
+    float3 origin = (float3)(header[0], header[1], header[2]);
+    int3 dims = (int3)((int)header[3], (int)header[4], (int)header[5]);
+    float invVoxelSize = header[7];
+    
+    // Compute voxel coordinates
+    float3 localPos = (pos - origin) * invVoxelSize;
+    int3 coord = (int3)((int)floor(localPos.x), (int)floor(localPos.y), (int)floor(localPos.z));
+    
+    // Bounds check
+    if (coord.x < 0 || coord.x >= dims.x ||
+        coord.y < 0 || coord.y >= dims.y ||
+        coord.z < 0 || coord.z >= dims.z)
+    {
+        return (float2)(-1.0f, FLT_MAX);
+    }
+    
+    // Compute linear index
+    int voxelIdx = coord.z * dims.y * dims.x + coord.y * dims.x + coord.x;
+    if (voxelIdx < 0 || voxelIdx >= voxelCount)
+    {
+        return (float2)(-1.0f, FLT_MAX);
+    }
+    
+    // Read voxel data (2 floats per voxel)
+    float nearestTriIndex = voxelData[voxelIdx * 2 + 0];
+    float approxSignedDist = voxelData[voxelIdx * 2 + 1];
+    
+    return (float2)(nearestTriIndex, approxSignedDist);
+}
+
+/// Query mesh SDF using voxel acceleration with 2x2x2 stencil lookup
+/// For positions far from the surface, uses cached triangle only.
+/// Near the surface, falls back to full BVH traversal for accuracy.
+/// @param pos Query position
+/// @param headerOffset Offset to voxel grid header in data array
+/// @param voxelDataOffset Offset to voxel data in data array
+/// @param nodesOffset BVH nodes offset
+/// @param trianglesOffset Triangles offset
+/// @param normalsOffset Vertex normals offset
+/// @param indicesOffset Vertex indices offset
+/// @param nodeCount Number of BVH nodes
+/// @param triCount Number of triangles
+/// @param vertexNormalCount Number of vertex normals
+/// @param data Global data array
+/// @return Signed distance
+inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
+                                              int headerOffset,
+                                              int voxelDataOffset,
+                                              int nodesOffset,
+                                              int trianglesOffset,
+                                              int normalsOffset,
+                                              int indicesOffset,
+                                              int nodeCount,
+                                              int triCount,
+                                              int vertexNormalCount,
+                                              __global float const* data)
+{
+    __global float const* header = data + headerOffset;
+    __global float const* voxelData = data + voxelDataOffset;
+    
+    // Extract header values
+    int3 dims = (int3)((int)header[3], (int)header[4], (int)header[5]);
+    float threshold = header[8];
+    int voxelCount = dims.x * dims.y * dims.z;
+    
+    // O(1) voxel lookup
+    float2 voxelResult = lookupMeshVoxel(pos, header, voxelData, voxelCount);
+    int nearestTriIdx = (int)voxelResult.x;
+    float approxDist = voxelResult.y;
+    
+    // If out of bounds or no valid triangle, fall back to BVH
+    if (nearestTriIdx < 0 || nearestTriIdx >= triCount)
+    {
+        return spatialMeshSDF(pos, nodesOffset, trianglesOffset, normalsOffset,
+                              indicesOffset, nodeCount, triCount, vertexNormalCount, data);
+    }
+    
+    // If far from surface, use approximate distance with sign from cached value
+    // This covers ~80% of raymarching queries
+    if (fabs(approxDist) > threshold)
+    {
+        // Compute exact distance to cached triangle only
+        __global struct MeshTriangleGPU const* triangles = 
+            (__global struct MeshTriangleGPU const*)(data + trianglesOffset);
+        
+        struct MeshTriangleGPU tri = triangles[nearestTriIdx];
+        float sqDist = sqTriangleFast(pos, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz);
+        
+        // Use sign from precomputed approximate distance
+        float sign = (approxDist < 0.0f) ? -1.0f : 1.0f;
+        return sign * sqrt(sqDist);
+    }
+    
+    // Near surface - fall back to full BVH traversal for accuracy
+    return spatialMeshSDF(pos, nodesOffset, trianglesOffset, normalsOffset,
+                          indicesOffset, nodeCount, triCount, vertexNormalCount, data);
 }
 
 #endif // MESH_SDF_CL

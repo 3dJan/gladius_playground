@@ -136,7 +136,7 @@ namespace gladius
         }
 
         // Serialize triangles
-        // Each triangle: v0 (4), v1 (4), v2 (4) = 12 floats
+        // Each triangle: v0 (4), v1 (4), v2 (4), faceNormal (4) = 16 floats
         size_t triDataStart = m_payloadData.data.size();
         for (auto const & tri : m_data.triangles)
         {
@@ -152,6 +152,10 @@ namespace gladius
             m_payloadData.data.push_back(tri.v2.y);
             m_payloadData.data.push_back(tri.v2.z);
             m_payloadData.data.push_back(tri.v2.w);
+            m_payloadData.data.push_back(tri.faceNormal.x);
+            m_payloadData.data.push_back(tri.faceNormal.y);
+            m_payloadData.data.push_back(tri.faceNormal.z);
+            m_payloadData.data.push_back(tri.faceNormal.w);
         }
 
         // Serialize vertex normals

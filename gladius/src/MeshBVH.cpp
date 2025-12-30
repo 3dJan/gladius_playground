@@ -74,6 +74,27 @@ namespace gladius
             tri.v0 = vertices[idx.i0];
             tri.v1 = vertices[idx.i1];
             tri.v2 = vertices[idx.i2];
+            
+            // Compute and store face normal (Option D - precomputed normals)
+            float e0x = tri.v1.x - tri.v0.x;
+            float e0y = tri.v1.y - tri.v0.y;
+            float e0z = tri.v1.z - tri.v0.z;
+            float e1x = tri.v2.x - tri.v0.x;
+            float e1y = tri.v2.y - tri.v0.y;
+            float e1z = tri.v2.z - tri.v0.z;
+            float nx = e0y * e1z - e0z * e1y;
+            float ny = e0z * e1x - e0x * e1z;
+            float nz = e0x * e1y - e0y * e1x;
+            float lenSq = nx * nx + ny * ny + nz * nz;
+            if (lenSq > 1e-10f)
+            {
+                float invLen = 1.0f / std::sqrt(lenSq);
+                nx *= invLen;
+                ny *= invLen;
+                nz *= invLen;
+            }
+            tri.faceNormal = float4{nx, ny, nz, 0.0f};
+            
             ctx.triangles.push_back(tri);
 
             // Store vertex indices for this triangle
