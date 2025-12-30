@@ -244,6 +244,14 @@ namespace gladius::ui
             return;
         }
 
+        // Check if file loading is in progress - if so, show loading indicator without blocking
+        bool const isFileLoading = m_document && m_document->isLoadingInProgress();
+        if (isFileLoading)
+        {
+            renderLoadingOverlay();
+            return;
+        }
+
         // UI thread needs to wait for compute token to ensure something gets rendered
         // (otherwise screen would be black)
         auto token = m_core->waitForComputeToken();
@@ -544,10 +552,8 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
-        // Check if file loading is in progress
-        bool const isFileLoading = m_document && m_document->isLoadingInProgress();
-
-        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress() || isFileLoading)
+        // Show progress indicator during compilation (loading case is handled by early return above)
+        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
         {
             m_view->startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -564,11 +570,9 @@ namespace gladius::ui
             if (ImGui::Begin("ProgressIndicator", &open, window_flags))
             {
                 ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-                // Use different color for file loading vs compilation
-                ImVec4 const indicatorColor =
-                  isFileLoading ? ImVec4(0.2f, 0.6f, 1.0f, 0.8f)  // Blue for loading
-                                : ImVec4(1.0f, 0.0f, 0.0f, 0.8f); // Red for compiling
-                ui::loadingIndicatorCircle(isFileLoading ? "loading" : "compiling",
+                // Red color for compilation (loading case is handled by early return)
+                ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
+                ui::loadingIndicatorCircle("compiling",
                                            30,
                                            indicatorColor,
                                            ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
@@ -2053,6 +2057,70 @@ namespace gladius::ui
             m_core->precomputeSdfForWholeBuildPlatform();
             invalidateView();
         }
+    }
+
+    void RenderWindow::renderLoadingOverlay()
+    {
+        ProfileFunction;
+
+        // Clear the result image to hide any previous render
+        auto displayImage = m_core->getResultImage();
+        if (displayImage)
+        {
+            displayImage->clear();
+        }
+
+        // Show a simple loading window without requiring compute resources
+        ImGuiWindowFlags const window_flags =
+          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
+        ImGui::SetNextWindowBgAlpha(1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::Begin("Preview", &m_isVisible, window_flags);
+
+        // Get content area dimensions for spinner positioning
+        ImVec2 const contentMin = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
+        ImVec2 const contentMax = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
+        ImVec2 const windowCenter = {
+          0.5f * (contentMin.x + contentMax.x),
+          0.5f * (contentMin.y + contentMax.y)};
+
+        // Display the cleared image
+        auto const textureId = displayImage->GetTextureId();
+        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+                     ImVec2(static_cast<float>(m_renderWindowSize_px.x),
+                            static_cast<float>(m_renderWindowSize_px.y)));
+
+        ImGui::End();
+        ImGui::PopStyleVar();
+        displayImage->unbind();
+        
+        // Show loading spinner overlay
+        m_view->startAnimationMode();
+        ImGuiWindowFlags const overlayFlags =
+          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+          ImGuiWindowFlags_NoNav;
+        
+        bool open = true;
+        ImGui::SetNextWindowBgAlpha(0.0f);
+        
+        if (ImGui::Begin("LoadingIndicator", &open, overlayFlags))
+        {
+            ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
+            // Blue color for file loading
+            ImVec4 const indicatorColor = ImVec4(0.2f, 0.6f, 1.0f, 0.8f);
+            ui::loadingIndicatorCircle("loading",
+                                       30,
+                                       indicatorColor,
+                                       ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
+                                       12,
+                                       10.0f);
+        }
+        ImGui::End();
     }
 
     bool RenderWindow::isVisible() const

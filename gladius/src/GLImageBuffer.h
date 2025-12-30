@@ -36,6 +36,9 @@ namespace gladius
 
         void invalidateContent();
 
+        /// Clears the texture to a solid color (default: dark gray)
+        void clear(float r = 0.1f, float g = 0.1f, float b = 0.1f, float a = 1.0f);
+
       private:
         void setupForInterOp();
         void setupForReadPixel();

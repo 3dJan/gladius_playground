@@ -130,6 +130,7 @@ namespace gladius::ui
 
       private:
         void render(RenderWindowState & state);
+        void renderLoadingOverlay();
         void slider();
         void initializeAsyncRendering();
         void renderSync(RenderWindowState & state);
