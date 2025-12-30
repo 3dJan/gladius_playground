@@ -434,9 +434,10 @@ inline float spatialMeshSDF(float3 pos,
     
     // Compute sign using pseudo-normal
     struct MeshTriangleGPU bestTri = triangles[bestTriIdx];
-    int idx0 = vertexIndices[bestTriIdx * 3 + 0];
-    int idx1 = vertexIndices[bestTriIdx * 3 + 1];
-    int idx2 = vertexIndices[bestTriIdx * 3 + 2];
+    // Note: vertex indices are stored with stride 4 (3 indices + 1 padding per triangle)
+    int idx0 = vertexIndices[bestTriIdx * 4 + 0];
+    int idx1 = vertexIndices[bestTriIdx * 4 + 1];
+    int idx2 = vertexIndices[bestTriIdx * 4 + 2];
     
     float3 pseudoNormal = computePseudoNormal(&bestResult,
         bestTri.v0.xyz, bestTri.v1.xyz, bestTri.v2.xyz,
