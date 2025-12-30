@@ -77,6 +77,9 @@ inline float sqTriangleWithClosestPoint(float3 pos,
                                         float3 v0, float3 v1, float3 v2,
                                         struct ClosestPointResult* result)
 {
+    // Epsilon for degenerate triangle detection
+    float const epsilon = 1e-10f;
+    
     // Edge vectors
     float3 e0 = v1 - v0;
     float3 e1 = v2 - v0;
@@ -91,6 +94,20 @@ inline float sqTriangleWithClosestPoint(float3 pos,
     float det = a * c - b * b;
     float s = b * e - c * d;
     float t = b * d - a * e;
+    
+    // Handle degenerate triangles (zero area or line/point)
+    if (det < epsilon && a < epsilon && c < epsilon)
+    {
+        // Triangle is a point - return distance to v0
+        result->sqDistance = dot(v, v);
+        result->closestPoint = v0;
+        result->featureType = 2;
+        result->baryU = 0.0f;
+        result->baryV = 0.0f;
+        result->edgeIndex = -1;
+        result->vertexIndex = 0;
+        return result->sqDistance;
+    }
     
     // Voronoi region classification
     int featureType = 0;  // 0=face, 1=edge, 2=vertex
@@ -143,7 +160,8 @@ inline float sqTriangleWithClosestPoint(float3 pos,
         else
         {
             // Region 0: inside triangle (face)
-            float invDet = 1.0f / det;
+            // Guard against degenerate triangles
+            float invDet = (det > epsilon) ? (1.0f / det) : 0.0f;
             s *= invDet;
             t *= invDet;
             featureType = 0;
@@ -243,11 +261,13 @@ inline float sqTriangleWithClosestPoint(float3 pos,
 /// @param result Closest point query result
 /// @param tri Triangle data
 /// @param vertexNormals Array of vertex normals
+/// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param triVertexIndices Vertex indices for this triangle (3 ints)
 /// @return Pseudo-normal at closest point (may need normalization check)
 inline float3 computePseudoNormal(struct ClosestPointResult const* result,
                                   float3 v0, float3 v1, float3 v2,
                                   __global struct MeshVertexNormalGPU const* vertexNormals,
+                                  int vertexNormalCount,
                                   int idx0, int idx1, int idx2)
 {
     float3 pseudoNormal;
@@ -267,7 +287,18 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
         else if (result->vertexIndex == 1) vIdx = idx1;
         else vIdx = idx2;
         
-        pseudoNormal = vertexNormals[vIdx].normal.xyz;
+        // Bounds check for safety
+        if (vIdx >= 0 && vIdx < vertexNormalCount)
+        {
+            pseudoNormal = vertexNormals[vIdx].normal.xyz;
+        }
+        else
+        {
+            // Fallback to face normal if index is out of bounds
+            float3 e0 = v1 - v0;
+            float3 e1 = v2 - v0;
+            pseudoNormal = cross(e0, e1);
+        }
     }
     else
     {
@@ -298,9 +329,20 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
             t = result->baryV;
         }
         
-        float3 nA = vertexNormals[vIdxA].normal.xyz;
-        float3 nB = vertexNormals[vIdxB].normal.xyz;
-        pseudoNormal = (1.0f - t) * nA + t * nB;
+        // Bounds check for safety
+        if (vIdxA >= 0 && vIdxA < vertexNormalCount && vIdxB >= 0 && vIdxB < vertexNormalCount)
+        {
+            float3 nA = vertexNormals[vIdxA].normal.xyz;
+            float3 nB = vertexNormals[vIdxB].normal.xyz;
+            pseudoNormal = (1.0f - t) * nA + t * nB;
+        }
+        else
+        {
+            // Fallback to face normal if indices are out of bounds
+            float3 e0 = v1 - v0;
+            float3 e1 = v2 - v0;
+            pseudoNormal = cross(e0, e1);
+        }
     }
     
     // Robustness: if pseudo-normal is near-zero, fall back to face normal
@@ -327,6 +369,7 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 /// @param indicesOffset Offset to vertex indices in data array
 /// @param nodeCount Number of BVH nodes
 /// @param triCount Number of triangles
+/// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param data Global primitive data array
 /// @return Signed distance (negative inside, positive outside)
 inline float spatialMeshSDF(float3 pos,
@@ -336,6 +379,7 @@ inline float spatialMeshSDF(float3 pos,
                             int indicesOffset,
                             int nodeCount,
                             int triCount,
+                            int vertexNormalCount,
                             __global float const* data)
 {
     if (nodeCount == 0 || triCount == 0)
@@ -441,7 +485,7 @@ inline float spatialMeshSDF(float3 pos,
     
     float3 pseudoNormal = computePseudoNormal(&bestResult,
         bestTri.v0.xyz, bestTri.v1.xyz, bestTri.v2.xyz,
-        vertexNormals, idx0, idx1, idx2);
+        vertexNormals, vertexNormalCount, idx0, idx1, idx2);
     
     float3 toQuery = pos - bestResult.closestPoint;
     float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;

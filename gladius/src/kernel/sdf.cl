@@ -1549,6 +1549,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                             indicesOffset,
                                             nodeCount,
                                             triCount,
+                                            vertexNormalCount,
                                             data);
             
             sdf = uniteSmooth(sdf, meshDist, 0.0f);

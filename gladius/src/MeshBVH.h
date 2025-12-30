@@ -180,13 +180,6 @@ namespace gladius
                            int depth,
                            MeshBVHBuildParams const & params);
 
-        /// Evaluate SAH cost for a split
-        float evaluateSAH(BuildContext const & ctx,
-                          int start,
-                          int split,
-                          int end,
-                          MeshBVHBuildParams const & params);
-
         /// Calculate surface area of bounding box
         static float surfaceArea(BoundingBox const & box);
     };

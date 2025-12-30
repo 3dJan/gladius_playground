@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <numeric>
 
 namespace gladius
@@ -214,7 +215,7 @@ namespace gladius
             float angle1 = std::acos(std::clamp(cosAngle1, -1.0f, 1.0f));
 
             // Angle at vertex 2: remaining angle (angles sum to pi)
-            float angle2 = 3.14159265359f - angle0 - angle1;
+            float angle2 = std::numbers::pi_v<float> - angle0 - angle1;
 
             // Add weighted face normal to each vertex
             data.vertexNormals[idx.i0].normal.x += angle0 * fnx;
@@ -471,21 +472,6 @@ namespace gladius
         node.rightChild = buildRecursive(ctx, mid, end, depth + 1, params);
 
         return nodeIndex;
-    }
-
-    float MeshBVHBuilder::evaluateSAH(BuildContext const & ctx,
-                                      int start,
-                                      int split,
-                                      int end,
-                                      MeshBVHBuildParams const & params)
-    {
-        // This method is now replaced by inline SAH in buildRecursive
-        (void)ctx;
-        (void)start;
-        (void)split;
-        (void)end;
-        (void)params;
-        return 0.0f;
     }
 
     float MeshBVHBuilder::surfaceArea(BoundingBox const & box)

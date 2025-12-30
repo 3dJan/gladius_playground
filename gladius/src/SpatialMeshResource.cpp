@@ -4,7 +4,6 @@
 
 #include "SpatialMeshResource.h"
 
-#include <bit>
 #include <cstring>
 
 namespace gladius
