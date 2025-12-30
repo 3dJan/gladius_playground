@@ -3,6 +3,7 @@
 #include "BeamLatticeResource.h"
 #include "ImageStackResource.h"
 #include "ResourceContext.h"
+#include "SpatialMeshResource.h"
 #include "StlResource.h"
 #include "VdbImporter.h"
 #include "VdbResource.h"
@@ -69,6 +70,11 @@ namespace gladius
                                       std::unique_ptr<BeamLatticeResource> && resource)
     {
         m_resources[key] = std::move(resource);
+    }
+
+    void ResourceManager::addResource(ResourceKey key, SpatialMeshData && spatialData)
+    {
+        m_resources[key] = std::make_unique<SpatialMeshResource>(key, std::move(spatialData));
     }
 
     void ResourceManager::loadResources()

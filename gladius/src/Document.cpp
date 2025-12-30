@@ -5,6 +5,7 @@
 #include "CliWriter.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
+#include "MeshBVH.h"
 #include "MeshExporter.h"
 #include "ResourceManager.h"
 #include "TimeMeasurement.h"
@@ -1266,7 +1267,29 @@ namespace gladius
 
         ResourceKey key = ResourceKey(new3mfMesh->GetModelResourceID(), ResourceType::Mesh);
         key.setDisplayName(name);
-        resourceManager.addResource(key, std::move(mesh));
+
+        // Build spatial mesh data using BVH for fast SDF queries
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        vertices.reserve(mesh.vertices.size());
+        indices.reserve(mesh.indices.size());
+
+        for (auto const & v : mesh.vertices)
+        {
+            vertices.push_back(float4{static_cast<float>(v.x()), static_cast<float>(v.y()), 
+                                      static_cast<float>(v.z()), 0.0f});
+        }
+
+        for (auto const & tri : mesh.indices)
+        {
+            indices.push_back(TriangleIndices{static_cast<int>(tri[0]), 
+                                              static_cast<int>(tri[1]), 
+                                              static_cast<int>(tri[2])});
+        }
+
+        MeshBVHBuilder builder;
+        auto spatialData = builder.build(vertices, indices);
+        resourceManager.addResource(key, std::move(spatialData));
 
         resourceManager.loadResources();
 

@@ -42,6 +42,7 @@ namespace gladius
                          "PNanoVDB_OpenCL.h",
                          "PNanoVDB.h",
                          "PNanoVDB_OpenCL_Helpers.h",
+                         "mesh_sdf.cl",
                          "sdf.cl",
                          "rendering.cl",
                          "distanceUpDown.cl",

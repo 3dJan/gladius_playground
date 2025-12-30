@@ -1515,6 +1515,44 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             if (beamIndex >= 0) i = beamIndex;
             if (ballIndex >= 0) i = ballIndex;
         }
+
+        if (primitive.primitiveType == SDF_SPATIAL_MESH_ROOT)
+        {
+            // Spatial mesh SDF using BVH traversal (alternative to VDB-based mesh SDF)
+            // Data layout in primitive buffer (set by SpatialMeshResource::loadImpl):
+            // - Root primitive: bounding box (8 floats), counts (4 floats), offsets (4 floats)
+            // - Node data: follows immediately after root header
+            // - Triangle data: follows nodes
+            // - Vertex normals: follows triangles
+            // - Triangle indices: follows normals
+
+            int const headerStart = primitive.start;
+            
+            // Read counts from header (offset 8 = after bounding box)
+            int const nodeCount = (int)data[headerStart + 8];
+            int const triCount = (int)data[headerStart + 9];
+            
+            // Read relative offsets from header (offset 12) and convert to absolute
+            // Offsets are stored relative to this primitive's data start
+            int const nodesOffset = headerStart + (int)data[headerStart + 12];
+            int const trianglesOffset = headerStart + (int)data[headerStart + 13];
+            int const normalsOffset = headerStart + (int)data[headerStart + 14];
+            
+            // Triangle indices follow vertex normals (4 floats per normal * vertexCount)
+            int const vertexNormalCount = (int)data[headerStart + 10];
+            int const indicesOffset = normalsOffset + vertexNormalCount * 4;
+            
+            float meshDist = spatialMeshSDF((float3)(pos),
+                                            nodesOffset,
+                                            trianglesOffset,
+                                            normalsOffset,
+                                            indicesOffset,
+                                            nodeCount,
+                                            triCount,
+                                            data);
+            
+            sdf = uniteSmooth(sdf, meshDist, 0.0f);
+        }
     }
     return sdf;
 }

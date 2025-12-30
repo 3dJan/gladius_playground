@@ -27,6 +27,7 @@ namespace gladius
                          "rendering.h",
                          "sdf_generator.h",
                          //"PNanoVDB_OpenCL.h",
+                         "mesh_sdf.cl",
                          "sdf.cl",
                          "rendering.cl",
                          "sdf_generator.cl"};

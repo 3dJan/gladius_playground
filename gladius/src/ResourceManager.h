@@ -25,6 +25,7 @@ namespace gladius
         class ImageStack;
     }
 
+    struct SpatialMeshData;
     class Mesh;
     class ResourceContext;
     class ImageStackOCLBuffer;
@@ -138,6 +139,7 @@ namespace gladius
         void addResource(ResourceKey key, openvdb::GridBase::Ptr && grid);
         void addResource(ResourceKey key, io::ImageStack && stack);
         void addResource(ResourceKey key, std::unique_ptr<BeamLatticeResource> && resource);
+        void addResource(ResourceKey key, SpatialMeshData && spatialData);
 
         /**
          * \brief Loads all resources that have not been load yet

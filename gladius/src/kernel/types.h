@@ -35,6 +35,12 @@ enum PrimitiveType
     SDF_PRIMITIVE_INDICES,        // Primitive indices mapping for BVH traversal
     SDF_BEAM_LATTICE_VOXEL_INDEX, // Voxel grid with primitive indices
     SDF_BEAM_LATTICE_VOXEL_TYPE,  // Voxel grid with primitive types (optional)
+
+    // Spatial mesh SDF (BVH-accelerated mesh with pseudo-normal sign)
+    SDF_SPATIAL_MESH_ROOT,        // Root node with bounding box and buffer offsets
+    SDF_SPATIAL_MESH_NODES,       // BVH node buffer (MeshBVHNode array)
+    SDF_SPATIAL_MESH_TRIS,        // Triangle buffer (MeshTriangle array)
+    SDF_SPATIAL_MESH_NORMALS,     // Vertex normal buffer (MeshVertexNormal array)
 };
 
 enum ApproximationMode
