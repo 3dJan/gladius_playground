@@ -91,17 +91,6 @@ namespace gladius::compute::tests
         [[nodiscard]] bool gpuTestsEnabled()
         {
             return true;
-            char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
-            if (env == nullptr)
-            {
-                return false;
-            }
-
-            std::string value(env);
-            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
-            { return static_cast<char>(std::tolower(c)); });
-
-            return value == "1" || value == "true" || value == "on" || value == "yes";
         }
 
         [[nodiscard]] MeshEdgeStats analyzeMeshEdges(ManifoldDualContouringMesh const & mesh)

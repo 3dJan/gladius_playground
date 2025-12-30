@@ -76,17 +76,7 @@ namespace gladius_tests::hierarchical_dc_mesh
 
           [[nodiscard]] bool gpuTestsEnabled()
           {
-            char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
-            if (env == nullptr)
-            {
-              return false;
-            }
-
-            std::string value(env);
-            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
-            { return static_cast<char>(std::tolower(c)); });
-
-            return value == "1" || value == "true" || value == "on" || value == "yes";
+            return true;
           }
 
         [[nodiscard]] bool isAdmeshAvailable()

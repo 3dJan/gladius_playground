@@ -1,7 +1,6 @@
 /// @file MeshSDF_tests.cpp
 /// @brief GPU tests for spatial mesh SDF accuracy and sign correctness
 /// @see mesh_sdf.cl
-/// @note These tests require GLADIUS_RUN_GPU_TESTS=1 environment variable
 
 #include "MeshBVH.h"
 #include "SpatialMeshResource.h"
@@ -11,7 +10,6 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <cstdlib>
 #include <vector>
 
 namespace gladius::tests
@@ -25,12 +23,6 @@ namespace gladius::tests
       protected:
         void SetUp() override
         {
-            // Check if GPU tests are enabled
-            char const * envVar = std::getenv("GLADIUS_RUN_GPU_TESTS");
-            if (envVar == nullptr || std::string(envVar) != "1")
-            {
-                GTEST_SKIP() << "GPU tests disabled. Set GLADIUS_RUN_GPU_TESTS=1 to enable.";
-            }
         }
 
         // Helper to create an icosphere mesh approximating a sphere
