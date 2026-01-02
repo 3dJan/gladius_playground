@@ -264,7 +264,12 @@ namespace gladius
         }
 
         paramBuf.write();
-        invalidatePreCompSdf("updateParameterBlocking");
+        // NOTE: Do NOT call invalidatePreCompSdf() here!
+        // We want to keep the old SDF valid for preview rendering during interactive
+        // parameter editing. The UI-side m_preComputedSdfDirty flag will trigger new
+        // SDF computation, and the preview will continue using the old (now slightly
+        // outdated) SDF until the new one is ready. This gives smooth preview updates
+        // instead of a black screen during parameter changes.
         LOG_LOCATION
         return true;
     }

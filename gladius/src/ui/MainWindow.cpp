@@ -918,9 +918,18 @@ namespace gladius::ui
                   }
               }
 
+              // Refresh model when compile is explicitly requested (structural changes)
               if (compileRequested)
               {
                   refreshModel();
+              }
+              // For parameter-only changes, just invalidate the view
+              // The m_parameterDirty flag is already set above, and updateModel() will
+              // handle it using the fast updateParameter() path
+              else if (parameterModifiedByModelEditor)
+              {
+                  // Just trigger a view update - updateModel() will handle the parameter update
+                  m_renderWindow.invalidateView();
               }
 
               // Mark model as up to date after compilation check
@@ -2085,17 +2094,28 @@ namespace gladius::ui
         }
 
         auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
+        auto const rateLimit = std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f));
+        
+        // For parameter changes, use a shorter rate limit for more responsive updates
+        bool const hasParameterChange = m_parameterDirty;
+        auto const effectiveRateLimit = hasParameterChange ? std::chrono::milliseconds(16) : rateLimit;
 
-        if (timeSinceLastUpdate <
-            std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f)))
+        if (timeSinceLastUpdate < effectiveRateLimit)
         {
             return;
         }
 
         m_lastUpateTime = std::chrono::steady_clock::now();
 
-        if (!(m_dirty || m_contoursDirty) || m_renderWindow.isRenderingInProgress() ||
-            !m_core->isRendererReady())
+        // Skip if nothing to do, but allow parameter updates even during rendering
+        if (!hasParameterChange && (!(m_dirty || m_contoursDirty) || m_renderWindow.isRenderingInProgress() ||
+            !m_core->isRendererReady()))
+        {
+            return;
+        }
+        
+        // For non-parameter updates, still check rendering state
+        if (!hasParameterChange && !m_core->isRendererReady())
         {
             return;
         }
@@ -2119,8 +2139,17 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
+            auto const start = std::chrono::high_resolution_clock::now();
             m_doc->updateParameter();
+            auto const afterUpdate = std::chrono::high_resolution_clock::now();
             m_renderWindow.invalidateViewDuetoModelUpdate();
+            auto const afterInvalidate = std::chrono::high_resolution_clock::now();
+            
+            auto const updateDuration = std::chrono::duration_cast<std::chrono::microseconds>(afterUpdate - start);
+            auto const invalidateDuration = std::chrono::duration_cast<std::chrono::microseconds>(afterInvalidate - afterUpdate);
+            fmt::print(stderr, "[Param] updateParameter took {}us, invalidateViewDuetoModelUpdate took {}us\n", 
+                       updateDuration.count(), invalidateDuration.count());
+            
             m_parameterDirty = false;
         }
         updateContours();

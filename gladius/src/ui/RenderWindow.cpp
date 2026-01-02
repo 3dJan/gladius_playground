@@ -285,11 +285,26 @@ namespace gladius::ui
             if (useFrontBuffer)
             {
                 displayImage = frontBuf->image;
+                static int frameCounter = 0;
+                if (++frameCounter % 60 == 0)
+                {
+                    fmt::print(stderr, "[Display] using front buffer, epoch={}, texId={}, size={}x{}\n",
+                               frontBuf->epoch.load(std::memory_order_acquire), displayImage->GetTextureId(),
+                               displayImage->getWidth(), displayImage->getHeight());
+                }
             }
             else
             {
                 // Fallback to result image for progressive rendering or when no valid front buffer
                 displayImage = m_core->getResultImage();
+                static int frameCounter = 0;
+                if (++frameCounter % 60 == 0)
+                {
+                    fmt::print(stderr, "[Display] using result image fallback, epoch={}, isMoving={}, isRendering={}, sdfValid={}, texId={}, size={}x{}\n",
+                               currentEpoch, m_renderWindowState.isMoving ? 1 : 0, m_renderWindowState.isRendering ? 1 : 0,
+                               m_core->isSdfValid() ? 1 : 0, displayImage->GetTextureId(),
+                               displayImage->getWidth(), displayImage->getHeight());
+                }
             }
         }
         else
@@ -511,7 +526,9 @@ namespace gladius::ui
         auto const windowCenter =
           ImVec2(0.5f * (contentMin.x + contentMax.x), 0.5f * (contentMin.y + contentMax.y));
 
-        // Update camera and set isMoving based on whether camera is currently animating
+        // Update camera and set isMoving based on whether camera is currently animating.
+        // Note: Parameter changes use forceLowResRender and lowResFeedbackPending flags,
+        // not isMoving. isMoving is specifically for camera movement.
         m_renderWindowState.isMoving = m_camera.update(io.DeltaTime * 1000.f);
         m_dirty = m_dirty || m_renderWindowState.isMoving;
 
@@ -616,10 +633,17 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
     {
+        fmt::print(stderr, "[Model] invalidateViewDuetoModelUpdate called, sdfValid={}\n", m_core->isSdfValid() ? 1 : 0);
+
+        // CRITICAL: Mark SDF as invalid immediately so renderer uses direct function evaluation
+        // This prevents rendering with stale precomputed SDF data
+        m_core->setSdfValid(false);
+
         // Force a low-res render on next frame for immediate visual feedback
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
 
         invalidateView();
+        
         m_preComputedSdfDirty = true;
         m_parameterDirty = true;
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
@@ -634,12 +658,13 @@ namespace gladius::ui
         // Reset bounding box so it will be recomputed
         m_core->resetBoundingBox();
 
-        // Schedule async bounding box update (don't block UI)
+        // DON'T schedule bbox update here - it blocks the UI thread!
+        // The async SDF job scheduling in renderAsync() will handle it.
+        // Just mark that we need a bbox update.
         if (m_core->isAutoUpdateBoundingBoxEnabled())
         {
-            scheduleAsyncBboxUpdate();
+            m_asyncBboxUpdatePending.store(true, std::memory_order_release);
         }
-        else {}
     }
 
     void RenderWindow::renderScene(RenderWindowState & state)
@@ -1357,6 +1382,8 @@ namespace gladius::ui
             bool const sdfDirty = m_preComputedSdfDirty.load(std::memory_order_acquire);
             bool const sdfJobActive = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
             bool const lowResPending = m_lowResFeedbackPending.load(std::memory_order_acquire);
+            bool const bboxPending = m_asyncBboxUpdatePending.load(std::memory_order_acquire);
+            bool const bboxJobActive = m_asyncBboxJobInFlight.load(std::memory_order_acquire);
 
             if (sdfDirty && !sdfJobActive)
             {
@@ -1372,6 +1399,12 @@ namespace gladius::ui
                 m_asyncSdfJobInFlight.store(true, std::memory_order_release);
                 m_asyncSdfInFlightEpoch.store(sdfJob.epoch, std::memory_order_release);
                 m_asyncController->enqueueJob(sdfJob);
+            }
+
+            // Schedule bbox update if pending and no bbox job in flight
+            if (bboxPending && !bboxJobActive)
+            {
+                scheduleAsyncBboxUpdate();
             }
 
             if (lowResPending)
@@ -1503,6 +1536,16 @@ namespace gladius::ui
         bool const forceLowResRender =
           m_forceLowResRenderOnNextFrame.exchange(false, std::memory_order_acq_rel);
         bool const lowResPending = m_lowResFeedbackPending.load(std::memory_order_acquire);
+        bool const previewJobInFlight = m_asyncPreviewJobInFlight.load(std::memory_order_acquire);
+
+        // Log every 60 frames to avoid spam
+        static int renderAsyncFrameCount = 0;
+        if (++renderAsyncFrameCount % 60 == 0)
+        {
+            fmt::print(stderr, "[RenderAsync] frame={}, isMoving={}, forceLowRes={}, lowResPending={}, previewInFlight={}, sdfValid={}\n",
+                       renderAsyncFrameCount, state.isMoving ? 1 : 0, forceLowResRender ? 1 : 0, 
+                       lowResPending ? 1 : 0, previewJobInFlight ? 1 : 0, m_core->isSdfValid() ? 1 : 0);
+        }
 
         if (state.isMoving || forceLowResRender || lowResPending)
         {
@@ -2298,11 +2341,10 @@ namespace gladius::ui
 
         auto const startTime = std::chrono::steady_clock::now();
 
-        auto const markSdfInvalid = [this]()
-        {
-            auto computeToken = m_core->waitForComputeToken();
-            m_core->invalidatePreCompSdf("asyncSdfCancelledOrFailed");
-        };
+        // Note: We intentionally don't invalidate the old SDF when cancelled.
+        // This allows preview rendering to continue with the old (slightly stale) SDF
+        // during rapid parameter editing, providing a much better user experience.
+        // The old SDF remains valid until a new one successfully completes.
 
         auto const commitSdfSuccess = [this]()
         {
@@ -2311,11 +2353,10 @@ namespace gladius::ui
             m_core->updateBBox();
         };
 
-        // Check cancellation before starting
+        // Check cancellation before starting - just return without invalidating
         if (cancelCheck && cancelCheck())
         {
             result.cancelled = true;
-            markSdfInvalid();
             co_return result;
         }
 
@@ -2332,20 +2373,19 @@ namespace gladius::ui
 
             if (!sdfEvent())
             {
-                // Failed to launch (preconditions not met)
+                // Failed to launch (preconditions not met) - but don't invalidate the old SDF
+                // so preview can continue with stale data
                 result.cancelled = true;
-                markSdfInvalid();
                 co_return result;
             }
 
             // Await SDF completion using waitForEvent helper
             co_await waitForEvent(sdfEvent, cancelCheck);
 
-            // Check if cancelled during wait
+            // Check if cancelled during wait - don't invalidate, keep old SDF
             if (cancelCheck && cancelCheck())
             {
                 result.cancelled = true;
-                markSdfInvalid();
                 co_return result;
             }
 
@@ -2359,12 +2399,12 @@ namespace gladius::ui
             {
                 logger->logError(std::string("Async SDF precomputation failed: ") + e.what());
             }
-            markSdfInvalid();
+            // On exception, keep old SDF valid for preview continuity
             result.cancelled = true;
         }
         catch (...)
         {
-            markSdfInvalid();
+            // On exception, keep old SDF valid for preview continuity
             result.cancelled = true;
         }
 
