@@ -656,7 +656,9 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 // Main SDF Query Functions
 // ============================================================================
 
-/// Query signed distance to mesh using BVH traversal with optional early termination
+/// Core implementation: Query signed distance to mesh using BVH traversal
+/// Returns float2 where x = signed distance, y = nearest triangle index (as float)
+/// This is the shared implementation used by all SDF query variants.
 /// @param pos Query point in world coordinates
 /// @param nodesOffset Offset to BVH nodes in data array
 /// @param trianglesOffset Offset to triangles in data array
@@ -669,21 +671,21 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 /// @param earlyExitDistanceSq Early termination threshold (squared distance).
 ///                            If > 0, traversal stops when minSqDist < earlyExitDistanceSq.
 ///                            Set to 0.0 to disable (find exact minimum distance).
-/// @return Signed distance (negative inside, positive outside)
-inline float spatialMeshSDFWithEarlyExit(float3 pos,
-                                         int nodesOffset,
-                                         int trianglesOffset,
-                                         int normalsOffset,
-                                         int indicesOffset,
-                                         int nodeCount,
-                                         int triCount,
-                                         int vertexNormalCount,
-                                         __global float const* data,
-                                         float earlyExitDistanceSq)
+/// @return float2(signedDistance, nearestTriangleIndex)
+inline float2 spatialMeshSDF_Core(float3 pos,
+                                  int nodesOffset,
+                                  int trianglesOffset,
+                                  int normalsOffset,
+                                  int indicesOffset,
+                                  int nodeCount,
+                                  int triCount,
+                                  int vertexNormalCount,
+                                  __global float const* data,
+                                  float earlyExitDistanceSq)
 {
     if (nodeCount == 0 || triCount == 0)
     {
-        return FLT_MAX;
+        return (float2)(FLT_MAX, -1.0f);
     }
     
     // Cast data pointers - use raw float pointer for vectorized loads
@@ -812,7 +814,7 @@ inline float spatialMeshSDFWithEarlyExit(float3 pos,
     
     if (bestTriIdx < 0)
     {
-        return FLT_MAX;
+        return (float2)(FLT_MAX, -1.0f);
     }
     
     // Deferred sign computation (Option B): recompute closest point details for winner only
@@ -838,12 +840,43 @@ inline float spatialMeshSDFWithEarlyExit(float3 pos,
     float3 toQuery = pos - bestResult.closestPoint;
     float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;
     
-    return sign * sqrt(minSqDist);
+    float signedDist = sign * sqrt(minSqDist);
+    return (float2)(signedDist, (float)bestTriIdx);
+}
+
+/// Query signed distance to mesh using BVH traversal with optional early termination
+/// Thin wrapper around spatialMeshSDF_Core that returns only the signed distance.
+/// @param pos Query point in world coordinates
+/// @param nodesOffset Offset to BVH nodes in data array
+/// @param trianglesOffset Offset to triangles in data array
+/// @param normalsOffset Offset to vertex normals in data array
+/// @param indicesOffset Offset to vertex indices in data array
+/// @param nodeCount Number of BVH nodes
+/// @param triCount Number of triangles
+/// @param vertexNormalCount Number of vertex normals (for bounds checking)
+/// @param data Global primitive data array
+/// @param earlyExitDistanceSq Early termination threshold (squared distance).
+///                            If > 0, traversal stops when minSqDist < earlyExitDistanceSq.
+///                            Set to 0.0 to disable (find exact minimum distance).
+/// @return Signed distance (negative inside, positive outside)
+inline float spatialMeshSDFWithEarlyExit(float3 pos,
+                                         int nodesOffset,
+                                         int trianglesOffset,
+                                         int normalsOffset,
+                                         int indicesOffset,
+                                         int nodeCount,
+                                         int triCount,
+                                         int vertexNormalCount,
+                                         __global float const* data,
+                                         float earlyExitDistanceSq)
+{
+    return spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
+                               indicesOffset, nodeCount, triCount, vertexNormalCount,
+                               data, earlyExitDistanceSq).x;
 }
 
 /// Query signed distance to mesh with nearest triangle index
-/// Returns float2 where x = signed distance, y = nearest triangle index (as float)
-/// This variant is used by the voxel grid build kernel to populate acceleration data.
+/// Thin wrapper around spatialMeshSDF_Core for use by voxel grid build kernel.
 /// @param pos Query point in world coordinates
 /// @param nodesOffset Offset to BVH nodes in data array
 /// @param trianglesOffset Offset to triangles in data array
@@ -864,142 +897,10 @@ inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
                                                 int vertexNormalCount,
                                                 __global float const* data)
 {
-    if (nodeCount == 0 || triCount == 0)
-    {
-        return (float2)(FLT_MAX, -1.0f);
-    }
-    
-    // Cast data pointers - use raw float pointer for vectorized loads
-    __global float const* nodesData = data + nodesOffset;
-    __global float const* trianglesData = data + trianglesOffset;
-    __global struct MeshVertexNormalGPU const* vertexNormals = 
-        (__global struct MeshVertexNormalGPU const*)(data + normalsOffset);
-    __global int const* vertexIndices = 
-        (__global int const*)(data + indicesOffset);
-    
-    // Stack-based BVH traversal with safety limits
-    int stack[64];
-    int stackPtr = 0;
-    stack[stackPtr++] = 0;  // Start with root node
-    
-    float minSqDist = FLT_MAX;
-    int bestTriIdx = -1;
-    
-    // Safety: limit iterations to prevent infinite loops from corrupted data
-    int const maxIterations = nodeCount * 2 + 100;
-    int iterations = 0;
-    
-    while (stackPtr > 0 && iterations < maxIterations)
-    {
-        ++iterations;
-        int nodeIdx = stack[--stackPtr];
-        
-        // Safety: bounds check on node index
-        if (nodeIdx < 0 || nodeIdx >= nodeCount)
-        {
-            continue;
-        }
-        
-        // Load node data using vectorized loads
-        float3 nodeBboxMin, nodeBboxMax;
-        int nodeLeftChild, nodeRightChild, nodePrimStart, nodePrimCount;
-        loadBVHNodeVectorized(nodesData, nodeIdx,
-                              &nodeBboxMin, &nodeBboxMax,
-                              &nodeLeftChild, &nodeRightChild,
-                              &nodePrimStart, &nodePrimCount);
-        
-        // Early exit if bounding box is farther than current best
-        float boxSqDist = sqDistanceToAABB(pos, nodeBboxMin, nodeBboxMax);
-        if (boxSqDist >= minSqDist)
-        {
-            continue;
-        }
-        
-        if (nodeLeftChild == -1)  // Leaf node
-        {
-            int primEnd = nodePrimStart + nodePrimCount;
-            if (nodePrimStart < 0 || primEnd > triCount)
-            {
-                continue;
-            }
-            
-            for (int i = 0; i < nodePrimCount; ++i)
-            {
-                int triIdx = nodePrimStart + i;
-                
-                float3 triV0, triV1, triV2;
-                loadTriangleVectorized(trianglesData, triIdx, &triV0, &triV1, &triV2);
-                
-                float sqDist = sqTriangleFast(pos, triV0, triV1, triV2);
-                
-                if (sqDist < minSqDist)
-                {
-                    minSqDist = sqDist;
-                    bestTriIdx = triIdx;
-                }
-            }
-        }
-        else  // Internal node
-        {
-            int leftValid = (nodeLeftChild >= 0 && nodeLeftChild < nodeCount) ? 1 : 0;
-            int rightValid = (nodeRightChild >= 0 && nodeRightChild < nodeCount) ? 1 : 0;
-            
-            if (leftValid && rightValid && stackPtr < 62)
-            {
-                float leftDist = sqDistanceToNodeAABB(nodesData, nodeLeftChild, pos);
-                float rightDist = sqDistanceToNodeAABB(nodesData, nodeRightChild, pos);
-                
-                if (leftDist < rightDist)
-                {
-                    stack[stackPtr++] = nodeRightChild;
-                    stack[stackPtr++] = nodeLeftChild;
-                }
-                else
-                {
-                    stack[stackPtr++] = nodeLeftChild;
-                    stack[stackPtr++] = nodeRightChild;
-                }
-            }
-            else
-            {
-                if (stackPtr < 62 && rightValid)
-                {
-                    stack[stackPtr++] = nodeRightChild;
-                }
-                if (stackPtr < 63 && leftValid)
-                {
-                    stack[stackPtr++] = nodeLeftChild;
-                }
-            }
-        }
-    }
-    
-    if (bestTriIdx < 0)
-    {
-        return (float2)(FLT_MAX, -1.0f);
-    }
-    
-    // Compute sign using pseudo-normal
-    float3 bestV0, bestV1, bestV2, bestFaceNormal;
-    loadTriangleWithNormalVectorized(trianglesData, bestTriIdx, 
-                                     &bestV0, &bestV1, &bestV2, &bestFaceNormal);
-    
-    struct ClosestPointResult bestResult;
-    sqTriangleWithClosestPoint(pos, bestV0, bestV1, bestV2, &bestResult);
-    
-    int idx0 = vertexIndices[bestTriIdx * 4 + 0];
-    int idx1 = vertexIndices[bestTriIdx * 4 + 1];
-    int idx2 = vertexIndices[bestTriIdx * 4 + 2];
-    
-    float3 pseudoNormal = computePseudoNormalFast(&bestResult,
-        bestV0, bestV1, bestV2, bestFaceNormal,
-        vertexNormals, vertexNormalCount, idx0, idx1, idx2);
-    
-    float3 toQuery = pos - bestResult.closestPoint;
-    float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;
-    
-    float signedDist = sign * sqrt(minSqDist);
-    return (float2)(signedDist, (float)bestTriIdx);
+    // Call core with early exit disabled (0.0 = find exact minimum)
+    return spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
+                               indicesOffset, nodeCount, triCount, vertexNormalCount,
+                               data, 0.0f);
 }
 
 /// Query signed distance to mesh using BVH traversal (backward-compatible wrapper)
