@@ -1632,14 +1632,15 @@ namespace gladius
         // Note: No mutex lock - caller is responsible for thread safety
         // Note: No glFinish() - this is async, caller handles sync via returned event
 
-        // Only render if precomputed SDF is available
-        if (!m_precompSdfIsValid)
+        // Use precomputed SDF if available, otherwise use full model evaluation (slower but works)
+        if (m_precompSdfIsValid)
         {
-            LOG_LOCATION;
-            return cl::Event{}; // Return empty event if SDF not ready
+            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
         }
-
-        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+        else
+        {
+            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        }
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
                                                                          *m_primitives,
@@ -1647,6 +1648,10 @@ namespace gladius
                                                                          m_sliceHeight_mm,
                                                                          0,
                                                                          targetImage.getHeight());
+
+        // Flush to ensure commands are submitted to the GPU before returning
+        // This is important for proper event completion signaling
+        queue.flush();
 
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 

@@ -1564,34 +1564,26 @@ namespace gladius::ui
             // Only schedule if no preview job already in flight
             if (!m_asyncPreviewJobInFlight.load(std::memory_order_acquire))
             {
-                // SDF must be valid for preview rendering
-                if (m_core->isSdfValid())
+                // Schedule preview job - it will use direct function evaluation if SDF is stale
+                // This allows smooth preview updates during parameter changes
+                fmt::print(stderr, "[AsyncPreview] trying to schedule preview job...\\n");
+                if (scheduleAsyncPreviewJob())
                 {
-                    fmt::print(stderr, "[AsyncPreview] trying to schedule preview job...\\n");
-                    if (scheduleAsyncPreviewJob())
-                    {
-                        fmt::print(stderr, "[AsyncPreview] job scheduled successfully\\n");
-                        // Job scheduled successfully, mark as pending
-                        // The result will be consumed in processAsyncPreviewResults()
-                        m_lastLowResRenderTime = std::chrono::system_clock::now();
-                    }
-                    else
-                    {
-                        fmt::print(stderr, "[AsyncPreview] scheduling failed, using sync fallback\\n");
-                        // Async scheduling failed - fall back to synchronous preview
-                        m_core->renderLowResPreview();
-                        m_lowResFeedbackPending.store(false, std::memory_order_release);
-                        m_lastLowResRenderTime = std::chrono::system_clock::now();
-                        m_lastLowResPreviewEpoch.store(
-                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                          std::memory_order_release);
-                    }
+                    fmt::print(stderr, "[AsyncPreview] job scheduled successfully\\n");
+                    // Job scheduled successfully, mark as pending
+                    // The result will be consumed in processAsyncPreviewResults()
+                    m_lastLowResRenderTime = std::chrono::system_clock::now();
                 }
                 else
                 {
-                    fmt::print(stderr, "[AsyncPreview] SDF not valid, will retry\\n");
-                    // SDF not valid yet, retry later
-                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                    fmt::print(stderr, "[AsyncPreview] scheduling failed, using sync fallback\\n");
+                    // Async scheduling failed - fall back to synchronous preview
+                    m_core->renderLowResPreview();
+                    m_lowResFeedbackPending.store(false, std::memory_order_release);
+                    m_lastLowResRenderTime = std::chrono::system_clock::now();
+                    m_lastLowResPreviewEpoch.store(
+                      m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                      std::memory_order_release);
                 }
             }
             state.isRendering = false;
@@ -2555,17 +2547,9 @@ namespace gladius::ui
 
         auto const startTime = std::chrono::steady_clock::now();
 
-        // Check if SDF is valid (required for preview rendering)
-        if (!m_core->isSdfValid())
-        {
-            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: SDF not valid\n");
-            ZoneText("SdfNotValid", 11);
-            result.cancelled = true;
-            m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
-            co_return result;
-        }
-
         // Perform the async preview render using the low-res preview infrastructure
+        // Note: Preview renders work both with and without precomputed SDF
+        // When SDF is not valid, it uses direct function evaluation (slower but correct)
         {
             ZoneScopedN("RenderLowResPreviewAsync");
 
@@ -2597,20 +2581,58 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Wait for GPU completion using blocking wait instead of coroutine callback.
-            // Some OpenCL implementations (e.g., rusticl) have issues with event callbacks.
-            // Since we're on a worker thread, blocking is fine.
-            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: waiting for event (blocking)...\n");
-            try
+            // Wait for GPU completion using polling with timeout instead of blocking wait.
+            // Some OpenCL implementations (e.g., rusticl) have issues with event.wait().
+            // Poll with short sleeps and timeout after 500ms to avoid hangs.
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: waiting for event (polling)...\n");
+            
+            auto const pollStart = std::chrono::steady_clock::now();
+            auto constexpr timeout = std::chrono::milliseconds(500);
+            bool eventCompleted = false;
+            
+            while (!eventCompleted)
             {
-                renderEvent.wait();
-            }
-            catch (std::exception const & e)
-            {
-                fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: event.wait() failed: {}\n", e.what());
-                result.cancelled = true;
-                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
-                co_return result;
+                try
+                {
+                    cl_int status = CL_QUEUED;
+                    renderEvent.getInfo(CL_EVENT_COMMAND_EXECUTION_STATUS, &status);
+                    
+                    if (status == CL_COMPLETE)
+                    {
+                        eventCompleted = true;
+                    }
+                    else if (status < 0)
+                    {
+                        // Error status
+                        fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: event error status={}\n", status);
+                        result.cancelled = true;
+                        m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                        co_return result;
+                    }
+                    else
+                    {
+                        // Check timeout
+                        auto elapsed = std::chrono::steady_clock::now() - pollStart;
+                        if (elapsed > timeout)
+                        {
+                            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: timeout after {}ms\n",
+                                std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+                            result.cancelled = true;
+                            m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                            co_return result;
+                        }
+                        
+                        // Short sleep to avoid busy-waiting
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
+                }
+                catch (std::exception const & e)
+                {
+                    fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: getInfo failed: {}\n", e.what());
+                    result.cancelled = true;
+                    m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                    co_return result;
+                }
             }
             fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: event completed\n");
 
