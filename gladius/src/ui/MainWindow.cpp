@@ -1718,13 +1718,14 @@ namespace gladius::ui
             }
             ImGui::PopStyleColor(4);
 
-            // Show UI scale and compute status on the right
+            // Show UI scale, FPS, and compute status on the right
             ImGui::SameLine();
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 220.0f);
-            ImGui::Text("UI %.2f (%.2f x %.2f)",
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 320.0f);
+            ImGui::Text("UI %.2f (%.2f x %.2f) | %.0f FPS",
                         m_mainView.getUiScale(),
                         m_mainView.getBaseScale(),
-                        m_mainView.getUserScale());
+                        m_mainView.getUserScale(),
+                        ImGui::GetIO().Framerate);
 
             if (!m_computeAvailable)
             {
