@@ -1117,4 +1117,85 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
                           indicesOffset, nodeCount, triCount, vertexNormalCount, data);
 }
 
+// ============================================================================
+// Voxel Grid Build Kernel
+// ============================================================================
+
+/// Build voxel acceleration grid on GPU (in-place in primitive buffer)
+/// Each work item computes the SDF at one voxel center and stores the result.
+/// Launch with global size = total voxel count (dims.x * dims.y * dims.z)
+/// @param primitiveData Primitive data buffer (read BVH, write voxels)
+/// @param headerStart Start offset of the spatial mesh header in primitiveData
+/// @param voxelDataOffset Offset where voxel data should be written
+/// @param nodesOffset BVH nodes offset in primitiveData
+/// @param trianglesOffset Triangles offset in primitiveData
+/// @param normalsOffset Vertex normals offset in primitiveData
+/// @param indicesOffset Vertex indices offset in primitiveData
+/// @param nodeCount Number of BVH nodes
+/// @param triCount Number of triangles
+/// @param vertexNormalCount Number of vertex normals
+__kernel void buildMeshVoxelGrid(
+    __global float* primitiveData,
+    int headerStart,
+    int voxelDataOffset,
+    int nodesOffset,
+    int trianglesOffset,
+    int normalsOffset,
+    int indicesOffset,
+    int nodeCount,
+    int triCount,
+    int vertexNormalCount)
+{
+    int const voxelIdx = get_global_id(0);
+    
+    // Voxel grid header is at headerStart + 16 (after bbox, counts, BVH offsets)
+    int const voxelHeaderOffset = headerStart + 16;
+    
+    // Extract header values from voxel grid header
+    float3 const origin = (float3)(primitiveData[voxelHeaderOffset + 0],
+                                    primitiveData[voxelHeaderOffset + 1],
+                                    primitiveData[voxelHeaderOffset + 2]);
+    int3 const dims = (int3)((int)primitiveData[voxelHeaderOffset + 3],
+                              (int)primitiveData[voxelHeaderOffset + 4],
+                              (int)primitiveData[voxelHeaderOffset + 5]);
+    float const voxelSize = primitiveData[voxelHeaderOffset + 6];
+    
+    // Bounds check
+    int const totalVoxels = dims.x * dims.y * dims.z;
+    if (voxelIdx >= totalVoxels)
+    {
+        return;
+    }
+    
+    // Compute 3D voxel coordinates from linear index
+    int const z = voxelIdx / (dims.x * dims.y);
+    int const remainder = voxelIdx % (dims.x * dims.y);
+    int const y = remainder / dims.x;
+    int const x = remainder % dims.x;
+    
+    // Compute voxel center in world space
+    float3 const center = origin + (convert_float3((int3)(x, y, z)) + 0.5f) * voxelSize;
+    
+    // Query signed distance using BVH traversal
+    // Pass primitiveData as const for reading BVH
+    float const signedDist = spatialMeshSDF(center,
+                                             nodesOffset,
+                                             trianglesOffset,
+                                             normalsOffset,
+                                             indicesOffset,
+                                             nodeCount,
+                                             triCount,
+                                             vertexNormalCount,
+                                             primitiveData);
+    
+    // For now, store -1 as nearest triangle index placeholder
+    // The accelerated query uses distance-based early exit, not exact triangle lookup
+    float const nearestTriIdx = -1.0f;
+    
+    // Store results: 2 floats per voxel at voxelDataOffset
+    int const outputIdx = voxelDataOffset + voxelIdx * 2;
+    primitiveData[outputIdx + 0] = nearestTriIdx;
+    primitiveData[outputIdx + 1] = signedDist;
+}
+
 #endif // MESH_SDF_CL

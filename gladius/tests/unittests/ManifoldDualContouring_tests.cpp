@@ -90,7 +90,13 @@ namespace gladius::compute::tests
 
         [[nodiscard]] bool gpuTestsEnabled()
         {
-            return true;
+            // Allow CI opt-out via GLADIUS_SKIP_GPU_TESTS=1
+            char const * const env = std::getenv("GLADIUS_SKIP_GPU_TESTS");
+            if (env != nullptr && std::string(env) == "1")
+            {
+                return false;
+            }
+            return true;  // Default to enabled
         }
 
         [[nodiscard]] MeshEdgeStats analyzeMeshEdges(ManifoldDualContouringMesh const & mesh)

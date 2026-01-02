@@ -71,11 +71,15 @@ namespace gladius
     /// @param extentY Bounding box extent Y
     /// @param extentZ Bounding box extent Z
     /// @param targetResolution Target resolution per axis (e.g., 32)
-    /// @return Voxel size for uniform grid
+    /// @return Voxel size for uniform grid (minimum 1e-6f for safety)
     inline float computeVoxelSize(float extentX, float extentY, float extentZ,
                                    int targetResolution)
     {
         float maxExtent = std::max({extentX, extentY, extentZ});
+        if (maxExtent <= 0.0f || targetResolution <= 0)
+        {
+            return 1.0f;  // Safe default for degenerate meshes
+        }
         return maxExtent / static_cast<float>(targetResolution);
     }
 

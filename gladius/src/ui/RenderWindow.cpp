@@ -2108,10 +2108,10 @@ namespace gladius::ui
         bool open = true;
         ImGui::SetNextWindowBgAlpha(0.0f);
         
-        if (ImGui::Begin("LoadingIndicator", &open, overlayFlags))
+        if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
         {
             ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-            // Blue color for file loading
+            // Blue color for file loading (red is used for compilation)
             ImVec4 const indicatorColor = ImVec4(0.2f, 0.6f, 1.0f, 0.8f);
             ui::loadingIndicatorCircle("loading",
                                        30,

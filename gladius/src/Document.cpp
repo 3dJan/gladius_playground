@@ -528,6 +528,13 @@ namespace gladius
 
                 m_generatorContext->resourceManager.loadResources();
                 m_generatorContext->resourceManager.writeResources(*m_generatorContext->primitives);
+                
+                // Build voxel acceleration grids for spatial mesh resources on GPU
+                auto buildParams = m_generatorContext->resourceManager.collectVoxelGridBuildParams();
+                if (!buildParams.empty())
+                {
+                    m_core->buildMeshVoxelGrids(buildParams);
+                }
             }
 
             // update start and end indices

@@ -1518,39 +1518,68 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
 
         if (primitive.primitiveType == SDF_SPATIAL_MESH_ROOT)
         {
-            // Spatial mesh SDF using BVH traversal (alternative to VDB-based mesh SDF)
-            // Data layout in primitive buffer (set by SpatialMeshResource::loadImpl):
-            // - Root primitive: bounding box (8 floats), counts (4 floats), offsets (4 floats)
-            // - Node data: follows immediately after root header
-            // - Triangle data: follows nodes
-            // - Vertex normals: follows triangles
-            // - Triangle indices: follows normals
+            // Spatial mesh SDF using BVH traversal with optional voxel acceleration
+            // ====================================================================
+            // Header Layout (32 floats total):
+            // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
+            // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
+            // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
+            // [16-25]: Voxel grid header (10 floats: origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding)
+            // [26-27]: Voxel grid info (2 floats: voxelDataOffset, voxelCount)
+            // [28-31]: Reserved (4 floats)
+            // ====================================================================
 
             int const headerStart = primitive.start;
             
             // Read counts from header (offset 8 = after bounding box)
             int const nodeCount = (int)data[headerStart + 8];
             int const triCount = (int)data[headerStart + 9];
-            
-            // Read relative offsets from header (offset 12) and convert to absolute
-            // Offsets are stored relative to this primitive's data start
-            int const nodesOffset = headerStart + (int)data[headerStart + 12];
-            int const trianglesOffset = headerStart + (int)data[headerStart + 13];
-            int const normalsOffset = headerStart + (int)data[headerStart + 14];
-            
-            // Triangle indices follow vertex normals (4 floats per normal * vertexCount)
             int const vertexNormalCount = (int)data[headerStart + 10];
-            int const indicesOffset = normalsOffset + vertexNormalCount * 4;
             
-            float meshDist = spatialMeshSDF((float3)(pos),
-                                            nodesOffset,
-                                            trianglesOffset,
-                                            normalsOffset,
-                                            indicesOffset,
-                                            nodeCount,
-                                            triCount,
-                                            vertexNormalCount,
-                                            data);
+            // Read BVH offsets (offset 12)
+            int const nodesOffset = (int)data[headerStart + 12];
+            int const trianglesOffset = (int)data[headerStart + 13];
+            int const normalsOffset = (int)data[headerStart + 14];
+            int const indicesOffset = (int)data[headerStart + 15];
+            
+            // Read voxel grid info (offset 26)
+            int const voxelDataOffset = (int)data[headerStart + 26];
+            int const voxelCount = (int)data[headerStart + 27];
+            
+            // Use voxel-accelerated path if voxel grid is available and populated
+            // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
+            bool const hasVoxelGrid = (voxelCount > 0) && (voxelDataOffset > 0);
+            
+            float meshDist;
+            if (hasVoxelGrid)
+            {
+                // Voxel grid header starts at offset 16
+                int const voxelHeaderOffset = headerStart + 16;
+                meshDist = spatialMeshSDF_VoxelAccelerated((float3)(pos),
+                                                           voxelHeaderOffset,
+                                                           voxelDataOffset,
+                                                           nodesOffset,
+                                                           trianglesOffset,
+                                                           normalsOffset,
+                                                           indicesOffset,
+                                                           nodeCount,
+                                                           triCount,
+                                                           vertexNormalCount,
+                                                           data);
+            }
+            else
+            {
+                // Fall back to pure BVH traversal
+                meshDist = spatialMeshSDF((float3)(pos),
+                                          nodesOffset,
+                                          trianglesOffset,
+                                          normalsOffset,
+                                          indicesOffset,
+                                          nodeCount,
+                                          triCount,
+                                          vertexNormalCount,
+                                          data);
+            }
             
             sdf = uniteSmooth(sdf, meshDist, 0.0f);
         }

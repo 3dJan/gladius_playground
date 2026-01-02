@@ -9,6 +9,7 @@
 /// @see VdbResource.h for the similar pattern used with OpenVDB grids
 
 #include "MeshBVH.h"
+#include "MeshVoxelGridManager.h"
 #include "ResourceManager.h"
 
 #include <span>
@@ -63,6 +64,19 @@ namespace gladius
         /// @param indices Updated triangle indices
         void rebuild(std::span<float4 const> vertices,
                      std::span<TriangleIndices const> indices);
+        
+        /// Override write to track base offset for voxel grid build
+        void write(Primitives & primitives) override;
+        
+        /// Get voxel grid build parameters (valid after write)
+        /// @return Build parameters with adjusted offsets, or nullopt if not ready
+        [[nodiscard]] std::optional<MeshVoxelGridBuildParams> getVoxelGridBuildParams() const;
+        
+        /// Check if voxel grid build is needed
+        [[nodiscard]] bool needsVoxelGridBuild() const { return m_needsVoxelGridBuild; }
+        
+        /// Mark voxel grid as built
+        void markVoxelGridBuilt() { m_needsVoxelGridBuild = false; }
 
       protected:
         /// Serialize to PrimitiveBuffer for GPU access
@@ -71,5 +85,22 @@ namespace gladius
       private:
         SpatialMeshData m_data;
         bool m_needsRebuild = false;
+        
+        /// Voxel grid tracking
+        /// @note Thread safety: Access to m_needsVoxelGridBuild is serialized by
+        ///       m_computeMutex in ComputeCore when called during document refresh.
+        ///       The flag is only modified during single-threaded resource loading
+        ///       (loadImpl, write) or under the compute mutex (markVoxelGridBuilt).
+        bool m_needsVoxelGridBuild = true;
+        int m_dataBaseOffset = 0;  ///< Base offset in primitives.data when written
+        
+        /// Cached local offsets (relative to m_payloadData.data start)
+        size_t m_headerStart = 0;
+        size_t m_nodesOffset = 0;
+        size_t m_trianglesOffset = 0;
+        size_t m_normalsOffset = 0;
+        size_t m_indicesOffset = 0;
+        size_t m_voxelDataOffset = 0;
+        size_t m_voxelCount = 0;
     };
 }

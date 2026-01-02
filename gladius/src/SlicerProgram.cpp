@@ -382,4 +382,37 @@ namespace gladius
     {
         m_programFront->setKernelReplacements(replacements);
     }
+    
+    bool SlicerProgram::buildMeshVoxelGrid(Primitives & primitives, 
+                                           MeshVoxelGridBuildParams const & params)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        ProfileFunction;
+        
+        swapProgramsIfNeeded();
+        
+        if (params.voxelCount <= 0)
+        {
+            return false;  // Nothing to build
+        }
+        
+        cl::NDRange const origin = {0, 0, 0};
+        cl::NDRange const globalRange = {static_cast<size_t>(params.voxelCount), 1, 1};
+        
+        m_programFront->run("buildMeshVoxelGrid",
+                            origin,
+                            globalRange,
+                            primitives.data.getBuffer(),               // 0: primitiveData
+                            static_cast<cl_int>(params.headerStart),   // 1: headerStart
+                            static_cast<cl_int>(params.voxelDataOffset), // 2: voxelDataOffset
+                            static_cast<cl_int>(params.nodesOffset),   // 3: nodesOffset
+                            static_cast<cl_int>(params.trianglesOffset), // 4: trianglesOffset
+                            static_cast<cl_int>(params.normalsOffset), // 5: normalsOffset
+                            static_cast<cl_int>(params.indicesOffset), // 6: indicesOffset
+                            static_cast<cl_int>(params.nodeCount),     // 7: nodeCount
+                            static_cast<cl_int>(params.triCount),      // 8: triCount
+                            static_cast<cl_int>(params.vertexNormalCount)); // 9: vertexNormalCount
+        
+        return true;
+    }
 }

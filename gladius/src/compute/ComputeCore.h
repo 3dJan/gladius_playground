@@ -6,6 +6,7 @@
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
 #include <kernel/types.h>
+#include <MeshVoxelGridManager.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>
@@ -533,6 +534,11 @@ namespace gladius
         [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
 
         void setPreCompSdfSize(size_t size);
+        
+        /// Build voxel acceleration grids for spatial mesh resources
+        /// @param buildParams Vector of build parameters from ResourceManager::collectVoxelGridBuildParams()
+        /// @return Number of grids successfully built
+        size_t buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams);
 
         void adoptVertexOfMeshToSurface(VertexBuffer & vertices);
 

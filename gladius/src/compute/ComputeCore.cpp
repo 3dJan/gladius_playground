@@ -284,6 +284,45 @@ namespace gladius
         m_preCompSdfSize = size;
     }
 
+    size_t ComputeCore::buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams)
+    {
+        ProfileFunction
+
+        if (buildParams.empty())
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        
+        // Ensure primitives are uploaded to GPU
+        m_primitives->write();
+        
+        // Get the slicer program which includes mesh_sdf.cl with the build kernel
+        auto slicerProgram = m_programs.getSlicerProgram();
+        if (!slicerProgram || !slicerProgram->isValid())
+        {
+            logMsg("Cannot build voxel grids: slicer program not ready");
+            return 0;
+        }
+        
+        size_t successCount = 0;
+        for (auto const & params : buildParams)
+        {
+            if (slicerProgram->buildMeshVoxelGrid(*m_primitives, params))
+            {
+                ++successCount;
+            }
+        }
+        
+        // Wait for all builds to complete
+        CL_ERROR(m_ComputeContext->GetQueue().finish());
+        
+        logMsg(fmt::format("Built {} voxel grids", successCount));
+        
+        return successCount;
+    }
+
     void ComputeCore::adoptVertexOfMeshToSurface(VertexBuffer & vertices)
     {
         ProfileFunction
