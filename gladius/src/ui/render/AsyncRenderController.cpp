@@ -621,4 +621,139 @@ namespace gladius::ui::async_rendering
             }
         }
     }
+
+    // ============== Preview Buffer Management ==============
+
+    FrameBuffer * AsyncRenderController::acquirePreviewBuffer(uint64_t epoch) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+
+        // Find an Idle buffer
+        for (auto & buffer : m_previewBuffers)
+        {
+            auto expected = FrameState::Idle;
+            if (buffer.state.compare_exchange_strong(expected, FrameState::Writing,
+                                                     std::memory_order_acq_rel))
+            {
+                buffer.epoch.store(epoch, std::memory_order_release);
+                return &buffer;
+            }
+        }
+
+        return nullptr; // No buffer available
+    }
+
+    void AsyncRenderController::publishPreviewFrame(FrameBuffer * buffer, 
+                                                    PreviewResultMeta const & meta) noexcept
+    {
+        if (buffer == nullptr)
+        {
+            return;
+        }
+
+        // Transition Writing → Ready
+        auto expected = FrameState::Writing;
+        if (!buffer->state.compare_exchange_strong(expected, FrameState::Ready,
+                                                   std::memory_order_acq_rel))
+        {
+            return; // Buffer not in expected state
+        }
+
+        // Store result metadata for UI thread consumption
+        {
+            std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+            m_latestPreviewResult = meta;
+            m_previewResultReady.store(true, std::memory_order_release);
+        }
+
+        // Record publish timestamp
+        auto const now = std::chrono::steady_clock::now();
+        auto const ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          now.time_since_epoch()).count();
+        buffer->publishTimestampNs.store(static_cast<uint64_t>(ns), std::memory_order_release);
+    }
+
+    std::optional<PreviewResultMeta> AsyncRenderController::tryConsumePreviewResult() noexcept
+    {
+        if (!m_previewResultReady.load(std::memory_order_acquire))
+        {
+            return std::nullopt;
+        }
+
+        std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+        if (!m_previewResultReady.load(std::memory_order_relaxed))
+        {
+            return std::nullopt; // Race: another thread consumed it
+        }
+
+        auto result = m_latestPreviewResult;
+        m_previewResultReady.store(false, std::memory_order_release);
+        return result;
+    }
+
+    FrameBuffer * AsyncRenderController::frontPreviewBuffer() noexcept
+    {
+        auto const idx = m_previewFrontIndex.load(std::memory_order_acquire);
+        if (idx >= m_previewBuffers.size())
+        {
+            return nullptr;
+        }
+        return &m_previewBuffers[idx];
+    }
+
+    FrameBuffer * AsyncRenderController::promotePreviewReadyToFront() noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+
+        // Find a Ready buffer
+        for (size_t i = 0; i < m_previewBuffers.size(); ++i)
+        {
+            auto & buffer = m_previewBuffers[i];
+            auto expected = FrameState::Ready;
+            if (buffer.state.compare_exchange_strong(expected, FrameState::Front,
+                                                     std::memory_order_acq_rel))
+            {
+                // Demote old front to Idle
+                auto const oldIdx = m_previewFrontIndex.load(std::memory_order_acquire);
+                if (oldIdx != i && oldIdx < m_previewBuffers.size())
+                {
+                    auto & oldBuffer = m_previewBuffers[oldIdx];
+                    auto oldExpected = FrameState::Front;
+                    oldBuffer.state.compare_exchange_strong(oldExpected, FrameState::Idle,
+                                                            std::memory_order_acq_rel);
+                }
+
+                m_previewFrontIndex.store(i, std::memory_order_release);
+                return &buffer;
+            }
+        }
+
+        return nullptr; // No Ready buffer available
+    }
+
+    void AsyncRenderController::releaseStalePreviewBuffers(uint64_t oldEpoch) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+
+        for (auto & buffer : m_previewBuffers)
+        {
+            auto const state = buffer.state.load(std::memory_order_acquire);
+            auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
+
+            // Release Writing buffers from old epochs
+            if (state == FrameState::Writing && bufEpoch <= oldEpoch)
+            {
+                auto expected = FrameState::Writing;
+                buffer.state.compare_exchange_strong(expected, FrameState::Idle,
+                                                     std::memory_order_acq_rel);
+            }
+        }
+    }
+
+    void AsyncRenderController::setLatestPreviewResult(PreviewResultMeta const & meta) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_previewBufferMutex);
+        m_latestPreviewResult = meta;
+        m_previewResultReady.store(true, std::memory_order_release);
+    }
 }

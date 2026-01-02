@@ -162,6 +162,13 @@ namespace gladius::ui
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
+        // Async preview rendering (non-blocking low-res preview during camera movement)
+        bool scheduleAsyncPreviewJob();
+        coro::task<async_rendering::FrameResultMeta> executeAsyncPreviewJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void processAsyncPreviewResults();
+
         GLView * m_view{};
 
         ComputeCore * m_core;
@@ -286,5 +293,12 @@ namespace gladius::ui
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
+
+        // Async preview rendering state (separate from HQ progressive rendering)
+        std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation
+        std::atomic<bool> m_asyncPreviewJobInFlight{false}; ///< True if preview job is executing
+        std::atomic<uint64_t> m_asyncPreviewFrameId{0};     ///< Latest completed preview frame ID
+        uint64_t m_asyncPreviewFrameCounter{0};             ///< Counter for generating unique frame IDs
+        std::chrono::steady_clock::time_point m_asyncPreviewEnqueueTime{}; ///< For latency tracking
     };
 }

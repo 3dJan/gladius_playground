@@ -1310,6 +1310,11 @@ namespace gladius
         return m_resultImage;
     }
 
+    SharedGLImageBuffer ComputeCore::getLowResPreviewImage() const
+    {
+        return m_lowResPreviewImage;
+    }
+
     SharedContourExtractor ComputeCore::getContour() const
     {
         // Create a local copy of the future to avoid race conditions
@@ -1612,6 +1617,35 @@ namespace gladius
         // Ensure GL texture is updated (especially important for readpixel mode)
         m_resultImage->bind();
         m_resultImage->unbind();
+    }
+
+    cl::Event ComputeCore::renderLowResPreviewAsync(cl::CommandQueue const & queue,
+                                                    ImageRGBA & targetImage) const
+    {
+        ProfileFunction
+
+        // Note: No mutex lock - caller is responsible for thread safety
+        // Note: No glFinish() - this is async, caller handles sync via returned event
+
+        // Only render if precomputed SDF is available
+        if (!m_precompSdfIsValid)
+        {
+            LOG_LOCATION;
+            return cl::Event{}; // Return empty event if SDF not ready
+        }
+
+        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+
+        cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
+                                                                         *m_primitives,
+                                                                         targetImage,
+                                                                         m_sliceHeight_mm,
+                                                                         0,
+                                                                         targetImage.getHeight());
+
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        return renderEvent;
     }
 
     void ComputeCore::invalidatePreCompSdf(std::string_view reason)

@@ -89,6 +89,34 @@ namespace gladius::ui::async_rendering
     };
 
     /**
+     * @brief Describes a low-resolution preview render job for async execution.
+     * 
+     * Preview jobs are high-priority, latency-sensitive jobs that execute
+     * during camera movement to provide visual feedback to the user.
+     */
+    struct PreviewRenderJob
+    {
+        uint64_t epoch{0};           ///< Cancellation token (job cancelled if epoch < current)
+        uint64_t frameId{0};         ///< Unique frame identifier for tracking
+        uint32_t width{0};           ///< Preview resolution width
+        uint32_t height{0};          ///< Preview resolution height
+        CameraSnapshot camera{};     ///< Camera state at job creation time
+        bool requiresSdfValid{true}; ///< True if SDF must be precomputed before rendering
+    };
+
+    /**
+     * @brief Metadata for completed preview frames shared between worker and UI threads.
+     */
+    struct PreviewResultMeta
+    {
+        uint64_t frameId{0};         ///< Matches PreviewRenderJob::frameId
+        uint64_t epoch{0};           ///< Matches PreviewRenderJob::epoch
+        uint64_t latencyNs{0};       ///< Time from job enqueue to completion (nanoseconds)
+        bool cancelled{false};       ///< True if job was cancelled due to epoch change
+        bool sdfWasValid{false};     ///< True if SDF was available during rendering
+    };
+
+    /**
      * @brief Represents a single buffered frame used in the async pipeline.
      */
     struct FrameBuffer

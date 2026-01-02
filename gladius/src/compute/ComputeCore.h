@@ -427,6 +427,23 @@ namespace gladius
 
         void renderLowResPreview() const;
 
+        /**
+         * @brief Starts asynchronous low-resolution preview render (non-blocking).
+         * 
+         * Unlike renderLowResPreview(), this method does not call glFinish() and returns
+         * an OpenCL event for async completion tracking. The caller is responsible for
+         * synchronization and texture binding.
+         * 
+         * @param queue OpenCL command queue to use for async execution
+         * @param targetImage Pure CL image buffer to render into (no GL texture)
+         * @return OpenCL event that signals when rendering is complete
+         * 
+         * @thread Any thread with compute context access
+         * @note Does not call bind() on result image - caller must handle GL texture update
+         */
+        [[nodiscard]] cl::Event renderLowResPreviewAsync(cl::CommandQueue const & queue,
+                                                         ImageRGBA & targetImage) const;
+
         bool precomputeSdfForWholeBuildPlatform();
         void precomputeSdfForBBox(const BoundingBox & boundingBox);
 
@@ -441,6 +458,11 @@ namespace gladius
         /// @return true if preparation succeeded, false otherwise
         bool prepareImageRendering();
         [[nodiscard]] SharedGLImageBuffer getResultImage() const;
+        
+        /// @brief Returns the low-resolution preview image buffer.
+        /// @return Shared pointer to the low-res preview image, may be null if not initialized.
+        [[nodiscard]] SharedGLImageBuffer getLowResPreviewImage() const;
+        
         [[nodiscard]] SharedContourExtractor getContour() const;
 
         [[nodiscard]] cl_float getSliceHeight() const;

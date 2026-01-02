@@ -43,6 +43,20 @@ namespace gladius
                       size_t startHeight,
                       size_t endHeight);
 
+        /// @brief Non-blocking resample operation with explicit command queue.
+        /// @param queue Command queue to use for execution.
+        /// @param sourceImage Source low-resolution image buffer.
+        /// @param targetImage Target high-resolution image buffer.
+        /// @param startHeight Starting row for resampling.
+        /// @param endHeight Ending row for resampling.
+        /// @param completionEvent Output parameter for completion event (optional).
+        void resampleAsync(cl::CommandQueue const & queue,
+                           ImageRGBA & sourceImage,
+                           ImageRGBA & targetImage,
+                           size_t startHeight,
+                           size_t endHeight,
+                           cl::Event * completionEvent = nullptr);
+
       private:
     };
 }

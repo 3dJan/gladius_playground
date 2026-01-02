@@ -4,6 +4,7 @@
 #include <cmath>
 #include <coroutine>
 #include <cstddef>
+#include <fmt/core.h>
 
 #include "../CLMath.h"
 #include "../ComputeContext.h"
@@ -169,6 +170,10 @@ namespace gladius::ui
                   else if (job.type == async_rendering::RenderJobType::ParameterUpdate)
                   {
                       co_return co_await executeAsyncParameterUpdate(job, cancelCheck);
+                  }
+                  else if (job.type == async_rendering::RenderJobType::LowResPreview)
+                  {
+                      co_return co_await executeAsyncPreviewJob(job, cancelCheck);
                   }
 
                   co_return co_await executeAsyncRenderJob(job, cancelCheck);
@@ -660,6 +665,8 @@ namespace gladius::ui
 
         if (state.isMoving)
         {
+            // TODO: [003-async-preview-rendering] Consider migrating this sync path to async
+            // For now, keep synchronous preview for the legacy renderSync() path
             bool const wasSdfValid = m_core->isSdfValid();
             m_core->renderLowResPreview();
             if (m_core->isSdfValid() || wasSdfValid)
@@ -1342,6 +1349,9 @@ namespace gladius::ui
 
         processAsyncResults(state);
 
+        // Process async preview results (separate from HQ progressive results)
+        processAsyncPreviewResults();
+
         if (m_asyncController && m_asyncController->isRunning())
         {
             bool const sdfDirty = m_preComputedSdfDirty.load(std::memory_order_acquire);
@@ -1507,28 +1517,39 @@ namespace gladius::ui
                 state.isRendering = false;
             }
 
-            bool lowResSuccessful = false;
-            auto token = m_core->requestComputeToken();
-            if (token.has_value())
+            // Use async preview rendering instead of blocking synchronous call
+            // Only schedule if no preview job already in flight
+            if (!m_asyncPreviewJobInFlight.load(std::memory_order_acquire))
             {
-                // renderLowResPreview requires a valid SDF. Check before/after to detect success.
-                bool const wasSdfValid = m_core->isSdfValid();
-                m_core->renderLowResPreview();
-                bool const isSdfValidNow = m_core->isSdfValid();
-                if (isSdfValidNow || wasSdfValid)
+                // SDF must be valid for preview rendering
+                if (m_core->isSdfValid())
                 {
-                    m_lowResFeedbackPending.store(false, std::memory_order_release);
-                    m_lastLowResRenderTime = std::chrono::system_clock::now();
-                    // Track that low-res preview is now up-to-date with the current epoch
-                    m_lastLowResPreviewEpoch.store(
-                      m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                      std::memory_order_release);
-                    lowResSuccessful = true;
+                    fmt::print(stderr, "[AsyncPreview] trying to schedule preview job...\\n");
+                    if (scheduleAsyncPreviewJob())
+                    {
+                        fmt::print(stderr, "[AsyncPreview] job scheduled successfully\\n");
+                        // Job scheduled successfully, mark as pending
+                        // The result will be consumed in processAsyncPreviewResults()
+                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                    }
+                    else
+                    {
+                        fmt::print(stderr, "[AsyncPreview] scheduling failed, using sync fallback\\n");
+                        // Async scheduling failed - fall back to synchronous preview
+                        m_core->renderLowResPreview();
+                        m_lowResFeedbackPending.store(false, std::memory_order_release);
+                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                        m_lastLowResPreviewEpoch.store(
+                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                          std::memory_order_release);
+                    }
                 }
-            }
-            if (!lowResSuccessful)
-            {
-                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                else
+                {
+                    fmt::print(stderr, "[AsyncPreview] SDF not valid, will retry\\n");
+                    // SDF not valid yet, retry later
+                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                }
             }
             state.isRendering = false;
             m_asyncJobInFlight.store(false, std::memory_order_release);
@@ -1620,6 +1641,13 @@ namespace gladius::ui
                 {
                     scheduleAsyncBboxUpdate();
                 }
+                continue;
+            }
+
+            // Skip LowResPreview results here - they are handled by processAsyncPreviewResults()
+            // which consumes them via tryConsumePreviewResult() and does the resample + GL sync.
+            if (result.jobType == async_rendering::RenderJobType::LowResPreview)
+            {
                 continue;
             }
 
@@ -2380,6 +2408,292 @@ namespace gladius::ui
           std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
 
         co_return result;
+    }
+
+    // ============== Async Preview Rendering ==============
+
+    bool RenderWindow::scheduleAsyncPreviewJob()
+    {
+        ZoneScoped;
+        ZoneName("scheduleAsyncPreviewJob", strlen("scheduleAsyncPreviewJob"));
+
+        if (!m_asyncController || !m_asyncController->isRunning())
+        {
+            fmt::print(stderr, "[AsyncPreview] scheduleAsyncPreviewJob: controller not running\n");
+            return false;
+        }
+
+        // Don't schedule if a preview job is already in flight
+        if (m_asyncPreviewJobInFlight.load(std::memory_order_acquire))
+        {
+            fmt::print(stderr, "[AsyncPreview] scheduleAsyncPreviewJob: job already in flight\n");
+            return false;
+        }
+
+        auto const image = m_core->getResultImage();
+        if (!image)
+        {
+            return false;
+        }
+
+        size_t const width = static_cast<size_t>(image->getWidth());
+        size_t const height = static_cast<size_t>(image->getHeight());
+
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+
+        // Initialize async resources if needed
+        m_asyncController->initializeAsyncResources(*m_core->getComputeContext(), width, height);
+
+        // Create preview job
+        async_rendering::RenderJob job{};
+        job.type = async_rendering::RenderJobType::LowResPreview;
+        job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+        if (job.epoch == 0)
+        {
+            job.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+            m_asyncCurrentEpoch.store(job.epoch, std::memory_order_release);
+        }
+        m_asyncController->setLatestEpoch(job.epoch);
+
+        // Use low-res preview resolution
+        auto const [previewWidth, previewHeight] = m_core->getLowResPreviewResolution();
+        job.width = static_cast<uint32_t>(previewWidth);
+        job.height = static_cast<uint32_t>(previewHeight);
+        job.frameHint = ++m_asyncPreviewFrameCounter;
+        job.startLine = 0;
+        job.stepSize = static_cast<size_t>(previewHeight);
+        job.precomputeSdf = false;
+        job.enableHighQuality = false;
+
+        // Track preview job state
+        m_asyncPreviewEpoch.store(job.epoch, std::memory_order_release);
+        m_asyncPreviewJobInFlight.store(true, std::memory_order_release);
+        m_asyncPreviewEnqueueTime = std::chrono::steady_clock::now();
+
+        m_asyncController->enqueueJob(job);
+
+        fmt::print(stderr, "[AsyncPreview] scheduleAsyncPreviewJob: job enqueued, epoch={}\n", job.epoch);
+        ZoneText("PreviewJobEnqueued", 18);
+        return true;
+    }
+
+    auto RenderWindow::executeAsyncPreviewJob(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
+    {
+        fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: starting, epoch={}\n", job.epoch);
+        ZoneScoped;
+        ZoneName("AsyncPreviewJob", strlen("AsyncPreviewJob"));
+#ifdef TRACY_ENABLE
+        tracy::SetThreadName("AsyncPreviewWorker");
+#endif
+
+        using namespace async_rendering;
+
+        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto const & commandQueue =
+          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+
+        FrameResultMeta result{};
+        result.frameId = job.frameHint;
+        result.epoch = job.epoch;
+        result.jobType = job.type;
+        result.width = job.width;
+        result.height = job.height;
+
+        // Note: We do NOT cancel preview jobs based on epoch changes.
+        // This ensures smooth visual feedback during camera movement.
+        // We only check for shutdown requests.
+        auto const shutdownRequested = [&]() -> bool {
+            return cancelCheck && cancelCheck() && 
+                   m_asyncController && !m_asyncController->isRunning();
+        };
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        // Check if SDF is valid (required for preview rendering)
+        if (!m_core->isSdfValid())
+        {
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: SDF not valid\n");
+            ZoneText("SdfNotValid", 11);
+            result.cancelled = true;
+            m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+            co_return result;
+        }
+
+        // Perform the async preview render using the low-res preview infrastructure
+        {
+            ZoneScopedN("RenderLowResPreviewAsync");
+
+            // Use the non-blocking async preview render
+            // This renders at low resolution and returns a cl::Event for completion tracking
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: getting lowResImage...\n");
+            auto lowResImage = m_core->getLowResPreviewImage();
+            if (!lowResImage)
+            {
+                fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: lowResImage is null\n");
+                ZoneText("NoLowResImage", 13);
+                result.cancelled = true;
+                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                co_return result;
+            }
+
+            // Kick off the async render - returns immediately with completion event
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: calling renderLowResPreviewAsync...\n");
+            cl::Event renderEvent = m_core->renderLowResPreviewAsync(commandQueue, *lowResImage);
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: renderLowResPreviewAsync returned, event valid={}\n", renderEvent() != nullptr);
+
+            if (!renderEvent())
+            {
+                // Empty event means SDF wasn't valid or other precondition failed
+                fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: renderEvent is empty\n");
+                ZoneText("RenderFailed", 12);
+                result.cancelled = true;
+                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                co_return result;
+            }
+
+            // Wait for GPU completion using blocking wait instead of coroutine callback.
+            // Some OpenCL implementations (e.g., rusticl) have issues with event callbacks.
+            // Since we're on a worker thread, blocking is fine.
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: waiting for event (blocking)...\n");
+            try
+            {
+                renderEvent.wait();
+            }
+            catch (std::exception const & e)
+            {
+                fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: event.wait() failed: {}\n", e.what());
+                result.cancelled = true;
+                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                co_return result;
+            }
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: event completed\n");
+
+            // Only check for shutdown, not epoch-based cancellation
+            if (shutdownRequested())
+            {
+                fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: shutdown requested\n");
+                result.cancelled = true;
+                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                co_return result;
+            }
+
+            // Finish the queue to ensure all work is complete before UI thread reads the buffer.
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: calling finish()...\n");
+            commandQueue.finish();
+            fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: finish() done\n");
+
+            // NOTE: We intentionally do NOT resample here because resample writes to
+            // m_resultImage which is a GL-interop buffer. GL operations must happen
+            // on the UI thread with the GL context. The resample will be done in
+            // processAsyncPreviewResults() on the UI thread.
+        }
+
+        auto const endTime = std::chrono::steady_clock::now();
+        result.computeDurationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
+        result.completedFrame = true;
+
+        fmt::print(stderr, "[AsyncPreview] executeAsyncPreviewJob: render complete, duration={}ns\n", result.computeDurationNs);
+
+        // Store result metadata for processing
+        PreviewResultMeta previewMeta{};
+        previewMeta.frameId = job.frameHint;
+        previewMeta.epoch = job.epoch;
+        previewMeta.latencyNs = result.computeDurationNs;
+        previewMeta.cancelled = false;
+        previewMeta.sdfWasValid = true;
+
+        m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+        // Note: Don't set m_asyncPreviewFrameId here - it's set in processAsyncPreviewResults
+        // after the frame is actually displayed on the UI thread.
+
+        // Store the result for UI thread polling
+        m_asyncController->setLatestPreviewResult(previewMeta);
+
+        ZoneText("PreviewComplete", 15);
+        co_return result;
+    }
+
+    void RenderWindow::processAsyncPreviewResults()
+    {
+        ZoneScopedN("ProcessAsyncPreviewResults");
+
+        if (!m_asyncController)
+        {
+            return;
+        }
+
+        // Try to consume a completed preview result
+        auto result = m_asyncController->tryConsumePreviewResult();
+        if (!result.has_value())
+        {
+            return;
+        }
+
+        fmt::print(stderr, "[AsyncPreview] processAsyncPreviewResults: got result, frameId={}, epoch={}\n", result.value().frameId, result.value().epoch);
+        auto const & meta = result.value();
+
+        // Skip frames that are older than what we've already displayed.
+        // This ensures we never show an older frame after a newer one.
+        // Use frameId (which is monotonically increasing) for ordering.
+        auto const lastDisplayedFrame = m_asyncPreviewFrameId.load(std::memory_order_acquire);
+        if (meta.frameId <= lastDisplayedFrame)
+        {
+            fmt::print(stderr, "[AsyncPreview] processAsyncPreviewResults: out-of-order frame, id={} <= lastDisplayed={}\n", meta.frameId, lastDisplayedFrame);
+            ZoneText("OutOfOrderPreviewSkipped", 24);
+            return;
+        }
+
+        // Skip cancelled results
+        if (meta.cancelled)
+        {
+            fmt::print(stderr, "[AsyncPreview] processAsyncPreviewResults: cancelled result\n");
+            ZoneText("CancelledPreviewSkipped", 23);
+            return;
+        }
+
+        ZoneText("PreviewResultConsumed", 21);
+
+        // The async preview render wrote to m_lowResPreviewImage.
+        // Now we need to resample to m_resultImage and sync the GL texture.
+        // These operations must happen on the UI thread with the GL context.
+        auto lowResImage = m_core->getLowResPreviewImage();
+        auto resultImage = m_core->getResultImage();
+        auto renderProgram = m_core->getBestRenderProgram();
+
+        if (lowResImage && resultImage && renderProgram)
+        {
+            fmt::print(stderr, "[AsyncPreview] processAsyncPreviewResults: doing resample {}x{} -> {}x{}\n",
+                      lowResImage->getWidth(), lowResImage->getHeight(),
+                      resultImage->getWidth(), resultImage->getHeight());
+
+            // Sync GL before CL operations (matches sync renderLowResPreview pattern)
+            glFinish();
+
+            // Resample from low-res to full-res result image
+            renderProgram->resample(*lowResImage, *resultImage, 0, resultImage->getHeight());
+
+            // Mark content as dirty so bind() will transfer pixels in readpixel mode
+            resultImage->invalidateContent();
+
+            // Sync the CL buffer to the GL texture
+            resultImage->bind();
+            resultImage->unbind();
+
+            // Update the last displayed frame ID for ordering
+            m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
+        }
+
+        // Clear low-res feedback pending flag since we now have fresh content
+        m_lowResFeedbackPending.store(false, std::memory_order_release);
+        m_lastLowResRenderTime = std::chrono::system_clock::now();
+        m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
     }
 
 }

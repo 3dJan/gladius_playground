@@ -156,4 +156,31 @@ namespace gladius
         m_programFront->run(
           "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
     }
+
+    void RenderProgram::resampleAsync(cl::CommandQueue const & queue,
+                                      ImageRGBA & sourceImage,
+                                      ImageRGBA & targetImage,
+                                      size_t startHeight,
+                                      size_t endHeight,
+                                      cl::Event * completionEvent)
+    {
+        ProfileFunction;
+        swapProgramsIfNeeded();
+        if (!m_programFront->isValid())
+        {
+            if (completionEvent)
+            {
+                *completionEvent = cl::Event{};
+            }
+            return;
+        }
+        cl::NDRange const origin = {0, startHeight, 0};
+        cl::NDRange const range = {targetImage.getWidth(), endHeight, 1};
+        cl::Event const event = m_programFront->runNonBlocking(
+          queue, "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
+        if (completionEvent)
+        {
+            *completionEvent = event;
+        }
+    }
 }
