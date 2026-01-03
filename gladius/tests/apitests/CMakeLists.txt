@@ -37,7 +37,7 @@ find_package(imgui CONFIG REQUIRED)
 find_package(unofficial-imgui-node-editor CONFIG REQUIRED)
 
 # Note: imgui-node-editor depends on imgui, order matters for static linking
-set(DEPENDENCIES ${CMAKE_PROJECT_NAME}_lib unofficial::imgui-node-editor::imgui-node-editor imgui::imgui GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main Eigen3::Eigen lodepng fmt::fmt OpenGL::GL)
+set(DEPENDENCIES unofficial::imgui-node-editor::imgui-node-editor imgui::imgui GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main Eigen3::Eigen lodepng fmt::fmt OpenGL::GL)
 
 # Add MCP-only dependencies for tests that use MCP
 list(APPEND DEPENDENCIES httplib::httplib nlohmann_json::nlohmann_json)
@@ -78,4 +78,5 @@ file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 # Use gtest_discover_tests for automatic test discovery with 'api' label
 gtest_discover_tests(${BINARY}
     PROPERTIES LABELS "api"
+    DISCOVERY_MODE POST_BUILD
 )

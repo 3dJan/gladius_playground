@@ -45,14 +45,14 @@ namespace gladius_integration_tests
     }
 
     void saveBitmapLayer(std::filesystem::path const & filename,
-                         std::vector<float> & data,
+                         std::vector<float> const & data,
                          unsigned int width_px,
                          unsigned int height_px)
     {
         std::vector<unsigned char> image;
         image.resize(data.size());
 
-         std::cout << "exporting bitmap to " << filename << "\n";
+        std::cout << "exporting bitmap to " << filename << "\n";
         std::transform(data.begin(),
                        data.end(),
                        image.begin(),

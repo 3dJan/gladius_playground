@@ -77,4 +77,5 @@ file(COPY ${FONT_FILES}  DESTINATION "misc/fonts/")
 # Use gtest_discover_tests for automatic test discovery with 'integration' label
 gtest_discover_tests(${CMAKE_PROJECT_NAME}_integrationtest
     PROPERTIES LABELS "integration"
+    DISCOVERY_MODE POST_BUILD
 )

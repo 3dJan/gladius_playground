@@ -167,6 +167,22 @@
 
 ---
 
+## Phase 9: Code Review Fixes
+
+**Purpose**: Address findings from code review (review.md)
+
+- [X] T061 Fix whitespace issues in testhelper.h and testhelper.cpp
+- [X] T062 Add missing newline at EOF in testdata.h
+- [X] T063 Add const to saveBitmapLayer data parameter (const-correctness)
+- [X] T064 Unify CMake minimum version to 3.21 across all test CMakeLists
+- [X] T065 Add DISCOVERY_MODE POST_BUILD to integrationtests and apitests gtest_discover_tests()
+- [X] T066 Remove redundant gladius_lib from DEPENDENCIES in apitests CMakeLists
+- [ ] T067 (Follow-up) Extract shared test utilities library to eliminate duplicate testhelper files
+
+**Checkpoint**: All review findings addressed except T067 (deferred to follow-up PR).
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
