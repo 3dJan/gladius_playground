@@ -10,23 +10,45 @@
 
 **Question**: How to implement per-ray adaptive ω based on SDF gradient?
 
-**Decision**: Use gradient magnitude from finite differences to estimate local Lipschitz bound
+**Initial Decision**: Use gradient magnitude from finite differences to estimate local Lipschitz bound
 
-**Rationale**:
+**Initial Implementation**:
 - SDF gradient magnitude approximates local Lipschitz constant L
 - Safe step = distance / L; over-relaxation ω = min(2.0, 1/L) when L < 1
-- Gradient computed via 4-sample tetrahedron method (already in `surfaceNormal()`)
-- Low cost: reuse distance samples from marching loop
+- Gradient computed via 4-sample tetrahedron method
+
+**Problem Discovered (2026-01-03)**:
+A/B testing revealed only ~2% step reduction with gradient-based approach. Root cause: well-formed SDFs (e.g., gyroid, CSG unions) have gradient magnitude ≈ 1.0, so ω = 1/gradMag ≈ 1.0 provides no benefit.
+
+**Final Decision**: Use Enhanced Sphere Tracing (Keinert et al. 2014) with overshoot detection
+
+**Final Implementation**:
+- Track previous step size (`prevStepSize`) and previous distance (`prevAbsDistance`)
+- Use full over-relaxation (ω = 1.6) by default when far from surfaces
+- Detect overshoot: if `prevAbsDistance + currentAbsDistance < prevStepSize`, we missed a surface
+- On overshoot: backtrack to previous position, retake step with ω = 1.0 (conservative)
+- Benefits:
+  - Works regardless of SDF gradient characteristics
+  - Provides ~19% step reduction on both ideal and non-ideal SDFs
+  - Self-correcting: overshoots are detected and fixed automatically
+
+**Results**:
+| Model | Baseline (ω=1.0) | Optimized | Step Reduction |
+|-------|------------------|-----------|----------------|
+| ImplicitGyroid | 111.23 steps/ray | 89.84 steps/ray | **19.2%** |
+| SphereInACage | 103.37 steps/ray | 83.69 steps/ray | **19.0%** |
 
 **Alternatives Considered**:
 1. Fixed ω per scene → Rejected: doesn't adapt to local geometry complexity
 2. User-adjustable ω → Rejected: clarified that automatic is preferred
 3. Scene-based presets → Rejected: not adaptive enough for mixed scenes
+4. **Gradient-based ω (implemented, then replaced)** → Only ~2% benefit for well-formed SDFs
 
 **Implementation Notes**:
-- Compute gradient every N steps (e.g., 5) to amortize cost
-- Cache gradient magnitude for consecutive steps
-- Clamp ω to [1.0, 1.6] for safety (literature suggests 1.6 optimal for most SDFs)
+- Overshoot detection: `prevAbsDistance + currentAbsDistance < prevStepSize`
+- Backtrack logic reuses previous distance sample (no additional SDF evaluation)
+- Conservative stepping (ω = 1.0) only when close to surfaces or after backtrack
+- RF_DISABLE_ADAPTIVE_OMEGA flag allows A/B testing in integration tests
 
 ---
 
@@ -57,6 +79,14 @@
 - `gladius/src/kernel/renderer.cl`: Pass distance texture to rayCast
 - `gladius/src/compute/Rendering.h/cpp`: Manage distance texture lifecycle
 - `gladius/src/ui/RenderWindow.cpp`: Wire low-res distance to HQ render job
+
+**Implementation Results (2026-01-04)**:
+- Infrastructure fully implemented and tested
+- A/B testing on ImplicitGyroid (512x512) showed ~4% overhead, not speedup
+- Root cause: Gyroid-like scenes fill most of the visible space with no significant empty regions to skip
+- The distance init buffer sampling overhead (plus 10% safety margin) outweighs benefits
+- **Conclusion**: Feature is scene-dependent. Disabled by default in RenderWindow but infrastructure retained
+- Future work: Add heuristic to enable only for scenes with significant empty space (e.g., single objects)
 
 ---
 
@@ -134,6 +164,87 @@
 - Capture: render time (ms), total steps, average steps/ray, non-convergence count
 - Store in `specs/005-ray-march-perf/baselines/` as JSON
 - Integration test compares against baseline with tolerance (e.g., 5% variance)
+
+---
+
+### 6. Shading Optimization Analysis (2026-01-03)
+
+**Question**: Can we reduce shading cost by optimizing normal calculation and AO?
+
+**Implementation**:
+- Added `surfaceNormalFast()` using precomputed SDF texture gradient (6 texture samples vs 4 model evals)
+- Reduced AO iterations for preview mode (4 vs 8)
+- Soft shadows already skipped in preview mode
+
+**Results (ImplicitGyroid 512x512)**:
+| Mode | Render Time | Speedup |
+|------|-------------|---------|
+| Preview (optimized shading) | 27.28 ms | 1.00x |
+| HQ (full shading) | 27.21 ms | baseline |
+
+**Analysis**: 
+For complex SDFs like gyroid, ray marching dominates render time (~95%+). Shading optimizations
+provide minimal impact because:
+1. Gyroid requires ~90 steps per ray (high ray march cost)
+2. Shading only runs once per hit pixel
+3. The ratio of ray marching to shading is heavily weighted toward marching
+
+**Conclusion**: Shading optimizations provide minimal benefit for complex SDFs.
+The primary performance lever remains ray step reduction (Enhanced Sphere Tracing).
+For simpler SDFs where shading is a larger fraction of total cost, these optimizations
+would provide more noticeable improvement.
+
+**Files Added/Modified**:
+- `gladius/src/kernel/rendering.cl`: Added `surfaceNormalFast()`, optimized `calcAmbientOcclusion()` — **REVERTED**
+- `gladius/tests/integrationtests/RayMarchPerf_tests.cpp`: Added `ShadingOptimization_PreviewVsHQ_Timing` benchmark — **REMOVED**
+
+**Production Decision**: Shading optimizations reverted as they provide no measurable benefit for the common case.
+
+---
+
+## Production-Ready Status (2026-01-04)
+
+### Optimizations Kept (Production Ready)
+
+| Optimization | Status | Impact | Details |
+|--------------|--------|--------|---------|
+| Enhanced Sphere Tracing | ✅ PRODUCTION | 19% step reduction | Overshoot detection with backtracking (ω = 1.6) |
+| RF_DISABLE_ADAPTIVE_OMEGA | ✅ PRODUCTION | A/B testing | Flag for performance benchmarking |
+| Metrics kernel | ✅ PRODUCTION | Debug diagnostics | renderSceneWithMetrics() for step counting |
+
+### Optimizations Reverted/Removed
+
+| Optimization | Status | Reason |
+|--------------|--------|--------|
+| Distance Init Buffer | ⚠️ REMOVED (code cleaned) | 4% overhead for dense SDFs; infrastructure kept |
+| surfaceNormalFast() | ❌ REVERTED | No measurable impact; ray marching dominates |
+| Optimized AO iterations | ❌ REVERTED | No measurable impact; ray marching dominates |
+| ShadingOptimization test | ❌ REMOVED | Test confirmed no benefit |
+| RenderWithDistanceInit test | ❌ REMOVED | Test showed overhead, not speedup |
+
+### Key Learnings
+
+1. **Ray marching dominates for complex SDFs**: For scenes like gyroid with ~90 steps/ray, 
+   shading represents <5% of total render time. Optimizing shading provides negligible benefit.
+
+2. **Enhanced Sphere Tracing works universally**: Unlike gradient-based adaptive ω which only 
+   helps non-ideal SDFs (2% benefit), the overshoot detection approach provides consistent 
+   19% step reduction on all tested models.
+
+3. **Distance init is scene-dependent**: Works theoretically but the overhead outweighs benefits 
+   for dense SDF scenes. Would need scene heuristics to enable selectively.
+
+### Files Modified (Production)
+
+- `gladius/src/kernel/rendering.cl`: Enhanced Sphere Tracing in rayCast()
+- `gladius/src/kernel/types.h`: RF_DISABLE_ADAPTIVE_OMEGA flag
+- `gladius/tests/integrationtests/RayMarchPerf_tests.cpp`: A/B comparison tests
+
+### Validation
+
+All 518 unit tests pass. Integration tests confirm:
+- **ImplicitGyroid**: 19.2% step reduction (111.23 → 89.84 steps/ray)
+- **SphereInACage**: 19.0% step reduction (103.37 → 83.69 steps/ray)
 
 ---
 

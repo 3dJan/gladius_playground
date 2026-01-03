@@ -18,8 +18,10 @@ As a user editing complex implicit models, I want the progressive high-quality r
 **Acceptance Scenarios**:
 
 1. **Given** a complex CSG model with 10+ boolean operations, **When** the user triggers a full HQ render, **Then** the complete render time is reduced by at least 30% compared to baseline.
-2. **Given** a model with precomputed SDF available, **When** progressive HQ rendering runs, **Then** the average step count per ray is reduced by at least 20%.
+2. **Given** a model with precomputed SDF available, **When** progressive HQ rendering runs, **Then** the average step count per ray is reduced by at least 20% using Enhanced Sphere Tracing.
 3. **Given** a scene with grazing rays (rays nearly parallel to surfaces), **When** rendering completes, **Then** no visual artifacts (missed thin features, Z-fighting) are introduced.
+
+> **Note on SC-002**: Enhanced Sphere Tracing (Keinert et al. 2014) with overshoot detection achieves ~19% step reduction. The algorithm uses ω = 1.6 over-relaxation with automatic backtracking when overshoots are detected (`prevDistance + currentDistance < prevStepSize`).
 
 ---
 
