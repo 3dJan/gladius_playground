@@ -83,7 +83,7 @@
 
 ### Implementation for User Story 2
 
-- [ ] T026 [US2] Create CMake function `add_component_labels()` in `gladius/tests/CMakeLists.txt` for applying labels based on file patterns
+- [ ] T026 [US2] Create CMake function `add_component_labels()` in `gladius/tests/CMakeLists.txt` for applying labels based on file patterns. Implementation: use `set_tests_properties()` with PROPERTIES LABELS after `gtest_discover_tests()`, matching test names via regex patterns
 - [ ] T027 [US2] Apply `mesh-export` label to test files matching `*Writer3mf*`, `*Exporter*`, `CliWriter*` in `gladius/tests/unittests/CMakeLists.txt`
 - [ ] T028 [P] [US2] Apply `dual-contouring` label to test files matching `DualContouring*`, `HierarchicalDC*`, `ManifoldDualContouring*` in `gladius/tests/integrationtests/CMakeLists.txt`
 - [ ] T029 [P] [US2] Apply `mcp` label to test files matching `MCP_*`, `ApplicationMCPAdapter*`, `JSONRPC*` 
@@ -109,8 +109,9 @@
 ### Implementation for User Story 3
 
 - [ ] T038 [US3] Add `opencl` label to all integration tests requiring OpenCL context in `gladius/tests/integrationtests/CMakeLists.txt`
+- [ ] T038b [P] [US3] Add `external-tools` label to tests requiring admesh or other CLI tools (e.g., `HierarchicalDC_STLExport_tests`)
 - [ ] T039 [US3] Verify integration tests include GPU-dependent tests: `ctest --preset IntegrationTests`
-- [ ] T040 [US3] Verify negative filtering works: `ctest --preset AllTests -LE opencl` excludes GPU tests
+- [ ] T040 [US3] Verify negative filtering works: `ctest --preset AllTests -LE opencl` excludes GPU tests and `ctest --preset AllTests -LE external-tools` excludes admesh-dependent tests
 - [ ] T041 [US3] Update integration test skip messages to be consistent: "OpenCL context not available" or "GPU tests disabled; set GLADIUS_RUN_GPU_TESTS=1"
 
 **Checkpoint**: GPU tests are isolated in IntegrationTests preset and skip gracefully without GPU

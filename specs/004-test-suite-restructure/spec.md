@@ -137,6 +137,7 @@ As a CI/CD pipeline, I want to run all test categories in an optimal order so th
 
 ## Assumptions
 
+- **Terminology**: "Scope" refers to the conceptual grouping (e.g., mesh-export, dual-contouring); "Label" refers to the CTest implementation mechanism. Scopes are implemented as CTest labels.
 - GTest/GMock framework continues to be used for all tests.
 - CTest preset functionality (CMake 3.21+) is available and appropriate for organizing test execution.
 - Current `GLADIUS_RUN_GPU_TESTS` environment variable pattern is acceptable and will continue to be used for GPU test gating within the integration test category.
