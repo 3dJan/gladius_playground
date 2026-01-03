@@ -135,3 +135,56 @@ void kernel renderSceneWithDistanceInit(__write_only image2d_t result,
       determineColor(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
     write_imagef(result, coord, (float4)(color));
 };
+
+/**
+ * @brief Rendering kernel with debug metrics collection (T030-T032)
+ *
+ * This variant collects per-ray metrics using atomic operations for debugging
+ * and performance analysis. Only use when RF_DEBUG_METRICS is set.
+ *
+ * Metrics collected:
+ * - totalRays: Number of rays cast
+ * - totalSteps: Sum of ray march steps across all rays
+ * - cacheHits: (reserved for cachedSdf early-out counting)
+ * - nonConverged: Rays that hit max steps without surface hit
+ */
+void kernel renderSceneWithMetrics(__write_only image2d_t result,
+                                   __global unsigned int* metrics, // [totalRays, totalSteps, cacheHits, nonConverged]
+                                   PAYLOAD_ARGS,
+                                   float3 eyePosition,
+                                   float16 modelViewPerspectiveMat)
+{
+    int2 const coord = {get_global_id(0), get_global_id(1)};
+
+    int2 const imageSize = (int2)(get_image_width(result), get_image_height(result));
+    float const aspectRatio =
+      (float) (get_image_width(result)) / (float) (get_image_height(result));
+    // Normalized position
+    float2 screenPos =
+      (float2)((float) coord.x / (imageSize.x - 1), 1.f - (float) coord.y / (imageSize.y - 1)) +
+      (float2)(-0.5f, -0.5f);
+    screenPos.y /= aspectRatio;
+
+    // Let's shoot a ray
+    float const lensLength = 1.;
+    float3 const rayDirection =
+      normalize(matrixVectorMul3f(modelViewPerspectiveMat, (float3)(screenPos, lensLength)));
+    float const startDistance = 0.f;
+    
+    // Use legacy rayCast without distance init
+    struct RayCastResult const raycastingResult =
+      rayCastLegacy(eyePosition, rayDirection, startDistance, PASS_PAYLOAD_ARGS);
+
+    float4 const color =
+      determineColor(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
+    write_imagef(result, coord, (float4)(color));
+    
+    // Collect metrics using atomic operations (T030)
+    atomic_inc(&metrics[0]);  // totalRays
+    atomic_add(&metrics[1], (unsigned int)raycastingResult.stepCount);  // totalSteps
+    // metrics[2] = cacheHits (reserved for T031)
+    if (raycastingResult.hit < 0.f)
+    {
+        atomic_inc(&metrics[3]);  // nonConverged
+    }
+};

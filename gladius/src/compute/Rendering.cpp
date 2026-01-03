@@ -243,7 +243,7 @@ namespace gladius
         m_lowResPreviewImage->allocateOnDevice();
 
         // Allocate distance init buffer at same resolution as low-res preview (T009)
-        allocateDistanceInitBuffer(width, height);
+        m_resources->allocateDistanceInitBuffer(width, height);
 
         return true;
     }
@@ -496,22 +496,6 @@ namespace gladius
         getResourceContext().setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
     }
 
-    void Rendering::allocateDistanceInitBuffer(size_t width, size_t height)
-    {
-        ProfileFunction
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-
-        if (m_distanceInitBuffer &&
-            width == m_distanceInitBuffer->getWidth() &&
-            height == m_distanceInitBuffer->getHeight())
-        {
-            return;  // Already allocated at correct size
-        }
-
-        m_distanceInitBuffer = std::make_unique<DistanceInitBuffer>(*m_ComputeContext, width, height);
-        m_distanceInitBuffer->allocateOnDevice();
-    }
-
     void Rendering::allocateMetricsBuffer()
     {
         ProfileFunction
@@ -534,11 +518,6 @@ namespace gladius
 
         // Initialize to zero
         clearMetricsBuffer();
-    }
-
-    DistanceInitBuffer * Rendering::getDistanceInitBuffer() const
-    {
-        return m_distanceInitBuffer.get();
     }
 
     RayMarchMetrics Rendering::readMetricsBuffer() const
@@ -582,6 +561,18 @@ namespace gladius
             sizeof(RayMarchMetrics),
             &zeroMetrics);
         CL_ERROR(err);
+    }
+
+    cl::Buffer & Rendering::getMetricsBuffer()
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!m_metricsBufferAllocated)
+        {
+            allocateMetricsBuffer();
+        }
+        return m_metricsBuffer;
     }
 
     // void Rendering::injectSmoothingKernel(std::string const & kernel)

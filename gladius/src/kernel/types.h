@@ -59,6 +59,7 @@ enum RenderingFlags
     RF_SHOW_FIELD = (1u << 2),
     RF_SHOW_STACK = (1u << 3),
     RF_SHOW_COORDINATE_SYSTEM = (1u << 4),
+    RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
     RF_DEBUG_METRICS = (1u << 15)  // Enable debug metrics collection (dev builds)
 };
 
@@ -180,6 +181,7 @@ struct RayCastResult
     float edge;
     float type;
     float4 color;
+    int stepCount;  ///< Number of ray march steps (for debug metrics)
 };
 
 /// Per-frame rendering metrics for debug instrumentation (FR-014)

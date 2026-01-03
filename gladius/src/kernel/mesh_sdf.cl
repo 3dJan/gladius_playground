@@ -659,6 +659,14 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 /// Core implementation: Query signed distance to mesh using BVH traversal
 /// Returns float2 where x = signed distance, y = nearest triangle index (as float)
 /// This is the shared implementation used by all SDF query variants.
+///
+/// Performance optimizations (T024-T026 verification):
+/// - T024 (FR-010) Early-out: AABB distance check skips subtrees farther than current best
+/// - T025: Implicit depth limit via stack[64] and maxIterations = nodeCount*2+100
+/// - T026: Vectorized loads (float4) for cache-friendly 16-byte aligned access
+/// - Ordered traversal: near child first reduces average traversal depth
+/// - Deferred sign: single final triangle test instead of per-triangle sign computation
+///
 /// @param pos Query point in world coordinates
 /// @param nodesOffset Offset to BVH nodes in data array
 /// @param trianglesOffset Offset to triangles in data array

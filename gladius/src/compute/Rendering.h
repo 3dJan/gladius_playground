@@ -69,14 +69,15 @@ namespace gladius
 
         bool isBusy() const;
 
-        /// Returns the distance init buffer for use during HQ rendering (may be null if not allocated)
-        [[nodiscard]] DistanceInitBuffer * getDistanceInitBuffer() const;
-
         /// Read back metrics from GPU buffer after frame completion
         [[nodiscard]] RayMarchMetrics readMetricsBuffer() const;
 
         /// Clear metrics buffer to zero at start of frame
         void clearMetricsBuffer();
+
+        /// Get the metrics buffer for use with renderSceneWithMetricsAsync (T033)
+        /// @note Allocates buffer lazily on first call
+        [[nodiscard]] cl::Buffer & getMetricsBuffer();
 
       private:
         void throwIfNoOpenGL() const;
@@ -91,9 +92,6 @@ namespace gladius
         void renderResultImageReadPixel(DistanceMap & sourceImage,
                                         GLImageBuffer & targetImage) const;
         void renderImage(DistanceMap & sourceImage) const;
-
-        /// Allocate or reallocate distance init buffer to match low-res preview resolution
-        void allocateDistanceInitBuffer(size_t width, size_t height);
 
         /// Allocate metrics buffer for debug instrumentation (single RayMarchMetrics struct)
         void allocateMetricsBuffer();
@@ -121,9 +119,6 @@ namespace gladius
         cl_float m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
-
-        /// Low-res preview traveled distances for HQ ray start initialization (US1 distance init)
-        std::unique_ptr<DistanceInitBuffer> m_distanceInitBuffer;
 
         /// GPU buffer for ray marching metrics collection (dev/debug builds)
         cl::Buffer m_metricsBuffer;

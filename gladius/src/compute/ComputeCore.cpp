@@ -1658,11 +1658,210 @@ namespace gladius
         return renderEvent;
     }
 
+    cl::Event ComputeCore::renderLowResPreviewWithDistanceOutputAsync(
+        cl::CommandQueue const & queue,
+        ImageRGBA & targetImage) const
+    {
+        ProfileFunction
+
+        // Ensure distance buffer is allocated for low-res dimensions
+        auto * distanceBuffer = m_resources->getDistanceInitBuffer();
+        if (!distanceBuffer)
+        {
+            // Buffer not allocated yet - fall back to regular preview
+            return renderLowResPreviewAsync(queue, targetImage);
+        }
+
+        // Use precomputed SDF if available, otherwise use full model evaluation
+        if (m_precompSdfIsValid)
+        {
+            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+        }
+        else
+        {
+            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        }
+
+        cl::Event renderEvent = getBestRenderProgram()->renderSceneWithDistanceOutputAsync(
+            queue,
+            *m_primitives,
+            targetImage,
+            *distanceBuffer,
+            m_sliceHeight_mm,
+            0,
+            targetImage.getHeight());
+
+        queue.flush();
+
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        return renderEvent;
+    }
+
+    bool ComputeCore::renderSceneWithDistanceInit(
+        cl::CommandQueue const & commandQueue,
+        size_t startLine,
+        size_t endLine,
+        ImageRGBA & targetImage,
+        cl::Event * completionEvent)
+    {
+        ProfileFunction
+
+        if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        recompileIfRequired();
+
+        if (getBestRenderProgram()->isCompilationInProgress())
+        {
+            LOG_LOCATION
+            return false;
+        }
+
+        auto * distanceBuffer = m_resources->getDistanceInitBuffer();
+        if (!distanceBuffer || !m_distanceInitBufferValid)
+        {
+            // Fall back to standard rendering if distance buffer not available
+            return renderSceneComputeOnly(commandQueue, startLine, endLine, targetImage, completionEvent);
+        }
+
+        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+
+        cl::Event const renderEvent = getBestRenderProgram()->renderSceneWithDistanceInitAsync(
+            commandQueue,
+            *m_primitives,
+            targetImage,
+            *distanceBuffer,
+            m_sliceHeight_mm,
+            startLine,
+            endLine);
+
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        if (completionEvent != nullptr)
+        {
+            *completionEvent = renderEvent;
+        }
+
+        if (renderEvent())
+        {
+            commandQueue.flush();
+            LOG_LOCATION
+            return true;
+        }
+
+        LOG_LOCATION
+        return false;
+    }
+
+    bool ComputeCore::isDistanceInitBufferValid() const
+    {
+        return m_distanceInitBufferValid && m_resources->getDistanceInitBuffer() != nullptr;
+    }
+
+    void ComputeCore::invalidateDistanceInitBuffer()
+    {
+        m_distanceInitBufferValid = false;
+    }
+
+    void ComputeCore::setDistanceInitBufferValid()
+    {
+        m_distanceInitBufferValid = true;
+    }
+
+    bool ComputeCore::renderSceneWithMetrics(
+        cl::CommandQueue const & commandQueue,
+        size_t startLine,
+        size_t endLine,
+        ImageRGBA & targetImage,
+        cl::Event * completionEvent)
+    {
+        ProfileFunction;
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!m_primitives)
+        {
+            return false;
+        }
+
+        // Ensure metrics buffer is allocated and cleared
+        clearMetricsBuffer();
+
+        // Get the metrics buffer from ResourceContext
+        auto & metricsBuffer = m_resources->getMetricsBuffer();
+
+        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+
+        cl::Event const renderEvent = getBestRenderProgram()->renderSceneWithMetricsAsync(
+            commandQueue,
+            *m_primitives,
+            targetImage,
+            metricsBuffer,
+            m_sliceHeight_mm,
+            startLine,
+            endLine);
+
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        if (completionEvent != nullptr)
+        {
+            *completionEvent = renderEvent;
+        }
+
+        if (renderEvent())
+        {
+            commandQueue.flush();
+            return true;
+        }
+
+        return false;
+    }
+
+    void ComputeCore::clearMetricsBuffer()
+    {
+        ProfileFunction;
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        auto & metricsBuffer = m_resources->getMetricsBuffer();
+        RayMarchMetrics zeroMetrics{};
+        cl_int err = m_ComputeContext->GetQueue().enqueueWriteBuffer(
+            metricsBuffer,
+            CL_TRUE,  // blocking write
+            0,
+            sizeof(RayMarchMetrics),
+            &zeroMetrics);
+        CL_ERROR(err);
+    }
+
+    RayMarchMetrics ComputeCore::readMetricsBuffer() const
+    {
+        ProfileFunction;
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        RayMarchMetrics metrics{};
+        auto & metricsBuffer = m_resources->getMetricsBuffer();
+
+        cl_int err = m_ComputeContext->GetQueue().enqueueReadBuffer(
+            metricsBuffer,
+            CL_TRUE,  // blocking read
+            0,
+            sizeof(RayMarchMetrics),
+            &metrics);
+        CL_ERROR(err);
+
+        return metrics;
+    }
+
     void ComputeCore::invalidatePreCompSdf(std::string_view reason)
     {
         std::string const reasonStr = reason.empty() ? std::string{} : std::string(reason);
 
         m_precompSdfIsValid = false;
+        // Distance buffer depends on SDF being valid, so invalidate it too
+        m_distanceInitBufferValid = false;
     }
 
     void ComputeCore::setSdfValid(bool valid)

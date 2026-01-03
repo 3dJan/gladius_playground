@@ -57,6 +57,60 @@ namespace gladius
                            size_t endHeight,
                            cl::Event * completionEvent = nullptr);
 
+        /// @brief Render scene and write traveled distance to buffer for HQ init (T017/T018)
+        /// @param queue Command queue to use for execution.
+        /// @param lines Primitives for rendering.
+        /// @param targetImage Target image buffer for color output.
+        /// @param distanceOutput Output buffer for traveled distance (same resolution as targetImage).
+        /// @param z_mm Slice height in millimeters.
+        /// @param startHeight Starting row for rendering.
+        /// @param endHeight Ending row for rendering.
+        /// @return Completion event for synchronization.
+        [[nodiscard]] cl::Event renderSceneWithDistanceOutputAsync(
+            cl::CommandQueue const & queue,
+            Primitives const & lines,
+            ImageRGBA & targetImage,
+            DistanceInitBuffer & distanceOutput,
+            cl_float z_mm,
+            size_t startHeight,
+            size_t endHeight);
+
+        /// @brief Render scene using distance init buffer to skip empty space (T016/T018)
+        /// @param queue Command queue to use for execution.
+        /// @param lines Primitives for rendering.
+        /// @param targetImage Target image buffer for color output.
+        /// @param distanceInit Input buffer with traveled distances from low-res preview.
+        /// @param z_mm Slice height in millimeters.
+        /// @param startHeight Starting row for rendering.
+        /// @param endHeight Ending row for rendering.
+        /// @return Completion event for synchronization.
+        [[nodiscard]] cl::Event renderSceneWithDistanceInitAsync(
+            cl::CommandQueue const & queue,
+            Primitives const & lines,
+            ImageRGBA & targetImage,
+            DistanceInitBuffer & distanceInit,
+            cl_float z_mm,
+            size_t startHeight,
+            size_t endHeight);
+
+        /// @brief Render scene with metrics collection for performance analysis (T033)
+        /// @param queue Command queue to use for execution.
+        /// @param lines Primitives for rendering.
+        /// @param targetImage Target image buffer for color output.
+        /// @param metricsBuffer Buffer for collecting ray march metrics (4 x uint32).
+        /// @param z_mm Slice height in millimeters.
+        /// @param startHeight Starting row for rendering.
+        /// @param endHeight Ending row for rendering.
+        /// @return Completion event for synchronization.
+        [[nodiscard]] cl::Event renderSceneWithMetricsAsync(
+            cl::CommandQueue const & queue,
+            Primitives const & lines,
+            ImageRGBA & targetImage,
+            cl::Buffer & metricsBuffer,
+            cl_float z_mm,
+            size_t startHeight,
+            size_t endHeight);
+
       private:
     };
 }
