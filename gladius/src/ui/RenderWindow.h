@@ -128,6 +128,12 @@ namespace gladius::ui
 
         bool isFocused() const;
 
+        /**
+         * @brief Check if camera is currently moving (for UI status display)
+         * @return true if the camera is being manipulated
+         */
+        [[nodiscard]] bool isCameraMoving() const;
+
       private:
         void render(RenderWindowState & state);
         void renderLoadingOverlay();

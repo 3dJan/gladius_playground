@@ -611,6 +611,9 @@ namespace gladius
         void invalidatePreCompSdf(std::string_view reason = {});
         void setSdfValid(bool valid);
         [[nodiscard]] bool isSdfValid() const;
+        [[nodiscard]] ApproximationMode getLastUsedApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedPreviewApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedHQApproximation() const;
         [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
@@ -710,6 +713,13 @@ namespace gladius
         /// @brief Tracks whether the distance init buffer contains valid data
         /// @note Invalidated on parameter changes, camera changes, or resolution changes
         bool m_distanceInitBufferValid = false;
+
+        /// @brief Tracks the last approximation mode used for rendering (for diagnostics)
+        mutable ApproximationMode m_lastUsedApproximation = AM_FULL_MODEL;
+        /// @brief Tracks the last approximation mode used for preview rendering
+        mutable ApproximationMode m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        /// @brief Tracks the last approximation mode used for HQ rendering
+        mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
 
         CodeGenerator m_codeGenerator = CodeGenerator::Code;
 

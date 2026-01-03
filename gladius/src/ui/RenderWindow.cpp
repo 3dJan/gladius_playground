@@ -220,6 +220,12 @@ namespace gladius::ui
         m_asyncJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
+        
+        // Invalidate distance init buffer on epoch change - camera/scene changed (FR-005)
+        if (m_core)
+        {
+            m_core->invalidateDistanceInitBuffer();
+        }
 
         // Release progressive buffer on epoch change
         if (m_asyncProgressiveBuffer)
@@ -1965,8 +1971,10 @@ namespace gladius::ui
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
 
                     cl::Event renderEvent{};
-                    bool const advanced = m_core->renderSceneComputeOnly(
-                      commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
+                    bool advanced = false;
+                    
+                    advanced = m_core->renderSceneComputeOnly(
+                        commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
 
                     if (renderEvent())
                     {
@@ -2191,6 +2199,11 @@ namespace gladius::ui
     bool RenderWindow::isFocused() const
     {
         return m_isWindowFocused && isVisible();
+    }
+
+    bool RenderWindow::isCameraMoving() const
+    {
+        return m_renderWindowState.isMoving;
     }
 
     void RenderWindow::handleKeyInput()
@@ -2552,8 +2565,9 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Kick off the async render - returns immediately with completion event
-            cl::Event renderEvent = m_core->renderLowResPreviewAsync(commandQueue, *lowResImage);
+            // Kick off the async render with distance output for HQ initialization (FR-005)
+            // This populates the distance init buffer for use by subsequent HQ renders
+            cl::Event renderEvent = m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
 
             if (!renderEvent())
             {
@@ -2624,6 +2638,9 @@ namespace gladius::ui
 
             // Finish the queue to ensure all work is complete before UI thread reads the buffer.
             commandQueue.finish();
+            
+            // Mark distance init buffer as valid - HQ renders can now use it (FR-005)
+            m_core->setDistanceInitBufferValid();
 
             // NOTE: We intentionally do NOT resample here because resample writes to
             // m_resultImage which is a GL-interop buffer. GL operations must happen

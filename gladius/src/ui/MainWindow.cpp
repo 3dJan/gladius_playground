@@ -1727,14 +1727,47 @@ namespace gladius::ui
             }
             ImGui::PopStyleColor(4);
 
-            // Show UI scale, FPS, and compute status on the right
+            // Show UI scale, FPS, rendering mode, and compute status on the right
             ImGui::SameLine();
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 320.0f);
-            ImGui::Text("UI %.2f (%.2f x %.2f) | %.0f FPS",
-                        m_mainView.getUiScale(),
-                        m_mainView.getBaseScale(),
-                        m_mainView.getUserScale(),
-                        ImGui::GetIO().Framerate);
+            
+            // Get rendering mode info from ComputeCore
+            // Show preview mode while camera is moving, HQ mode when still
+            char const * renderModeStr = "N/A";
+            char const * sdfStatusStr = "";
+            if (m_core)
+            {
+                bool const cameraMoving = m_renderWindow.isCameraMoving();
+                auto const approx = cameraMoving 
+                    ? m_core->getLastUsedPreviewApproximation()
+                    : m_core->getLastUsedHQApproximation();
+                bool const sdfValid = m_core->isSdfValid();
+                
+                if (approx & AM_FULL_MODEL)
+                {
+                    renderModeStr = "FULL";
+                }
+                else if (approx & AM_ONLY_PRECOMPSDF)
+                {
+                    renderModeStr = "TEX3D";
+                }
+                else if (approx & AM_HYBRID)
+                {
+                    renderModeStr = "HYB";
+                }
+                else
+                {
+                    renderModeStr = "?";
+                }
+                
+                // Show SDF status when moving: indicates SDF is still computing
+                sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
+            }
+            
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 400.0f);
+            ImGui::Text("%.0f FPS | %s%s",
+                        ImGui::GetIO().Framerate,
+                        renderModeStr,
+                        sdfStatusStr);
 
             if (!m_computeAvailable)
             {

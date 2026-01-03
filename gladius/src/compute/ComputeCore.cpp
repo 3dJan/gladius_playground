@@ -1522,6 +1522,8 @@ namespace gladius
         glFinish();
 
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        m_lastUsedApproximation = AM_HYBRID;
+        m_lastUsedHQApproximation = AM_HYBRID;
         getBestRenderProgram()->renderScene(
           *m_primitives, *m_resultImage, m_sliceHeight_mm, startLine, endLine);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
@@ -1563,6 +1565,8 @@ namespace gladius
         }
 
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        m_lastUsedApproximation = AM_HYBRID;
+        m_lastUsedHQApproximation = AM_HYBRID;
 
         // Render directly to the target CL image buffer (no GL involved)
         cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
@@ -1608,6 +1612,8 @@ namespace gladius
         }
 
         m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
 
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,
@@ -1636,10 +1642,14 @@ namespace gladius
         if (m_precompSdfIsValid)
         {
             m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
         else
         {
             m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
@@ -1676,10 +1686,14 @@ namespace gladius
         if (m_precompSdfIsValid)
         {
             m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
         else
         {
             m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneWithDistanceOutputAsync(
@@ -1872,6 +1886,21 @@ namespace gladius
     bool ComputeCore::isSdfValid() const
     {
         return m_precompSdfIsValid;
+    }
+
+    ApproximationMode ComputeCore::getLastUsedApproximation() const
+    {
+        return m_lastUsedApproximation;
+    }
+
+    ApproximationMode ComputeCore::getLastUsedPreviewApproximation() const
+    {
+        return m_lastUsedPreviewApproximation;
+    }
+
+    ApproximationMode ComputeCore::getLastUsedHQApproximation() const
+    {
+        return m_lastUsedHQApproximation;
     }
 
     events::SharedLogger ComputeCore::getSharedLogger() const
