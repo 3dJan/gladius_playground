@@ -460,13 +460,15 @@ namespace gladius::tests
     TEST_F(RayMarchPerfTest, RenderWithMetrics_SphereInACage_AdaptiveOmega_ABComparison)
     {
         auto testFile = findTestFile("SphereInACage.3mf");
-        if (testFile.empty())
+        if (testFile.empty() || !fs::exists(testFile))
         {
             GTEST_SKIP() << "SphereInACage.3mf not found in testdata directory";
         }
 
-        auto bundle = loadDocument(testFile.string());
+        auto bundle = loadDocument(testFile);
         ASSERT_NE(bundle.core, nullptr);
+        ASSERT_TRUE(bundle.core->updateBBox());
+        ASSERT_TRUE(bundle.core->prepareImageRendering());
 
         auto bbox = bundle.core->getBoundingBox();
         ASSERT_TRUE(bbox.has_value());
@@ -496,6 +498,8 @@ namespace gladius::tests
         auto runMetricsRender = [&](bool disableAdaptiveOmega) -> RayMarchMetrics {
             // Set or clear the RF_DISABLE_ADAPTIVE_OMEGA flag
             auto & settings = resources->getRenderingSettings();
+            auto const originalFlags = settings.flags;  // Save original for restoration
+            
             if (disableAdaptiveOmega)
             {
                 settings.flags = static_cast<RenderingFlags>(settings.flags | RF_DISABLE_ADAPTIVE_OMEGA);
@@ -516,7 +520,9 @@ namespace gladius::tests
                 event.wait();
             }
             
-            return bundle.core->readMetricsBuffer();
+            auto const metrics = bundle.core->readMetricsBuffer();
+            settings.flags = originalFlags;  // Restore original flags
+            return metrics;
         };
         
         // Run baseline (adaptive ω DISABLED - standard sphere tracing)

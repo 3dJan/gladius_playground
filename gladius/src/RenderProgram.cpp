@@ -31,6 +31,49 @@ namespace gladius
                          "renderer.cl"};
     }
 
+    RenderProgram::RenderSetup RenderProgram::prepareRenderSetup(
+        ImageRGBA & targetImage,
+        cl_float z_mm,
+        size_t startHeight,
+        size_t endHeight)
+    {
+        RenderSetup setup{};
+
+        if (!m_programFront->isValid())
+        {
+            return setup;
+        }
+        swapProgramsIfNeeded();
+
+        if (startHeight >= endHeight)
+        {
+            return setup;
+        }
+
+        auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
+        auto const size =
+          std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
+
+        if (size < 1 || size > kMaxRenderHeightPerDispatch)
+        {
+            return setup;
+        }
+
+        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
+            glImageBuffer != nullptr)
+        {
+            glImageBuffer->invalidateContent();
+        }
+
+        m_resources->getRenderingSettings().time_s = m_resources->getTime_s();
+        m_resources->getRenderingSettings().z_mm = z_mm;
+
+        setup.origin = {0, start, 0};
+        setup.globalRange = {targetImage.getWidth(), size, 1};
+        setup.valid = true;
+        return setup;
+    }
+
     void RenderProgram::renderScene(const Primitives & lines,
                                     ImageRGBA & targetImage,
                                     cl_float z_mm,
@@ -76,37 +119,9 @@ namespace gladius
     {
         ProfileFunction;
         cl::Event kernelEvent{};
-        if (!m_programFront->isValid())
-        {
-            return kernelEvent;
-        }
-        swapProgramsIfNeeded();
 
-        if (startHeight >= endHeight)
-        {
-            return kernelEvent;
-        }
-        auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
-        auto const size =
-          std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
-
-        if (size < 1 || size > kMaxRenderHeightPerDispatch)
-        {
-            return kernelEvent;
-        }
-        cl::NDRange const origin = {0, start, 0};
-        cl::NDRange const globalRange = {targetImage.getWidth(), size, 1};
-
-        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
-            glImageBuffer != nullptr)
-        {
-            glImageBuffer->invalidateContent();
-        }
-
-        m_resoures->getRenderingSettings().time_s = m_resoures->getTime_s();
-        m_resoures->getRenderingSettings().z_mm = z_mm;
-
-        if (!m_programFront->isValid())
+        auto const setup = prepareRenderSetup(targetImage, z_mm, startHeight, endHeight);
+        if (!setup.valid)
         {
             return kernelEvent;
         }
@@ -116,22 +131,22 @@ namespace gladius
             kernelEvent = m_programFront->runNonBlocking(
               queue,
               "renderScene",
-              origin,
-              globalRange,
+              setup.origin,
+              setup.globalRange,
               targetImage.getBuffer(),
-              m_resoures->getBuildArea(),
+              m_resources->getBuildArea(),
               lines.primitives.getBuffer(),
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resoures->getRenderingSettings(),
-              m_resoures->getPrecompSdfBuffer().getBuffer(),
-              m_resoures->getParameterBuffer().getBuffer(),
-              m_resoures->getCommandBuffer().getBuffer(),
-              cl_int(m_resoures->getCommandBuffer().getData().size()),
-              m_resoures->getPreCompSdfBBox(),
-              m_resoures->getEyePosition(),
-              m_resoures->getModelViewPerspectiveMat());
+              m_resources->getRenderingSettings(),
+              m_resources->getPrecompSdfBuffer().getBuffer(),
+              m_resources->getParameterBuffer().getBuffer(),
+              m_resources->getCommandBuffer().getBuffer(),
+              cl_int(m_resources->getCommandBuffer().getData().size()),
+              m_resources->getPreCompSdfBBox(),
+              m_resources->getEyePosition(),
+              m_resources->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {
@@ -199,37 +214,9 @@ namespace gladius
     {
         ProfileFunction;
         cl::Event kernelEvent{};
-        if (!m_programFront->isValid())
-        {
-            return kernelEvent;
-        }
-        swapProgramsIfNeeded();
 
-        if (startHeight >= endHeight)
-        {
-            return kernelEvent;
-        }
-        auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
-        auto const size =
-          std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
-
-        if (size < 1 || size > kMaxRenderHeightPerDispatch)
-        {
-            return kernelEvent;
-        }
-        cl::NDRange const origin = {0, start, 0};
-        cl::NDRange const globalRange = {targetImage.getWidth(), size, 1};
-
-        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
-            glImageBuffer != nullptr)
-        {
-            glImageBuffer->invalidateContent();
-        }
-
-        m_resoures->getRenderingSettings().time_s = m_resoures->getTime_s();
-        m_resoures->getRenderingSettings().z_mm = z_mm;
-
-        if (!m_programFront->isValid())
+        auto const setup = prepareRenderSetup(targetImage, z_mm, startHeight, endHeight);
+        if (!setup.valid)
         {
             return kernelEvent;
         }
@@ -239,23 +226,23 @@ namespace gladius
             kernelEvent = m_programFront->runNonBlocking(
               queue,
               "renderSceneWithDistanceOutput",
-              origin,
-              globalRange,
+              setup.origin,
+              setup.globalRange,
               targetImage.getBuffer(),
               distanceOutput.getBuffer(),
-              m_resoures->getBuildArea(),
+              m_resources->getBuildArea(),
               lines.primitives.getBuffer(),
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resoures->getRenderingSettings(),
-              m_resoures->getPrecompSdfBuffer().getBuffer(),
-              m_resoures->getParameterBuffer().getBuffer(),
-              m_resoures->getCommandBuffer().getBuffer(),
-              cl_int(m_resoures->getCommandBuffer().getData().size()),
-              m_resoures->getPreCompSdfBBox(),
-              m_resoures->getEyePosition(),
-              m_resoures->getModelViewPerspectiveMat());
+              m_resources->getRenderingSettings(),
+              m_resources->getPrecompSdfBuffer().getBuffer(),
+              m_resources->getParameterBuffer().getBuffer(),
+              m_resources->getCommandBuffer().getBuffer(),
+              cl_int(m_resources->getCommandBuffer().getData().size()),
+              m_resources->getPreCompSdfBBox(),
+              m_resources->getEyePosition(),
+              m_resources->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {
@@ -279,66 +266,39 @@ namespace gladius
     {
         ProfileFunction;
         cl::Event kernelEvent{};
-        if (!m_programFront->isValid())
+
+        auto const setup = prepareRenderSetup(targetImage, z_mm, startHeight, endHeight);
+        if (!setup.valid)
         {
             return kernelEvent;
         }
-        swapProgramsIfNeeded();
 
-        if (startHeight >= endHeight)
-        {
-            return kernelEvent;
-        }
-        auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
-        auto const size =
-          std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
-
-        if (size < 1 || size > kMaxRenderHeightPerDispatch)
-        {
-            return kernelEvent;
-        }
-        cl::NDRange const origin = {0, start, 0};
-        cl::NDRange const globalRange = {targetImage.getWidth(), size, 1};
-
-        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
-            glImageBuffer != nullptr)
-        {
-            glImageBuffer->invalidateContent();
-        }
-
-        m_resoures->getRenderingSettings().time_s = m_resoures->getTime_s();
-        m_resoures->getRenderingSettings().z_mm = z_mm;
         // Enable distance initialization flag (T020)
-        m_resoures->getRenderingSettings().approximation = static_cast<ApproximationMode>(
-            m_resoures->getRenderingSettings().approximation | AM_USE_DISTANCE_INIT);
-
-        if (!m_programFront->isValid())
-        {
-            return kernelEvent;
-        }
+        m_resources->getRenderingSettings().approximation = static_cast<ApproximationMode>(
+            m_resources->getRenderingSettings().approximation | AM_USE_DISTANCE_INIT);
 
         try
         {
             kernelEvent = m_programFront->runNonBlocking(
               queue,
               "renderSceneWithDistanceInit",
-              origin,
-              globalRange,
+              setup.origin,
+              setup.globalRange,
               targetImage.getBuffer(),
               distanceInit.getBuffer(),
-              m_resoures->getBuildArea(),
+              m_resources->getBuildArea(),
               lines.primitives.getBuffer(),
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resoures->getRenderingSettings(),
-              m_resoures->getPrecompSdfBuffer().getBuffer(),
-              m_resoures->getParameterBuffer().getBuffer(),
-              m_resoures->getCommandBuffer().getBuffer(),
-              cl_int(m_resoures->getCommandBuffer().getData().size()),
-              m_resoures->getPreCompSdfBBox(),
-              m_resoures->getEyePosition(),
-              m_resoures->getModelViewPerspectiveMat());
+              m_resources->getRenderingSettings(),
+              m_resources->getPrecompSdfBuffer().getBuffer(),
+              m_resources->getParameterBuffer().getBuffer(),
+              m_resources->getCommandBuffer().getBuffer(),
+              cl_int(m_resources->getCommandBuffer().getData().size()),
+              m_resources->getPreCompSdfBBox(),
+              m_resources->getEyePosition(),
+              m_resources->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {
@@ -349,8 +309,8 @@ namespace gladius
         }
 
         // Clear the distance init flag after use
-        m_resoures->getRenderingSettings().approximation = static_cast<ApproximationMode>(
-            m_resoures->getRenderingSettings().approximation & ~AM_USE_DISTANCE_INIT);
+        m_resources->getRenderingSettings().approximation = static_cast<ApproximationMode>(
+            m_resources->getRenderingSettings().approximation & ~AM_USE_DISTANCE_INIT);
 
         return kernelEvent;
     }
@@ -366,58 +326,35 @@ namespace gladius
     {
         ProfileFunction;
         cl::Event kernelEvent{};
-        if (!m_programFront->isValid())
+
+        auto const setup = prepareRenderSetup(targetImage, z_mm, startHeight, endHeight);
+        if (!setup.valid)
         {
             return kernelEvent;
         }
-        swapProgramsIfNeeded();
-
-        if (startHeight >= endHeight)
-        {
-            return kernelEvent;
-        }
-        auto const start = std::clamp(startHeight, size_t(0), targetImage.getHeight() - 2);
-        auto const size =
-          std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
-
-        if (size < 1 || size > kMaxRenderHeightPerDispatch)
-        {
-            return kernelEvent;
-        }
-        cl::NDRange const origin = {0, start, 0};
-        cl::NDRange const globalRange = {targetImage.getWidth(), size, 1};
-
-        if (auto * glImageBuffer = dynamic_cast<GLImageBuffer *>(&targetImage);
-            glImageBuffer != nullptr)
-        {
-            glImageBuffer->invalidateContent();
-        }
-
-        m_resoures->getRenderingSettings().time_s = m_resoures->getTime_s();
-        m_resoures->getRenderingSettings().z_mm = z_mm;
 
         try
         {
             kernelEvent = m_programFront->runNonBlocking(
               queue,
               "renderSceneWithMetrics",
-              origin,
-              globalRange,
+              setup.origin,
+              setup.globalRange,
               targetImage.getBuffer(),
               metricsBuffer,
-              m_resoures->getBuildArea(),
+              m_resources->getBuildArea(),
               lines.primitives.getBuffer(),
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resoures->getRenderingSettings(),
-              m_resoures->getPrecompSdfBuffer().getBuffer(),
-              m_resoures->getParameterBuffer().getBuffer(),
-              m_resoures->getCommandBuffer().getBuffer(),
-              cl_int(m_resoures->getCommandBuffer().getData().size()),
-              m_resoures->getPreCompSdfBBox(),
-              m_resoures->getEyePosition(),
-              m_resoures->getModelViewPerspectiveMat());
+              m_resources->getRenderingSettings(),
+              m_resources->getPrecompSdfBuffer().getBuffer(),
+              m_resources->getParameterBuffer().getBuffer(),
+              m_resources->getCommandBuffer().getBuffer(),
+              cl_int(m_resources->getCommandBuffer().getData().size()),
+              m_resources->getPreCompSdfBBox(),
+              m_resources->getEyePosition(),
+              m_resources->getModelViewPerspectiveMat());
         }
         catch (std::exception const & e)
         {

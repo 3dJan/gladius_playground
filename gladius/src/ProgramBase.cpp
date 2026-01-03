@@ -11,7 +11,7 @@ namespace gladius
     ProgramBase::ProgramBase(SharedComputeContext context, const SharedResources resources)
         : m_ComputeContext(context)
         , m_programFront(std::make_unique<CLProgram>(context))
-        , m_resoures(resources)
+        , m_resources(resources)
     {
         if (m_logger)
         {

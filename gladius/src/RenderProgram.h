@@ -112,5 +112,24 @@ namespace gladius
             size_t endHeight);
 
       private:
+        /// @brief Result of render setup preparation
+        struct RenderSetup
+        {
+            cl::NDRange origin;
+            cl::NDRange globalRange;
+            bool valid = false;
+        };
+
+        /// @brief Prepare common render parameters (validity checks, clamping, GL buffer handling)
+        /// @param targetImage Target image buffer
+        /// @param z_mm Slice height in millimeters
+        /// @param startHeight Starting row for rendering
+        /// @param endHeight Ending row for rendering
+        /// @return RenderSetup with origin/range and validity flag
+        [[nodiscard]] RenderSetup prepareRenderSetup(
+            ImageRGBA & targetImage,
+            cl_float z_mm,
+            size_t startHeight,
+            size_t endHeight);
     };
 }

@@ -12,22 +12,22 @@ namespace gladius
 {
 
 #define PAYLOAD_ARGUMENTS                                                                          \
-    m_resoures->getBuildArea(), lines.primitives.getBuffer(),                                      \
+    m_resources->getBuildArea(), lines.primitives.getBuffer(),                                      \
       static_cast<cl_uint>(lines.primitives.getSize()), lines.data.getBuffer(),                    \
-      static_cast<cl_uint>(lines.data.getSize()), m_resoures->getRenderingSettings(),              \
-      m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
-      m_resoures->getCommandBuffer().getBuffer(),                                                  \
-      static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
-      m_resoures->getPreCompSdfBBox()
+      static_cast<cl_uint>(lines.data.getSize()), m_resources->getRenderingSettings(),              \
+      m_resources->getPrecompSdfBuffer().getBuffer(), m_resources->getParameterBuffer().getBuffer(), \
+      m_resources->getCommandBuffer().getBuffer(),                                                  \
+      static_cast<cl_int>(m_resources->getCommandBuffer().getData().size()),                        \
+      m_resources->getPreCompSdfBBox()
 
 #define PAYLOAD_ARGUMENTS_CLIPPING_AREA                                                            \
-    m_resoures->getClippingArea(), lines.primitives.getBuffer(),                                   \
+    m_resources->getClippingArea(), lines.primitives.getBuffer(),                                   \
       static_cast<cl_uint>(lines.primitives.getSize()), lines.data.getBuffer(),                    \
-      static_cast<cl_uint>(lines.data.getSize()), m_resoures->getRenderingSettings(),              \
-      m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
-      m_resoures->getCommandBuffer().getBuffer(),                                                  \
-      static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
-      m_resoures->getPreCompSdfBBox()
+      static_cast<cl_uint>(lines.data.getSize()), m_resources->getRenderingSettings(),              \
+      m_resources->getPrecompSdfBuffer().getBuffer(), m_resources->getParameterBuffer().getBuffer(), \
+      m_resources->getCommandBuffer().getBuffer(),                                                  \
+      static_cast<cl_int>(m_resources->getCommandBuffer().getData().size()),                        \
+      m_resources->getPreCompSdfBBox()
 
     gladius::SlicerProgram::SlicerProgram(SharedComputeContext context,
                                           const SharedResources & resources)
@@ -52,25 +52,25 @@ namespace gladius
     void SlicerProgram::readBuffer() const
     {
 
-        m_resoures->getContourVertexPos().read();
+        m_resources->getContourVertexPos().read();
     }
 
     void SlicerProgram::renderFirstLayer(const Primitives & lines, cl_float isoValue, cl_float z_mm)
     {
         ProfileFunction;
         swapProgramsIfNeeded();
-        const auto res = m_resoures->getMipMapResolutions().front();
+        const auto res = m_resources->getMipMapResolutions().front();
         const cl_float branchThreshold = determineBranchThreshold(res, isoValue);
 
         const cl::NDRange origin = {0, 0, 0};
-        const cl::NDRange globalRange = {m_resoures->getDistanceMipMaps().front()->getWidth(),
-                                         m_resoures->getDistanceMipMaps().front()->getHeight(),
+        const cl::NDRange globalRange = {m_resources->getDistanceMipMaps().front()->getWidth(),
+                                         m_resources->getDistanceMipMaps().front()->getHeight(),
                                          1u};
 
         m_programFront->run("renderSDFFirstLayer",
                             origin,
                             globalRange,
-                            m_resoures->getDistanceMipMaps().front()->getBuffer(), // 0
+                            m_resources->getDistanceMipMaps().front()->getBuffer(), // 0
                             branchThreshold,                                       // 1
                             PAYLOAD_ARGUMENTS_CLIPPING_AREA,
                             z_mm); // 12
@@ -80,15 +80,15 @@ namespace gladius
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
-        m_resoures->getRenderingSettings().approximation = AM_HYBRID;
+        m_resources->getRenderingSettings().approximation = AM_HYBRID;
         swapProgramsIfNeeded();
         renderFirstLayer(lines, isoValue, z_mm);
 
-        auto resIt = std::begin(m_resoures->getMipMapResolutions());
-        auto distMapIt = std::begin(m_resoures->getDistanceMipMaps());
+        auto resIt = std::begin(m_resources->getMipMapResolutions());
+        auto distMapIt = std::begin(m_resources->getDistanceMipMaps());
 
-        for (++resIt, ++distMapIt; resIt != std::end(m_resoures->getMipMapResolutions()) &&
-                                   distMapIt != std::end(m_resoures->getDistanceMipMaps());
+        for (++resIt, ++distMapIt; resIt != std::end(m_resources->getMipMapResolutions()) &&
+                                   distMapIt != std::end(m_resources->getDistanceMipMaps());
              ++resIt, ++distMapIt)
         {
             const auto res = *resIt;
@@ -109,7 +109,7 @@ namespace gladius
                                 z_mm); // 13
         }
 
-        auto & lastLayer = *m_resoures->getDistanceMipMaps().back();
+        auto & lastLayer = *m_resources->getDistanceMipMaps().back();
         lastLayer.read();
     }
 
@@ -117,14 +117,14 @@ namespace gladius
     {
         ProfileFunction;
         const auto buildAreaWidth =
-          m_resoures->getClippingArea().z - m_resoures->getClippingArea().x;
+          m_resources->getClippingArea().z - m_resources->getClippingArea().x;
         const auto buildAreaHeight =
-          m_resoures->getClippingArea().w - m_resoures->getClippingArea().y;
+          m_resources->getClippingArea().w - m_resources->getClippingArea().y;
         const auto maxSize = std::max(buildAreaWidth / static_cast<float>(res.x),
                                       buildAreaHeight / static_cast<float>(res.y));
         const auto maxSizeGrid =
-          std::max(buildAreaWidth / static_cast<float>(m_resoures->getGridSize().x),
-                   buildAreaHeight / static_cast<float>(m_resoures->getGridSize().y));
+          std::max(buildAreaWidth / static_cast<float>(m_resources->getGridSize().x),
+                   buildAreaHeight / static_cast<float>(m_resources->getGridSize().y));
         return fabs(isoValue) + std::max(maxSize, maxSizeGrid) * 2.0f;
     }
 
@@ -145,8 +145,8 @@ namespace gladius
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
         swapProgramsIfNeeded();
-        auto & target = m_resoures->getPrecompSdfBuffer();
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        auto & target = m_resources->getPrecompSdfBuffer();
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {target.getWidth(), target.getHeight(), target.getDepth()};
         m_programFront->run(
@@ -161,8 +161,8 @@ namespace gladius
         ProfileFunction;
         swapProgramsIfNeeded();
 
-        auto & target = m_resoures->getPrecompSdfBuffer();
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        auto & target = m_resources->getPrecompSdfBuffer();
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {target.getWidth(), target.getHeight(), target.getDepth()};
@@ -190,7 +190,7 @@ namespace gladius
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
         swapProgramsIfNeeded();
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {mesh.getNumberOfVertices(), 1, 1};
         m_programFront->run("calculateVertexNormals",
@@ -208,7 +208,7 @@ namespace gladius
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
         swapProgramsIfNeeded();
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {targetImage.getWidth(), targetImage.getHeight(), 1};
 
@@ -228,7 +228,7 @@ namespace gladius
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
         swapProgramsIfNeeded();
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {targetImage.getWidth(), targetImage.getHeight(), 1};
         m_programFront->run(
@@ -257,7 +257,7 @@ namespace gladius
         input.write();
         output.write();
 
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {output.getSize(), 1, 1};
         m_programFront->run("movePointsToSurface",
@@ -286,7 +286,7 @@ namespace gladius
         input.write();
         output.write();
 
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {output.getSize(), 1, 1};
         m_programFront->run("adoptVertexOfMeshToSurface",
@@ -304,20 +304,20 @@ namespace gladius
         ProfileFunction;
         swapProgramsIfNeeded();
         const cl::NDRange origin = {0, 0, 0};
-        const cl::NDRange globalRange = {m_resoures->getMarchingSquareStates().getWidth(),
-                                         m_resoures->getMarchingSquareStates().getHeight(),
+        const cl::NDRange globalRange = {m_resources->getMarchingSquareStates().getWidth(),
+                                         m_resources->getMarchingSquareStates().getHeight(),
                                          1};
-        /*   m_resoures->getRenderingSettings().approximation =
+        /*   m_resources->getRenderingSettings().approximation =
              static_cast<ApproximationMode>(AM_HYBRID | AM_DISABLE_INTERPOLATION);*/
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         m_programFront->run("computeMarchingSquareStates",
                             origin,
                             globalRange,
-                            m_resoures->getMarchingSquareStates().getBuffer(), // 0
+                            m_resources->getMarchingSquareStates().getBuffer(), // 0
                             z_mm,
                             PAYLOAD_ARGUMENTS_CLIPPING_AREA);
 
-        m_resoures->getMarchingSquareStates().read();
+        m_resources->getMarchingSquareStates().read();
     }
 
     void SlicerProgram::adoptVertexPositions2d(const Primitives & lines,
@@ -339,7 +339,7 @@ namespace gladius
         input.write();
         output.write();
 
-        m_resoures->getRenderingSettings().approximation = AM_FULL_MODEL;
+        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {output.getSize(), 1, 1};
 
