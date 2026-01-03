@@ -71,6 +71,7 @@ As a user on hardware with limited VRAM, I want the rendering system to use memo
 ### Edge Cases
 
 - What happens when a ray grazes a surface at near-zero angles? (Grazing problem must not cause excessive iterations or timeout)
+- What happens when a ray fails to converge? → Returns background color; debug mode optionally visualizes/logs non-converged rays
 - How does the system handle degenerate SDF values (NaN, infinity, discontinuities)?
 - What happens when the precomputed SDF resolution is insufficient for fine details?
 - How does performance scale when models contain deeply nested CSG trees (100+ operations)?
@@ -83,16 +84,17 @@ As a user on hardware with limited VRAM, I want the rendering system to use memo
 
 #### Numerical Optimization
 
-- **FR-001**: System MUST implement enhanced sphere tracing with over-relaxation (ω factor between 1.0 and 2.0) for rays traversing empty space
+- **FR-001**: System MUST implement enhanced sphere tracing with adaptive over-relaxation where ω factor (1.0–2.0) is automatically adjusted per-ray based on local SDF gradient magnitude
 - **FR-002**: System MUST detect and mitigate the grazing problem by switching to smaller step sizes when consecutive steps remain small
 - **FR-003**: System MUST maintain binary refinement for surface crossing detection with configurable iteration count (default: 6)
 - **FR-004**: System MUST support local Lipschitz bound estimation for adaptive step sizing in CSG operations
+- **FR-004a**: System MUST return background color for rays that fail to converge; debug mode MAY visualize non-converged rays distinctly
 
 #### Multi-Pass Rendering
 
-- **FR-005**: System MUST support a multi-pass rendering strategy where a low-resolution pass pre-computes approximate ray start distances
-- **FR-006**: System MUST scale SDF footprints in the low-resolution pass to avoid missing thin features
-- **FR-007**: System MUST allow configurable resolution ratios between low-res and high-res passes (default: 1/4 linear, 1/16 pixel count)
+- **FR-005**: System MUST support using the existing low-res preview render result as distance initialization for HQ rendering passes
+- **FR-006**: System MUST scale SDF footprints when sampling the low-res buffer to avoid missing thin features in the HQ pass
+- **FR-007**: System MUST gracefully handle cases where no low-res preview is available (e.g., first render after model load) by falling back to standard ray marching
 
 #### Hierarchical Acceleration
 
@@ -105,6 +107,7 @@ As a user on hardware with limited VRAM, I want the rendering system to use memo
 - **FR-011**: System MUST minimize warp divergence by using uniform control flow where feasible in the main ray march loop
 - **FR-012**: System MUST ensure memory access patterns favor spatial locality for the precomputed SDF 3D texture
 - **FR-013**: System MUST avoid dynamic memory allocation within ray marching kernels
+- **FR-014**: Debug builds MUST expose per-frame metrics (average step count, SDF cache hit rate, non-convergence count) via existing debug overlay
 
 ### Key Entities
 
@@ -117,12 +120,24 @@ As a user on hardware with limited VRAM, I want the rendering system to use memo
 
 ### Measurable Outcomes
 
+**Baseline Methodology**: Performance metrics are measured using existing 3mf test files from integration tests (e.g., `wristsupport.3mf`). Baseline measurements use thumbnail rendering and are stored per-model in version control.
+
 - **SC-001**: Progressive HQ render completes at least 30% faster on complex CSG models compared to baseline
 - **SC-002**: Average ray march step count is reduced by at least 20% for typical viewport renders
 - **SC-003**: Camera interaction maintains 30+ FPS on models that previously dropped below 20 FPS during orbit
 - **SC-004**: No visual quality regression (artifacts, missed features, incorrect colors) in rendered images compared to baseline
 - **SC-005**: Memory overhead for acceleration structures remains below 20% of base model storage
 - **SC-006**: Grazing rays converge within 2x the step count of perpendicular rays (no pathological slowdown)
+
+## Clarifications
+
+### Session 2026-01-03
+
+- Q: How should over-relaxation (speed) vs grazing mitigation (correctness) tradeoff be handled? → A: Adaptive automatic tuning - system adjusts ω per-ray based on local SDF gradient
+- Q: What should happen when a ray fails to converge (hits max step count)? → A: Soft fail - return background color; optionally log/visualize in debug mode only
+- Q: What baseline should performance metrics (SC-001, SC-002) compare against? → A: Per-model baselines using existing 3mf test files from integration tests; use thumbnail rendering for benchmarking
+- Q: What level of instrumentation should the rendering system provide? → A: Per-frame metrics (step counts, cache hits, convergence rate) exposed via existing debug overlay in dev builds only
+- Q: How should multi-pass rendering be triggered? → A: Reuse existing low-res preview result as distance initialization for HQ rendering (no separate pre-pass needed)
 
 ## Assumptions
 
