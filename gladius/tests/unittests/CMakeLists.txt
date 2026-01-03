@@ -16,8 +16,6 @@ if(NOT ENABLE_OPENCL_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/ToCommandStreamVisitor_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Builder_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeOpenCL_tests.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringOctree_tests.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/MeshBaseline_tests.cpp"
   )
   message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring unit tests")
 endif()
@@ -81,5 +79,13 @@ file(COPY "../../components/licenses" DESTINATION ".")
 file(MAKE_DIRECTORY "examples")
 file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 
-# Use gtest_discover_tests for automatic test discovery
-gtest_discover_tests(${BINARY})
+# Use gtest_discover_tests for automatic test discovery with 'unit' label
+# DISCOVERY_MODE POST_BUILD allows set_tests_properties to work after discovery
+gtest_discover_tests(${BINARY}
+    PROPERTIES LABELS "unit"
+    DISCOVERY_MODE POST_BUILD
+)
+
+# Component labels are applied via CTest include script
+# See: gladius/tests/cmake/ComponentLabels.cmake
+

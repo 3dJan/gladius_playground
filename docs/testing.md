@@ -1,7 +1,6 @@
-# Quickstart: Running Gladius Tests
+# Running Gladius Tests
 
-**Feature**: 004-test-suite-restructure  
-**Date**: January 3, 2026
+**Last Updated**: January 3, 2026
 
 ## Overview
 
@@ -9,7 +8,7 @@ Gladius tests are organized into three categories:
 
 | Category | Purpose | Typical Duration | GPU Required |
 |----------|---------|------------------|--------------|
-| **Unit** | Fast feedback during development | <60 seconds | No |
+| **Unit** | Fast feedback during development | ~5 seconds | No |
 | **Integration** | Comprehensive validation with GPU | ~10 minutes | Yes |
 | **API** | External interface validation | ~2 minutes | No |
 
@@ -31,7 +30,7 @@ ctest --preset UnitTests
 ```
 This takes ~3-4 minutes due to CTest spawning a process per test.
 
-Or use VS Code task: **Run Unit Tests**
+Or use VS Code task: **Run Unit Tests (Fast)**
 
 > **Performance Note**: CTest's `gtest_discover_tests()` creates a separate process for each test case, adding ~0.3s overhead per test. For rapid feedback during development, run `./gladius_test` directly. Use CTest when you need label filtering or CI integration.
 
@@ -70,7 +69,7 @@ Run tests for a specific component using CTest regex filters:
 # Run all mesh export tests
 ctest --preset AllTests -R "MeshWriter3mf|Writer3mf|Exporter|CliWriter"
 
-# Run dual contouring tests
+# Run dual contouring tests  
 ctest --preset AllTests -R "DualContouring|HierarchicalDC|ManifoldDualContouring"
 
 # Run MCP protocol tests
@@ -95,7 +94,7 @@ ctest --preset UnitTests
 | `parser` | `ExpressionParser\|Function\|ImplicitModeling` |
 | `ui` | `Dialog\|MainWindow\|Export` |
 
-**Tip**: You can combine the `-R` (include regex) with preset filters:
+**Tip**: Combine `-R` (include regex) with preset filters:
 ```bash
 # Run only unit tests matching mesh-related patterns
 ctest --preset UnitTests -R "MeshWriter3mf|Mesh_Test"
@@ -109,13 +108,6 @@ ctest --preset UnitTests -R "MeshWriter3mf|Mesh_Test"
 | `GLADIUS_DEBUG_MDC_CONFIG` | Enable MDC config debug logging | `0` |
 
 **Note**: The `IntegrationTests` and `AllTests` presets automatically set `GLADIUS_RUN_GPU_TESTS=1`.
-
-## Test Output
-
-Test results are logged to:
-- `out/build/linux-releaseWithDebug/ctest-*.log`
-
-Failed test output is displayed automatically with `--output-on-failure` (enabled in all presets).
 
 ## Writing New Tests
 
@@ -163,9 +155,18 @@ This is expected when running integration tests without GPU. Tests skip graceful
 
 If unit tests take >60 seconds, some tests may have been miscategorized. Check for:
 - Tests with `GTEST_SKIP()` for OpenCL (should be in integration)
-- Tests loading large files (should be in integration)
+- Tests loading large files (should be in integration)  
 - Performance benchmark tests (should be in integration)
 
 ### GPU Tests Not Running
 
 Ensure `GLADIUS_RUN_GPU_TESTS=1` is set. The `IntegrationTests` preset sets this automatically.
+
+## Test Counts (as of January 3, 2026)
+
+| Category | Test Count |
+|----------|------------|
+| Unit Tests | 520 |
+| Integration Tests | 127 |
+| API Tests | 90 |
+| **Total** | **737** |
