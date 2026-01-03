@@ -52,8 +52,8 @@
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Add gradient estimation function estimateGradientMagnitude() using 4-sample tetrahedron in gladius/src/kernel/rendering.cl
-- [ ] T011 [US1] Add adaptive ω calculation based on gradient magnitude (ω = min(1.6, 1.0/gradient)) in rayCast() in gladius/src/kernel/rendering.cl
+- [ ] T010 [US1] Add gradient estimation function estimateGradientMagnitude() using 4-sample tetrahedron in gladius/src/kernel/rendering.cl (implements FR-004 Lipschitz bound estimation)
+- [ ] T011 [US1] Add adaptive ω calculation based on gradient magnitude (ω = min(1.6, 1.0/gradient), where 1.6 is practical safe limit per research.md) in rayCast() in gladius/src/kernel/rendering.cl
 - [ ] T012 [US1] Add grazing detection counter (consecutive small steps > 5 forces ω = 1.0) in rayCast() in gladius/src/kernel/rendering.cl
 - [ ] T013 [US1] Add distanceInitTexture parameter to rayCast() function signature in gladius/src/kernel/rendering.cl
 - [ ] T014 [US1] Sample distance texture at ray start with bilinear interpolation and safety margin in rayCast() in gladius/src/kernel/rendering.cl
@@ -79,6 +79,8 @@
 - [ ] T021 [US2] Apply adaptive ω optimization to low-res preview path (reuse T010-T012 logic) in gladius/src/kernel/rendering.cl
 - [ ] T022 [US2] Verify warp divergence minimization in main ray march loop - document any control flow changes in gladius/src/kernel/rendering.cl
 - [ ] T023 [US2] Profile and optimize texture cache access patterns for precomputed SDF sampling in gladius/src/kernel/rendering.cl
+- [ ] T023a [US2] Verify FR-008: precomputed SDF texture is used for empty space skipping (existing behavior - document/confirm) in gladius/src/kernel/rendering.cl
+- [ ] T023b [US2] Verify FR-009: early ray termination when outside geometry bounds (existing behavior - document/confirm) in gladius/src/kernel/rendering.cl
 
 **Checkpoint**: User Story 2 complete - camera interaction maintains 30+ FPS
 
@@ -125,7 +127,7 @@
 - [ ] T032 [P] Initialize metrics buffer to zero at frame start in renderScene kernel in gladius/src/kernel/renderer.cl
 - [ ] T033 Pass metrics buffer as kernel argument in gladius/src/RenderProgram.cpp
 - [ ] T034 Read metrics buffer after frame completion via clFinish() in gladius/src/compute/Rendering.cpp
-- [ ] T035 Add debug overlay panel displaying step count, cache hits, non-convergence rate in gladius/src/ui/RenderWindow.cpp
+- [ ] T035 Extend existing debug overlay in RenderWindow::drawDebugInfo() to display step count, cache hits, non-convergence rate in gladius/src/ui/RenderWindow.cpp
 - [ ] T036 Gate metrics collection with #ifdef GLADIUS_DEBUG_METRICS in all kernel files
 
 **Checkpoint**: Debug instrumentation complete - metrics visible in overlay
@@ -142,6 +144,8 @@
 - [ ] T040 Add visual regression test comparing rendered image to golden reference in gladius/tests/integrationtests/RayMarchPerf_tests.cpp
 - [ ] T041 Add grazing ray scenario test (ray nearly parallel to surface) in gladius/tests/integrationtests/RayMarchPerf_tests.cpp
 - [ ] T042 Add non-convergence behavior test (verify background color returned) in gladius/tests/unittests/Rendering_tests.cpp
+- [ ] T042a Add edge case test for degenerate SDF values (NaN, infinity) - verify graceful handling in gladius/tests/unittests/Rendering_tests.cpp
+- [ ] T042b Add edge case test for rays starting inside geometry (clipping plane scenario) in gladius/tests/integrationtests/RayMarchPerf_tests.cpp
 
 ---
 
@@ -208,11 +212,11 @@ Phase 9 (Polish) ─────────────────────
 | Setup | 4 | rendering.h, types.h, ImageRGBA.h |
 | Foundational | 5 | Rendering.h, Rendering.cpp |
 | US1 (P1) | 11 | rendering.cl, renderer.cl, RenderProgram.cpp, RenderWindow.cpp |
-| US2 (P2) | 3 | rendering.cl |
+| US2 (P2) | 5 | rendering.cl |
 | US3 (P2) | 3 | mesh_sdf.cl |
 | US4 (P3) | 3 | Rendering.cpp |
 | Debug | 7 | rendering.cl, renderer.cl, RenderProgram.cpp, RenderWindow.cpp |
-| Testing | 6 | RayMarchPerf_tests.cpp, Rendering_tests.cpp |
+| Testing | 8 | RayMarchPerf_tests.cpp, Rendering_tests.cpp |
 | Polish | 4 | Documentation, validation |
 
-**Total**: 46 tasks
+**Total**: 50 tasks

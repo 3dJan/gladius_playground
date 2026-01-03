@@ -84,7 +84,7 @@ As a user on hardware with limited VRAM, I want the rendering system to use memo
 
 #### Numerical Optimization
 
-- **FR-001**: System MUST implement enhanced sphere tracing with adaptive over-relaxation where ω factor (1.0–2.0) is automatically adjusted per-ray based on local SDF gradient magnitude
+- **FR-001**: System MUST implement enhanced sphere tracing with adaptive over-relaxation where ω factor (1.0–2.0 theoretical range; 1.6 practical safe limit) is automatically adjusted per-ray based on local SDF gradient magnitude
 - **FR-002**: System MUST detect and mitigate the grazing problem by switching to smaller step sizes when consecutive steps remain small
 - **FR-003**: System MUST maintain binary refinement for surface crossing detection with configurable iteration count (default: 6)
 - **FR-004**: System MUST support local Lipschitz bound estimation for adaptive step sizing in CSG operations
