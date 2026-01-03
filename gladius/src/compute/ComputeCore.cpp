@@ -1794,7 +1794,12 @@ namespace gladius
         cl::Event * completionEvent)
     {
         ProfileFunction;
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         if (!m_primitives)
         {

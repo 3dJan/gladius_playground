@@ -714,12 +714,13 @@ namespace gladius
         /// @note Invalidated on parameter changes, camera changes, or resolution changes
         bool m_distanceInitBufferValid = false;
 
-        /// @brief Tracks the last approximation mode used for rendering (for diagnostics)
+        /// @brief Tracks last used approximation modes for UI status display only
+        /// @note Mutable because these are purely diagnostic and set during const render methods
+        /// @{
         mutable ApproximationMode m_lastUsedApproximation = AM_FULL_MODEL;
-        /// @brief Tracks the last approximation mode used for preview rendering
         mutable ApproximationMode m_lastUsedPreviewApproximation = AM_FULL_MODEL;
-        /// @brief Tracks the last approximation mode used for HQ rendering
         mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
+        /// @}
 
         CodeGenerator m_codeGenerator = CodeGenerator::Code;
 

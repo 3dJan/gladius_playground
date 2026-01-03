@@ -11,6 +11,9 @@
 
 namespace gladius
 {
+    /// Maximum render height per dispatch to prevent excessive GPU workload
+    constexpr size_t kMaxRenderHeightPerDispatch = 16000;
+
     RenderProgram::RenderProgram(SharedComputeContext context, const SharedResources & resources)
         : ProgramBase(context, resources)
     {
@@ -87,7 +90,7 @@ namespace gladius
         auto const size =
           std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
 
-        if (size < 1 || size > 16000)
+        if (size < 1 || size > kMaxRenderHeightPerDispatch)
         {
             return kernelEvent;
         }
@@ -210,7 +213,7 @@ namespace gladius
         auto const size =
           std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
 
-        if (size < 1 || size > 16000)
+        if (size < 1 || size > kMaxRenderHeightPerDispatch)
         {
             return kernelEvent;
         }
@@ -290,7 +293,7 @@ namespace gladius
         auto const size =
           std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
 
-        if (size < 1 || size > 16000)
+        if (size < 1 || size > kMaxRenderHeightPerDispatch)
         {
             return kernelEvent;
         }
@@ -377,7 +380,7 @@ namespace gladius
         auto const size =
           std::clamp(endHeight - startHeight, size_t{0}, targetImage.getHeight() - start - 1);
 
-        if (size < 1 || size > 16000)
+        if (size < 1 || size > kMaxRenderHeightPerDispatch)
         {
             return kernelEvent;
         }

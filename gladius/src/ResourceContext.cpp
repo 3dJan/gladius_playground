@@ -444,8 +444,15 @@ namespace gladius
             return; // Already allocated at correct size
         }
 
-        m_distanceInitBuffer = std::make_unique<DistanceInitBuffer>(*m_ComputeContext, width, height);
-        m_distanceInitBuffer->allocateOnDevice();
+        try
+        {
+            m_distanceInitBuffer = std::make_unique<DistanceInitBuffer>(*m_ComputeContext, width, height);
+            m_distanceInitBuffer->allocateOnDevice();
+        }
+        catch (std::exception const &)
+        {
+            m_distanceInitBuffer.reset(); // Ensure nullptr on failure
+        }
     }
 
     DistanceInitBuffer * ResourceContext::getDistanceInitBuffer() const
