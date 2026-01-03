@@ -6,8 +6,16 @@ float4 model(float3 pos, PAYLOAD_ARGS);
 struct DistanceColor map(float3 pos, PAYLOAD_ARGS);
 struct DistanceColor mapCached(float3 pos, PAYLOAD_ARGS);
 
+// Gradient magnitude estimation for adaptive over-relaxation (FR-004)
+float estimateGradientMagnitude(float3 pos, PAYLOAD_ARGS);
+
+// Enhanced rayCast with adaptive ω and distance initialization support
 struct RayCastResult
-rayCast(float3 eyePostion, float3 rayDirection, float startDistance, PAYLOAD_ARGS);
+rayCast(float3 eyePosition, float3 rayDirection, float startDistance, bool useDistanceInit, float distanceInitValue, PAYLOAD_ARGS);
+
+// Legacy rayCast overload for backward compatibility (no distance init)
+struct RayCastResult
+rayCastLegacy(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_ARGS);
 
 float3 surfaceNormal(float3 pos, PAYLOAD_ARGS);
 float calcSoftshadow(float3 pos, float3 rayDirection, float mint, float tmax, PAYLOAD_ARGS);

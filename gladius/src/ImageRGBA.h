@@ -306,5 +306,10 @@ namespace gladius
 
     using PreComputedSdf = ImageImpl<cl_float>;
 
+    /// Buffer storing traveled distances from low-res preview for HQ initialization
+    /// Format: Single-channel float (CL_R, CL_FLOAT)
+    /// Resolution: Same as low-res preview (e.g., width/4 × height/4)
+    using DistanceInitBuffer = ImageImpl<cl_float>;
+
     using MarchingSquaresStates = ImageImpl<cl_char>;
 }

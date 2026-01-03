@@ -117,18 +117,26 @@ if (renderingSettings.z_mm > 0.0001f && (renderingSettings.flags & RF_SHOW_STACK
 /**
  * @brief Performs ray casting against signed distance fields to find intersections.
  * 
- * Enhanced to better handle thin-walled geometries using binary refinement when
- * passing through surfaces and adaptive step sizes to reduce the chance of missing details.
+ * Enhanced with adaptive over-relaxation (ω) based on gradient magnitude estimation,
+ * grazing angle detection to prevent overshooting on shallow surfaces, and optional
+ * distance initialization from low-res preview buffer for faster HQ rendering.
  * Also refines step size when the distance gradient changes sign near a surface.
+ * 
+ * Performance optimizations (FR-001 to FR-007):
+ * - Adaptive ω in range [1.0, 1.6] based on local Lipschitz estimate
+ * - Distance initialization from low-res preview (when AM_USE_DISTANCE_INIT set)
+ * - Grazing detection resets ω after 5 consecutive small steps
  * 
  * @param eyePosition The starting position of the ray
  * @param rayDirection The normalized direction of the ray
  * @param startDistance Initial travel distance offset
+ * @param useDistanceInit Whether to use distance initialization (AM_USE_DISTANCE_INIT flag)
+ * @param distanceInitValue Pre-sampled distance init value (from low-res preview)
  * @param PAYLOAD_ARGS Additional arguments passed to mapping functions
  * @return struct RayCastResult Result of the ray cast containing hit information
  */
 struct RayCastResult
-rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_ARGS)
+rayCast(float3 eyePosition, float3 rayDirection, float startDistance, bool useDistanceInit, float distanceInitValue, PAYLOAD_ARGS)
 {
     // Configuration constants
     int const maxRaySteps = 2000;
@@ -136,12 +144,32 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_AR
     float const initialCloseEnough = (renderingSettings.approximation & AM_ONLY_PRECOMPSDF) ? 0.01f : 1.E-3f;
     float closeEnough = initialCloseEnough;
     
+    // Adaptive over-relaxation constants (FR-001, research.md limits)
+    float const omegaMin = 1.0f;      // Conservative: standard sphere tracing
+    float const omegaMax = 1.6f;      // Practical safe limit (per research.md)
+    float const omegaGrazingReset = 1.0f;  // ω value when grazing detected
+    int const grazingThreshold = 5;   // Consecutive small steps to trigger grazing reset
+    
+    // Distance initialization (FR-005, FR-006)
+    float initialTravelDistance = startDistance + closeEnough;
+    if (useDistanceInit && distanceInitValue > closeEnough)
+    {
+        // Apply safety margin: use 90% of the distance init value to avoid overshooting
+        float const safetyMargin = 0.9f;
+        initialTravelDistance = max(startDistance + closeEnough, distanceInitValue * safetyMargin);
+    }
+    
     // Ray state tracking
-    float traveledDistance = startDistance + closeEnough;
+    float traveledDistance = initialTravelDistance;
     float prevSignedDistance = FLT_MAX; // Signed distance from the previous step, initialized high
     float prevAbsDistance = FLT_MAX;    // Absolute distance from the previous step
     float prevDeltaDistance = 0.0f;     // Change in distance (slope) from the previous step calculation
     float minStepSize = initialCloseEnough * 0.01f; // Minimum step size to prevent skipping tiny features
+    
+    // Adaptive ω state
+    float omega = omegaMax;            // Start optimistic, reduce based on gradient
+    int consecutiveSmallSteps = 0;     // Counter for grazing detection (FR-003)
+    float const smallStepThreshold = closeEnough * 10.f;  // Steps smaller than this count as "small"
     
     // Result structure preparation
     struct RayCastResult result;
@@ -167,6 +195,34 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_AR
         
         // Dynamic precision adjustment based on distance traveled
         closeEnough = initialCloseEnough + traveledDistance * 1.E-6f;
+        
+        // Adaptive ω based on gradient magnitude (FR-001, FR-004)
+        // Only compute gradient when not in conservative mode and not too close to surface
+        if (currentAbsDistance > closeEnough * 100.f && !(renderingSettings.approximation & AM_ONLY_PRECOMPSDF))
+        {
+            float gradMag = estimateGradientMagnitude(rayPos, PASS_PAYLOAD_ARGS);
+            // ω = min(omegaMax, 1/gradient) clamped to [omegaMin, omegaMax]
+            // Higher gradient → lower ω (more conservative stepping)
+            omega = clamp(1.0f / max(gradMag, 0.001f), omegaMin, omegaMax);
+        }
+        else
+        {
+            omega = omegaMin;  // Conservative near surfaces or in preview mode
+        }
+        
+        // Grazing detection (FR-003): consecutive small steps indicate shallow angle
+        if (currentAbsDistance < smallStepThreshold)
+        {
+            consecutiveSmallSteps++;
+            if (consecutiveSmallSteps >= grazingThreshold)
+            {
+                omega = omegaGrazingReset;  // Force conservative stepping
+            }
+        }
+        else
+        {
+            consecutiveSmallSteps = 0;  // Reset counter when taking normal-sized steps
+        }
         
         // Detect if we've crossed a surface boundary (sign change of distance)
         // Ensure prevSignedDistance is valid before checking sign change
@@ -227,6 +283,7 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_AR
 
             // Use very small steps immediately after passing through a surface
             nearRangeFactor = 0.1f;
+            omega = omegaMin;  // Also reset ω to conservative after refinement
             refinedThisStep = true; // Mark that refinement occurred
         }
         else
@@ -235,9 +292,9 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_AR
             nearRangeFactor = min(nearRangeFactor * 1.05f, 1.0f);
         }
         
-        // Calculate the next step size, ensuring it's not too small
+        // Calculate the next step size with adaptive over-relaxation
         // Use the potentially updated currentAbsDistance from binary search
-        nextStep = max(currentAbsDistance * nearRangeFactor, minStepSize);
+        nextStep = max(currentAbsDistance * nearRangeFactor * omega, minStepSize);
                 
         // Update state for the next iteration *before* advancing the ray
         // Use the potentially updated currentSignedDistance/AbsDistance from binary search
@@ -272,6 +329,13 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_AR
     result.hit = (hit) ? 1.f : -1.f;
     result.traveledDistance = traveledDistance;
     return result;
+}
+
+/// Legacy overload for backward compatibility (no distance init)
+struct RayCastResult
+rayCastLegacy(float3 eyePosition, float3 rayDirection, float startDistance, PAYLOAD_ARGS)
+{
+    return rayCast(eyePosition, rayDirection, startDistance, false, 0.0f, PASS_PAYLOAD_ARGS);
 }
 
 float3 surfaceNormal(float3 pos, PAYLOAD_ARGS)
@@ -358,6 +422,32 @@ float calcAmbientOcclusion(float3 pos, float3 normal, PAYLOAD_ARGS)
 float3 reflect(float3 inVector, float3 normal)
 {
     return inVector - 2.f * dot(normal, inVector) * normal;
+}
+
+/**
+ * @brief Estimates gradient magnitude using 4-sample tetrahedron pattern for Lipschitz bound.
+ *
+ * Uses the same tetrahedron pattern as surfaceNormal() but returns the magnitude
+ * of the gradient vector. Higher values indicate steeper SDF gradients where
+ * over-relaxation should be reduced.
+ *
+ * Implements FR-004: Lipschitz bound estimation for adaptive ω calculation.
+ *
+ * @param pos Position to estimate gradient at
+ * @param PAYLOAD_ARGS Additional arguments passed to mapping functions
+ * @return Estimated gradient magnitude (typically ~1.0 for ideal SDFs, higher for steep regions)
+ */
+float estimateGradientMagnitude(float3 pos, PAYLOAD_ARGS)
+{
+    const float smallValue = 1.0E-4f;
+    int const zero = min((int)(fabs(pos.x)), 0);  // Trick compiler to avoid inlining
+    float3 gradient = (float3)(0.f);
+    for (int i = zero; i < 4; ++i)
+    {
+        float3 offset = 0.5773f * (2.f * (float3)(((i + 3) >> 1) & 1, (i >> 1) & 1, i & 1) - 1.f);
+        gradient += offset * mapCached(pos + offset * smallValue, PASS_PAYLOAD_ARGS).signedDistance;
+    }
+    return length(gradient) / smallValue;
 }
 
 float4

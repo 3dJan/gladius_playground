@@ -48,7 +48,8 @@ enum ApproximationMode
     AM_FULL_MODEL = (1u << 0),
     AM_HYBRID = (1u << 1),
     AM_ONLY_PRECOMPSDF = (1u << 2),
-    AM_DISABLE_INTERPOLATION = (1u << 3)
+    AM_DISABLE_INTERPOLATION = (1u << 3),
+    AM_USE_DISTANCE_INIT = (1u << 4)  // Use low-res distance buffer to initialize HQ ray start
 };
 
 enum RenderingFlags
@@ -57,7 +58,8 @@ enum RenderingFlags
     RF_CUT_OFF_OBJECT = (1u << 1),
     RF_SHOW_FIELD = (1u << 2),
     RF_SHOW_STACK = (1u << 3),
-    RF_SHOW_COORDINATE_SYSTEM = (1u << 4)
+    RF_SHOW_COORDINATE_SYSTEM = (1u << 4),
+    RF_DEBUG_METRICS = (1u << 15)  // Enable debug metrics collection (dev builds)
 };
 
 enum SamplingFilter
@@ -178,6 +180,16 @@ struct RayCastResult
     float edge;
     float type;
     float4 color;
+};
+
+/// Per-frame rendering metrics for debug instrumentation (FR-014)
+/// Storage: GPU buffer for atomic updates; read back to host after frame completion
+struct RayMarchMetrics
+{
+    unsigned int totalRays;      ///< Total rays cast this frame
+    unsigned int totalSteps;     ///< Sum of steps across all rays
+    unsigned int cacheHits;      ///< Number of times cachedSdf() returned early
+    unsigned int nonConverged;   ///< Rays that hit maxRaySteps without hitting surface
 };
 
 struct Command

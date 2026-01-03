@@ -21,10 +21,10 @@
 
 **Purpose**: Add new flags and buffer infrastructure needed by all user stories
 
-- [ ] T001 Add AM_USE_DISTANCE_INIT flag (0x08) to approximation bitmask in gladius/src/kernel/rendering.h
-- [ ] T002 [P] Add RF_DEBUG_METRICS flag (0x8000) to rendering flags bitmask in gladius/src/kernel/rendering.h
-- [ ] T003 [P] Define RayMarchMetrics struct in gladius/src/kernel/types.h (totalRays, totalSteps, cacheHits, nonConverged)
-- [ ] T004 Add DistanceInitBuffer type alias (cl::Image2D float) in gladius/src/ImageRGBA.h
+- [x] T001 Add AM_USE_DISTANCE_INIT flag (0x10) to ApproximationMode enum in gladius/src/kernel/types.h
+- [x] T002 [P] Add RF_DEBUG_METRICS flag (0x8000) to RenderingFlags enum in gladius/src/kernel/types.h
+- [x] T003 [P] Define RayMarchMetrics struct in gladius/src/kernel/types.h (totalRays, totalSteps, cacheHits, nonConverged)
+- [x] T004 Add DistanceInitBuffer type alias (cl::Image2D float) in gladius/src/ImageRGBA.h
 
 ---
 
@@ -34,11 +34,11 @@
 
 **⚠️ CRITICAL**: Kernel optimizations cannot use distance init or metrics until these are ready
 
-- [ ] T005 Add m_distanceInitBuffer member to Rendering class in gladius/src/compute/Rendering.h
-- [ ] T006 Implement allocateDistanceInitBuffer() in gladius/src/compute/Rendering.cpp (same resolution as low-res preview)
-- [ ] T007 [P] Add m_metricsBuffer member to Rendering class in gladius/src/compute/Rendering.h
-- [ ] T008 [P] Implement allocateMetricsBuffer() and readMetricsBuffer() in gladius/src/compute/Rendering.cpp
-- [ ] T009 Wire distance buffer lifecycle to low-res preview resolution changes in gladius/src/compute/Rendering.cpp
+- [x] T005 Add m_distanceInitBuffer member to Rendering class in gladius/src/compute/Rendering.h
+- [x] T006 Implement allocateDistanceInitBuffer() in gladius/src/compute/Rendering.cpp (same resolution as low-res preview)
+- [x] T007 [P] Add m_metricsBuffer member to Rendering class in gladius/src/compute/Rendering.h
+- [x] T008 [P] Implement allocateMetricsBuffer() and readMetricsBuffer() in gladius/src/compute/Rendering.cpp
+- [x] T009 Wire distance buffer lifecycle to low-res preview resolution changes in gladius/src/compute/Rendering.cpp
 
 **Checkpoint**: Buffer infrastructure ready - kernel implementation can begin
 
@@ -52,14 +52,14 @@
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Add gradient estimation function estimateGradientMagnitude() using 4-sample tetrahedron in gladius/src/kernel/rendering.cl (implements FR-004 Lipschitz bound estimation)
-- [ ] T011 [US1] Add adaptive ω calculation based on gradient magnitude (ω = min(1.6, 1.0/gradient), where 1.6 is practical safe limit per research.md) in rayCast() in gladius/src/kernel/rendering.cl
-- [ ] T012 [US1] Add grazing detection counter (consecutive small steps > 5 forces ω = 1.0) in rayCast() in gladius/src/kernel/rendering.cl
-- [ ] T013 [US1] Add distanceInitTexture parameter to rayCast() function signature in gladius/src/kernel/rendering.cl
-- [ ] T014 [US1] Sample distance texture at ray start with bilinear interpolation and safety margin in rayCast() in gladius/src/kernel/rendering.cl
-- [ ] T015 [US1] Add fallback to startDistance=0 when AM_USE_DISTANCE_INIT is not set or texture invalid in gladius/src/kernel/rendering.cl
-- [ ] T016 [US1] Update renderScene kernel to accept and pass distance texture to rayCast() in gladius/src/kernel/renderer.cl
-- [ ] T017 [US1] Write traveledDistance to distance buffer during low-res preview pass in gladius/src/kernel/renderer.cl
+- [x] T010 [US1] Add gradient estimation function estimateGradientMagnitude() using 4-sample tetrahedron in gladius/src/kernel/rendering.cl (implements FR-004 Lipschitz bound estimation)
+- [x] T011 [US1] Add adaptive ω calculation based on gradient magnitude (ω = min(1.6, 1.0/gradient), where 1.6 is practical safe limit per research.md) in rayCast() in gladius/src/kernel/rendering.cl
+- [x] T012 [US1] Add grazing detection counter (consecutive small steps > 5 forces ω = 1.0) in rayCast() in gladius/src/kernel/rendering.cl
+- [x] T013 [US1] Add distanceInitTexture parameter to rayCast() function signature in gladius/src/kernel/rendering.cl
+- [x] T014 [US1] Sample distance texture at ray start with bilinear interpolation and safety margin in rayCast() in gladius/src/kernel/rendering.cl
+- [x] T015 [US1] Add fallback to startDistance=0 when AM_USE_DISTANCE_INIT is not set or texture invalid in gladius/src/kernel/rendering.cl
+- [x] T016 [US1] Update renderScene kernel to accept and pass distance texture to rayCast() in gladius/src/kernel/renderer.cl
+- [x] T017 [US1] Write traveledDistance to distance buffer during low-res preview pass in gladius/src/kernel/renderer.cl
 - [ ] T018 [US1] Update RenderProgram to set distance texture kernel argument in gladius/src/RenderProgram.cpp
 - [ ] T019 [US1] Wire distance buffer from low-res render to HQ render job in gladius/src/ui/RenderWindow.cpp
 - [ ] T020 [US1] Enable AM_USE_DISTANCE_INIT flag when valid low-res result available in gladius/src/ui/RenderWindow.cpp
