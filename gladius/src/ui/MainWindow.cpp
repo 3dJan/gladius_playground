@@ -2139,17 +2139,8 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
-            auto const start = std::chrono::high_resolution_clock::now();
             m_doc->updateParameter();
-            auto const afterUpdate = std::chrono::high_resolution_clock::now();
             m_renderWindow.invalidateViewDuetoModelUpdate();
-            auto const afterInvalidate = std::chrono::high_resolution_clock::now();
-            
-            auto const updateDuration = std::chrono::duration_cast<std::chrono::microseconds>(afterUpdate - start);
-            auto const invalidateDuration = std::chrono::duration_cast<std::chrono::microseconds>(afterInvalidate - afterUpdate);
-            fmt::print(stderr, "[Param] updateParameter took {}us, invalidateViewDuetoModelUpdate took {}us\n", 
-                       updateDuration.count(), invalidateDuration.count());
-            
             m_parameterDirty = false;
         }
         updateContours();

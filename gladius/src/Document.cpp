@@ -96,16 +96,25 @@ namespace gladius
         m_backupManager.initialize();
     }
 
-    void Document::refreshModelAsync()
+    bool Document::refreshModelAsync()
     {
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
+
+        // Early validation: Skip expensive compilation if model is in an invalid state
+        // (e.g., during graph editing when nodes have missing connections)
+        if (!validateAssembly())
+        {
+            return false;
+        }
+
         // saveBackup();
         {
             m_futureModelRefresh = std::async(std::launch::async, [&]() { refreshWorker(); });
         }
+        return true;
     }
 
     void Document::loadAllMeshResources()
@@ -328,9 +337,7 @@ namespace gladius
             return false;
         }
 
-        refreshModelAsync();
-
-        return true;
+        return refreshModelAsync();
     }
 
     void Document::newModel()
@@ -746,7 +753,7 @@ namespace gladius
     void Document::merge(std::filesystem::path filename)
     {
         mergeImpl(filename);
-        refreshModelAsync();
+        (void) refreshModelAsync(); // Result intentionally ignored for merge
     }
 
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)

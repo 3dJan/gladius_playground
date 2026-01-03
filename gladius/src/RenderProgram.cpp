@@ -175,7 +175,7 @@ namespace gladius
             return;
         }
         cl::NDRange const origin = {0, startHeight, 0};
-        cl::NDRange const range = {targetImage.getWidth(), endHeight, 1};
+        cl::NDRange const range = {targetImage.getWidth(), endHeight - startHeight, 1};
         cl::Event const event = m_programFront->runNonBlocking(
           queue, "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
         if (completionEvent)

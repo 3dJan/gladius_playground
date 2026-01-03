@@ -347,7 +347,7 @@ namespace gladius
 
         void loadImpl(const std::filesystem::path & filename);
         void mergeImpl(const std::filesystem::path & filename);
-        void refreshModelAsync();
+        [[nodiscard]] bool refreshModelAsync();
         void loadAllMeshResources();
         void refreshWorker();
 
