@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <sstream>
 
 #ifdef _WIN32
 #include <shellapi.h>
@@ -252,43 +253,197 @@ namespace gladius::ui
     void MainWindow::setup()
     {
         ProfileFunction;
+        LOG_SCOPE_DURATION_NAMED("MainWindow::setup()");
+        std::cerr << "[STARTUP] MainWindow::setup() begin" << std::endl << std::flush;
         m_initialized = true;
 
         // Create the GL context up-front so any GL-backed resources can be created safely
-        m_mainView.ensureInitialized();
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - ensureInitialized");
+            m_mainView.ensureInitialized();
+        }
+        std::cerr << "[STARTUP] GL context initialized" << std::endl << std::flush;
 
-        // Try to initialize compute stack; if it fails, keep UI running in limited mode.
+        // Set up minimal UI immediately so window appears responsive
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - setLogger");
+            m_welcomeScreen.setLogger(m_logger);
+        }
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - getRecentFiles");
+            m_welcomeScreen.setRecentFiles(getRecentFiles(100));
+        }
+
+        // Set up minimal callbacks - will be replaced after compute init completes
+        std::cerr << "[STARTUP] Setting up callbacks" << std::endl << std::flush;
+        m_mainView.clearViewCallback();
+        m_renderCallback = [&]() { /* no-op until compute ready */ };
+        m_mainView.setRenderCallback(m_renderCallback);
+        m_mainView.addViewCallBack([&]() { render(); });
+        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+
+        // Start async OpenCL initialization
+        std::cerr << "[STARTUP] About to call startAsyncComputeInit" << std::endl << std::flush;
+        startAsyncComputeInit();
+        std::cerr << "[STARTUP] MainWindow::setup() returning" << std::endl << std::flush;
+    }
+
+    void MainWindow::startAsyncComputeInit()
+    {
+        LOG_SCOPE_DURATION_NAMED("MainWindow::startAsyncComputeInit()");
+        std::cerr << "[STARTUP] startAsyncComputeInit() begin" << std::endl;
+
+        if (m_computeInitState != ComputeInitState::NotStarted)
+        {
+            return; // Already started or completed
+        }
+
+        m_computeInitState = ComputeInitState::InProgress;
+
+        // Phase 1: Run the slow device enumeration on a background thread
+        // The GL context is NOT required for this phase
+        m_computeInitFuture = std::async(
+          std::launch::async,
+          []() -> ComputeEnumResult
+          {
+              std::cerr << "[STARTUP] Async OpenCL enumeration thread started" << std::endl;
+              auto startTime = std::chrono::high_resolution_clock::now();
+              ComputeEnumResult result;
+              try
+              {
+                  // This is the slow part - OpenCL platform/device enumeration
+                  std::ostringstream logStream;
+                  auto accelerators = queryAccelerators(logStream);
+                  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::high_resolution_clock::now() - startTime).count();
+                  std::cerr << "[STARTUP] queryAccelerators() completed in " << elapsed << "ms" << std::endl;
+
+                  if (accelerators.empty())
+                  {
+                      result.success = false;
+                      result.errorMessage = "No suitable OpenCL devices found";
+                      return result;
+                  }
+
+                  // Sort by performance estimation (best first)
+                  std::stable_sort(std::begin(accelerators),
+                                   std::end(accelerators),
+                                   [](Accelerator const & lhs, Accelerator const & rhs)
+                                   {
+                                       return lhs.capabilities.performanceEstimation >
+                                              rhs.capabilities.performanceEstimation;
+                                   });
+
+                  result.accelerators = std::move(accelerators);
+                  result.success = true;
+              }
+              catch (const GladiusException & e)
+              {
+                  result.success = false;
+                  result.errorMessage = e.what();
+              }
+              catch (const std::exception & e)
+              {
+                  result.success = false;
+                  result.errorMessage = e.what();
+              }
+              std::cerr << "[STARTUP] Async OpenCL enumeration thread finished" << std::endl;
+              return result;
+          });
+        std::cerr << "[STARTUP] startAsyncComputeInit() - async task launched" << std::endl;
+    }
+
+    void MainWindow::pollComputeInit()
+    {
+        if (m_computeInitState != ComputeInitState::InProgress)
+        {
+            return;
+        }
+
+        // Check if future is ready (non-blocking)
+        if (!m_computeInitFuture.valid())
+        {
+            return;
+        }
+
+        if (m_computeInitFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        {
+            return; // Still in progress
+        }
+
+        // Future is ready - get the result and finalize on main thread
+        std::cerr << "[STARTUP] pollComputeInit() - future ready, finalizing on main thread" << std::endl;
+        auto pollStartTime = std::chrono::high_resolution_clock::now();
+        m_computeInitState = ComputeInitState::Completed;
+
         try
         {
-            auto context = std::make_shared<ComputeContext>(EnableGLOutput::enabled);
-            context->setLogger(m_logger);
-            gladius::setGlobalLogger(m_logger);
-            context->setDebugOutputEnabled(m_openclDebugEnabled);
-            if (!context->isValid())
+            auto result = m_computeInitFuture.get();
+
+            if (result.success && !result.accelerators.empty())
             {
-                throw OpenCLContextCreationError("Context invalid after initialization");
+                // Phase 2: Create the OpenCL context on the main thread (GL context is current)
+                auto const & selectedAccelerator = result.accelerators.front();
+
+                std::string deviceName = "unknown";
+                try
+                {
+                    deviceName = selectedAccelerator.device.getInfo<CL_DEVICE_NAME>();
+                }
+                catch (...)
+                {
+                }
+                std::cerr << "[STARTUP] Creating ComputeContext with accelerator: " 
+                          << deviceName << std::endl;
+                auto contextStartTime = std::chrono::high_resolution_clock::now();
+                auto context = std::make_shared<ComputeContext>(
+                  EnableGLOutput::enabled, selectedAccelerator);
+                {
+                    auto contextElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::high_resolution_clock::now() - contextStartTime).count();
+                    std::cerr << "[STARTUP] ComputeContext constructor took " << contextElapsed << "ms" << std::endl;
+                }
+                context->setLogger(m_logger);
+                context->setDebugOutputEnabled(m_openclDebugEnabled);
+                gladius::setGlobalLogger(m_logger);
+
+                if (!context->isValid())
+                {
+                    throw OpenCLContextCreationError("Context invalid after initialization");
+                }
+
+                m_core = std::make_shared<ComputeCore>(
+                  context, RequiredCapabilities::OpenGLInterop, m_logger);
+                m_doc = std::make_shared<Document>(m_core);
+                m_computeAvailable = true;
+                m_computeErrorMessage.clear();
+
+                // Load render settings now that compute is available
+                if (m_configManager)
+                {
+                    loadRenderSettings();
+                }
+
+                // Complete full setup with compute
+                setup(m_core, m_doc, m_logger);
+
+                if (m_logger)
+                {
+                    m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
+                }
             }
-
-            m_core =
-              std::make_shared<ComputeCore>(context, RequiredCapabilities::OpenGLInterop, m_logger);
-            m_doc = std::make_shared<Document>(m_core);
-            m_computeAvailable = true;
-            m_computeErrorMessage.clear();
-        }
-        catch (const GladiusException & e)
-        {
-            // Handle any OpenCL-related errors gracefully
-            m_computeAvailable = false;
-            m_computeErrorMessage = e.what();
-            m_showComputeErrorModal = true;
-
-            // Hide welcome screen so error is immediately visible
-            m_welcomeScreen.hide();
-
-            if (m_logger)
+            else
             {
-                m_logger->addEvent(
-                  {std::string("Compute disabled: ") + e.what(), events::Severity::Warning});
+                m_computeAvailable = false;
+                m_computeErrorMessage = result.errorMessage;
+                m_showComputeErrorModal = true;
+                m_welcomeScreen.hide();
+
+                if (m_logger)
+                {
+                    m_logger->addEvent({std::string("Compute disabled: ") + result.errorMessage,
+                                        events::Severity::Warning});
+                }
             }
         }
         catch (const std::exception & e)
@@ -296,42 +451,16 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
-
-            // Hide welcome screen so error is immediately visible
             m_welcomeScreen.hide();
 
             if (m_logger)
             {
                 m_logger->addEvent(
-                  {std::string("Compute disabled: ") + e.what(), events::Severity::Warning});
+                  {std::string("Compute init error: ") + e.what(), events::Severity::Warning});
             }
         }
 
-        // Load render settings only when compute is available
-        if (m_configManager && m_computeAvailable)
-        {
-            loadRenderSettings();
-        }
-
-        // If compute is available, continue normal setup. Otherwise, keep UI minimal.
-        if (m_computeAvailable)
-        {
-            setup(m_core, m_doc, m_logger);
-            // Note: setup() already sets up all callbacks including nodeEditor()
-        }
-        else
-        {
-            // Minimal UI: welcome screen, menus, status bar
-            m_welcomeScreen.setLogger(m_logger);
-            m_welcomeScreen.setRecentFiles(getRecentFiles(100));
-
-            // Set up minimal callbacks when compute is disabled
-            m_mainView.clearViewCallback();
-            m_renderCallback = [&]() { /* no-op when compute disabled */ };
-            m_mainView.setRenderCallback(m_renderCallback);
-            m_mainView.addViewCallBack([&]() { render(); });
-            m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
-        }
+        m_computeInitState = ComputeInitState::Finalized;
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
@@ -394,6 +523,9 @@ namespace gladius::ui
     {
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        // Poll for async compute initialization completion
+        pollComputeInit();
 
         // Detect completion of async file load and refresh editors to the new Assembly.
         // (MainWindow::open() starts the async load; we defer resetEditorState() until loading finishes.)

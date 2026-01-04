@@ -33,6 +33,8 @@ namespace gladius::ui
         std::vector<unsigned char> decodedPixels;   ///< Decoded RGBA pixel data
         unsigned int width = 0;                     ///< Image width
         unsigned int height = 0;                    ///< Image height
+        std::uintmax_t fileSize = 0;                ///< File size in bytes
+        std::vector<std::pair<std::string, std::string>> metadata; ///< Extracted metadata key-value pairs
         std::string errorMessage;                   ///< Error description if failed
     };
 
@@ -187,7 +189,10 @@ namespace gladius::ui
                                                             unsigned int & outHeight);
 
         /**
-         * @brief Create OpenGL texture from pre-decoded RGBA pixels (main thread only)
+         * @brief Create OpenGL texture from pre-decoded RGBA pixels
+         *
+         * @warning This method MUST be called on the main thread where the OpenGL
+         *          context is current. NOT thread-safe.
          *
          * @param info Thumbnail info with decodedPixels populated
          */

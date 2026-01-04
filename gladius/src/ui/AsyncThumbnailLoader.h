@@ -94,13 +94,16 @@ namespace gladius::ui
          * @return true if there are active or queued load operations
          * @return false if all work is complete
          */
-        bool hasPendingWork() const;
+        [[nodiscard]] bool hasPendingWork() const noexcept;
 
       private:
         events::SharedLogger m_logger;                ///< Logger for error reporting
         size_t m_maxConcurrentLoads;                  ///< Max parallel loads
         std::vector<ThumbnailLoadTask> m_activeTasks; ///< Currently active load tasks
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo *> m_pendingQueue; ///< Queued requests
+
+        /// Queued requests - IMPORTANT: Pointers must remain valid until cancelAll() is called.
+        /// The WelcomeScreen guarantees this by not modifying m_thumbnailInfos during loading.
+        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo *> m_pendingQueue;
 
         /**
          * @brief Start a new async load operation for a thumbnail

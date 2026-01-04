@@ -50,6 +50,7 @@ namespace gladius
             : m_name(name)
         {
             m_start = std::chrono::high_resolution_clock::now();
+            std::cerr << "[TIMING] " << m_name << " started" << std::endl;
         }
 
         ~ScopedTimeLogger()
@@ -60,7 +61,7 @@ namespace gladius
 
             //if (duration.count() > threshold)
             {
-                std::cout << m_name << " took " << duration.count() << "ms" << std::endl;
+                std::cerr << "[TIMING] " << m_name << " took " << duration.count() << "ms" << std::endl;
             }
         }
 

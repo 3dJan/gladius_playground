@@ -172,77 +172,9 @@ namespace gladius::ui
         info.fileName = filePath.stem().string();
         info.timestamp = timestamp;
 
-        // Get file size
-        try
-        {
-            if (std::filesystem::exists(filePath))
-            {
-                info.fileInfo.fileSize = std::filesystem::file_size(filePath);
-            }
-        }
-        catch (const std::exception & e)
-        {
-            if (m_logger)
-            {
-                m_logger->addEvent(
-                  {fmt::format("Failed to get file size for {}: {}", filePath.string(), e.what()),
-                   events::Severity::Warning});
-            }
-        }
-
-        // Extract 3MF metadata if possible
-        try
-        {
-            if (m_wrapper && std::filesystem::exists(filePath))
-            {
-                auto model = m_wrapper->CreateModel();
-                auto reader = model->QueryReader("3mf");
-
-                reader->SetStrictModeActive(false);
-                reader->ReadFromFile(filePath.string());
-
-                // Get the metadata group from the model
-                auto metaDataGroup = model->GetMetaDataGroup();
-                if (metaDataGroup)
-                {
-                    // Get number of metadata entries
-                    Lib3MF_uint32 entryCount = metaDataGroup->GetMetaDataCount();
-
-                    for (Lib3MF_uint32 i = 0; i < entryCount; i++)
-                    {
-                        try
-                        {
-                            // Get metadata entry
-                            auto metaData = metaDataGroup->GetMetaData(i);
-                            if (metaData)
-                            {
-                                // Extract metadata key and value
-                                std::string key = metaData->GetName();
-                                std::string value = metaData->GetValue();
-
-                                // Get namespace if present to make key more specific
-                                std::string nameSpace = metaData->GetNameSpace();
-                                if (!nameSpace.empty())
-                                {
-                                    key = nameSpace + ":" + key;
-                                }
-
-                                // Add to fileInfo
-                                info.fileInfo.addMetadata(key, value);
-                            }
-                        }
-                        catch (...)
-                        {
-                            // Skip this metadata entry if there's an error
-                        }
-                    }
-                }
-            }
-        }
-        catch (std::exception const &)
-        {
-            // it is not a problem if we cannot read the metadata
-        }
+        // Note: File size and metadata extraction are deferred to async loading
+        // to avoid blocking the UI during startup. The async thumbnail loader
+        // will populate fileInfo.fileSize and metadata when the thumbnail is loaded.
 
         return info;
     }
@@ -254,6 +186,12 @@ namespace gladius::ui
 
         try
         {
+            // Get file size (quick filesystem operation)
+            if (std::filesystem::exists(filePath))
+            {
+                result.fileSize = std::filesystem::file_size(filePath);
+            }
+
             // Create a new lib3mf wrapper for thread safety
             auto wrapper = gladius::io::loadLib3mfScoped();
             if (!wrapper)
@@ -267,6 +205,45 @@ namespace gladius::ui
 
             reader->SetStrictModeActive(false);
             reader->ReadFromFile(filePath.string());
+
+            // Extract metadata from the model
+            try
+            {
+                auto metaDataGroup = model->GetMetaDataGroup();
+                if (metaDataGroup)
+                {
+                    Lib3MF_uint32 const entryCount = metaDataGroup->GetMetaDataCount();
+                    for (Lib3MF_uint32 i = 0; i < entryCount; i++)
+                    {
+                        try
+                        {
+                            auto metaData = metaDataGroup->GetMetaData(i);
+                            if (metaData)
+                            {
+                                std::string key = metaData->GetName();
+                                std::string value = metaData->GetValue();
+                                std::string nameSpace = metaData->GetNameSpace();
+                                if (!nameSpace.empty())
+                                {
+                                    key = nameSpace + ":" + key;
+                                }
+                                if (!value.empty())
+                                {
+                                    result.metadata.emplace_back(key, value);
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            // Skip this metadata entry if there's an error
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Metadata extraction is optional, continue even if it fails
+            }
 
             if (model->HasPackageThumbnailAttachment())
             {

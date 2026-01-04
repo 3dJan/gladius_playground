@@ -95,13 +95,26 @@ namespace gladius::ui
                         it->info->decodedPixels = std::move(result.decodedPixels);
                         it->info->thumbnailWidth = result.width;
                         it->info->thumbnailHeight = result.height;
+                        it->info->fileInfo.fileSize = result.fileSize;
+                        for (const auto & [key, value] : result.metadata)
+                        {
+                            it->info->fileInfo.addMetadata(key, value);
+                        }
                         it->info->hasThumbnail = true;
                         it->info->thumbnailLoaded = true;
                         it->info->loadState = ThumbnailLoadState::DecodedPending;
                     }
                     else if (it->info)
                     {
-                        // Mark as failed
+                        // Mark as failed but still update file size and metadata if available
+                        if (result.fileSize > 0)
+                        {
+                            it->info->fileInfo.fileSize = result.fileSize;
+                        }
+                        for (const auto & [key, value] : result.metadata)
+                        {
+                            it->info->fileInfo.addMetadata(key, value);
+                        }
                         it->info->loadState = ThumbnailLoadState::Failed;
                         it->info->hasThumbnail = false;
                         it->info->thumbnailLoaded = true;
@@ -136,9 +149,11 @@ namespace gladius::ui
 
     void AsyncThumbnailLoader::processPendingTextures()
     {
-        // This is intentionally empty - texture creation is done via
-        // ThreemfThumbnailExtractor::createTextureFromPixels()
-        // called by WelcomeScreen when it detects DecodedPending state
+        // Intentionally empty: OpenGL texture creation requires access to ThumbnailInfo
+        // containers owned by WelcomeScreen. The WelcomeScreen iterates its own containers
+        // and calls ThreemfThumbnailExtractor::createTextureFromPixels() directly for any
+        // thumbnails in DecodedPending state. This method exists for API completeness and
+        // potential future refactoring where the loader might own the info containers.
     }
 
     void AsyncThumbnailLoader::cancelAll()
@@ -164,7 +179,7 @@ namespace gladius::ui
         m_activeTasks.clear();
     }
 
-    bool AsyncThumbnailLoader::hasPendingWork() const
+    bool AsyncThumbnailLoader::hasPendingWork() const noexcept
     {
         return !m_activeTasks.empty() || !m_pendingQueue.empty();
     }

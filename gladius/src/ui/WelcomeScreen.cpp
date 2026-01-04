@@ -189,9 +189,7 @@ namespace gladius::ui
                 // Create new thumbnail info
                 auto info = m_thumbnailExtractor->createThumbnailInfo(filePath, timestamp);
 
-                // Set loading state for async loading
-                info.loadState = ThumbnailLoadState::Loading;
-
+                // Leave loadState as NotStarted - requestLoad will set it to Loading
                 m_thumbnailInfos.push_back(std::move(info));
 
                 // Queue for async loading (use back() since we just pushed)
@@ -203,25 +201,20 @@ namespace gladius::ui
         }
 
         // Remove thumbnails for files that are no longer in the recent files list
-        m_thumbnailInfos.erase(
-          std::remove_if(m_thumbnailInfos.begin(),
-                         m_thumbnailInfos.end(),
-                         [this](const auto & info)
-                         {
-                             auto it = std::find_if(m_recentFiles.begin(),
-                                                    m_recentFiles.end(),
-                                                    [&info](const auto & pair)
-                                                    { return pair.first == info.filePath; });
-                             if (it == m_recentFiles.end())
-                             {
-                                 // Release the thumbnail resources before removing
-                                 m_thumbnailExtractor->releaseThumbnail(
-                                   const_cast<ThreemfThumbnailExtractor::ThumbnailInfo &>(info));
-                                 return true;
-                             }
-                             return false;
-                         }),
-          m_thumbnailInfos.end());
+        m_thumbnailInfos.remove_if([this](auto & info)
+                                   {
+                                       auto it = std::find_if(m_recentFiles.begin(),
+                                                              m_recentFiles.end(),
+                                                              [&info](const auto & pair)
+                                                              { return pair.first == info.filePath; });
+                                       if (it == m_recentFiles.end())
+                                       {
+                                           // Release the thumbnail resources before removing
+                                           m_thumbnailExtractor->releaseThumbnail(info);
+                                           return true;
+                                       }
+                                       return false;
+                                   });
 
         m_needsRefresh = false;
     }
@@ -286,12 +279,9 @@ namespace gladius::ui
         // Clear existing thumbnails if we're refreshing
         if (m_examplesNeedRefresh)
         {
-            // Cancel any pending async loads for examples
-            // Note: cancelAll() cancels all, so we only cancel if fully refreshing
-            if (m_asyncLoader && m_exampleThumbnailInfos.empty())
-            {
-                // Don't cancel if there are recent files loading
-            }
+            // Note: We don't call cancelAll() here because it would also cancel
+            // any in-progress recent file loads. Individual example thumbnail loads
+            // will naturally complete or be overwritten by new requests.
 
             for (auto & info : m_exampleThumbnailInfos)
             {
@@ -316,9 +306,7 @@ namespace gladius::ui
                 // Create new thumbnail info
                 auto info = m_thumbnailExtractor->createThumbnailInfo(filePath, timestamp);
 
-                // Set loading state for async loading
-                info.loadState = ThumbnailLoadState::Loading;
-
+                // Leave loadState as NotStarted - requestLoad will set it to Loading
                 m_exampleThumbnailInfos.push_back(std::move(info));
 
                 // Queue for async loading (use back() since we just pushed)
@@ -330,25 +318,20 @@ namespace gladius::ui
         }
 
         // Remove thumbnails for files that are no longer in the examples files list
-        m_exampleThumbnailInfos.erase(
-          std::remove_if(m_exampleThumbnailInfos.begin(),
-                         m_exampleThumbnailInfos.end(),
-                         [this](const auto & info)
-                         {
-                             auto it = std::find_if(m_exampleFiles.begin(),
-                                                    m_exampleFiles.end(),
-                                                    [&info](const auto & pair)
-                                                    { return pair.first == info.filePath; });
-                             if (it == m_exampleFiles.end())
-                             {
-                                 // Release the thumbnail resources before removing
-                                 m_thumbnailExtractor->releaseThumbnail(
-                                   const_cast<ThreemfThumbnailExtractor::ThumbnailInfo &>(info));
-                                 return true;
-                             }
-                             return false;
-                         }),
-          m_exampleThumbnailInfos.end());
+        m_exampleThumbnailInfos.remove_if([this](auto & info)
+                                          {
+                                              auto it = std::find_if(m_exampleFiles.begin(),
+                                                                     m_exampleFiles.end(),
+                                                                     [&info](const auto & pair)
+                                                                     { return pair.first == info.filePath; });
+                                              if (it == m_exampleFiles.end())
+                                              {
+                                                  // Release the thumbnail resources before removing
+                                                  m_thumbnailExtractor->releaseThumbnail(info);
+                                                  return true;
+                                              }
+                                              return false;
+                                          });
 
         m_examplesNeedRefresh = false;
     }
@@ -383,6 +366,12 @@ namespace gladius::ui
 
     void WelcomeScreen::updateActiveTab()
     {
+        // Only set the initial tab once - don't override user's tab selection
+        if (m_initialTabSet)
+        {
+            return;
+        }
+
         if (m_backupManager && m_backupManager->hasPreviousSessionBackups())
         {
             m_activeTab = WelcomeTab::RestoreBackup;
@@ -438,9 +427,6 @@ namespace gladius::ui
                 }
             }
         }
-
-        // Update active tab based on backup availability
-        updateActiveTab();
 
         // Set up window styling
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
@@ -515,15 +501,17 @@ namespace gladius::ui
             // Tab bar
             if (ImGui::BeginTabBar("WelcomeTabBar", ImGuiTabBarFlags_None))
             {
+                // Use SetSelected flag only on the first frame to set initial tab
+                ImGuiTabItemFlags initialSelectFlag =
+                  m_initialTabSet ? ImGuiTabItemFlags_None : ImGuiTabItemFlags_SetSelected;
+
                 // Recent Files tab - only show if there are recent files
                 if (!m_recentFiles.empty())
                 {
-                    bool recentFilesSelected = (m_activeTab == WelcomeTab::RecentFiles);
-                    if (ImGui::BeginTabItem("Recent Files",
-                                            nullptr,
-                                            recentFilesSelected && !m_preferBackupTab
-                                              ? ImGuiTabItemFlags_SetSelected
-                                              : ImGuiTabItemFlags_None))
+                    ImGuiTabItemFlags flags = (m_activeTab == WelcomeTab::RecentFiles && !m_preferBackupTab)
+                                                ? initialSelectFlag
+                                                : ImGuiTabItemFlags_None;
+                    if (ImGui::BeginTabItem("Recent Files", nullptr, flags))
                     {
                         m_activeTab = WelcomeTab::RecentFiles;
                         renderRecentFilesTab(listWidth);
@@ -532,29 +520,33 @@ namespace gladius::ui
                 }
 
                 // Examples tab
-                bool examplesSelected = (m_activeTab == WelcomeTab::Examples);
-                if (ImGui::BeginTabItem("Examples",
-                                        nullptr,
-                                        examplesSelected ? ImGuiTabItemFlags_SetSelected
-                                                         : ImGuiTabItemFlags_None))
                 {
-                    m_activeTab = WelcomeTab::Examples;
-                    renderExamplesTab(listWidth);
-                    ImGui::EndTabItem();
+                    ImGuiTabItemFlags flags = (m_activeTab == WelcomeTab::Examples)
+                                                ? initialSelectFlag
+                                                : ImGuiTabItemFlags_None;
+                    if (ImGui::BeginTabItem("Examples", nullptr, flags))
+                    {
+                        m_activeTab = WelcomeTab::Examples;
+                        renderExamplesTab(listWidth);
+                        ImGui::EndTabItem();
+                    }
                 }
 
                 // Restore Backup tab
-                bool restoreBackupSelected = (m_activeTab == WelcomeTab::RestoreBackup);
-                if (ImGui::BeginTabItem("Restore Backup",
-                                        nullptr,
-                                        restoreBackupSelected && m_preferBackupTab
-                                          ? ImGuiTabItemFlags_SetSelected
-                                          : ImGuiTabItemFlags_None))
                 {
-                    m_activeTab = WelcomeTab::RestoreBackup;
-                    renderRestoreBackupTab(listWidth);
-                    ImGui::EndTabItem();
+                    ImGuiTabItemFlags flags = (m_activeTab == WelcomeTab::RestoreBackup && m_preferBackupTab)
+                                                ? initialSelectFlag
+                                                : ImGuiTabItemFlags_None;
+                    if (ImGui::BeginTabItem("Restore Backup", nullptr, flags))
+                    {
+                        m_activeTab = WelcomeTab::RestoreBackup;
+                        renderRestoreBackupTab(listWidth);
+                        ImGui::EndTabItem();
+                    }
                 }
+
+                // After first frame, mark initial tab as set
+                m_initialTabSet = true;
 
                 ImGui::EndTabBar();
             }
@@ -772,7 +764,7 @@ namespace gladius::ui
         return result;
     }
 
-    bool WelcomeScreen::hasPendingFileOpen() const
+    bool WelcomeScreen::hasPendingFileOpen() const noexcept
     {
         return m_pendingFileOpen.has_value();
     }
@@ -823,7 +815,7 @@ namespace gladius::ui
     }
 
     void WelcomeScreen::renderThumbnailGrid(
-      std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
+      std::list<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
       float availableWidth,
       const char * placeholderIcon,
       bool showTimestamp)
@@ -965,12 +957,11 @@ namespace gladius::ui
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
 
             // Use spinning indicator or hourglass
-            auto const loadingIcon = info.loadState == ThumbnailLoadState::Loading
-                                       ? ICON_FA_SPINNER
-                                       : ICON_FA_IMAGE; // DecodedPending shows image icon
+            char const * loadingIcon = info.loadState == ThumbnailLoadState::Loading
+                                         ? ICON_FA_SPINNER
+                                         : ICON_FA_IMAGE; // DecodedPending shows image icon
 
-            ImGui::Button(reinterpret_cast<char const *>(loadingIcon),
-                          ImVec2(m_thumbnailSize, m_thumbnailSize));
+            ImGui::Button(loadingIcon, ImVec2(m_thumbnailSize, m_thumbnailSize));
 
             // Still allow clicking while loading
             if (ImGui::IsItemClicked() && !m_clickProcessed && !m_pendingFileOpen.has_value())

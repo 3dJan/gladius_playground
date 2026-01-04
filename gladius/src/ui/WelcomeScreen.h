@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <list>
 #include <optional>
 #include <string>
 #include <vector>
@@ -135,7 +136,7 @@ namespace gladius::ui
          *
          * @return std::optional<std::filesystem::path> The file path to open, or empty if none
          */
-        std::optional<std::filesystem::path> processFileOpen();
+        [[nodiscard]] std::optional<std::filesystem::path> processFileOpen();
 
         /**
          * @brief Checks if there is a pending file open request
@@ -143,7 +144,7 @@ namespace gladius::ui
          * @return true if a file was clicked and is waiting to be opened
          * @return false if no file is pending
          */
-        bool hasPendingFileOpen() const;
+        [[nodiscard]] bool hasPendingFileOpen() const noexcept;
 
       private:
         /// Callback for when a file should be opened
@@ -179,8 +180,10 @@ namespace gladius::ui
         /// Logger for error reporting
         events::SharedLogger m_logger;
 
-        /// List of thumbnail info for recent files
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> m_thumbnailInfos;
+        /// List of thumbnail info for recent files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_thumbnailInfos;
 
         /// Flag to indicate if thumbnails need to be regenerated
         bool m_needsRefresh = true;
@@ -194,6 +197,9 @@ namespace gladius::ui
         /// Currently active tab
         WelcomeTab m_activeTab = WelcomeTab::RecentFiles;
 
+        /// Flag to indicate if initial tab selection has been made
+        bool m_initialTabSet = false;
+
         /// Flag to indicate if backup tab should be selected by default
         bool m_preferBackupTab = false;
 
@@ -203,8 +209,10 @@ namespace gladius::ui
         /// List of example files with their modification timestamps
         std::vector<std::pair<std::filesystem::path, std::time_t>> m_exampleFiles;
 
-        /// List of thumbnail info for example files
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> m_exampleThumbnailInfos;
+        /// List of thumbnail info for example files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_exampleThumbnailInfos;
 
         /// Flag to indicate if example thumbnails need to be regenerated
         bool m_examplesNeedRefresh = true;
@@ -237,7 +245,7 @@ namespace gladius::ui
 
         /// Helper method to render a thumbnail grid
         void
-        renderThumbnailGrid(std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
+        renderThumbnailGrid(std::list<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
                             float availableWidth,
                             const char * placeholderIcon,
                             bool showTimestamp);

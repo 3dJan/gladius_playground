@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <future>
 
 #include "../ConfigManager.h"
 #include "../Document.h"
@@ -326,5 +327,33 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications during mesh export
         ExportState m_exportState;
+
+        // --- Deferred OpenCL initialization ---
+        /// @brief State of the async compute initialization
+        enum class ComputeInitState
+        {
+            NotStarted,   ///< Not yet started
+            InProgress,   ///< Async device enumeration running
+            Completed,    ///< Enumeration completed, needs finalization on main thread
+            Finalized     ///< Fully initialized
+        };
+        ComputeInitState m_computeInitState{ComputeInitState::NotStarted};
+
+        /// @brief Result of async device enumeration
+        struct ComputeEnumResult
+        {
+            AcceleratorList accelerators;
+            bool success = false;
+            std::string errorMessage;
+        };
+
+        /// @brief Future for async compute initialization
+        std::future<ComputeEnumResult> m_computeInitFuture;
+
+        /// @brief Start async compute initialization
+        void startAsyncComputeInit();
+
+        /// @brief Poll and finalize async compute initialization (called from render loop)
+        void pollComputeInit();
     };
 }

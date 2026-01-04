@@ -126,6 +126,9 @@ namespace gladius
 
     void GLView::init()
     {
+        LOG_SCOPE_DURATION_NAMED("GLView::init()");
+        std::cerr << "[STARTUP] GLView::init() begin" << std::endl;
+
         if (m_initialized)
         {
             return;
@@ -142,6 +145,7 @@ namespace gladius
 
         m_window = glfwCreateWindow(
           1920, 1080, "Gladius - Advanced Cheese Grater Creator", nullptr, nullptr);
+        std::cerr << "[STARTUP] glfwCreateWindow completed" << std::endl;
 
         if (!m_window)
         {
@@ -174,7 +178,9 @@ namespace gladius
             return;
         }
         glShadeModel(GL_FLAT);
+        std::cerr << "[STARTUP] GL context made current, calling initImgUI()" << std::endl;
         initImgUI();
+        std::cerr << "[STARTUP] initImgUI() completed" << std::endl;
 
         // determine hdpi scaling
         determineUiScale();
@@ -254,6 +260,7 @@ namespace gladius
 
     void GLView::initImgUI()
     {
+        LOG_SCOPE_DURATION_NAMED("GLView::initImgUI()");
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO & io = ImGui::GetIO();
