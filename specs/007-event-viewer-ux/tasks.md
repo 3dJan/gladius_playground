@@ -34,7 +34,7 @@
 **Purpose**: Core infrastructure used by multiple user stories
 
 - [ ] T003 Add formatEventForClipboard() helper function in gladius/src/ui/LogView.cpp
-- [ ] T004 Add formatEventsForClipboard() helper for multiple events in gladius/src/ui/LogView.cpp
+- [ ] T004 Add formatEventsForClipboard() helper for multiple events in gladius/src/ui/LogView.cpp (depends on T003)
 - [ ] T005 [P] Add unit tests for formatEventForClipboard() in gladius/tests/unittests/ui/LogView_tests.cpp
 
 **Checkpoint**: Helper functions ready - user story implementation can begin
@@ -50,7 +50,7 @@
 ### Implementation for User Story 1
 
 - [ ] T006 [US1] Change m_showInfo default from true to false in gladius/src/ui/LogView.h
-- [ ] T007 [US1] Update updateCache() call on first render to respect new default in gladius/src/ui/LogView.cpp
+- [ ] T007 [US1] Ensure updateCache() is called on first render so severity filter applies immediately in gladius/src/ui/LogView.cpp
 
 **Checkpoint**: User Story 1 complete - default filter now hides Info messages
 
@@ -67,7 +67,7 @@
 - [ ] T008 [US2] Add m_selectedEventIndex member variable to LogView in gladius/src/ui/LogView.h
 - [ ] T009 [US2] Wrap event rows in ImGui::PushID/PopID for unique context menu IDs in gladius/src/ui/LogView.cpp
 - [ ] T010 [US2] Add ImGui::BeginPopupContextItem() for right-click menu in renderExpandedView() in gladius/src/ui/LogView.cpp
-- [ ] T011 [US2] Implement "Copy" menu item that calls ImGui::SetClipboardText() in gladius/src/ui/LogView.cpp
+- [ ] T011 [US2] Implement "Copy" menu item that calls ImGui::SetClipboardText() in gladius/src/ui/LogView.cpp (handle empty selection gracefully)
 - [ ] T012 [US2] Add Ctrl+C keyboard shortcut handling in renderExpandedView() in gladius/src/ui/LogView.cpp
 
 **Checkpoint**: User Story 2 complete - individual event copy works via right-click and Ctrl+C
@@ -83,7 +83,7 @@
 ### Implementation for User Story 3
 
 - [ ] T013 [US3] Add "Copy All" button to toolbar in render() after "Clear log" button in gladius/src/ui/LogView.cpp
-- [ ] T014 [US3] Implement copyAllVisibleEvents() that iterates filtered events and formats for clipboard in gladius/src/ui/LogView.cpp
+- [ ] T014 [US3] Implement copyAllVisibleEvents() that iterates filtered events and formats for clipboard in gladius/src/ui/LogView.cpp (show "No events to copy" if empty)
 
 **Checkpoint**: User Story 3 complete - bulk copy respects all active filters
 
@@ -112,7 +112,7 @@
 
 - [ ] T019 [P] Add Doxygen comments for new public/private methods in gladius/src/ui/LogView.h
 - [ ] T020 [P] Add copy feedback tooltip ("Copied!") for visual confirmation in gladius/src/ui/LogView.cpp
-- [ ] T021 Run quickstart.md manual testing checklist
+- [ ] T021 Run quickstart.md manual testing checklist (include: verify filter persistence when closing/reopening Event Viewer within session)
 - [ ] T022 Build and run all unit tests to verify no regressions
 
 ---

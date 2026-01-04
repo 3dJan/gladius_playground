@@ -91,7 +91,7 @@ As a user viewing the collapsed event summary, I want to copy all events of a sp
 - **FR-006**: System MUST provide a "Copy All" button in the expanded view toolbar
 - **FR-007**: The "Copy All" function MUST respect current text filter and severity filters
 - **FR-008**: Copied event text MUST include timestamp (ISO 8601), severity level, and full message
-- **FR-009**: System MUST provide visual feedback when copy operation succeeds
+- **FR-009**: System MUST provide visual feedback (tooltip showing "Copied!") when copy operation succeeds
 - **FR-010**: System MUST provide copy buttons within severity tooltips in collapsed view
 
 ### Key Entities
