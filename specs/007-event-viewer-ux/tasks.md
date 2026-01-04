@@ -24,8 +24,8 @@
 
 **Purpose**: Create test infrastructure for new functionality
 
-- [ ] T001 Create test file structure at gladius/tests/unittests/ui/LogView_tests.cpp
-- [ ] T002 Add LogView_tests.cpp to CMakeLists.txt in gladius/tests/unittests/CMakeLists.txt
+- [x] T001 Create test file structure at gladius/tests/unittests/ui/LogView_tests.cpp
+- [x] T002 Add LogView_tests.cpp to CMakeLists.txt in gladius/tests/unittests/CMakeLists.txt (auto-discovered via GLOB_RECURSE)
 
 ---
 
@@ -33,9 +33,9 @@
 
 **Purpose**: Core infrastructure used by multiple user stories
 
-- [ ] T003 Add formatEventForClipboard() helper function in gladius/src/ui/LogView.cpp
-- [ ] T004 Add formatEventsForClipboard() helper for multiple events in gladius/src/ui/LogView.cpp (depends on T003)
-- [ ] T005 [P] Add unit tests for formatEventForClipboard() in gladius/tests/unittests/ui/LogView_tests.cpp
+- [x] T003 Add formatEventForClipboard() helper function in gladius/src/ui/LogView.cpp
+- [x] T004 Add formatEventsForClipboard() helper for multiple events in gladius/src/ui/LogView.cpp (depends on T003)
+- [x] T005 [P] Add unit tests for formatEventForClipboard() in gladius/tests/unittests/ui/LogView_tests.cpp
 
 **Checkpoint**: Helper functions ready - user story implementation can begin
 
@@ -49,8 +49,8 @@
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Change m_showInfo default from true to false in gladius/src/ui/LogView.h
-- [ ] T007 [US1] Ensure updateCache() is called on first render so severity filter applies immediately in gladius/src/ui/LogView.cpp
+- [x] T006 [US1] Change m_showInfo default from true to false in gladius/src/ui/LogView.h
+- [x] T007 [US1] Ensure updateCache() is called on first render so severity filter applies immediately in gladius/src/ui/LogView.cpp
 
 **Checkpoint**: User Story 1 complete - default filter now hides Info messages
 
@@ -64,11 +64,11 @@
 
 ### Implementation for User Story 2
 
-- [ ] T008 [US2] Add m_selectedEventIndex member variable to LogView in gladius/src/ui/LogView.h
-- [ ] T009 [US2] Wrap event rows in ImGui::PushID/PopID for unique context menu IDs in gladius/src/ui/LogView.cpp
-- [ ] T010 [US2] Add ImGui::BeginPopupContextItem() for right-click menu in renderExpandedView() in gladius/src/ui/LogView.cpp
-- [ ] T011 [US2] Implement "Copy" menu item that calls ImGui::SetClipboardText() in gladius/src/ui/LogView.cpp (handle empty selection gracefully)
-- [ ] T012 [US2] Add Ctrl+C keyboard shortcut handling in renderExpandedView() in gladius/src/ui/LogView.cpp
+- [x] T008 [US2] Add m_selectedEventIndex member variable to LogView in gladius/src/ui/LogView.h
+- [x] T009 [US2] Wrap event rows in ImGui::PushID/PopID for unique context menu IDs in gladius/src/ui/LogView.cpp
+- [x] T010 [US2] Add ImGui::BeginPopupContextItem() for right-click menu in renderExpandedView() in gladius/src/ui/LogView.cpp
+- [x] T011 [US2] Implement "Copy" menu item that calls ImGui::SetClipboardText() in gladius/src/ui/LogView.cpp (handle empty selection gracefully)
+- [x] T012 [US2] Add Ctrl+C keyboard shortcut handling in renderExpandedView() in gladius/src/ui/LogView.cpp
 
 **Checkpoint**: User Story 2 complete - individual event copy works via right-click and Ctrl+C
 
@@ -82,8 +82,8 @@
 
 ### Implementation for User Story 3
 
-- [ ] T013 [US3] Add "Copy All" button to toolbar in render() after "Clear log" button in gladius/src/ui/LogView.cpp
-- [ ] T014 [US3] Implement copyAllVisibleEvents() that iterates filtered events and formats for clipboard in gladius/src/ui/LogView.cpp (show "No events to copy" if empty)
+- [x] T013 [US3] Add "Copy All" button to toolbar in render() after "Clear log" button in gladius/src/ui/LogView.cpp
+- [x] T014 [US3] Implement copyAllVisibleEvents() that iterates filtered events and formats for clipboard in gladius/src/ui/LogView.cpp (show "No events to copy" if empty)
 
 **Checkpoint**: User Story 3 complete - bulk copy respects all active filters
 
@@ -97,10 +97,10 @@
 
 ### Implementation for User Story 4
 
-- [ ] T015 [US4] Add copyEventsBySeverity(Severity) helper function in gladius/src/ui/LogView.cpp
-- [ ] T016 [US4] Convert fatal error tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
-- [ ] T017 [US4] Convert error tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
-- [ ] T018 [US4] Convert warning tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
+- [x] T015 [US4] Add copyEventsBySeverity(Severity) helper function in gladius/src/ui/LogView.cpp
+- [x] T016 [US4] Convert fatal error tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
+- [x] T017 [US4] Convert error tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
+- [x] T018 [US4] Convert warning tooltip to popup with copy button in renderCollapsedView() in gladius/src/ui/LogView.cpp
 
 **Checkpoint**: User Story 4 complete - per-severity copy available in collapsed view
 
@@ -110,10 +110,10 @@
 
 **Purpose**: Documentation, cleanup, and validation
 
-- [ ] T019 [P] Add Doxygen comments for new public/private methods in gladius/src/ui/LogView.h
-- [ ] T020 [P] Add copy feedback tooltip ("Copied!") for visual confirmation in gladius/src/ui/LogView.cpp
+- [x] T019 [P] Add Doxygen comments for new public/private methods in gladius/src/ui/LogView.h
+- [ ] T020 [P] Add copy feedback tooltip ("Copied!") for visual confirmation in gladius/src/ui/LogView.cpp (deferred - low priority)
 - [ ] T021 Run quickstart.md manual testing checklist (include: verify filter persistence when closing/reopening Event Viewer within session)
-- [ ] T022 Build and run all unit tests to verify no regressions
+- [x] T022 Build and run all unit tests to verify no regressions (549 tests pass)
 
 ---
 

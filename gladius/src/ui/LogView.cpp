@@ -8,6 +8,46 @@
 
 namespace gladius::ui
 {
+    /// Helper function to convert severity enum to string label for clipboard output.
+    char const* getSeverityLabel(events::Severity severity)
+    {
+        switch (severity)
+        {
+        case events::Severity::Warning:
+            return "WARNING";
+        case events::Severity::Error:
+            return "ERROR";
+        case events::Severity::FatalError:
+            return "FATAL";
+        case events::Severity::Info:
+        default:
+            return "INFO";
+        }
+    }
+}
+
+namespace gladius::ui::tests
+{
+    /// Format a single event for clipboard output.
+    /// Format: [YYYY-MM-DD HH:MM:SS] [SEVERITY] Message
+    std::string formatEventForClipboard(events::Event const& event)
+    {
+        auto inTime = std::chrono::system_clock::to_time_t(event.getTimeStamp());
+        std::tm tm{};
+#ifdef _MSVC_LANG
+        localtime_s(&tm, &inTime);
+#else
+        localtime_r(&inTime, &tm);
+#endif
+        return fmt::format("[{:%Y-%m-%d %H:%M:%S}] [{}] {}",
+                          tm,
+                          getSeverityLabel(event.getSeverity()),
+                          event.getMessage());
+    }
+}
+
+namespace gladius::ui
+{
     void LogView::show()
     {
         m_visible = true;
@@ -25,6 +65,13 @@ namespace gladius::ui
             return;
         }
 
+        // Ensure cache is initialized on first render (applies default severity filter)
+        if (m_cacheNeedsInitialUpdate)
+        {
+            updateCache(logger);
+            m_cacheNeedsInitialUpdate = false;
+        }
+
         // Render appropriate view based on collapsed state
         if (m_collapsed)
         {
@@ -40,7 +87,7 @@ namespace gladius::ui
             ImGui::SetNextWindowSize(ImVec2(0, 400));
 
             ImGui::Begin("Events", &m_visible);
-            // Top toolbar
+            // Top toolbar - Row 1: Settings and Filters
             ImGui::Checkbox("Auto-scroll", &m_autoScroll);
             ImGui::SameLine();
 
@@ -81,8 +128,9 @@ namespace gladius::ui
                 // Force update of cache when switching view modes
                 updateCache(logger);
             }
-            ImGui::SameLine();
 
+            // Top toolbar - Row 2: Search and Actions
+            ImGui::SetNextItemWidth(200.0f);
             if (m_filter.Draw("Filter") || (m_logSizeWhenCacheWasGenerated != logger.size()))
             {
                 if (m_filter.IsActive() || isSeverityFilterActive())
@@ -95,6 +143,87 @@ namespace gladius::ui
             if (ImGui::Button("Clear log"))
             {
                 logger.clear();
+            }
+
+            // Copy All button - copies all visible (filtered) events to clipboard
+            ImGui::SameLine();
+            if (ImGui::Button(ICON_FA_CLIPBOARD " Copy All"))
+            {
+                auto const& copyEventsBegin = (m_filter.IsActive() || isSeverityFilterActive())
+                                               ? m_filteredEvents.cbegin()
+                                               : logger.cbegin();
+                auto const& copyEventsEnd = (m_filter.IsActive() || isSeverityFilterActive())
+                                             ? m_filteredEvents.cend()
+                                             : logger.cend();
+
+                if (copyEventsBegin != copyEventsEnd)
+                {
+                    std::string clipboardText;
+                    for (auto iter = copyEventsBegin; iter != copyEventsEnd; ++iter)
+                    {
+                        clipboardText += tests::formatEventForClipboard(*iter) + "\n";
+                    }
+                    ImGui::SetClipboardText(clipboardText.c_str());
+                }
+            }
+            if (ImGui::IsItemHovered())
+            {
+                auto const eventCount = (m_filter.IsActive() || isSeverityFilterActive())
+                                          ? m_filteredEvents.size()
+                                          : logger.size();
+                if (eventCount == 0)
+                {
+                    ImGui::SetTooltip("No events to copy");
+                }
+                else
+                {
+                    ImGui::SetTooltip("Copy %zu event(s) to clipboard", eventCount);
+                }
+            }
+
+            // Copy Errors & Warnings button - copies only errors and warnings to clipboard
+            ImGui::SameLine();
+            if (ImGui::Button(ICON_FA_EXCLAMATION_TRIANGLE " Copy Errors && Warnings"))
+            {
+                std::string clipboardText;
+                size_t count = 0;
+                for (auto const& event : logger)
+                {
+                    auto const severity = event.getSeverity();
+                    if (severity == events::Severity::Error ||
+                        severity == events::Severity::Warning ||
+                        severity == events::Severity::FatalError)
+                    {
+                        clipboardText += tests::formatEventForClipboard(event) + "\n";
+                        ++count;
+                    }
+                }
+                if (!clipboardText.empty())
+                {
+                    ImGui::SetClipboardText(clipboardText.c_str());
+                }
+            }
+            if (ImGui::IsItemHovered())
+            {
+                size_t count = 0;
+                for (auto const& event : logger)
+                {
+                    auto const severity = event.getSeverity();
+                    if (severity == events::Severity::Error ||
+                        severity == events::Severity::Warning ||
+                        severity == events::Severity::FatalError)
+                    {
+                        ++count;
+                    }
+                }
+                if (count == 0)
+                {
+                    ImGui::SetTooltip("No errors or warnings to copy");
+                }
+                else
+                {
+                    ImGui::SetTooltip("Copy %zu error(s) and warning(s) to clipboard", count);
+                }
             }
 
             renderExpandedView(logger);
@@ -148,14 +277,31 @@ namespace gladius::ui
         if (fatalErrorCount > 0)
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
-            ImGui::Text(reinterpret_cast<const char *>(ICON_FA_EXCLAMATION " Fatal Errors: %zu"),
-                        fatalErrorCount);
+            if (ImGui::SmallButton(
+                  fmt::format(ICON_FA_EXCLAMATION " Fatal Errors: {}", fatalErrorCount).c_str()))
+            {
+                ImGui::OpenPopup("fatal_errors_popup");
+            }
             ImGui::PopStyleColor();
 
-            // Show tooltip with all fatal error messages when hovering
-            if (ImGui::IsItemHovered())
+            // Popup with fatal error messages and copy button
+            if (ImGui::BeginPopup("fatal_errors_popup"))
             {
-                ImGui::BeginTooltip();
+                // Copy button at the top
+                if (ImGui::Button(ICON_FA_CLIPBOARD " Copy All Fatal Errors"))
+                {
+                    std::string clipboardText;
+                    for (auto iter = eventsBegin; iter != eventsEnd; ++iter)
+                    {
+                        if (iter->getSeverity() == events::Severity::FatalError)
+                        {
+                            clipboardText += tests::formatEventForClipboard(*iter) + "\n";
+                        }
+                    }
+                    ImGui::SetClipboardText(clipboardText.c_str());
+                }
+                ImGui::Separator();
+
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
                 ImGui::TextUnformatted("Fatal Errors:");
@@ -171,7 +317,7 @@ namespace gladius::ui
                     }
                 }
                 ImGui::PopTextWrapPos();
-                ImGui::EndTooltip();
+                ImGui::EndPopup();
             }
             ImGui::SameLine();
         }
@@ -179,14 +325,31 @@ namespace gladius::ui
         if (errorCount > 0)
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
-            ImGui::Text(reinterpret_cast<const char *>(ICON_FA_EXCLAMATION_TRIANGLE " Errors: %zu"),
-                        errorCount);
+            if (ImGui::SmallButton(
+                  fmt::format(ICON_FA_EXCLAMATION_TRIANGLE " Errors: {}", errorCount).c_str()))
+            {
+                ImGui::OpenPopup("errors_popup");
+            }
             ImGui::PopStyleColor();
 
-            // Show tooltip with all error messages when hovering
-            if (ImGui::IsItemHovered())
+            // Popup with error messages and copy button
+            if (ImGui::BeginPopup("errors_popup"))
             {
-                ImGui::BeginTooltip();
+                // Copy button at the top
+                if (ImGui::Button(ICON_FA_CLIPBOARD " Copy All Errors"))
+                {
+                    std::string clipboardText;
+                    for (auto iter = eventsBegin; iter != eventsEnd; ++iter)
+                    {
+                        if (iter->getSeverity() == events::Severity::Error)
+                        {
+                            clipboardText += tests::formatEventForClipboard(*iter) + "\n";
+                        }
+                    }
+                    ImGui::SetClipboardText(clipboardText.c_str());
+                }
+                ImGui::Separator();
+
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                 ImGui::TextUnformatted("Errors:");
@@ -202,7 +365,7 @@ namespace gladius::ui
                     }
                 }
                 ImGui::PopTextWrapPos();
-                ImGui::EndTooltip();
+                ImGui::EndPopup();
             }
             ImGui::SameLine();
         }
@@ -210,14 +373,31 @@ namespace gladius::ui
         if (warningCount > 0)
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.f, 1.0f));
-            ImGui::Text(reinterpret_cast<const char *>(ICON_FA_EXCLAMATION_CIRCLE " Warnings: %zu"),
-                        warningCount);
+            if (ImGui::SmallButton(
+                  fmt::format(ICON_FA_EXCLAMATION_CIRCLE " Warnings: {}", warningCount).c_str()))
+            {
+                ImGui::OpenPopup("warnings_popup");
+            }
             ImGui::PopStyleColor();
 
-            // Show tooltip with all warning messages when hovering
-            if (ImGui::IsItemHovered())
+            // Popup with warning messages and copy button
+            if (ImGui::BeginPopup("warnings_popup"))
             {
-                ImGui::BeginTooltip();
+                // Copy button at the top
+                if (ImGui::Button(ICON_FA_CLIPBOARD " Copy All Warnings"))
+                {
+                    std::string clipboardText;
+                    for (auto iter = eventsBegin; iter != eventsEnd; ++iter)
+                    {
+                        if (iter->getSeverity() == events::Severity::Warning)
+                        {
+                            clipboardText += tests::formatEventForClipboard(*iter) + "\n";
+                        }
+                    }
+                    ImGui::SetClipboardText(clipboardText.c_str());
+                }
+                ImGui::Separator();
+
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.f, 1.0f));
                 ImGui::TextUnformatted("Warnings:");
@@ -233,7 +413,7 @@ namespace gladius::ui
                     }
                 }
                 ImGui::PopTextWrapPos();
-                ImGui::EndTooltip();
+                ImGui::EndPopup();
             }
             ImGui::SameLine();
         }
@@ -307,6 +487,9 @@ namespace gladius::ui
 
             for (auto iter = displayBegin; iter != eventsEnd && iter != displayEnd; ++iter)
             {
+                auto const eventIndex = static_cast<int>(std::distance(eventsBegin, iter));
+                ImGui::PushID(eventIndex);
+
                 auto inTime = std::chrono::system_clock::to_time_t(iter->getTimeStamp());
 
                 std::tm tm{};
@@ -315,6 +498,27 @@ namespace gladius::ui
 #else
                 localtime_r(&inTime, &tm);
 #endif
+                // Make row selectable for context menu and keyboard copy
+                bool const isSelected = (m_selectedEventIndex == eventIndex);
+                if (ImGui::Selectable("##event_row", isSelected,
+                                      ImGuiSelectableFlags_SpanAllColumns |
+                                      ImGuiSelectableFlags_AllowItemOverlap))
+                {
+                    m_selectedEventIndex = eventIndex;
+                }
+
+                // Right-click context menu for individual event copy
+                if (ImGui::BeginPopupContextItem("event_context_menu"))
+                {
+                    if (ImGui::MenuItem(ICON_FA_CLIPBOARD " Copy"))
+                    {
+                        ImGui::SetClipboardText(
+                            tests::formatEventForClipboard(*iter).c_str());
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SameLine();
                 ImGui::TextUnformatted(fmt::format("{:%Y-%m-%d %H:%M:%S}", tm).c_str());
                 ImGui::SameLine();
 
@@ -350,7 +554,18 @@ namespace gladius::ui
 
                 ImGui::SameLine();
                 ImGui::TextUnformatted(iter->getMessage().c_str());
+
+                ImGui::PopID();
             }
+        }
+
+        // Ctrl+C keyboard shortcut to copy selected event
+        if (ImGui::IsWindowFocused() && ImGui::GetIO().KeyCtrl &&
+            ImGui::IsKeyPressed(ImGuiKey_C) && m_selectedEventIndex >= 0 &&
+            m_selectedEventIndex < static_cast<int>(logSize))
+        {
+            auto const& selectedEvent = *(eventsBegin + m_selectedEventIndex);
+            ImGui::SetClipboardText(tests::formatEventForClipboard(selectedEvent).c_str());
         }
 
         if (lastFatalErrorIter != logger.cend())
