@@ -1305,16 +1305,16 @@ namespace gladius::ui
             img->unbind();
         };
 
-        float constexpr kp = 0.0001f;
+        float constexpr kp = 0.001f;
         float constexpr ki = 0.00001f;
         float constexpr kd = 0.000001f;
 
         auto const executionDuration_ms =
           measure<std::chrono::milliseconds>::execution(renderFrame);
 
-        auto constexpr progressiveTargetRenderTime_ms = 500;
+        auto constexpr progressiveTargetRenderTime_ms = 20000;
         auto constexpr tolerance_ms = 1;
-        auto constexpr targetFrameTime_ms = 50;
+        auto constexpr targetFrameTime_ms = 25;
         float error = targetFrameTime_ms - executionDuration_ms;
         if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgress()) &&
             executionDuration_ms > 0 && fabs(error) > 0)

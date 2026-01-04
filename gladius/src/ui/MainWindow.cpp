@@ -420,6 +420,21 @@ namespace gladius::ui
         {
             m_overlayFadeoutActive = true;
             m_mainView.startAnimationMode();
+
+            // Process any pending file open from the welcome screen
+            if (auto pendingPath = m_welcomeScreen.processFileOpen())
+            {
+                if (std::filesystem::exists(*pendingPath))
+                {
+                    open(*pendingPath);
+                }
+                else
+                {
+                    m_logger->addEvent(
+                      {fmt::format("File not found: {}", pendingPath->string()),
+                       events::Severity::Error});
+                }
+            }
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
 
@@ -518,6 +533,10 @@ namespace gladius::ui
                 ImGui::End();
                 ImGui::PopStyleVar();
             }
+
+            // Always render the docking area to preserve layout (even behind welcome screen)
+            // This ensures the dock space state is maintained across welcome screen transitions
+            mainWindowDockingArea();
 
             // Only render the normal UI if welcome screen is not visible and fadeout is complete
             if (!welcomeScreenVisible)
@@ -676,7 +695,6 @@ namespace gladius::ui
                 }
                 ImGui::PopStyleVar();
 
-                mainWindowDockingArea();
                 if (m_computeAvailable)
                 {
                     sliceWindow();
@@ -949,9 +967,15 @@ namespace gladius::ui
 #ifdef IMGUI_HAS_DOCK
         window_flags |= ImGuiWindowFlags_NoDocking;
 #endif
+
+        // Measure the menu bar height using the SAME padding as the actual menu bar in render()
+        // The actual menu bar uses: ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {20.f * m_uiScale, 12.f * m_uiScale});
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {20.f * m_uiScale, 12.f * m_uiScale});
         ImGui::BeginMainMenuBar();
-        const auto menuBarHeight = ImGui::GetWindowHeight();
+        float const menuBarHeight = ImGui::GetWindowHeight();
         ImGui::EndMainMenuBar();
+        ImGui::PopStyleVar();
+
         const auto & io = ImGui::GetIO();
 
         ImGui::SetNextWindowBgAlpha(0.0f);

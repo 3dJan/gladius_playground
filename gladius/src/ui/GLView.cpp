@@ -295,7 +295,17 @@ namespace gladius
                 // If our custom config exists, load it immediately
                 if (std::filesystem::is_regular_file(m_gladiusImgUiFilename))
                 {
-                    ImGui::LoadIniSettingsFromDisk(m_iniFileNameStorage.c_str());
+                    try
+                    {
+                        ImGui::LoadIniSettingsFromDisk(m_iniFileNameStorage.c_str());
+                    }
+                    catch (const std::exception & ex)
+                    {
+                        std::cerr << "Warning: Failed to load ImGui layout from "
+                                  << m_iniFileNameStorage << ": " << ex.what()
+                                  << ". Using default layout.\n";
+                        // Continue with default layout - ImGui will handle this gracefully
+                    }
                 }
             }
             catch (const std::exception & ex)

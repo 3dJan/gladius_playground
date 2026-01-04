@@ -160,6 +160,12 @@ namespace gladius::ui
         // Clear existing thumbnails if we're refreshing
         if (m_needsRefresh)
         {
+            // Cancel any pending async loads
+            if (m_asyncLoader)
+            {
+                m_asyncLoader->cancelAll();
+            }
+
             for (auto & info : m_thumbnailInfos)
             {
                 m_thumbnailExtractor->releaseThumbnail(info);
@@ -183,10 +189,16 @@ namespace gladius::ui
                 // Create new thumbnail info
                 auto info = m_thumbnailExtractor->createThumbnailInfo(filePath, timestamp);
 
-                // Load the thumbnail right away
-                m_thumbnailExtractor->loadThumbnail(info);
+                // Set loading state for async loading
+                info.loadState = ThumbnailLoadState::Loading;
 
                 m_thumbnailInfos.push_back(std::move(info));
+
+                // Queue for async loading (use back() since we just pushed)
+                if (m_asyncLoader)
+                {
+                    m_asyncLoader->requestLoad(m_thumbnailInfos.back());
+                }
             }
         }
 
@@ -274,6 +286,13 @@ namespace gladius::ui
         // Clear existing thumbnails if we're refreshing
         if (m_examplesNeedRefresh)
         {
+            // Cancel any pending async loads for examples
+            // Note: cancelAll() cancels all, so we only cancel if fully refreshing
+            if (m_asyncLoader && m_exampleThumbnailInfos.empty())
+            {
+                // Don't cancel if there are recent files loading
+            }
+
             for (auto & info : m_exampleThumbnailInfos)
             {
                 m_thumbnailExtractor->releaseThumbnail(info);
@@ -297,10 +316,16 @@ namespace gladius::ui
                 // Create new thumbnail info
                 auto info = m_thumbnailExtractor->createThumbnailInfo(filePath, timestamp);
 
-                // Load the thumbnail right away
-                m_thumbnailExtractor->loadThumbnail(info);
+                // Set loading state for async loading
+                info.loadState = ThumbnailLoadState::Loading;
 
                 m_exampleThumbnailInfos.push_back(std::move(info));
+
+                // Queue for async loading (use back() since we just pushed)
+                if (m_asyncLoader)
+                {
+                    m_asyncLoader->requestLoad(m_exampleThumbnailInfos.back());
+                }
             }
         }
 
@@ -336,6 +361,9 @@ namespace gladius::ui
         if (!m_thumbnailExtractor && m_logger)
         {
             m_thumbnailExtractor = std::make_unique<ThreemfThumbnailExtractor>(m_logger);
+
+            // Initialize the async thumbnail loader
+            m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger);
 
             // Force a refresh of thumbnails if we have any recent files
             if (!m_recentFiles.empty())
@@ -375,9 +403,40 @@ namespace gladius::ui
 
     bool WelcomeScreen::render()
     {
+        // Reset click processing flag at start of each frame
+        m_clickProcessed = false;
+
         if (!m_isVisible)
         {
             return false;
+        }
+
+        // Update async thumbnail loading - process completed background loads
+        if (m_asyncLoader)
+        {
+            m_asyncLoader->update();
+
+            // Process any pending textures (must be done on main thread)
+            m_asyncLoader->processPendingTextures();
+
+            // Create GL textures for thumbnails in DecodedPending state
+            if (m_thumbnailExtractor)
+            {
+                for (auto & info : m_thumbnailInfos)
+                {
+                    if (info.loadState == ThumbnailLoadState::DecodedPending)
+                    {
+                        m_thumbnailExtractor->createTextureFromPixels(info);
+                    }
+                }
+                for (auto & info : m_exampleThumbnailInfos)
+                {
+                    if (info.loadState == ThumbnailLoadState::DecodedPending)
+                    {
+                        m_thumbnailExtractor->createTextureFromPixels(info);
+                    }
+                }
+            }
         }
 
         // Update active tab based on backup availability
@@ -697,7 +756,25 @@ namespace gladius::ui
 
     void WelcomeScreen::hide()
     {
+        // Cancel any pending async thumbnail loads
+        if (m_asyncLoader)
+        {
+            m_asyncLoader->cancelAll();
+        }
+
         m_isVisible = false;
+    }
+
+    std::optional<std::filesystem::path> WelcomeScreen::processFileOpen()
+    {
+        auto result = m_pendingFileOpen;
+        m_pendingFileOpen.reset();
+        return result;
+    }
+
+    bool WelcomeScreen::hasPendingFileOpen() const
+    {
+        return m_pendingFileOpen.has_value();
     }
 
     void WelcomeScreen::renderSimpleFileList(
@@ -731,9 +808,10 @@ namespace gladius::ui
             if (ImGui::Button(displayText.c_str(),
                               ImVec2(-1, ImGui::GetTextLineHeightWithSpacing() * 2.5f)))
             {
-                if (m_openFileCallback)
+                if (!m_clickProcessed && !m_pendingFileOpen.has_value())
                 {
-                    m_openFileCallback(filePath);
+                    m_pendingFileOpen = filePath;
+                    m_clickProcessed = true;
                     m_isVisible = false;
                 }
             }
@@ -823,9 +901,10 @@ namespace gladius::ui
 
         if (ImGui::Button("##thumbnail", ImVec2(cellWidth, cellHeight)))
         {
-            if (m_openFileCallback)
+            if (!m_clickProcessed && !m_pendingFileOpen.has_value())
             {
-                m_openFileCallback(info.filePath);
+                m_pendingFileOpen = info.filePath;
+                m_clickProcessed = true;
                 m_isVisible = false;
             }
         }
@@ -846,7 +925,7 @@ namespace gladius::ui
         float thumbPosX = itemPos.x + (cellWidth - m_thumbnailSize) * 0.5f;
         ImGui::SetCursorPos(ImVec2(thumbPosX, itemPos.y + 5.0f));
 
-        // Draw the thumbnail or placeholder
+        // Draw the thumbnail, loading indicator, or placeholder
         if (info.hasThumbnail && info.thumbnailTextureId != 0)
         {
             // Calculate aspect ratio for proper display
@@ -877,6 +956,37 @@ namespace gladius::ui
             ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(info.thumbnailTextureId)),
                          ImVec2(displayWidth, displayHeight));
         }
+        else if (info.loadState == ThumbnailLoadState::Loading ||
+                 info.loadState == ThumbnailLoadState::DecodedPending)
+        {
+            // Show loading indicator - spinner icon with pulsing color
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+
+            // Use spinning indicator or hourglass
+            auto const loadingIcon = info.loadState == ThumbnailLoadState::Loading
+                                       ? ICON_FA_SPINNER
+                                       : ICON_FA_IMAGE; // DecodedPending shows image icon
+
+            ImGui::Button(reinterpret_cast<char const *>(loadingIcon),
+                          ImVec2(m_thumbnailSize, m_thumbnailSize));
+
+            // Still allow clicking while loading
+            if (ImGui::IsItemClicked() && !m_clickProcessed && !m_pendingFileOpen.has_value())
+            {
+                m_pendingFileOpen = info.filePath;
+                m_clickProcessed = true;
+                m_isVisible = false;
+            }
+
+            if (ImGui::IsItemHovered())
+            {
+                renderFileTooltip(info, showTimestamp);
+            }
+
+            ImGui::PopStyleColor(3);
+        }
         else
         {
             // Draw placeholder with appropriate styling for examples vs recent files
@@ -899,9 +1009,10 @@ namespace gladius::ui
                               ImVec2(m_thumbnailSize, m_thumbnailSize)))
             {
                 // Clicking the placeholder should also open the file
-                if (m_openFileCallback)
+                if (!m_clickProcessed && !m_pendingFileOpen.has_value())
                 {
-                    m_openFileCallback(info.filePath);
+                    m_pendingFileOpen = info.filePath;
+                    m_clickProcessed = true;
                     m_isVisible = false;
                 }
             }

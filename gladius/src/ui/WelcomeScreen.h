@@ -1,10 +1,12 @@
 #pragma once
 
+#include "AsyncThumbnailLoader.h"
 #include "BackupManager.h"
 #include "ThreemfThumbnailExtractor.h"
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -125,6 +127,24 @@ namespace gladius::ui
          */
         void setExamplesDirectory(const std::filesystem::path & examplesPath);
 
+        /**
+         * @brief Retrieves and clears the pending file open path
+         *
+         * Call this after the welcome screen closes to get the path of the file
+         * that was clicked, if any.
+         *
+         * @return std::optional<std::filesystem::path> The file path to open, or empty if none
+         */
+        std::optional<std::filesystem::path> processFileOpen();
+
+        /**
+         * @brief Checks if there is a pending file open request
+         *
+         * @return true if a file was clicked and is waiting to be opened
+         * @return false if no file is pending
+         */
+        bool hasPendingFileOpen() const;
+
       private:
         /// Callback for when a file should be opened
         std::function<void(const std::filesystem::path &)> m_openFileCallback;
@@ -138,6 +158,12 @@ namespace gladius::ui
         /// Flag indicating whether the welcome screen is visible
         bool m_isVisible = true;
 
+        /// Flag to prevent processing multiple clicks in the same frame
+        bool m_clickProcessed = false;
+
+        /// Path of file to open (set when thumbnail clicked, cleared after processing)
+        std::optional<std::filesystem::path> m_pendingFileOpen;
+
         /// Thumbnail size for the recent files grid
         float m_thumbnailSize = 150.0f;
 
@@ -146,6 +172,9 @@ namespace gladius::ui
 
         /// Thumbnail extractor for recent files
         std::unique_ptr<ThreemfThumbnailExtractor> m_thumbnailExtractor;
+
+        /// Async thumbnail loader for background loading
+        std::unique_ptr<AsyncThumbnailLoader> m_asyncLoader;
 
         /// Logger for error reporting
         events::SharedLogger m_logger;

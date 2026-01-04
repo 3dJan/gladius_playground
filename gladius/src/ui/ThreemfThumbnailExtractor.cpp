@@ -246,4 +246,135 @@ namespace gladius::ui
 
         return info;
     }
+
+    ThumbnailLoadResult
+    ThreemfThumbnailExtractor::extractThumbnailDataOnly(const std::filesystem::path & filePath)
+    {
+        ThumbnailLoadResult result;
+
+        try
+        {
+            // Create a new lib3mf wrapper for thread safety
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            if (!wrapper)
+            {
+                result.errorMessage = "Failed to initialize lib3mf";
+                return result;
+            }
+
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+
+            reader->SetStrictModeActive(false);
+            reader->ReadFromFile(filePath.string());
+
+            if (model->HasPackageThumbnailAttachment())
+            {
+                auto thumbnail = model->GetPackageThumbnailAttachment();
+                if (thumbnail)
+                {
+                    std::vector<unsigned char> pngData;
+                    thumbnail->WriteToBuffer(pngData);
+
+                    if (!pngData.empty())
+                    {
+                        // Decode PNG to RGBA pixels
+                        result.decodedPixels =
+                          decodePngToPixels(pngData, result.width, result.height);
+
+                        if (!result.decodedPixels.empty())
+                        {
+                            result.success = true;
+                        }
+                        else
+                        {
+                            result.errorMessage = "Failed to decode PNG thumbnail";
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // No thumbnail in file - not an error, just no thumbnail
+                result.success = false;
+                result.errorMessage = "No thumbnail in 3MF file";
+            }
+        }
+        catch (const std::exception & e)
+        {
+            result.success = false;
+            result.errorMessage = e.what();
+        }
+
+        return result;
+    }
+
+    std::vector<unsigned char>
+    ThreemfThumbnailExtractor::decodePngToPixels(const std::vector<unsigned char> & pngData,
+                                                  unsigned int & outWidth,
+                                                  unsigned int & outHeight)
+    {
+        std::vector<unsigned char> decodedImage;
+        outWidth = 0;
+        outHeight = 0;
+
+        if (pngData.empty())
+        {
+            return decodedImage;
+        }
+
+        unsigned int error = lodepng::decode(decodedImage, outWidth, outHeight, pngData);
+
+        if (error != 0)
+        {
+            decodedImage.clear();
+            outWidth = 0;
+            outHeight = 0;
+        }
+
+        return decodedImage;
+    }
+
+    void ThreemfThumbnailExtractor::createTextureFromPixels(ThumbnailInfo & info)
+    {
+        if (info.thumbnailTextureId != 0 || info.decodedPixels.empty())
+        {
+            return;
+        }
+
+        // Create OpenGL texture
+        GLuint textureId;
+        glGenTextures(1, &textureId);
+        glBindTexture(GL_TEXTURE_2D, textureId);
+
+        // Set texture parameters
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Upload the image data to the texture
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA,
+                     info.thumbnailWidth,
+                     info.thumbnailHeight,
+                     0,
+                     GL_RGBA,
+                     GL_UNSIGNED_BYTE,
+                     info.decodedPixels.data());
+
+        // Unbind the texture
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Store the texture ID and update state
+        info.thumbnailTextureId = textureId;
+        info.textureCreated = true;
+        info.hasThumbnail = true;
+        info.loadState = ThumbnailLoadState::Ready;
+
+        // Clear decoded pixels to free memory
+        info.decodedPixels.clear();
+        info.decodedPixels.shrink_to_fit();
+    }
 }

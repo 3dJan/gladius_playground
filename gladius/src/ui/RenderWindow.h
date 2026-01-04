@@ -37,7 +37,7 @@ namespace gladius::ui
         bool isRendering = false;
         bool isMoving = false;
         size_t currentLine = 0;
-        size_t renderingStepSize = 20;
+        size_t renderingStepSize = 100;
 
         float fpsPreviousError = 0.0f;
         float fpsIntegral = 0.0f;
