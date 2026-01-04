@@ -49,9 +49,10 @@ namespace gladius::ui
          */
         ~AsyncThumbnailLoader();
 
-        // Non-copyable, non-movable (owns futures)
-        AsyncThumbnailLoader(const AsyncThumbnailLoader &) = delete;
-        AsyncThumbnailLoader & operator=(const AsyncThumbnailLoader &) = delete;
+        // Non-copyable, non-movable: owns active futures with raw pointers to external ThumbnailInfo.
+        // Moving would invalidate the pointers stored in m_activeTasks and m_pendingQueue.
+        AsyncThumbnailLoader(AsyncThumbnailLoader const &) = delete;
+        AsyncThumbnailLoader & operator=(AsyncThumbnailLoader const &) = delete;
         AsyncThumbnailLoader(AsyncThumbnailLoader &&) = delete;
         AsyncThumbnailLoader & operator=(AsyncThumbnailLoader &&) = delete;
 

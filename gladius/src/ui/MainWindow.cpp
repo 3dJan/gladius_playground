@@ -254,7 +254,6 @@ namespace gladius::ui
     {
         ProfileFunction;
         LOG_SCOPE_DURATION_NAMED("MainWindow::setup()");
-        std::cerr << "[STARTUP] MainWindow::setup() begin" << std::endl << std::flush;
         m_initialized = true;
 
         // Create the GL context up-front so any GL-backed resources can be created safely
@@ -262,7 +261,6 @@ namespace gladius::ui
             LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - ensureInitialized");
             m_mainView.ensureInitialized();
         }
-        std::cerr << "[STARTUP] GL context initialized" << std::endl << std::flush;
 
         // Set up minimal UI immediately so window appears responsive
         {
@@ -275,7 +273,6 @@ namespace gladius::ui
         }
 
         // Set up minimal callbacks - will be replaced after compute init completes
-        std::cerr << "[STARTUP] Setting up callbacks" << std::endl << std::flush;
         m_mainView.clearViewCallback();
         m_renderCallback = [&]() { /* no-op until compute ready */ };
         m_mainView.setRenderCallback(m_renderCallback);
@@ -283,15 +280,12 @@ namespace gladius::ui
         m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
 
         // Start async OpenCL initialization
-        std::cerr << "[STARTUP] About to call startAsyncComputeInit" << std::endl << std::flush;
         startAsyncComputeInit();
-        std::cerr << "[STARTUP] MainWindow::setup() returning" << std::endl << std::flush;
     }
 
     void MainWindow::startAsyncComputeInit()
     {
         LOG_SCOPE_DURATION_NAMED("MainWindow::startAsyncComputeInit()");
-        std::cerr << "[STARTUP] startAsyncComputeInit() begin" << std::endl;
 
         if (m_computeInitState != ComputeInitState::NotStarted)
         {
@@ -306,17 +300,12 @@ namespace gladius::ui
           std::launch::async,
           []() -> ComputeEnumResult
           {
-              std::cerr << "[STARTUP] Async OpenCL enumeration thread started" << std::endl;
-              auto startTime = std::chrono::high_resolution_clock::now();
               ComputeEnumResult result;
               try
               {
                   // This is the slow part - OpenCL platform/device enumeration
                   std::ostringstream logStream;
                   auto accelerators = queryAccelerators(logStream);
-                  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::high_resolution_clock::now() - startTime).count();
-                  std::cerr << "[STARTUP] queryAccelerators() completed in " << elapsed << "ms" << std::endl;
 
                   if (accelerators.empty())
                   {
@@ -337,20 +326,18 @@ namespace gladius::ui
                   result.accelerators = std::move(accelerators);
                   result.success = true;
               }
-              catch (const GladiusException & e)
+              catch (GladiusException const & e)
               {
                   result.success = false;
                   result.errorMessage = e.what();
               }
-              catch (const std::exception & e)
+              catch (std::exception const & e)
               {
                   result.success = false;
                   result.errorMessage = e.what();
               }
-              std::cerr << "[STARTUP] Async OpenCL enumeration thread finished" << std::endl;
               return result;
           });
-        std::cerr << "[STARTUP] startAsyncComputeInit() - async task launched" << std::endl;
     }
 
     void MainWindow::pollComputeInit()
@@ -372,8 +359,6 @@ namespace gladius::ui
         }
 
         // Future is ready - get the result and finalize on main thread
-        std::cerr << "[STARTUP] pollComputeInit() - future ready, finalizing on main thread" << std::endl;
-        auto pollStartTime = std::chrono::high_resolution_clock::now();
         m_computeInitState = ComputeInitState::Completed;
 
         try
@@ -385,24 +370,8 @@ namespace gladius::ui
                 // Phase 2: Create the OpenCL context on the main thread (GL context is current)
                 auto const & selectedAccelerator = result.accelerators.front();
 
-                std::string deviceName = "unknown";
-                try
-                {
-                    deviceName = selectedAccelerator.device.getInfo<CL_DEVICE_NAME>();
-                }
-                catch (...)
-                {
-                }
-                std::cerr << "[STARTUP] Creating ComputeContext with accelerator: " 
-                          << deviceName << std::endl;
-                auto contextStartTime = std::chrono::high_resolution_clock::now();
                 auto context = std::make_shared<ComputeContext>(
                   EnableGLOutput::enabled, selectedAccelerator);
-                {
-                    auto contextElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::high_resolution_clock::now() - contextStartTime).count();
-                    std::cerr << "[STARTUP] ComputeContext constructor took " << contextElapsed << "ms" << std::endl;
-                }
                 context->setLogger(m_logger);
                 context->setDebugOutputEnabled(m_openclDebugEnabled);
                 gladius::setGlobalLogger(m_logger);

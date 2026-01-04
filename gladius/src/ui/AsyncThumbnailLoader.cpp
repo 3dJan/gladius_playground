@@ -19,11 +19,12 @@ namespace gladius::ui
 
     void AsyncThumbnailLoader::requestLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info)
     {
-        // Skip if already loading, decoded, or ready
-        if (info.loadState != ThumbnailLoadState::NotStarted &&
-            info.loadState != ThumbnailLoadState::Failed)
+        // Only proceed if NotStarted or Failed (retry case)
+        if (info.loadState == ThumbnailLoadState::Loading ||
+            info.loadState == ThumbnailLoadState::DecodedPending ||
+            info.loadState == ThumbnailLoadState::Ready)
         {
-            return;
+            return; // Already loading, decoded, or completed successfully
         }
 
         // Check if already in queue
@@ -149,11 +150,10 @@ namespace gladius::ui
 
     void AsyncThumbnailLoader::processPendingTextures()
     {
-        // Intentionally empty: OpenGL texture creation requires access to ThumbnailInfo
-        // containers owned by WelcomeScreen. The WelcomeScreen iterates its own containers
-        // and calls ThreemfThumbnailExtractor::createTextureFromPixels() directly for any
-        // thumbnails in DecodedPending state. This method exists for API completeness and
-        // potential future refactoring where the loader might own the info containers.
+        // TODO: Move texture creation logic here when we refactor ownership.
+        // Currently, WelcomeScreen owns the ThumbnailInfo containers and calls
+        // ThreemfThumbnailExtractor::createTextureFromPixels() directly for any
+        // thumbnails in DecodedPending state.
     }
 
     void AsyncThumbnailLoader::cancelAll()

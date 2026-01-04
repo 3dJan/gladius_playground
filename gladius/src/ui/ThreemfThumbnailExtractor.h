@@ -174,7 +174,7 @@ namespace gladius::ui
          * @param filePath Path to the 3MF file
          * @return ThumbnailLoadResult Result containing decoded pixels or error
          */
-        static ThumbnailLoadResult extractThumbnailDataOnly(const std::filesystem::path & filePath);
+        [[nodiscard]] static ThumbnailLoadResult extractThumbnailDataOnly(std::filesystem::path const & filePath);
 
         /**
          * @brief Decode PNG data to RGBA pixels (thread-safe, static)

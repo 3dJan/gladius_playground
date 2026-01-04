@@ -800,12 +800,7 @@ namespace gladius::ui
             if (ImGui::Button(displayText.c_str(),
                               ImVec2(-1, ImGui::GetTextLineHeightWithSpacing() * 2.5f)))
             {
-                if (!m_clickProcessed && !m_pendingFileOpen.has_value())
-                {
-                    m_pendingFileOpen = filePath;
-                    m_clickProcessed = true;
-                    m_isVisible = false;
-                }
+                trySetPendingFileOpen(filePath);
             }
 
             ImGui::PopStyleVar();
@@ -893,12 +888,7 @@ namespace gladius::ui
 
         if (ImGui::Button("##thumbnail", ImVec2(cellWidth, cellHeight)))
         {
-            if (!m_clickProcessed && !m_pendingFileOpen.has_value())
-            {
-                m_pendingFileOpen = info.filePath;
-                m_clickProcessed = true;
-                m_isVisible = false;
-            }
+            trySetPendingFileOpen(info.filePath);
         }
 
         // Add tooltip when hovering over the thumbnail
@@ -964,11 +954,9 @@ namespace gladius::ui
             ImGui::Button(loadingIcon, ImVec2(m_thumbnailSize, m_thumbnailSize));
 
             // Still allow clicking while loading
-            if (ImGui::IsItemClicked() && !m_clickProcessed && !m_pendingFileOpen.has_value())
+            if (ImGui::IsItemClicked())
             {
-                m_pendingFileOpen = info.filePath;
-                m_clickProcessed = true;
-                m_isVisible = false;
+                trySetPendingFileOpen(info.filePath);
             }
 
             if (ImGui::IsItemHovered())
@@ -1000,12 +988,7 @@ namespace gladius::ui
                               ImVec2(m_thumbnailSize, m_thumbnailSize)))
             {
                 // Clicking the placeholder should also open the file
-                if (!m_clickProcessed && !m_pendingFileOpen.has_value())
-                {
-                    m_pendingFileOpen = info.filePath;
-                    m_clickProcessed = true;
-                    m_isVisible = false;
-                }
+                trySetPendingFileOpen(info.filePath);
             }
 
             // Add tooltip for placeholder as well
@@ -1141,5 +1124,17 @@ namespace gladius::ui
         }
 
         ImGui::EndTooltip();
+    }
+
+    bool WelcomeScreen::trySetPendingFileOpen(std::filesystem::path const & path)
+    {
+        if (m_clickProcessed || m_pendingFileOpen.has_value())
+        {
+            return false;
+        }
+        m_pendingFileOpen = path;
+        m_clickProcessed = true;
+        m_isVisible = false;
+        return true;
     }
 }

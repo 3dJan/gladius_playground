@@ -1305,6 +1305,11 @@ namespace gladius::ui
             img->unbind();
         };
 
+        // PID controller tuning for adaptive rendering resolution
+        // These values are tuned to provide smooth resolution adjustment during camera movement
+        // kp: Proportional gain - primary response to frame time error
+        // ki: Integral gain - eliminates steady-state error (low to prevent windup)
+        // kd: Derivative gain - dampens oscillation
         float constexpr kp = 0.001f;
         float constexpr ki = 0.00001f;
         float constexpr kd = 0.000001f;
@@ -1312,9 +1317,10 @@ namespace gladius::ui
         auto const executionDuration_ms =
           measure<std::chrono::milliseconds>::execution(renderFrame);
 
-        auto constexpr progressiveTargetRenderTime_ms = 20000;
+        // Progressive rendering: max time to render complete frame before forcing completion
+        auto constexpr progressiveTargetRenderTime_ms = 20000; // 20 seconds max progressive render
         auto constexpr tolerance_ms = 1;
-        auto constexpr targetFrameTime_ms = 25;
+        auto constexpr targetFrameTime_ms = 25; // Target ~40 FPS during interaction
         float error = targetFrameTime_ms - executionDuration_ms;
         if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgress()) &&
             executionDuration_ms > 0 && fabs(error) > 0)

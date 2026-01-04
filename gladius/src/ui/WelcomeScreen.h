@@ -270,5 +270,9 @@ namespace gladius::ui
         /// Helper method to render file tooltip with common information
         void renderFileTooltip(const ThreemfThumbnailExtractor::ThumbnailInfo & info,
                                bool showTimestamp);
+
+        /// Helper method to handle file click and set pending file open
+        /// @return true if the click was processed, false if already processed this frame
+        bool trySetPendingFileOpen(std::filesystem::path const & path);
     };
 }

@@ -167,7 +167,6 @@ namespace gladius
     AcceleratorList queryAccelerators(std::ostream & logStream)
     {
         LOG_SCOPE_DURATION_NAMED("queryAccelerators()");
-        std::cerr << "[STARTUP] queryAccelerators() begin" << std::endl;
         AcceleratorList candidates;
         AcceleratorList fallbackCandidates;
 
@@ -178,7 +177,6 @@ namespace gladius
                 LOG_SCOPE_DURATION_NAMED("queryAccelerators() - cl::Platform::get()");
                 cl::Platform::get(&allPlatforms);
             }
-            std::cerr << "[STARTUP] Found " << allPlatforms.size() << " OpenCL platforms" << std::endl;
 
             if (allPlatforms.empty())
             {
@@ -193,12 +191,9 @@ namespace gladius
                 {
                     auto const platformName = allPlatforms[i].getInfo<CL_PLATFORM_NAME>();
                     logStream << "\nDevices of platform " << i + 1 << ") " << platformName << ":\n";
-                    std::cerr << "[STARTUP] Querying platform " << i + 1 << ": " << platformName << std::endl;
-                    auto platformStartTime = std::chrono::high_resolution_clock::now();
 
                     std::vector<cl::Device> allDevices;
                     allPlatforms[i].getDevices(CL_DEVICE_TYPE_ALL, &allDevices);
-                    std::cerr << "[STARTUP]   Found " << allDevices.size() << " devices" << std::endl;
 
                     if (allDevices.empty())
                     {
@@ -210,14 +205,10 @@ namespace gladius
                     {
                         try
                         {
-                            auto deviceStartTime = std::chrono::high_resolution_clock::now();
                             auto const deviceName = device.getInfo<CL_DEVICE_NAME>();
                             logStream << "\n\t" << deviceName << "\n";
 
                             auto caps = queryCapabilities(device);
-                            auto deviceElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::high_resolution_clock::now() - deviceStartTime).count();
-                            std::cerr << "[STARTUP]     Device: " << deviceName << " queried in " << deviceElapsed << "ms" << std::endl;
                             logStream << "Performance rating:" << caps.performanceEstimation
                                       << "\n";
 
@@ -1050,16 +1041,6 @@ namespace gladius
     void ComputeContext::initContextWithAccelerator(Accelerator const & accelerator)
     {
         LOG_SCOPE_DURATION_NAMED("ComputeContext::initContextWithAccelerator()");
-        std::string deviceName = "unknown";
-        try
-        {
-            deviceName = accelerator.device.getInfo<CL_DEVICE_NAME>();
-        }
-        catch (...)
-        {
-        }
-        std::cerr << "[STARTUP] initContextWithAccelerator() begin - device: " 
-                  << deviceName << std::endl;
         try
         {
             m_device = accelerator.device;

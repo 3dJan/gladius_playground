@@ -180,7 +180,7 @@ namespace gladius::ui
     }
 
     ThumbnailLoadResult
-    ThreemfThumbnailExtractor::extractThumbnailDataOnly(const std::filesystem::path & filePath)
+    ThreemfThumbnailExtractor::extractThumbnailDataOnly(std::filesystem::path const & filePath)
     {
         ThumbnailLoadResult result;
 
@@ -240,9 +240,13 @@ namespace gladius::ui
                     }
                 }
             }
+            catch (std::exception const &)
+            {
+                // Metadata extraction is optional - continue without metadata
+            }
             catch (...)
             {
-                // Metadata extraction is optional, continue even if it fails
+                // Unknown error during metadata extraction - continue without metadata
             }
 
             if (model->HasPackageThumbnailAttachment())
