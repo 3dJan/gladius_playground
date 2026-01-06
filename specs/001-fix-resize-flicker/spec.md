@@ -65,13 +65,11 @@ When a user drags the application window between monitors with different resolut
 
 ### Functional Requirements
 
-- **FR-001**: System MUST preserve rendered viewport content during window resize operations
-- **FR-002**: System MUST prevent clearing or blanking of the render area during resize events
-- **FR-003**: System MUST maintain visual content continuity during window maximize and restore operations
-- **FR-004**: System MUST handle resize events without introducing visual artifacts or flicker
-- **FR-005**: System MUST gracefully handle resize operations during active rendering
-- **FR-006**: Users MUST perceive smooth visual transitions during all window dimension changes
-- **FR-007**: System MUST support resize operations across different DPI and resolution contexts without clearing content
+- **FR-001**: System MUST preserve rendered viewport content by preventing framebuffer clearing during window resize operations
+- **FR-002**: System MUST maintain visual content continuity during window maximize and restore operations
+- **FR-003**: System MUST provide smooth visual transitions without flicker or artifacts during all window dimension changes
+- **FR-004**: System MUST safely handle resize operations during active async rendering without race conditions
+- **FR-005**: System MUST preserve content during resize operations across different DPI and resolution contexts
 
 ### Key Entities
 
@@ -87,5 +85,5 @@ When a user drags the application window between monitors with different resolut
 - **SC-002**: Content remains visible and stable during 100% of resize operations (manual dragging, maximize, restore)
 - **SC-003**: Zero reported instances of render area clearing during window operations in user testing
 - **SC-004**: Window resize operations complete without visual discontinuity or blank frames
-- **SC-005**: Users report improved perceived quality of the application (measured via user feedback or survey)
-- **SC-006**: Resize operation handling time remains under 16ms per frame to maintain smooth 60fps visual experience
+- **SC-005**: Developer and early user testing confirms no visual regressions compared to baseline recordings
+- **SC-006**: Resize event handling code executes in <1ms to avoid blocking frame rendering

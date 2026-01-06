@@ -35,7 +35,8 @@
 - [ ] T004 Document current resize behavior by tracing code flow from RenderWindow::renderWindow() lines 488-503
 - [ ] T005 Document invalidateView() behavior and all side effects in gladius/src/ui/RenderWindow.cpp lines 612-623
 - [ ] T006 Identify all call sites of invalidateView() to understand impact of changes
-- [ ] T007 Create baseline test recording of current flicker behavior (screen recording for reference)
+- [ ] T007 Verify async epoch cancellation mechanism in renderAsync() doesn't race with resize buffer reallocation
+- [ ] T008 Create baseline test recording of current flicker behavior (screen recording for reference)
 
 **Checkpoint**: Foundation ready - detailed understanding of current resize handling established
 
@@ -49,17 +50,22 @@
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] Modify resize detection logic in gladius/src/ui/RenderWindow.cpp lines 488-503 to preserve current display texture
-- [ ] T009 [US1] Update invalidateView() in gladius/src/ui/RenderWindow.cpp lines 612-623 to avoid clearing existing frame buffer
-- [ ] T010 [US1] Add flag m_preserveContentDuringResize to RenderWindow class in gladius/src/ui/RenderWindow.h
-- [ ] T011 [US1] Implement deferred buffer reallocation - delay setScreenResolution() call until preview completes
-- [ ] T012 [US1] Update renderSync() in gladius/src/ui/RenderWindow.cpp lines 1184-1361 to respect preserve flag
-- [ ] T013 [US1] Update renderAsync() in gladius/src/ui/RenderWindow.cpp lines 1363-1643 to respect preserve flag
-- [ ] T014 [US1] Add inline comments explaining resize preservation logic per constitution requirements
-- [ ] T015 [US1] Manual test: Execute Test 1.1 (single-edge horizontal resize) from quickstart.md
-- [ ] T016 [US1] Manual test: Execute Test 1.2 (single-edge vertical resize) from quickstart.md
-- [ ] T017 [US1] Manual test: Execute Test 1.3 (corner resize) from quickstart.md
-- [ ] T018 [US1] Manual test: Execute Test 1.4 (rapid continuous resize stress test) from quickstart.md
+- [ ] T009 [US1] Add m_preserveContentDuringResize and m_deferredResizePending flags to RenderWindow in gladius/src/ui/RenderWindow.h
+- [ ] T010 [US1] Modify resize detection logic in gladius/src/ui/RenderWindow.cpp lines 488-503 to set preserve flags instead of immediate invalidateView()
+- [ ] T011 [US1] Update invalidateView() in gladius/src/ui/RenderWindow.cpp lines 612-623 to conditionally skip framebuffer clearing when preserve flag is set
+- [ ] T012 [US1] Implement deferred buffer reallocation in renderAsync() - defer setScreenResolution() until current async render job completes (check epoch)
+- [ ] T013 [US1] Update renderSync() in gladius/src/ui/RenderWindow.cpp lines 1184-1361 to check preserve flag before clearing
+- [ ] T014 [US1] Update renderAsync() in gladius/src/ui/RenderWindow.cpp lines 1363-1643 to check preserve flag before clearing
+- [ ] T015 [US1] Add inline comments explaining framebuffer preservation and deferred reallocation logic
+- [ ] T016 [US1] Create gladius/tests/unittests/ui/RenderWindowResizeTest.cpp with GTest suite structure
+- [ ] T017 [US1] Write unit test: invalidateView() respects preserve flag and doesn't clear framebuffer
+- [ ] T018 [US1] Write unit test: Resize detection sets deferred reallocation flag correctly
+- [ ] T019 [US1] Write unit test: setScreenResolution() deferred until async epoch increments
+- [ ] T020 [US1] Build and run unit tests, verify all pass
+- [ ] T021 [US1] Manual test: Execute Test 1.1 (single-edge horizontal resize) from quickstart.md
+- [ ] T022 [US1] Manual test: Execute Test 1.2 (single-edge vertical resize) from quickstart.md
+- [ ] T023 [US1] Manual test: Execute Test 1.3 (corner resize) from quickstart.md
+- [ ] T024 [US1] Manual test: Execute Test 1.4 (rapid continuous resize stress test) from quickstart.md
 
 **Checkpoint**: Manual window resize should now be flicker-free. Content remains visible during drag operations.
 
@@ -73,12 +79,12 @@
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Verify maximize/restore uses same resize detection code path as manual resize (no special handling needed)
-- [ ] T020 [US2] Test that existing US1 changes handle maximize event correctly
-- [ ] T021 [US2] Test that existing US1 changes handle restore event correctly
-- [ ] T022 [US2] Manual test: Execute Test 2.1 (maximize transition) from quickstart.md
-- [ ] T023 [US2] Manual test: Execute Test 2.2 (restore transition) from quickstart.md
-- [ ] T024 [US2] Manual test: Execute Test 2.3 (rapid maximize/restore toggle) from quickstart.md
+- [ ] T025 [US2] Verify maximize/restore uses same resize detection code path as manual resize (no special handling needed)
+- [ ] T026 [US2] Test that existing US1 changes handle maximize event correctly
+- [ ] T027 [US2] Test that existing US1 changes handle restore event correctly
+- [ ] T028 [US2] Manual test: Execute Test 2.1 (maximize transition) from quickstart.md
+- [ ] T029 [US2] Manual test: Execute Test 2.2 (restore transition) from quickstart.md
+- [ ] T030 [US2] Manual test: Execute Test 2.3 (rapid maximize/restore toggle) from quickstart.md
 
 **Checkpoint**: Maximize and restore operations should preserve content without flicker, reusing US1 logic.
 
@@ -94,11 +100,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] Verify DPI changes are handled by existing ImGui::GetIO().FontGlobalScale logic (line 1120)
-- [ ] T026 [US3] Verify multi-monitor transitions use same resize detection as single-monitor resize
-- [ ] T027 [US3] Manual test: Execute Test 3.1 (standard-to-HiDPI transition) from quickstart.md if multi-monitor available
-- [ ] T028 [US3] Manual test: Execute Test 3.2 (HiDPI-to-standard transition) from quickstart.md if multi-monitor available
-- [ ] T029 [US3] Document multi-monitor behavior in code comments if tested, or note as untested if unavailable
+- [ ] T031 [US3] Verify DPI changes are handled by existing ImGui::GetIO().FontGlobalScale logic (line 1120)
+- [ ] T032 [US3] Verify multi-monitor transitions use same resize detection as single-monitor resize
+- [ ] T033 [US3] Manual test: Execute Test 3.1 (standard-to-HiDPI transition) from quickstart.md if multi-monitor available
+- [ ] T034 [US3] Manual test: Execute Test 3.2 (HiDPI-to-standard transition) from quickstart.md if multi-monitor available
+- [ ] T035 [US3] Document multi-monitor behavior in code comments if tested, or note as untested if unavailable
 
 **Checkpoint**: Multi-monitor transitions preserve content without flicker (or documented as untested).
 
@@ -108,12 +114,12 @@
 
 **Purpose**: Handle boundary conditions and ensure robustness across all scenarios
 
-- [ ] T030 Manual test: Execute Test E.1 (resize to minimum dimensions) from quickstart.md
-- [ ] T031 Manual test: Execute Test E.2 (resize during active rendering) from quickstart.md
-- [ ] T032 Manual test: Execute Test E.3 (minimize and restore) from quickstart.md
-- [ ] T033 Manual test: Execute Test E.4 (aspect ratio change widescreen↔portrait) from quickstart.md
-- [ ] T034 Verify all edge case tests pass and document any known limitations
-- [ ] T035 Add defensive checks for edge cases (minimum viewport size, buffer reallocation failures)
+- [ ] T036 Manual test: Execute Test E.1 (resize to minimum dimensions) from quickstart.md
+- [ ] T037 Manual test: Execute Test E.2 (resize during active rendering) from quickstart.md
+- [ ] T038 Manual test: Execute Test E.3 (minimize and restore) from quickstart.md
+- [ ] T039 Manual test: Execute Test E.4 (aspect ratio change widescreen↔portrait) from quickstart.md
+- [ ] T040 Verify all edge case tests pass and document any known limitations
+- [ ] T041 Add defensive checks: minimum viewport size validation (width/height >= 1px) before buffer allocation, null texture checks
 
 **Checkpoint**: All edge cases handled gracefully without crashes or major visual artifacts.
 
@@ -123,14 +129,14 @@
 
 **Purpose**: Code quality, documentation, and final validation
 
-- [ ] T036 [P] Code review: Verify Allman brace style, 4-space indentation, camelCase naming per constitution
-- [ ] T037 [P] Code review: Verify modern C++ usage (no raw pointers, use const correctness, east-side const)
-- [ ] T038 [P] Code review: Verify KISS principle - no unnecessary complexity added
-- [ ] T039 Add final inline documentation for any non-obvious resize handling logic
-- [ ] T040 Run full manual test suite from quickstart.md and verify all success criteria (SC-001 to SC-006)
-- [ ] T041 Document any known limitations or edge cases in quickstart.md troubleshooting section
-- [ ] T042 Update release notes with user-facing description of flicker fix
-- [ ] T043 Create before/after screen recordings demonstrating the fix (optional, for documentation)
+- [ ] T042 [P] Code review: Verify Allman brace style, 4-space indentation, camelCase naming per constitution
+- [ ] T043 [P] Code review: Verify modern C++ usage (no raw pointers, use const correctness, east-side const)
+- [ ] T044 [P] Code review: Verify KISS principle - no unnecessary complexity added
+- [ ] T045 Add final inline documentation for any non-obvious resize handling logic
+- [ ] T046 Run full manual test suite from quickstart.md and verify all success criteria (SC-001 to SC-006)
+- [ ] T047 Document any known limitations or edge cases in quickstart.md troubleshooting section
+- [ ] T048 Update release notes with user-facing description of flicker fix
+- [ ] T049 Create before/after screen recordings demonstrating the fix (optional, for documentation)
 
 ---
 
@@ -143,7 +149,7 @@ Phase 1 (Setup)
     ↓
 Phase 2 (Foundational) ← BLOCKS ALL STORIES
     ↓
-Phase 3 (US1: Manual Resize) ← MVP GATE
+Phase 3 (US1: Manual Resize + Unit Tests) ← MVP GATE
     ↓
 Phase 4 (US2: Maximize/Restore) ← Depends on US1 changes
     ↓
@@ -166,12 +172,12 @@ Phase 7 (Polish)
 
 ```
 T001-T003 (Setup) → 
-T004-T007 (Foundation) → 
-T008-T018 (US1 Implementation & Tests) → 
-T019-T024 (US2 Tests) → 
-T025-T029 (US3 Tests) → 
-T030-T035 (Edge Cases) → 
-T036-T043 (Polish)
+T004-T008 (Foundation) → 
+T009-T024 (US1 Implementation + Unit Tests + Manual Tests) → 
+T025-T030 (US2 Tests) → 
+T031-T035 (US3 Tests) → 
+T036-T041 (Edge Cases) → 
+T042-T049 (Polish)
 ```
 
 ### Parallel Opportunities
@@ -224,8 +230,8 @@ After MVP (User Story 1):
 10. **Add Phase 7**: Polish and finalize (2 hours)
 
 **Total Estimated Time**: 
-- MVP (US1 only): ~3-4 hours
-- Full feature (US1+US2+US3+polish): ~8-10 hours
+- MVP (US1 with unit tests): ~4-5 hours (3 hrs implementation + 1-2 hrs unit tests)
+- Full feature (US1+US2+US3+polish): ~9-11 hours
 
 ### Single Developer Strategy
 
@@ -267,7 +273,7 @@ When all tasks are complete, verify against specification success criteria:
 | **SC-002** | All manual tests | 100% stable during all resize operations |
 | **SC-003** | All manual tests | Zero clearing instances observed |
 | **SC-004** | Visual observation | No blank frames or discontinuity |
-| **SC-005** | Subjective assessment | Improved perceived quality (smoother UX) |
-| **SC-006** | Visual smoothness | Maintains 60fps feel (<16ms handling) |
+| **SC-005** | Baseline recording comparison | No regressions vs. baseline behavior |
+| **SC-006** | Code profiling (if needed) | Resize handling <1ms execution time |
 
 All criteria must pass before considering the feature complete.

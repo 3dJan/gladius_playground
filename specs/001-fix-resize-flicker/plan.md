@@ -33,10 +33,12 @@ Eliminate render area clearing during window resize operations by preserving the
 - **Plan**: Continue using modern C++ patterns for resize handling logic
 
 #### Test-First Development ✅  
-- **Status**: Compliant with caveat
+- **Status**: Compliant
 - **Evidence**: Project has comprehensive GTest suite in `gladius/tests/unittests/`
-- **Plan**: Add manual visual test cases for resize behavior (automated UI testing not required per constitution)
-- **Rationale**: Window resize flickering is a visual UX issue best verified through manual testing; no automated UI test framework exists in project
+- **Plan**: Add unit tests for core logic (invalidateView preservation, epoch handling) + manual visual tests for UX verification
+- **Unit Tests**: Test invalidateView() flag behavior, deferred reallocation logic, async rendering safety
+- **Manual Tests**: Verify visual smoothness, multi-monitor behavior, edge cases (per quickstart.md)
+- **Rationale**: Core resize logic is testable via GTest; visual UX confirmation requires manual verification
 
 #### Simplicity First (KISS, DRY, YAGNI) ✅
 - **Status**: Compliant
@@ -88,6 +90,30 @@ gladius/
 ```
 
 **Structure Decision**: Single project structure with modifications localized to the `RenderWindow` class in `gladius/src/ui/`. No new files required; changes are confined to existing resize detection logic (~lines 488-503) and the `invalidateView()` method (~lines 612-623). Testing will use manual visual verification following documented test protocol, consistent with the project's approach to UI/UX validation.
+
+## Implementation Notes
+
+### Core Code Changes (~15-25 lines modified)
+
+**RenderWindow.h**:
+- Add `bool m_preserveContentDuringResize` flag member variable
+- Add `bool m_deferredResizePending` flag for deferred buffer reallocation
+
+**RenderWindow.cpp**:
+- Lines 488-503 (resize detection): Set preserve flags instead of immediately calling invalidateView()
+- Lines 612-623 (invalidateView): Add conditional logic to skip framebuffer clearing when preserve flag is set
+- Lines 1184-1361 (renderSync): Check preserve flag before clearing
+- Lines 1363-1643 (renderAsync): Check preserve flag, defer setScreenResolution() until async job completes
+
+### Unit Tests (~60-80 lines new code)
+
+**gladius/tests/unittests/ui/RenderWindowResizeTest.cpp** (new file):
+- Test: invalidateView() respects preserve flag
+- Test: Resize sets deferred reallocation flag
+- Test: Async epoch increment doesn't race with resize
+- Test: Buffer reallocation deferred until render completes
+
+**Total LOC Impact**: ~75-105 lines (15-25 modified + 60-80 test lines)
 
 ## Complexity Tracking
 
