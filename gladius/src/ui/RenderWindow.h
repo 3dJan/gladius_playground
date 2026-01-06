@@ -306,5 +306,9 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncPreviewFrameId{0};     ///< Latest completed preview frame ID
         uint64_t m_asyncPreviewFrameCounter{0};             ///< Counter for generating unique frame IDs
         std::chrono::steady_clock::time_point m_asyncPreviewEnqueueTime{}; ///< For latency tracking
+
+        // Framebuffer preservation during resize (prevents flicker)
+        bool m_preserveContentDuringResize{false}; ///< Keep displaying old texture during resize
+        bool m_deferredResizePending{false}; ///< Buffer reallocation deferred until render completes
     };
 }

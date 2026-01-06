@@ -493,7 +493,13 @@ namespace gladius::ui
         if (fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
             fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance)
         {
-            invalidateView();
+            // Preserve existing framebuffer content during resize to prevent flicker
+            // Schedule low-res preview at new dimensions without clearing current display
+            m_preserveContentDuringResize = true;
+            m_deferredResizePending = true;
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lastLowResRenderTime = std::chrono::system_clock::now();
+            m_dirty = true;
 
             // Mark viewport size as changed for permanent centering
             if (m_permanentCenteringEnabled)
@@ -619,7 +625,13 @@ namespace gladius::ui
         m_renderWindowState.isRendering = false;
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
-        notifyAsyncEpochIncrement();
+        
+        // Skip epoch increment if preserving content during resize
+        // This keeps the old frame visible while scheduling new preview
+        if (!m_preserveContentDuringResize)
+        {
+            notifyAsyncEpochIncrement();
+        }
     }
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
@@ -1262,7 +1274,11 @@ namespace gladius::ui
             }
         }
 
-        if (m_core->setScreenResolution(
+        // Defer buffer reallocation during resize to preserve visible content
+        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
+        
+        if (!shouldDeferResize &&
+            m_core->setScreenResolution(
               static_cast<int>(
                 std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f)),
               static_cast<int>(
@@ -1487,7 +1503,11 @@ namespace gladius::ui
             m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
         }
 
-        if (m_core->setScreenResolution(
+        // Defer buffer reallocation during resize to preserve visible content
+        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
+
+        if (!shouldDeferResize &&
+            m_core->setScreenResolution(
               static_cast<int>(
                 std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f)),
               static_cast<int>(
@@ -1503,6 +1523,13 @@ namespace gladius::ui
             {
                 m_dirty = true;
             }
+        }
+        
+        // Clear preserve flags once low-res preview starts rendering
+        if (shouldDeferResize && m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire))
+        {
+            m_preserveContentDuringResize = false;
+            m_deferredResizePending = false;
         }
 
         std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
