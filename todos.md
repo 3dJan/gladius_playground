@@ -9,6 +9,15 @@
     
 - After loading switch to the function referenced by the levelset of the first build item that has one 
 
+
+## Mesh Exoport
+- Manifold Dual Contouring needs to generate watertight meshes
+- Progress indication for mesh export and async mesh generation
+- Simplify mesh export settings UI
+- Color mapping also with openvdb mesh export
+- Simplify the Color Export settings UI
+- Visualize color mapping graphically instead of a table
+
 ## Improve 3mf library browser
 - Remove duplicated functions after merging a 3mf file from the library
 - Easy way to store to the library
