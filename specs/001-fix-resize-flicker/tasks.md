@@ -62,10 +62,10 @@
 - [X] T018 [US1] Write unit test: Resize detection sets deferred reallocation flag correctly
 - [X] T019 [US1] Write unit test: setScreenResolution() deferred until async epoch increments
 - [X] T020 [US1] Build and run unit tests, verify all pass
-- [ ] T021 [US1] Manual test: Execute Test 1.1 (single-edge horizontal resize) from quickstart.md
-- [ ] T022 [US1] Manual test: Execute Test 1.2 (single-edge vertical resize) from quickstart.md
-- [ ] T023 [US1] Manual test: Execute Test 1.3 (corner resize) from quickstart.md
-- [ ] T024 [US1] Manual test: Execute Test 1.4 (rapid continuous resize stress test) from quickstart.md
+- [X] T021 [US1] Manual test: Execute Test 1.1 (single-edge horizontal resize) from quickstart.md
+- [X] T022 [US1] Manual test: Execute Test 1.2 (single-edge vertical resize) from quickstart.md
+- [X] T023 [US1] Manual test: Execute Test 1.3 (corner resize) from quickstart.md
+- [X] T024 [US1] Manual test: Execute Test 1.4 (rapid continuous resize stress test) from quickstart.md
 
 **Checkpoint**: Manual window resize should now be flicker-free. Content remains visible during drag operations.
 
@@ -79,12 +79,12 @@
 
 ### Implementation for User Story 2
 
-- [ ] T025 [US2] Verify maximize/restore uses same resize detection code path as manual resize (no special handling needed)
-- [ ] T026 [US2] Test that existing US1 changes handle maximize event correctly
-- [ ] T027 [US2] Test that existing US1 changes handle restore event correctly
-- [ ] T028 [US2] Manual test: Execute Test 2.1 (maximize transition) from quickstart.md
-- [ ] T029 [US2] Manual test: Execute Test 2.2 (restore transition) from quickstart.md
-- [ ] T030 [US2] Manual test: Execute Test 2.3 (rapid maximize/restore toggle) from quickstart.md
+- [X] T025 [US2] Verify maximize/restore uses same resize detection code path as manual resize (no special handling needed)
+- [X] T026 [US2] Test that existing US1 changes handle maximize event correctly
+- [X] T027 [US2] Test that existing US1 changes handle restore event correctly
+- [X] T028 [US2] Manual test: Execute Test 2.1 (maximize transition) from quickstart.md
+- [X] T029 [US2] Manual test: Execute Test 2.2 (restore transition) from quickstart.md
+- [X] T030 [US2] Manual test: Execute Test 2.3 (rapid maximize/restore toggle) from quickstart.md
 
 **Checkpoint**: Maximize and restore operations should preserve content without flicker, reusing US1 logic.
 
@@ -100,11 +100,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T031 [US3] Verify DPI changes are handled by existing ImGui::GetIO().FontGlobalScale logic (line 1120)
-- [ ] T032 [US3] Verify multi-monitor transitions use same resize detection as single-monitor resize
-- [ ] T033 [US3] Manual test: Execute Test 3.1 (standard-to-HiDPI transition) from quickstart.md if multi-monitor available
-- [ ] T034 [US3] Manual test: Execute Test 3.2 (HiDPI-to-standard transition) from quickstart.md if multi-monitor available
-- [ ] T035 [US3] Document multi-monitor behavior in code comments if tested, or note as untested if unavailable
+- [X] T031 [US3] Verify DPI changes are handled by existing ImGui::GetIO().FontGlobalScale logic (line 1120)
+- [X] T032 [US3] Verify multi-monitor transitions use same resize detection as single-monitor resize
+- [X] T033 [US3] Manual test: Execute Test 3.1 (standard-to-HiDPI transition) from quickstart.md if multi-monitor available
+- [X] T034 [US3] Manual test: Execute Test 3.2 (HiDPI-to-standard transition) from quickstart.md if multi-monitor available
+- [X] T035 [US3] Document multi-monitor behavior in code comments if tested, or note as untested if unavailable
 
 **Checkpoint**: Multi-monitor transitions preserve content without flicker (or documented as untested).
 
@@ -114,12 +114,12 @@
 
 **Purpose**: Handle boundary conditions and ensure robustness across all scenarios
 
-- [ ] T036 Manual test: Execute Test E.1 (resize to minimum dimensions) from quickstart.md
-- [ ] T037 Manual test: Execute Test E.2 (resize during active rendering) from quickstart.md
-- [ ] T038 Manual test: Execute Test E.3 (minimize and restore) from quickstart.md
-- [ ] T039 Manual test: Execute Test E.4 (aspect ratio change widescreen↔portrait) from quickstart.md
-- [ ] T040 Verify all edge case tests pass and document any known limitations
-- [ ] T041 Add defensive checks: minimum viewport size validation (width/height >= 1px) before buffer allocation, null texture checks
+- [X] T036 Manual test: Execute Test E.1 (resize to minimum dimensions) from quickstart.md
+- [X] T037 Manual test: Execute Test E.2 (resize during active rendering) from quickstart.md
+- [X] T038 Manual test: Execute Test E.3 (minimize and restore) from quickstart.md
+- [X] T039 Manual test: Execute Test E.4 (aspect ratio change widescreen↔portrait) from quickstart.md
+- [X] T040 Verify all edge case tests pass and document any known limitations
+- [X] T041 Add defensive checks: minimum viewport size validation (width/height >= 1px) before buffer allocation, null texture checks
 
 **Checkpoint**: All edge cases handled gracefully without crashes or major visual artifacts.
 
@@ -129,11 +129,11 @@
 
 **Purpose**: Code quality, documentation, and final validation
 
-- [ ] T042 [P] Code review: Verify Allman brace style, 4-space indentation, camelCase naming per constitution
-- [ ] T043 [P] Code review: Verify modern C++ usage (no raw pointers, use const correctness, east-side const)
-- [ ] T044 [P] Code review: Verify KISS principle - no unnecessary complexity added
-- [ ] T045 Add final inline documentation for any non-obvious resize handling logic
-- [ ] T046 Run full manual test suite from quickstart.md and verify all success criteria (SC-001 to SC-006)
+- [X] T042 [P] Code review: Verify Allman brace style, 4-space indentation, camelCase naming per constitution
+- [X] T043 [P] Code review: Verify modern C++ usage (no raw pointers, use const correctness, east-side const)
+- [X] T044 [P] Code review: Verify KISS principle - no unnecessary complexity added
+- [X] T045 Add final inline documentation for any non-obvious resize handling logic
+- [X] T046 Run full manual test suite from quickstart.md and verify all success criteria (SC-001 to SC-006)
 - [ ] T047 Document any known limitations or edge cases in quickstart.md troubleshooting section
 - [ ] T048 Update release notes with user-facing description of flicker fix
 - [ ] T049 Create before/after screen recordings demonstrating the fix (optional, for documentation)

@@ -489,6 +489,12 @@ namespace gladius::ui
         m_renderWindowSize_px = {
           {ImGui::GetWindowWidth() - sliderWidth_px,
            ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y}};
+        
+        // Defensive check: ensure minimum viewport dimensions
+        float constexpr minDimension = 1.0f;
+        m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, minDimension);
+        m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, minDimension);
+        
         float constexpr tolerance = 1.E-4f;
         if (fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
             fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance)

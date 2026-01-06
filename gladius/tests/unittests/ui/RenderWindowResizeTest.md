@@ -250,6 +250,16 @@ If resize operations are sluggish or drop below 60fps:
 3. Profile with Tracy to identify bottlenecks
 4. Check if low-res preview resolution is appropriate (should be < 50% of full resolution)
 
+### Known Limitations
+
+1. **Multi-monitor DPI transitions**: Tested on single-monitor setup. Multi-monitor behavior with different DPI verified via code inspection but not manual testing.
+
+2. **Minimize/restore**: Window manager may clear minimized windows (out of application control).
+
+3. **Very small viewports**: Minimum dimension clamped to 1px. Below this, window manager constraints apply.
+
+4. **Extreme rapid resize**: Content may appear stretched/scaled during continuous drag but never clears to blank.
+
 ## Recording Test Results
 
 For each test case, record:
