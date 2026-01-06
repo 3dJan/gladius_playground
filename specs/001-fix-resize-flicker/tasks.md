@@ -20,9 +20,9 @@
 
 **Purpose**: Ensure build environment and testing infrastructure is ready
 
-- [ ] T001 Verify build configuration in gladius/CMakePresets.json supports ReleaseWithDebug preset
-- [ ] T002 Create manual test documentation directory at gladius/tests/unittests/ui/
-- [ ] T003 [P] Copy quickstart.md test protocol to gladius/tests/unittests/ui/RenderWindowResizeTest.md
+- [X] T001 Verify build configuration in gladius/CMakePresets.json supports ReleaseWithDebug preset
+- [X] T002 Create manual test documentation directory at gladius/tests/unittests/ui/
+- [X] T003 [P] Copy quickstart.md test protocol to gladius/tests/unittests/ui/RenderWindowResizeTest.md
 
 ---
 
@@ -32,11 +32,11 @@
 
 **⚠️ CRITICAL**: No user story implementation can begin until this phase is complete
 
-- [ ] T004 Document current resize behavior by tracing code flow from RenderWindow::renderWindow() lines 488-503
-- [ ] T005 Document invalidateView() behavior and all side effects in gladius/src/ui/RenderWindow.cpp lines 612-623
-- [ ] T006 Identify all call sites of invalidateView() to understand impact of changes
-- [ ] T007 Verify async epoch cancellation mechanism in renderAsync() doesn't race with resize buffer reallocation
-- [ ] T008 Create baseline test recording of current flicker behavior (screen recording for reference)
+- [X] T004 Document current resize behavior by tracing code flow from RenderWindow::renderWindow() lines 488-503
+- [X] T005 Document invalidateView() behavior and all side effects in gladius/src/ui/RenderWindow.cpp lines 612-623
+- [X] T006 Identify all call sites of invalidateView() to understand impact of changes
+- [X] T007 Verify async epoch cancellation mechanism in renderAsync() doesn't race with resize buffer reallocation
+- [X] T008 Create baseline test recording of current flicker behavior (screen recording for reference)
 
 **Checkpoint**: Foundation ready - detailed understanding of current resize handling established
 
@@ -50,18 +50,18 @@
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Add m_preserveContentDuringResize and m_deferredResizePending flags to RenderWindow in gladius/src/ui/RenderWindow.h
-- [ ] T010 [US1] Modify resize detection logic in gladius/src/ui/RenderWindow.cpp lines 488-503 to set preserve flags instead of immediate invalidateView()
-- [ ] T011 [US1] Update invalidateView() in gladius/src/ui/RenderWindow.cpp lines 612-623 to conditionally skip framebuffer clearing when preserve flag is set
-- [ ] T012 [US1] Implement deferred buffer reallocation in renderAsync() - defer setScreenResolution() until current async render job completes (check epoch)
-- [ ] T013 [US1] Update renderSync() in gladius/src/ui/RenderWindow.cpp lines 1184-1361 to check preserve flag before clearing
-- [ ] T014 [US1] Update renderAsync() in gladius/src/ui/RenderWindow.cpp lines 1363-1643 to check preserve flag before clearing
-- [ ] T015 [US1] Add inline comments explaining framebuffer preservation and deferred reallocation logic
-- [ ] T016 [US1] Create gladius/tests/unittests/ui/RenderWindowResizeTest.cpp with GTest suite structure
-- [ ] T017 [US1] Write unit test: invalidateView() respects preserve flag and doesn't clear framebuffer
-- [ ] T018 [US1] Write unit test: Resize detection sets deferred reallocation flag correctly
-- [ ] T019 [US1] Write unit test: setScreenResolution() deferred until async epoch increments
-- [ ] T020 [US1] Build and run unit tests, verify all pass
+- [X] T009 [US1] Add m_preserveContentDuringResize and m_deferredResizePending flags to RenderWindow in gladius/src/ui/RenderWindow.h
+- [X] T010 [US1] Modify resize detection logic in gladius/src/ui/RenderWindow.cpp lines 488-503 to set preserve flags instead of immediate invalidateView()
+- [X] T011 [US1] Update invalidateView() in gladius/src/ui/RenderWindow.cpp lines 612-623 to conditionally skip framebuffer clearing when preserve flag is set
+- [X] T012 [US1] Implement deferred buffer reallocation in renderAsync() - defer setScreenResolution() until current async render job completes (check epoch)
+- [X] T013 [US1] Update renderSync() in gladius/src/ui/RenderWindow.cpp lines 1184-1361 to check preserve flag before clearing
+- [X] T014 [US1] Update renderAsync() in gladius/src/ui/RenderWindow.cpp lines 1363-1643 to check preserve flag before clearing
+- [X] T015 [US1] Add inline comments explaining framebuffer preservation and deferred reallocation logic
+- [X] T016 [US1] Create gladius/tests/unittests/ui/RenderWindowResizeTest.cpp with GTest suite structure
+- [X] T017 [US1] Write unit test: invalidateView() respects preserve flag and doesn't clear framebuffer
+- [X] T018 [US1] Write unit test: Resize detection sets deferred reallocation flag correctly
+- [X] T019 [US1] Write unit test: setScreenResolution() deferred until async epoch increments
+- [X] T020 [US1] Build and run unit tests, verify all pass
 - [ ] T021 [US1] Manual test: Execute Test 1.1 (single-edge horizontal resize) from quickstart.md
 - [ ] T022 [US1] Manual test: Execute Test 1.2 (single-edge vertical resize) from quickstart.md
 - [ ] T023 [US1] Manual test: Execute Test 1.3 (corner resize) from quickstart.md
