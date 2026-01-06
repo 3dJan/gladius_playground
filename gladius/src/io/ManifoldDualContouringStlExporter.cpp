@@ -448,7 +448,7 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
-        m_progress = 0.25;
+        m_progress = 0.05;
 
         compute::ManifoldDualContouringGpu gpuPipeline(generator);
         compute::ManifoldDualContouringConfig config{};
@@ -488,6 +488,17 @@ namespace gladius::io
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
         gpuPipeline.setConfig(config);
+        
+        // Wire progress callback to update exporter's atomic progress
+        // Mesh generation phase spans 5-80% of total export progress
+        gpuPipeline.setMeshGenerationProgressCallback(
+            [this](float meshProgress, std::string_view /*phaseName*/) {
+                // Map mesh generation progress (0.0-1.0) to exporter progress (0.05-0.80)
+                // This gives mesh generation 75% of the total export progress
+                double const exportProgress = 0.05 + static_cast<double>(meshProgress) * 0.75;
+                m_progress.store(exportProgress, std::memory_order_relaxed);
+            });
+        
         gpuPipeline.generateMesh();
 
         auto const & mesh = gpuPipeline.getMesh();
@@ -496,7 +507,7 @@ namespace gladius::io
             throw std::runtime_error("Manifold dual contouring produced an empty mesh");
         }
 
-        m_progress = 0.7;
+        m_progress = 0.80;
         writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals);
 
         if (m_logger)
@@ -512,7 +523,7 @@ namespace gladius::io
       ComputeCore & generator,
       std::vector<Eigen::Vector3f> const & positions,
       std::vector<std::uint32_t> const & indices,
-      std::vector<Eigen::Vector3f> const & normals) const
+      std::vector<Eigen::Vector3f> const & normals)
     {
         if (indices.size() % 3U != 0U)
         {
@@ -529,6 +540,8 @@ namespace gladius::io
         {
             throw std::runtime_error("Compute context unavailable for mesh export");
         }
+
+        m_progress.store(0.82, std::memory_order_relaxed);
 
         // Repair winding inconsistencies on the indexed mesh before converting to triangle soup.
         // This prevents slicers from interpreting an otherwise watertight mesh as broken.
@@ -610,6 +623,8 @@ namespace gladius::io
             
             if (m_exportWithColors)
             {
+                m_progress.store(0.85, std::memory_order_relaxed);
+                
                 // Build faces array from indices
                 std::size_t const numFaces = repairedIndices.size() / 3;
                 std::vector<std::array<std::uint32_t, 3>> facesForSampling;
@@ -630,7 +645,9 @@ namespace gladius::io
                         auto vertexColors = FaceColorSampler::sampleVertexColors(
                             positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
                         
+                        m_progress.store(0.90, std::memory_order_relaxed);
                         writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
+                        m_progress.store(1.0, std::memory_order_relaxed);
                         
                         if (m_logger)
                         {
@@ -644,7 +661,9 @@ namespace gladius::io
                         auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
                             positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
                         
+                        m_progress.store(0.90, std::memory_order_relaxed);
                         writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                        m_progress.store(1.0, std::memory_order_relaxed);
                         
                         if (m_logger)
                         {
@@ -663,17 +682,23 @@ namespace gladius::io
                           {"Color sampling unavailable, exporting without colors",
                            events::Severity::Warning});
                     }
+                    m_progress.store(0.90, std::memory_order_relaxed);
                     writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+                    m_progress.store(1.0, std::memory_order_relaxed);
                 }
             }
             else
             {
+                m_progress.store(0.90, std::memory_order_relaxed);
                 writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+                m_progress.store(1.0, std::memory_order_relaxed);
             }
         }
         else
         {
+            m_progress.store(0.90, std::memory_order_relaxed);
             vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+            m_progress.store(1.0, std::memory_order_relaxed);
         }
     }
 }

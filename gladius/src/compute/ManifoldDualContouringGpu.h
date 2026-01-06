@@ -12,8 +12,10 @@
 #include <Eigen/Geometry>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -86,6 +88,11 @@ namespace gladius::compute
         std::vector<std::uint32_t> indices;
     };
 
+    /// Progress callback for mesh generation
+    /// @param progress Normalized progress value in [0.0, 1.0]
+    /// @param phaseName Human-readable name of the current phase
+    using MeshGenerationProgressCallback = std::function<void(float progress, std::string_view phaseName)>;
+
     class ManifoldDualContouringGpu
     {
       public:
@@ -93,6 +100,10 @@ namespace gladius::compute
 
         void setConfig(ManifoldDualContouringConfig config);
         void generateMesh();
+
+        /// Set progress callback for mesh generation phases
+        /// @param callback Function to receive progress updates (0.0-1.0) and phase name
+        void setMeshGenerationProgressCallback(MeshGenerationProgressCallback callback);
 
         [[nodiscard]] ManifoldDualContouringMesh const & getMesh() const
         {
@@ -129,8 +140,14 @@ namespace gladius::compute
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
+        MeshGenerationProgressCallback m_meshGenerationProgressCallback{nullptr};
         std::size_t m_lastVertexCount{0U};
         std::size_t m_octreeNodeCount{0U};
+
+        /// Report progress to the callback if set
+        /// @param progress Normalized progress value in [0.0, 1.0]
+        /// @param phaseName Human-readable name of the current phase
+        void reportProgress(float progress, std::string_view phaseName);
 
         void loadKernels();
         void constructOctree();
