@@ -16,6 +16,7 @@ if(NOT ENABLE_OPENCL_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/Slice_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringOctree_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringStlExporter_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ExportCancellation_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/HierarchicalDC_CompilationDebug_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/HierarchicalDC_ExtractionStep_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/HierarchicalDC_STLExport_tests.cpp"

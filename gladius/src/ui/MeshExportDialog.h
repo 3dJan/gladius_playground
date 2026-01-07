@@ -4,6 +4,7 @@
 #include "FileDialogService.h"
 #include "io/3mf/FaceColorSampler.h"
 #include "ColorToThicknessDialog.h"
+#include "io/CancellationToken.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
@@ -148,5 +149,8 @@ namespace gladius::ui
         std::future<PaletteDeriveResult> m_paletteFuture;
         std::atomic<bool> m_paletteDeriveInProgress{false};
         bool m_paletteHandlerBound{false};
+
+        // Cooperative cancellation token for async export
+        io::CancellationToken m_cancellationToken;
     };
 } // namespace gladius::ui

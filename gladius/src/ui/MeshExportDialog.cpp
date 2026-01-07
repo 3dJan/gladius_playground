@@ -236,23 +236,16 @@ namespace gladius::ui
 
     void MeshExportDialog::onExportCancelled()
     {
-        if (m_activeExporter == &m_layeredExporter)
+        // Signal cancellation to the export worker - don't block!
+        // The export loop will check isCancellationRequested() and exit early.
+        // Cleanup happens when the export finishes (via finalizeExport/resetState).
+        m_cancellationToken.requestCancellation();
+        
+        // Update ExportState to show "Cancelling..." phase in UI
+        if (m_exportState != nullptr)
         {
-            m_layeredExporter.finalize();
+            m_exportState->requestCancellation();
         }
-        else if (m_activeExporter == &m_layeredExporter3mf)
-        {
-            m_layeredExporter3mf.finalize();
-        }
-        else if (m_activeExporter == &m_dualExporter)
-        {
-            m_dualExporter.finalize();
-        }
-        else if (m_activeExporter == &m_manifoldExporter)
-        {
-            m_manifoldExporter.finalize();
-        }
-        resetState();
     }
 
     void MeshExportDialog::onExportCompleted()
@@ -337,7 +330,37 @@ namespace gladius::ui
                     }
                 }
 
-                if (failed)
+                // Check if export was cancelled - treat as distinct from failure
+                bool const wasCancelled = m_cancellationToken.isCancelled();
+
+                if (wasCancelled)
+                {
+                    // Export was cancelled by user - show cancellation message
+                    m_exportInProgress = false;
+                    m_exportCompleted = false;
+                    m_statusMessage = "Export cancelled";
+                    m_statusIsError = false;
+                    m_errorMessage.clear();
+                    if (m_exportState != nullptr)
+                    {
+                        m_exportState->endExport();
+                    }
+                    // Clean up any partial output file
+                    if (!m_targetFile.empty())
+                    {
+                        std::error_code ec;
+                        if (std::filesystem::exists(m_targetFile, ec))
+                        {
+                            std::filesystem::remove(m_targetFile, ec);
+                            if (ec)
+                            {
+                                // Log warning but don't fail - the cancel itself succeeded
+                                // TODO: Consider logging this warning
+                            }
+                        }
+                    }
+                }
+                else if (failed)
                 {
                     m_exportInProgress = false;
                     m_exportCompleted = false;
@@ -368,10 +391,20 @@ namespace gladius::ui
                 
                 ImGui::Spacing();
                 
-                if (ImGui::Button("Cancel Export"))
+                // Check if cancellation is already requested
+                bool const isCancelling = m_cancellationToken.isCancelled();
+                
+                if (isCancelling)
+                {
+                    // Show disabled "Cancelling..." button when cancellation is in progress
+                    ImGui::BeginDisabled(true);
+                    ImGui::Button("Cancelling...");
+                    ImGui::EndDisabled();
+                }
+                else if (ImGui::Button("Cancel Export"))
                 {
                     onExportCancelled();
-                    m_statusMessage = "Export cancelled";
+                    m_statusMessage = "Cancelling export...";
                     m_statusIsError = false;
                 }
                 
@@ -1387,6 +1420,13 @@ namespace gladius::ui
         }
         default:
             throw std::runtime_error("Unsupported surface extraction method");
+        }
+
+        // Reset cancellation token for the new export and pass it to the exporter
+        m_cancellationToken.reset();
+        if (m_activeExporter != nullptr)
+        {
+            m_activeExporter->setCancellationToken(&m_cancellationToken);
         }
 
         m_exportInProgress = true;

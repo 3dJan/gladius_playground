@@ -448,6 +448,13 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
+        // Check for cancellation after bbox computation
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
         m_progress = 0.05;
 
         compute::ManifoldDualContouringGpu gpuPipeline(generator);
@@ -499,7 +506,20 @@ namespace gladius::io
                 m_progress.store(exportProgress, std::memory_order_relaxed);
             });
         
+        // Wire cancellation callback so the GPU pipeline can check frequently
+        gpuPipeline.setCancellationCheckCallback(
+            [this]() -> bool {
+                return isCancellationRequested();
+            });
+        
         gpuPipeline.generateMesh();
+
+        // Check for cancellation after mesh generation (most expensive step)
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
 
         auto const & mesh = gpuPipeline.getMesh();
         if (mesh.indices.empty())
@@ -508,6 +528,14 @@ namespace gladius::io
         }
 
         m_progress = 0.80;
+
+        // Check for cancellation before file write
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
         writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals);
 
         if (m_logger)

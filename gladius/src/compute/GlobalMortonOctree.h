@@ -245,6 +245,22 @@ namespace gladius::compute
             return m_vertexRegistry;
         }
 
+        /// Cancellation check callback
+        /// @return true if the operation should be cancelled
+        using CancellationCheckCallback = std::function<bool()>;
+
+        /**
+         * @brief Set cancellation check callback.
+         * @param callback Function that returns true if the operation should be cancelled
+         */
+        void setCancellationCheckCallback(CancellationCheckCallback callback);
+
+        /**
+         * @brief Check if the operation was cancelled.
+         * @return true if cancelled
+         */
+        [[nodiscard]] bool wasCancelled() const { return m_wasCancelled; }
+
       private:
         ComputeCore& m_core;
         ManifoldDualContouringProgram* m_program{nullptr};
@@ -326,5 +342,12 @@ namespace gladius::compute
         [[nodiscard]] float sampleSdf(Eigen::Vector3f const& position) const;
         [[nodiscard]] Eigen::Vector3f sampleGradient(Eigen::Vector3f const& position,
                                                       float epsilon) const;
+        
+        // Cancellation support
+        CancellationCheckCallback m_cancellationCheckCallback{nullptr};
+        bool m_wasCancelled{false};
+        
+        /// Check if the operation should be cancelled
+        [[nodiscard]] bool isCancelled();
     };
 }

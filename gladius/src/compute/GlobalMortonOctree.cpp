@@ -119,6 +119,20 @@ namespace gladius::compute
 
     GlobalMortonOctree::~GlobalMortonOctree() = default;
 
+    void GlobalMortonOctree::setCancellationCheckCallback(CancellationCheckCallback callback)
+    {
+        m_cancellationCheckCallback = std::move(callback);
+    }
+
+    bool GlobalMortonOctree::isCancelled()
+    {
+        if (!m_wasCancelled && m_cancellationCheckCallback && m_cancellationCheckCallback())
+        {
+            m_wasCancelled = true;
+        }
+        return m_wasCancelled;
+    }
+
     void GlobalMortonOctree::build(GlobalMortonOctreeConfig const& config)
     {
         auto const startTime = std::chrono::high_resolution_clock::now();
@@ -579,6 +593,13 @@ namespace gladius::compute
         bool changed = true;
         while (changed && passes < MAX_BALANCE_PASSES)
         {
+            // Check for cancellation between balance passes
+            if (isCancelled())
+            {
+                std::cout << "  Balancing cancelled after " << passes << " passes" << std::endl;
+                return;
+            }
+            
             changed = false;
             ++passes;
             std::size_t neighborsThisPass = 0U;

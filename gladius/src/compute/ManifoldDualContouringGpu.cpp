@@ -645,6 +645,16 @@ namespace gladius::compute
         m_meshGenerationProgressCallback = std::move(callback);
     }
 
+    void ManifoldDualContouringGpu::setCancellationCheckCallback(CancellationCheckCallback callback)
+    {
+        m_cancellationCheckCallback = std::move(callback);
+    }
+
+    bool ManifoldDualContouringGpu::isCancelled() const
+    {
+        return m_cancellationCheckCallback && m_cancellationCheckCallback();
+    }
+
     void ManifoldDualContouringGpu::reportProgress(float progress, std::string_view phaseName)
     {
         if (m_meshGenerationProgressCallback)
@@ -725,6 +735,12 @@ namespace gladius::compute
 
         reportProgress(0.05F, "Building octree");
 
+        // Check for cancellation before expensive operations
+        if (isCancelled())
+        {
+            return;
+        }
+
         // Use hierarchical octree approach if enabled.
         if (m_config.enableHierarchicalOctree)
         {
@@ -735,12 +751,30 @@ namespace gladius::compute
             generateMeshNonHierarchical();
         } // End of else block for non-hierarchical processing
 
+        // Check for cancellation after mesh generation
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
+
         reportProgress(0.65F, "Post-processing");
 
         // Post-processing for sharp features
         if (m_config.enableSharpFeaturePostProcess && !m_mesh.indices.empty())
         {
             postProcessSharpFeatures();
+        }
+
+        // Check for cancellation after post-processing
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
         }
 
         reportProgress(0.70F, "Simplifying mesh");
@@ -753,6 +787,15 @@ namespace gladius::compute
         if (shouldSimplify && !m_mesh.indices.empty())
         {
             simplifyMesh();
+            
+            // Check for cancellation after simplification
+            if (isCancelled())
+            {
+                m_mesh.positions.clear();
+                m_mesh.normals.clear();
+                m_mesh.indices.clear();
+                return;
+            }
         }
 
         reportProgress(0.75F, "Improving mesh quality");
@@ -761,6 +804,15 @@ namespace gladius::compute
         if (m_config.enableQualityImprovement && !m_mesh.indices.empty())
         {
             improveMeshQuality();
+            
+            // Check for cancellation after quality improvement
+            if (isCancelled())
+            {
+                m_mesh.positions.clear();
+                m_mesh.normals.clear();
+                m_mesh.indices.clear();
+                return;
+            }
         }
 
         reportProgress(0.78F, "Projecting to surface");
@@ -770,6 +822,15 @@ namespace gladius::compute
         if (m_config.projectToSurface && !m_mesh.indices.empty())
         {
             projectVerticesToSurface();
+        }
+
+        // Final cancellation check
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
         }
 
         reportProgress(0.80F, "Mesh generation complete");
@@ -4619,6 +4680,12 @@ namespace gladius::compute
 
         reportProgress(0.08F, "Precomputing SDF");
 
+        // Early cancellation check
+        if (isCancelled())
+        {
+            return;
+        }
+
         // Ensure SDF is precomputed for the SAME bounding box the octree will use.
         // Use the padded bbox computed in generateMesh() (2 voxels at maxDepth) to
         // avoid clipping the surface at the domain boundary.
@@ -4634,12 +4701,24 @@ namespace gladius::compute
 
         m_core.precomputeSdfForBBox(paddedBbox);
 
+        // Check for cancellation after SDF precomputation
+        if (isCancelled())
+        {
+            return;
+        }
+
         reportProgress(0.15F, "Building hierarchical octree");
 
         // Create or reuse the hierarchical octree
         if (!m_hierarchicalOctree)
         {
             m_hierarchicalOctree = std::make_unique<GlobalMortonOctree>(m_core);
+        }
+
+        // Wire cancellation callback to the octree
+        if (m_cancellationCheckCallback)
+        {
+            m_hierarchicalOctree->setCancellationCheckCallback(m_cancellationCheckCallback);
         }
 
         // Configure the octree
@@ -4656,10 +4735,25 @@ namespace gladius::compute
         // Build the octree
         m_hierarchicalOctree->build(octreeConfig);
 
+        // Check for cancellation after octree build (including if cancelled during balancing)
+        if (isCancelled() || m_hierarchicalOctree->wasCancelled())
+        {
+            return;
+        }
+
         reportProgress(0.35F, "Extracting mesh");
 
         // Extract mesh
         m_hierarchicalOctree->extractMesh(m_mesh.positions, m_mesh.normals, m_mesh.indices);
+
+        // Check for cancellation after mesh extraction
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
 
         // Report statistics
         auto const & stats = m_hierarchicalOctree->getStats();

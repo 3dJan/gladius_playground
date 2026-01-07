@@ -156,4 +156,87 @@ namespace gladius::ui::tests
         m_state.endExport();
     }
 
+    /// @brief Test fixture for ExportPhase tests
+    class ExportPhaseTest : public ::testing::Test
+    {
+      protected:
+        ExportState m_state;
+    };
+
+    TEST_F(ExportPhaseTest, InitialState_PhaseIsIdle)
+    {
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Idle);
+        EXPECT_FALSE(m_state.isCancelling());
+    }
+
+    TEST_F(ExportPhaseTest, BeginExport_SetsPhaseToExporting)
+    {
+        m_state.beginExport("Test");
+
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Exporting);
+        EXPECT_FALSE(m_state.isCancelling());
+    }
+
+    TEST_F(ExportPhaseTest, RequestCancellation_SetsPhaseTooCancelling)
+    {
+        m_state.beginExport("Test");
+        m_state.requestCancellation();
+
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Cancelling);
+        EXPECT_TRUE(m_state.isCancelling());
+    }
+
+    TEST_F(ExportPhaseTest, RequestCancellation_WhenIdle_DoesNothing)
+    {
+        m_state.requestCancellation();
+
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Idle);
+        EXPECT_FALSE(m_state.isCancelling());
+    }
+
+    TEST_F(ExportPhaseTest, EndExport_ResetsPhaseToIdle)
+    {
+        m_state.beginExport("Test");
+        m_state.requestCancellation();
+        m_state.endExport();
+
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Idle);
+        EXPECT_FALSE(m_state.isCancelling());
+    }
+
+    TEST_F(ExportPhaseTest, MultipleRequestCancellation_RemainsInCancelling)
+    {
+        m_state.beginExport("Test");
+        m_state.requestCancellation();
+        m_state.requestCancellation();
+        m_state.requestCancellation();
+
+        EXPECT_EQ(m_state.getPhase(), ExportPhase::Cancelling);
+    }
+
+    TEST_F(ExportPhaseTest, Phase_ThreadSafetyWithCancellation)
+    {
+        m_state.beginExport("Thread test");
+
+        std::atomic<bool> sawCancelling{false};
+        std::thread observer([&]() {
+            for (int i = 0; i < 1000; ++i)
+            {
+                if (m_state.getPhase() == ExportPhase::Cancelling)
+                {
+                    sawCancelling = true;
+                    break;
+                }
+                std::this_thread::yield();
+            }
+        });
+
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        m_state.requestCancellation();
+
+        observer.join();
+        EXPECT_TRUE(sawCancelling);
+        m_state.endExport();
+    }
+
 } // namespace gladius::ui::tests

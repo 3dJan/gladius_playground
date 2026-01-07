@@ -179,6 +179,13 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
+        // Check for cancellation after bbox computation
+        if (isCancellationRequested())
+        {
+            m_state.store(State::Idle);
+            return;
+        }
+
         generator.setPreCompSdfSize(m_options.sdfResolution);
 
         auto const config = makeConfig();
@@ -190,10 +197,24 @@ namespace gladius::io
             throw std::runtime_error("Failed to build dual contouring octree");
         }
 
+        // Check for cancellation after octree build
+        if (isCancellationRequested())
+        {
+            m_state.store(State::Idle);
+            return;
+        }
+
         m_progress.store(0.5);
 
         dual_contouring::DualContouringDiagnostics diagnostics{};
         auto mesh = dual_contouring::buildDualContouringMesh(builder, *root, config, &diagnostics);
+
+        // Check for cancellation before file write
+        if (isCancellationRequested())
+        {
+            m_state.store(State::Idle);
+            return;
+        }
 
         writeMeshToFile(generator, mesh);
 

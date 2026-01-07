@@ -93,6 +93,10 @@ namespace gladius::compute
     /// @param phaseName Human-readable name of the current phase
     using MeshGenerationProgressCallback = std::function<void(float progress, std::string_view phaseName)>;
 
+    /// Cancellation check callback
+    /// @return true if the operation should be cancelled
+    using CancellationCheckCallback = std::function<bool()>;
+
     class ManifoldDualContouringGpu
     {
       public:
@@ -104,6 +108,10 @@ namespace gladius::compute
         /// Set progress callback for mesh generation phases
         /// @param callback Function to receive progress updates (0.0-1.0) and phase name
         void setMeshGenerationProgressCallback(MeshGenerationProgressCallback callback);
+
+        /// Set cancellation check callback
+        /// @param callback Function that returns true if the operation should be cancelled
+        void setCancellationCheckCallback(CancellationCheckCallback callback);
 
         [[nodiscard]] ManifoldDualContouringMesh const & getMesh() const
         {
@@ -141,8 +149,13 @@ namespace gladius::compute
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
         MeshGenerationProgressCallback m_meshGenerationProgressCallback{nullptr};
+        CancellationCheckCallback m_cancellationCheckCallback{nullptr};
         std::size_t m_lastVertexCount{0U};
         std::size_t m_octreeNodeCount{0U};
+
+        /// Check if the operation should be cancelled
+        /// @return true if cancelled, false otherwise
+        [[nodiscard]] bool isCancelled() const;
 
         /// Report progress to the callback if set
         /// @param progress Normalized progress value in [0.0, 1.0]
