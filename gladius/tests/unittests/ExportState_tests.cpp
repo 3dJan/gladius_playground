@@ -177,7 +177,7 @@ namespace gladius::ui::tests
         EXPECT_FALSE(m_state.isCancelling());
     }
 
-    TEST_F(ExportPhaseTest, RequestCancellation_SetsPhaseTooCancelling)
+    TEST_F(ExportPhaseTest, RequestCancellation_SetsPhaseToCancelling)
     {
         m_state.beginExport("Test");
         m_state.requestCancellation();

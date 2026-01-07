@@ -355,7 +355,9 @@ namespace gladius::ui
                             if (ec)
                             {
                                 // Log warning but don't fail - the cancel itself succeeded
-                                // TODO: Consider logging this warning
+                                std::cerr << "Warning: Failed to delete partial export file: "
+                                          << m_targetFile.string() << " (" << ec.message() << ")"
+                                          << std::endl;
                             }
                         }
                     }
