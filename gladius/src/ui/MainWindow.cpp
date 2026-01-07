@@ -800,11 +800,16 @@ namespace gladius::ui
                 {
                     sliceWindow();
                     renderWindow();
+
+                    // Render export overlay BEFORE dialogs so they appear on top
+                    renderExportOverlay();
+
                     meshExportDialog();
                     cliExportDialog();
                 }
                 mainMenu();
                 showExitPopUp();
+                showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
 
                 if (m_shortcutSettingsDialog.isVisible())
@@ -1662,6 +1667,14 @@ namespace gladius::ui
     void MainWindow::close()
     {
         saveRenderSettings();
+
+        // Block close if export is in progress
+        if (m_exportState.isExportInProgress())
+        {
+            m_showExportInProgressWarning = true;
+            return;
+        }
+
         if (m_fileChanged)
         {
             m_showSaveBeforeExit = true;
@@ -1763,6 +1776,91 @@ namespace gladius::ui
             }
             ImGui::EndPopup();
         }
+    }
+
+    void MainWindow::showExportInProgressWarning()
+    {
+        if (!m_showExportInProgressWarning)
+        {
+            return;
+        }
+
+        auto constexpr windowTitle = "Export in Progress";
+        if (!ImGui::IsPopupOpen(windowTitle))
+        {
+            ImGui::OpenPopup(windowTitle);
+        }
+        ImGuiWindowFlags const windowFlags =
+          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+        if (ImGui::BeginPopupModal(windowTitle, nullptr, windowFlags))
+        {
+            ImGui::NewLine();
+            ImGui::TextUnformatted("An export operation is currently in progress.");
+            ImGui::TextUnformatted("Please wait for it to complete before closing the application.");
+            ImGui::NewLine();
+
+            if (ImGui::Button("OK"))
+            {
+                m_showExportInProgressWarning = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    void MainWindow::renderExportOverlay()
+    {
+        if (!m_exportState.isExportInProgress())
+        {
+            return;
+        }
+
+        // Get the entire viewport size
+        ImGuiViewport const * viewport = ImGui::GetMainViewport();
+        ImVec2 const viewportPos = viewport->Pos;
+        ImVec2 const viewportSize = viewport->Size;
+
+        // Create a fullscreen overlay window
+        ImGui::SetNextWindowPos(viewportPos);
+        ImGui::SetNextWindowSize(viewportSize);
+
+        ImGuiWindowFlags const overlayFlags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.6f));
+
+        if (ImGui::Begin("##ExportOverlay", nullptr, overlayFlags))
+        {
+            // Centered message using window draw list
+            ImDrawList * drawList = ImGui::GetWindowDrawList();
+            char const * message = "Export in progress...";
+            ImVec2 const textSize = ImGui::CalcTextSize(message);
+            ImVec2 const textPos(viewportPos.x + (viewportSize.x - textSize.x) / 2.0f,
+                                 viewportPos.y + (viewportSize.y - textSize.y) / 2.0f);
+            drawList->AddText(textPos, IM_COL32(255, 255, 255, 255), message);
+
+            // Invisible button to capture clicks and redirect focus to export dialog
+            ImGui::SetCursorPos(ImVec2(0, 0));
+            if (ImGui::InvisibleButton("##ExportOverlayBlocker", viewportSize))
+            {
+                // When clicked, refocus the visible export dialog
+                // Try all known export dialog window titles - SetWindowFocus is a no-op
+                // if the window doesn't exist
+                ImGui::SetWindowFocus("Exporting STL");
+                ImGui::SetWindowFocus("Exporting 3MF");
+                ImGui::SetWindowFocus("Export Mesh");
+                ImGui::SetWindowFocus("Export in progress");
+            }
+        }
+        ImGui::End();
+
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
     }
 
     void MainWindow::renderStatusBar()

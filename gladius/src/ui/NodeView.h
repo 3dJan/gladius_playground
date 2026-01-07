@@ -21,6 +21,7 @@ namespace gladius::nodes
 
 namespace gladius::ui
 {
+    class ExportState;
     class ModelEditor;
 
     std::string typeToString(std::type_index typeIndex);
@@ -54,6 +55,10 @@ namespace gladius::ui
         void visit(nodes::Resource & resourceNode) override;
 
         void setModelEditor(ModelEditor * editor);
+
+        /// @brief Set the export state for blocking input during export
+        /// @param state Pointer to ExportState (may be nullptr)
+        void setExportState(ExportState * state);
 
         [[nodiscard]] auto haveParameterChanged() const -> bool;
         [[nodiscard]] auto hasModelChanged() const -> bool;
@@ -258,6 +263,7 @@ namespace gladius::ui
         nodes::SharedModel m_currentModel;
 
         ModelEditor * m_modelEditor{nullptr};
+        ExportState * m_exportState{nullptr};
         bool m_showContextMenu{false};
 
         bool m_showLinkAssignmentMenu{false};

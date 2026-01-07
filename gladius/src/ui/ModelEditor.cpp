@@ -1117,6 +1117,13 @@ namespace gladius::ui
                         ed::NavigateToContent();
                     }
 
+                    // Block Undo/Redo/Copy/Paste during export
+                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+                    if (exportLocked)
+                    {
+                        ImGui::BeginDisabled();
+                    }
+
                     m_stateApplyingUndo = false;
                     if (m_history.canUnDo())
                     {
@@ -1176,6 +1183,11 @@ namespace gladius::ui
                             // Defer paste until editor is active
                             m_pendingPasteRequest = true;
                         }
+                    }
+
+                    if (exportLocked)
+                    {
+                        ImGui::EndDisabled();
                     }
 
                     toggleButton(
@@ -1318,6 +1330,7 @@ namespace gladius::ui
 
                 m_nodeViewVisitor.setAssembly(m_assembly);
                 m_nodeViewVisitor.setModelEditor(this);
+                m_nodeViewVisitor.setExportState(m_exportState);
                 if (m_currentModel)
                 {
                     m_nodeWidthsInitialized = m_nodeViewVisitor.columnWidthsAreInitialized();
@@ -1338,7 +1351,9 @@ namespace gladius::ui
                 onDeleteNode();
 
                 // Keyboard copy/paste when editor is focused
-                if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                // Block copy/paste during export to prevent model modifications
+                bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+                if (!exportLocked && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
                 {
                     ImGuiIO & io = ImGui::GetIO();
                     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
@@ -1384,6 +1399,8 @@ namespace gladius::ui
 
                 ed::End();
                 ed::PopStyleColor();
+
+                // Export overlay is now rendered at MainWindow level to block entire UI
 
                 if (m_nodeViewVisitor.haveParameterChanged())
                 {
@@ -2688,4 +2705,5 @@ namespace gladius::ui
         // Track last paste canvas position for offset nudging
         m_clipboard.updatePastePosition(canvas);
     }
+
 } // namespace gladius::ui

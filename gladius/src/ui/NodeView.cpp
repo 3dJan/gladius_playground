@@ -1,6 +1,7 @@
 #include "NodeView.h"
 
 #include "Assembly.h"
+#include "ExportState.h"
 #include "FileChooser.h"
 #include "InputList.h"
 #include "LinkColors.h"
@@ -249,6 +250,11 @@ namespace gladius::ui
     {
         m_modelEditor = editor;
         reset();
+    }
+
+    void NodeView::setExportState(ExportState * state)
+    {
+        m_exportState = state;
     }
 
     bool NodeView::haveParameterChanged() const
@@ -1412,6 +1418,12 @@ namespace gladius::ui
                               ParameterMap::reference parameter,
                               VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto name = std::get_if<std::string>(&val))
         {
             const auto previousText = *name;
@@ -1480,6 +1492,11 @@ namespace gladius::ui
             val = *name;
             ImGui::PopItemWidth();
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
         return false;
     }
 
@@ -1487,6 +1504,12 @@ namespace gladius::ui
                              nodes::ParameterMap::reference parameter,
                              nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<float>(&val))
         {
             ImGui::SameLine();
@@ -1534,12 +1557,23 @@ namespace gladius::ui
 
             m_parameterChanged |= changed;
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewFloat3(nodes::NodeBase const & node,
                               nodes::ParameterMap::reference parameter,
                               nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<float3>(&val))
         {
             ImGui::TextUnformatted("Vector");
@@ -1591,12 +1625,23 @@ namespace gladius::ui
 
             ImGui::PopItemWidth();
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewMatrix(nodes::NodeBase const & node,
                               nodes::ParameterMap::reference parameter,
                               nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<Matrix4x4>(&val))
         {
             ImGui::PushItemWidth(300 * m_uiScale);
@@ -1623,12 +1668,23 @@ namespace gladius::ui
 
             m_parameterChanged |= changed;
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewResource(nodes::NodeBase & node,
                                 nodes::ParameterMap::reference parameter,
                                 nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (auto * pval = std::get_if<ResourceId>(&val))
         {
             ImGui::SameLine();
@@ -1716,12 +1772,23 @@ namespace gladius::ui
                   });
             }
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewInt(nodes::NodeBase const & node,
                            nodes::ParameterMap::reference parameter,
                            nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<int>(&val))
         {
             ImGui::SameLine();
@@ -1748,6 +1815,11 @@ namespace gladius::ui
             }
 
             m_parameterChanged |= changed;
+        }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
         }
     }
 
