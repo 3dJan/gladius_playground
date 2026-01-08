@@ -1061,50 +1061,6 @@ namespace gladius::ui
                         }
                     }
 
-                    ImGui::AlignTextToFramePadding();
-                    ImGui::TextUnformatted("Layout:");
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
-                    auto const * currentLayoutLabel = layoutStrategyLabel(m_selectedLayoutStrategy);
-                    if (ImGui::BeginCombo("##LayoutStrategySelector", currentLayoutLabel))
-                    {
-                        bool const isAutoSelected =
-                          m_selectedLayoutStrategy == LayoutStrategyChoice::Auto;
-                        if (ImGui::Selectable(layoutStrategyLabel(LayoutStrategyChoice::Auto),
-                                              isAutoSelected))
-                        {
-                            m_selectedLayoutStrategy = LayoutStrategyChoice::Auto;
-                        }
-                        if (isAutoSelected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-
-                        for (auto const & descriptor : layoutStrategyDescriptors())
-                        {
-                            bool const isSelected =
-                              m_selectedLayoutStrategy == descriptor.choice;
-                            if (ImGui::Selectable(descriptor.displayName, isSelected))
-                            {
-                                m_selectedLayoutStrategy = descriptor.choice;
-                            }
-                            if (isSelected)
-                            {
-                                ImGui::SetItemDefaultFocus();
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Choose the auto layout algorithm.");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "Auto runs the tournament and applies the winning strategy.");
-                        ImGui::EndTooltip();
-                    }
-
                     ImGui::SameLine();
 
                     if (ImGui::MenuItem("Autolayout"))

@@ -195,7 +195,7 @@ namespace gladius::ui
         bool m_primitiveDataDirty{false};
         bool m_nodePositionsNeedUpdate{false};
         bool m_pendingPasteRequest{false};
-        float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
+        float m_nodeDistance = 50.f;
         float m_scale = 0.5f;
         bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};

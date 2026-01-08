@@ -34,11 +34,11 @@ namespace gladius::ui
          */
         struct LayoutConfig
         {
-            float nodeDistance = 50.0f;          ///< Basic distance between nodes
-            float layerSpacing = 500.0f;         ///< Distance between layers
-            float groupPadding = 200.0f;         ///< Padding around groups
+            float nodeDistance = 30.0f;          ///< Basic distance between nodes
+            float layerSpacing = 50.0f;         ///< Distance between layers
+            float groupPadding = 50.0f;         ///< Padding around groups
             int maxOptimizationIterations = 100; ///< Max iterations for position optimization
-            float convergenceThreshold = 5.0f;   ///< Threshold for optimization convergence
+            float convergenceThreshold = 2.0f;   ///< Threshold for optimization convergence
             bool useMedianForOrdering = true;    ///< If true, use median (barycentric) Y for ordering instead of mean
         };
 
