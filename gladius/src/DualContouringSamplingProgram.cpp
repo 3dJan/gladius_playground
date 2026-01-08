@@ -316,4 +316,79 @@ namespace gladius
                                                        outValues.size() * sizeof(cl_float),
                                                        outValues.data());
     }
+
+    void DualContouringSamplingProgram::sampleCornersShellVolume(
+      std::vector<Eigen::Vector3f> const & positions,
+      std::vector<float> & outValues,
+      Primitives const & primitives,
+      std::vector<float> const & outerLUT,
+      std::vector<float> const & innerLUT,
+      int lutResolution,
+      bool isInnermostLayer)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outValues.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outValues.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer valueBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              outValues.size() * sizeof(cl_float));
+
+        cl::Buffer outerLutBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  outerLUT.size() * sizeof(float),
+                                  const_cast<float*>(outerLUT.data()));
+
+        // For innermost layer, we still need a valid buffer but it won't be read
+        cl::Buffer innerLutBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  innerLUT.size() * sizeof(float),
+                                  const_cast<float*>(innerLUT.data()));
+
+        cl_int const innermostFlag = isInnermostLayer ? 1 : 0;
+
+        // Run kernel
+        m_programFront->run("sampleCornersShellVolume",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           valueBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS,
+                           outerLutBuffer,
+                           innerLutBuffer,
+                           lutResolution,
+                           innermostFlag);
+
+        // Read results
+        m_ComputeContext->GetQueue().enqueueReadBuffer(valueBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       outValues.size() * sizeof(cl_float),
+                                                       outValues.data());
+    }
 }

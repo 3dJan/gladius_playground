@@ -1840,7 +1840,20 @@ namespace gladius::hierarchical_dc
                 }
             }
 
-            if (!m_config.thicknessLUT.empty())
+            if (m_config.useShellVolumeMode && !m_config.outerLUT.empty())
+            {
+                // Shell volume mode: sample with two LUTs for material band
+                if (!m_gpuSampler->sampleCornersShellVolume(m_cornerSamplePositions,
+                                                           m_cornerSampleValues,
+                                                           m_config.outerLUT,
+                                                           m_config.innerLUT,
+                                                           m_config.lutResolution,
+                                                           m_config.isInnermostLayer))
+                {
+                    return false;
+                }
+            }
+            else if (!m_config.thicknessLUT.empty())
             {
                 if (!m_gpuSampler->sampleCornersVariableThickness(m_cornerSamplePositions,
                                                                   m_cornerSampleValues,

@@ -336,6 +336,60 @@ namespace gladius::dual_contouring
         }
     }
 
+    bool GpuSamplingSession::sampleCornersShellVolume(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<float> & outValues,
+        std::vector<float> const & outerLUT,
+        std::vector<float> const & innerLUT,
+        int lutResolution,
+        bool isInnermostLayer)
+    {
+        if (positions.empty())
+        {
+            outValues.clear();
+            return true;
+        }
+
+        if (!m_gpuAvailable)
+        {
+            return false;
+        }
+
+        outValues.resize(positions.size());
+
+        try
+        {
+            auto context = m_core->getComputeContext();
+            if (!context || !context->isValid())
+            {
+                return false;
+            }
+
+            // No caching for shell volumes - LUT varies per layer
+            auto * program = m_core->getProgramManager().getDualContouringSamplingProgram();
+            if (!program)
+            {
+                logError("DualContouringSamplingProgram not available");
+                return false;
+            }
+
+            // Direct GPU sampling without caching
+            program->sampleCornersShellVolume(
+                positions, outValues, *m_core->getPrimitives(),
+                outerLUT, innerLUT, lutResolution, isInnermostLayer);
+
+            m_stats.cornerBatches += 1;
+            m_stats.totalCornerSamples += positions.size();
+
+            return true;
+        }
+        catch (std::exception const & ex)
+        {
+            logError(fmt::format("Shell volume sampling failed: {}", ex.what()));
+            return false;
+        }
+    }
+
     bool GpuSamplingSession::sampleHermite(std::vector<Eigen::Vector3f> const & positions,
                                            std::vector<float> & outValues,
                                            std::vector<Eigen::Vector3f> & outGradients,

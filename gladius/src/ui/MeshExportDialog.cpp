@@ -225,6 +225,10 @@ namespace gladius::ui
         {
             m_manifoldExporter.finalize();
         }
+        else if (m_activeExporter == &m_shellExporter)
+        {
+            m_shellExporter.finalize();
+        }
         else
         {
             BaseExportDialog::finalizeExport();
@@ -290,6 +294,11 @@ namespace gladius::ui
                 {
                     failed = m_manifoldExporter.hasError();
                     failureMessage = m_manifoldExporter.errorMessage();
+                }
+                else if (finishedExporter == &m_shellExporter)
+                {
+                    failed = m_shellExporter.hasError();
+                    failureMessage = m_shellExporter.errorMessage();
                 }
 
                 try
@@ -1154,28 +1163,7 @@ namespace gladius::ui
             throw std::runtime_error("No precomputed LUTs available for shell export");
         }
 
-        core.updateBBox();
-
-        // Derive a per-layer thickness solution using LUTs when available; fallback to min thickness
-        io::ThicknessSolution solution(stack.size());
-        for (std::size_t i = 0; i < solution.thicknesses.size(); ++i)
-        {
-            float thickness = m_colorToThicknessDialog.getConstraints().minThickness;
-            if (i < precomputedLuts.size() && !precomputedLuts[i].empty())
-            {
-                int const res = std::max(2, lutResolution);
-                std::size_t const idx =
-                  (static_cast<std::size_t>(res - 1) * static_cast<std::size_t>(res) +
-                   static_cast<std::size_t>(res - 1)) * static_cast<std::size_t>(res) +
-                  static_cast<std::size_t>(res - 1);
-                if (idx < precomputedLuts[i].size())
-                {
-                    thickness = precomputedLuts[i][idx];
-                }
-            }
-            solution.thicknesses[i] = thickness;
-        }
-
+        // Build MDC options from current settings
         io::ManifoldDualContouringOptions options{};
         options.qualityPreset = m_manifoldQualityPreset;
         options.applyPreset();
@@ -1206,74 +1194,29 @@ namespace gladius::ui
         options.simplificationQemWeight = std::max(0.0F,
           1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
 
+        // Build shell export config
+        io::ShellExportConfig config;
+        config.filamentStack = std::move(stack);
+        config.precomputedLuts = precomputedLuts;
+        config.lutResolution = lutResolution;
+        config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
+        config.mdcOptions = std::move(options);
+
+        // Reset cancellation token for the new export
+        m_cancellationToken.reset();
+
+        // Configure and start async shell export
+        m_shellExporter.setConfig(std::move(config));
+        m_shellExporter.setDocument(m_document);
+        m_shellExporter.setCancellationToken(&m_cancellationToken);
+        m_shellExporter.beginExport(m_targetFile, core);
+        m_activeExporter = &m_shellExporter;
+
+        // Enable progress tracking and UI lock
         m_exportInProgress = true;
         if (m_exportState != nullptr)
         {
             m_exportState->beginExport("3MF shell export");
-        }
-
-        io::ShellGenerator generator(core, *const_cast<Document*>(m_document));
-        auto shells = generator.generateShells(
-            stack,
-            solution,
-            options,
-            lutResolution,
-            m_colorToThicknessDialog.getConstraints(),
-            &precomputedLuts);
-
-        if (shells.empty())
-        {
-            throw std::runtime_error("Shell generation produced no meshes");
-        }
-
-        ComputeContext * context = core.getComputeContext().get();
-
-        // Build vector of (mesh, name, material color)
-        std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> meshesWithColors;
-        meshesWithColors.reserve(shells.size());
-
-        for (auto const & shell : shells)
-        {
-            auto mesh = std::make_shared<Mesh>(*context);
-
-            for (std::size_t idx = 0; idx + 2 < shell.indices.size(); idx += 3)
-            {
-                auto const i0 = shell.indices[idx + 0];
-                auto const i1 = shell.indices[idx + 1];
-                auto const i2 = shell.indices[idx + 2];
-
-                if (i0 >= shell.vertices.size() || i1 >= shell.vertices.size() || i2 >= shell.vertices.size())
-                {
-                    continue;
-                }
-
-                mesh->addFace(shell.vertices[i0], shell.vertices[i1], shell.vertices[i2]);
-            }
-
-            mesh->write();
-            std::string const name = fmt::format("Shell_L{}_{}", shell.layerIndex, shell.filamentName);
-
-            // Lookup material color from stack
-            Eigen::Vector3f color{1.0F, 1.0F, 1.0F};
-            if (static_cast<std::size_t>(shell.layerIndex) < stack.size())
-            {
-                color = stack[static_cast<std::size_t>(shell.layerIndex)].reflectanceColor;
-            }
-
-            meshesWithColors.emplace_back(std::move(mesh), name, color);
-        }
-
-        io::MeshWriter3mf writer(nullptr);
-        writer.exportMeshesWithMaterialColors(m_targetFile, meshesWithColors, m_document, true);
-
-        m_exportInProgress = false;
-        m_exportCompleted = true;
-        m_statusMessage = "Exported shell meshes to 3MF";
-        m_statusIsError = false;
-
-        if (m_exportState != nullptr)
-        {
-            m_exportState->endExport();
         }
     }
 

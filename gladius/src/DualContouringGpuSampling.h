@@ -76,6 +76,15 @@ namespace gladius::dual_contouring
                                          std::vector<float> const & thicknessLUT,
                                          int lutResolution);
 
+        /// Sample SDF values for shell volumes (material bands between two depth boundaries)
+        /// Returns false if GPU sampling fails and CPU fallback should be used
+        [[nodiscard]] bool sampleCornersShellVolume(std::vector<Eigen::Vector3f> const & positions,
+                                         std::vector<float> & outValues,
+                                         std::vector<float> const & outerLUT,
+                                         std::vector<float> const & innerLUT,
+                                         int lutResolution,
+                                         bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// Returns false if GPU sampling fails and CPU fallback should be used
         [[nodiscard]] bool sampleHermite(std::vector<Eigen::Vector3f> const & positions,

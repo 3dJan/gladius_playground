@@ -63,6 +63,12 @@ namespace gladius::hierarchical_dc
         std::size_t maxNodes{10000000U};         ///< Safety limit on total nodes to prevent OOM (0 = unlimited)
         std::vector<float> thicknessLUT;         ///< Optional 3D LUT for variable thickness (RGB -> Thickness)
         int lutResolution{0};                    ///< Resolution of the LUT (e.g. 32)
+        
+        // Shell volume mode: uses two LUTs to define a material band between outer and inner boundaries
+        std::vector<float> outerLUT;             ///< 3D LUT for outer boundary thickness (layers above)
+        std::vector<float> innerLUT;             ///< 3D LUT for inner boundary thickness (layers above + this)
+        bool isInnermostLayer{false};            ///< True if no inner boundary (innermost material layer)
+        bool useShellVolumeMode{false};          ///< True to use shell volume sampling instead of single LUT
     };
 
     /// Quality presets for hierarchical dual contouring

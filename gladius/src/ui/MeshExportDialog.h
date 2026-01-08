@@ -9,6 +9,7 @@
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/MeshExporter3mf.h"
+#include "io/ShellExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 
 #include <cstddef>
@@ -84,6 +85,7 @@ namespace gladius::ui
         vdb::MeshExporter3mf m_layeredExporter3mf;
         io::DualContouringStlExporter m_dualExporter;
         io::ManifoldDualContouringStlExporter m_manifoldExporter;
+        io::ShellExporter m_shellExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
         Document const * m_document = nullptr;

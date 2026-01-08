@@ -42,6 +42,22 @@ namespace gladius
                           std::vector<float> const & thicknessLUT,
                           int lutResolution);
 
+        /// Sample SDF values for shell volumes (material bands between two depth boundaries)
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerLUT 3D LUT for outer boundary thickness (layers above this one)
+        /// @param innerLUT 3D LUT for inner boundary thickness (layers above and including this one)
+        /// @param lutResolution Resolution of the LUTs (e.g. 16)
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        void sampleCornersShellVolume(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerLUT,
+                          std::vector<float> const & innerLUT,
+                          int lutResolution,
+                          bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// @param positions Input positions to sample
         /// @param outValues Output SDF values (must be pre-sized)

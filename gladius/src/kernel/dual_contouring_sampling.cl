@@ -320,3 +320,108 @@ __kernel void sampleCornersVariableThickness(
     
     values[gid] = distance + thickness + baseIsoValue;
 }
+
+// Shell volume sampling kernel
+// Computes SDF for a material shell (band between two depth boundaries)
+// The shell is the region where: outerThickness <= -distance < innerThickness
+// SDF is negative inside the shell, positive outside
+__kernel void sampleCornersShellVolume(
+    __global const float4* positions,    // Input: array of (x,y,z,_) positions
+    __global float* values,              // Output: SDF values at positions
+    const unsigned int count,            // Number of positions to sample
+    PAYLOAD_ARGS,
+    __global const float* outerLUT,      // 3D LUT: RGB -> outer boundary thickness
+    __global const float* innerLUT,      // 3D LUT: RGB -> inner boundary thickness
+    const int lutResolution,             // Resolution of the 3D LUTs (e.g. 16)
+    const int isInnermostLayer           // 1 if innermost layer (no inner boundary)
+)
+{
+    const int gid = get_global_id(0);
+    
+    if (gid >= count)
+    {
+        return;
+    }
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Evaluate SDF at this position using the model function
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
+    const float3 color = clamp(sdfResult.xyz, 0.0f, 1.0f);
+    
+    // Trilinear interpolation setup
+    float3 uvw = color * (float)(lutResolution - 1);
+    int3 idx = convert_int3(floor(uvw));
+    float3 f = uvw - convert_float3(idx);
+    
+    // Clamp indices
+    idx = clamp(idx, 0, lutResolution - 2);
+    
+    // Helper macro for LUT access
+    #define SHELL_LUT_IDX(x, y, z) (((x) * lutResolution + (y)) * lutResolution + (z))
+    
+    // Sample outer LUT with trilinear interpolation
+    float o000 = outerLUT[SHELL_LUT_IDX(idx.x, idx.y, idx.z)];
+    float o001 = outerLUT[SHELL_LUT_IDX(idx.x, idx.y, idx.z + 1)];
+    float o010 = outerLUT[SHELL_LUT_IDX(idx.x, idx.y + 1, idx.z)];
+    float o011 = outerLUT[SHELL_LUT_IDX(idx.x, idx.y + 1, idx.z + 1)];
+    float o100 = outerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y, idx.z)];
+    float o101 = outerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y, idx.z + 1)];
+    float o110 = outerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y + 1, idx.z)];
+    float o111 = outerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y + 1, idx.z + 1)];
+    
+    float o00 = mix(o000, o001, f.z);
+    float o01 = mix(o010, o011, f.z);
+    float o10 = mix(o100, o101, f.z);
+    float o11 = mix(o110, o111, f.z);
+    
+    float o0 = mix(o00, o01, f.y);
+    float o1 = mix(o10, o11, f.y);
+    
+    float outerThickness = mix(o0, o1, f.x);
+    
+    if (isInnermostLayer)
+    {
+        // Innermost layer: solid core from outer boundary inward
+        // SDF is negative inside (distance < -outerThickness)
+        values[gid] = distance + outerThickness;
+    }
+    else
+    {
+        // Sample inner LUT with trilinear interpolation
+        float i000 = innerLUT[SHELL_LUT_IDX(idx.x, idx.y, idx.z)];
+        float i001 = innerLUT[SHELL_LUT_IDX(idx.x, idx.y, idx.z + 1)];
+        float i010 = innerLUT[SHELL_LUT_IDX(idx.x, idx.y + 1, idx.z)];
+        float i011 = innerLUT[SHELL_LUT_IDX(idx.x, idx.y + 1, idx.z + 1)];
+        float i100 = innerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y, idx.z)];
+        float i101 = innerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y, idx.z + 1)];
+        float i110 = innerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y + 1, idx.z)];
+        float i111 = innerLUT[SHELL_LUT_IDX(idx.x + 1, idx.y + 1, idx.z + 1)];
+        
+        float i00 = mix(i000, i001, f.z);
+        float i01 = mix(i010, i011, f.z);
+        float i10 = mix(i100, i101, f.z);
+        float i11 = mix(i110, i111, f.z);
+        
+        float ii0 = mix(i00, i01, f.y);
+        float ii1 = mix(i10, i11, f.y);
+        
+        float innerThickness = mix(ii0, ii1, f.x);
+        
+        // Shell volume using fabs() for closed surface
+        // Shell centerline is at offset = (outer + inner) / 2
+        // Shell half-thickness is (inner - outer) / 2
+        // The fabs() naturally creates both inner and outer surfaces in one mesh!
+        float shellCenter = (outerThickness + innerThickness) * 0.5f;
+        float halfThickness = (innerThickness - outerThickness) * 0.5f;
+        
+        // Shell SDF: |distance_to_centerline| - halfThickness
+        // Negative inside shell volume, positive outside
+        // Iso-surface at 0 = closed shell boundary (both inner and outer faces)
+        values[gid] = fabs(distance + shellCenter) - halfThickness;
+    }
+    
+    #undef SHELL_LUT_IDX
+}
