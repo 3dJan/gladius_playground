@@ -2342,6 +2342,17 @@ namespace gladius::ui
                      ImVec2(static_cast<float>(m_renderWindowSize_px.x),
                             static_cast<float>(m_renderWindowSize_px.y)));
 
+        // Calculate window center BEFORE calling End() (while Preview is still active)
+        ImVec2 const contentMin = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
+        ImVec2 const contentMax = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
+        ImVec2 const windowCenter = {
+          0.5f * (contentMin.x + contentMax.x),
+          0.5f * (contentMin.y + contentMax.y)};
+
         ImGui::End();
         ImGui::PopStyleVar();
         displayImage->unbind();
@@ -2350,17 +2361,6 @@ namespace gladius::ui
         // Show busy indicator during actual kernel compilation
         if (m_core->isAnyCompilationInProgressNonBlocking())
         {
-            // Calculate window center only when needed (Finding 5)
-            ImVec2 const contentMin = {
-              ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
-              ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
-            ImVec2 const contentMax = {
-              ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
-              ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
-            ImVec2 const windowCenter = {
-              0.5f * (contentMin.x + contentMax.x),
-              0.5f * (contentMin.y + contentMax.y)};
-
             showProgressSpinner(windowCenter, "compiling");
         }
     }
@@ -2368,10 +2368,13 @@ namespace gladius::ui
     void RenderWindow::showProgressSpinner(ImVec2 const & windowCenter, char const * label)
     {
         m_view->startAnimationMode();
-        ImGuiWindowFlags const overlayFlags =
+        ImGuiWindowFlags overlayFlags =
           ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
           ImGuiWindowFlags_NoNav;
+#ifdef IMGUI_HAS_DOCK
+        overlayFlags |= ImGuiWindowFlags_NoDocking;
+#endif
 
         bool open = true;
         ImGui::SetNextWindowBgAlpha(0.0f);
