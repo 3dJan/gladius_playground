@@ -139,6 +139,7 @@ namespace gladius::ui
         void renderLoadingOverlay();
         void renderBusyOverlay();
         void renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage);
+        void showProgressSpinner(ImVec2 const & windowCenter, char const * label);
         void slider();
         void initializeAsyncRendering();
         void renderSync(RenderWindowState & state);

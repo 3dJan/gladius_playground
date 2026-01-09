@@ -299,8 +299,9 @@ namespace gladius
 
     [[nodiscard]] bool ProgramManager::isAnyCompilationInProgressNonBlocking() const noexcept
     {
-        // Non-blocking check using atomic flags only - no mutex needed
-        // Each isCompilationInProgress() returns an atomic<bool>
+        // SAFETY: Program pointers are set during initialization and never nullified
+        // during normal operation, making this lock-free check safe.
+        // Each isCompilationInProgress() returns an atomic<bool>.
         return (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
             (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
             (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||

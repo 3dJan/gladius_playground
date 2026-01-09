@@ -660,11 +660,11 @@ namespace gladius
 
         /// @brief Check if SDF precomputation is currently in progress
         /// @return True if SDF computation is running asynchronously
-        [[nodiscard]] bool isSdfComputationInProgress() const;
+        [[nodiscard]] bool isSdfComputationInProgress() const noexcept;
 
         /// @brief Check if bounding box computation is currently in progress
         /// @return True if bounding box calculation is running
-        [[nodiscard]] bool isBoundingBoxComputationInProgress() const;
+        [[nodiscard]] bool isBoundingBoxComputationInProgress() const noexcept;
 
         /// Get the program manager for direct access to specialized programs
         [[nodiscard]] ProgramManager & getProgramManager();

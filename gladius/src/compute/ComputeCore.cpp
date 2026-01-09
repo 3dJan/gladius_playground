@@ -351,12 +351,12 @@ namespace gladius
         return m_autoUpdateBoundingBox;
     }
 
-    bool ComputeCore::isSdfComputationInProgress() const
+    bool ComputeCore::isSdfComputationInProgress() const noexcept
     {
         return m_sdfComputationInProgress.load();
     }
 
-    bool ComputeCore::isBoundingBoxComputationInProgress() const
+    bool ComputeCore::isBoundingBoxComputationInProgress() const noexcept
     {
         return m_boundingBoxComputationInProgress.load();
     }
@@ -510,10 +510,10 @@ namespace gladius
     {
         ProfileFunction
 
-        m_boundingBoxComputationInProgress.store(true);
-
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
+
+        m_boundingBoxComputationInProgress.store(true);
 
         if (m_boundingBox && isBoundingBoxMeaningful(*m_boundingBox))
         {

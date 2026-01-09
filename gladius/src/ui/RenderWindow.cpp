@@ -2304,28 +2304,7 @@ namespace gladius::ui
         displayImage->unbind();
 
         // Show busy spinner overlay
-        m_view->startAnimationMode();
-        ImGuiWindowFlags const overlayFlags =
-          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-          ImGuiWindowFlags_NoNav;
-
-        bool open = true;
-        ImGui::SetNextWindowBgAlpha(0.0f);
-
-        if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
-        {
-            ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-            // Red color for compute-busy (matches existing compilation indicator)
-            ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
-            ui::loadingIndicatorCircle("busy",
-                                       30,
-                                       indicatorColor,
-                                       ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
-                                       12,
-                                       10.0f);
-        }
-        ImGui::End();
+        showProgressSpinner(windowCenter, "busy");
     }
 
     void RenderWindow::renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage)
@@ -2339,17 +2318,6 @@ namespace gladius::ui
         ImGui::SetNextWindowBgAlpha(1.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
         ImGui::Begin("Preview", &m_isVisible, window_flags);
-
-        // Get content area for potential spinner positioning
-        ImVec2 const contentMin = {
-          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
-          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
-        ImVec2 const contentMax = {
-          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
-          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
-        ImVec2 const windowCenter = {
-          0.5f * (contentMin.x + contentMax.x),
-          0.5f * (contentMin.y + contentMax.y)};
 
         // Cache window state
         m_isWindowHovered = ImGui::IsWindowHovered();
@@ -2382,29 +2350,44 @@ namespace gladius::ui
         // Show busy indicator during actual kernel compilation
         if (m_core->isAnyCompilationInProgressNonBlocking())
         {
-            m_view->startAnimationMode();
-            ImGuiWindowFlags const overlayFlags =
-              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-              ImGuiWindowFlags_NoNav;
+            // Calculate window center only when needed (Finding 5)
+            ImVec2 const contentMin = {
+              ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
+              ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
+            ImVec2 const contentMax = {
+              ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
+              ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
+            ImVec2 const windowCenter = {
+              0.5f * (contentMin.x + contentMax.x),
+              0.5f * (contentMin.y + contentMax.y)};
 
-            bool open = true;
-            ImGui::SetNextWindowBgAlpha(0.0f);
-
-            if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
-            {
-                ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-                // Red color for compilation
-                ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
-                ui::loadingIndicatorCircle("compiling",
-                                           30,
-                                           indicatorColor,
-                                           ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
-                                           12,
-                                           10.0f);
-            }
-            ImGui::End();
+            showProgressSpinner(windowCenter, "compiling");
         }
+    }
+
+    void RenderWindow::showProgressSpinner(ImVec2 const & windowCenter, char const * label)
+    {
+        m_view->startAnimationMode();
+        ImGuiWindowFlags const overlayFlags =
+          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+          ImGuiWindowFlags_NoNav;
+
+        bool open = true;
+        ImGui::SetNextWindowBgAlpha(0.0f);
+
+        if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
+        {
+            ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
+            ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
+            ui::loadingIndicatorCircle(label,
+                                       30,
+                                       indicatorColor,
+                                       ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
+                                       12,
+                                       10.0f);
+        }
+        ImGui::End();
     }
 
     bool RenderWindow::isVisible() const
