@@ -263,9 +263,46 @@ namespace gladius::ui
             return;
         }
 
-        // UI thread needs to wait for compute token to ensure something gets rendered
-        // (otherwise screen would be black)
-        auto token = m_core->waitForComputeToken();
+        // Try to acquire compute token non-blocking
+        auto token = m_core->requestComputeToken();
+        bool const hasComputeToken = token.has_value();
+
+        // If we don't have the compute token, we can still display existing buffers
+        // This keeps the UI responsive during parameter changes
+        if (!hasComputeToken)
+        {
+            // Check if we have async preview content to display
+            bool hasAsyncContent = false;
+            std::shared_ptr<GLImageBuffer> displayImage;
+
+            if (m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
+            {
+                auto * frontBuf = m_asyncController->frontBuffer();
+                if (frontBuf && frontBuf->image)
+                {
+                    displayImage = frontBuf->image;
+                    hasAsyncContent = true;
+                }
+            }
+
+            // Fallback to result image if available
+            if (!hasAsyncContent)
+            {
+                displayImage = m_core->getResultImage();
+                hasAsyncContent = displayImage != nullptr;
+            }
+
+            if (hasAsyncContent && displayImage)
+            {
+                // Show existing content without blocking - no busy indicator needed
+                renderExistingFrame(displayImage);
+                return;
+            }
+
+            // No content available - show busy overlay
+            renderBusyOverlay();
+            return;
+        }
 
         // Execute rendering logic FIRST - this processes async results and promotes buffers
         render(m_renderWindowState);
@@ -577,8 +614,11 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
-        // Show progress indicator during compilation (loading case is handled by early return above)
-        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
+        // Show progress indicator only during actual kernel compilation
+        // (not during parameter changes which just update SDF/bounding box)
+        bool const showBusyIndicator = !m_core->isRendererReady() 
+            || m_core->isAnyCompilationInProgress();
+        if (showBusyIndicator)
         {
             m_view->startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -2223,6 +2263,148 @@ namespace gladius::ui
                                        10.0f);
         }
         ImGui::End();
+    }
+
+    void RenderWindow::renderBusyOverlay()
+    {
+        ProfileFunction;
+
+        // Show the last rendered frame (no clearing - keep existing image visible)
+        auto displayImage = m_core->getResultImage();
+        if (!displayImage)
+        {
+            return;
+        }
+
+        ImGuiWindowFlags const window_flags =
+          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
+        ImGui::SetNextWindowBgAlpha(1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::Begin("Preview", &m_isVisible, window_flags);
+
+        // Get content area dimensions for spinner positioning
+        ImVec2 const contentMin = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
+        ImVec2 const contentMax = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
+        ImVec2 const windowCenter = {
+          0.5f * (contentMin.x + contentMax.x),
+          0.5f * (contentMin.y + contentMax.y)};
+
+        // Display the last frame (not cleared - shows previous render result)
+        auto const textureId = displayImage->GetTextureId();
+        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+                     ImVec2(static_cast<float>(m_renderWindowSize_px.x),
+                            static_cast<float>(m_renderWindowSize_px.y)));
+
+        ImGui::End();
+        ImGui::PopStyleVar();
+        displayImage->unbind();
+
+        // Show busy spinner overlay
+        m_view->startAnimationMode();
+        ImGuiWindowFlags const overlayFlags =
+          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+          ImGuiWindowFlags_NoNav;
+
+        bool open = true;
+        ImGui::SetNextWindowBgAlpha(0.0f);
+
+        if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
+        {
+            ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
+            // Red color for compute-busy (matches existing compilation indicator)
+            ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
+            ui::loadingIndicatorCircle("busy",
+                                       30,
+                                       indicatorColor,
+                                       ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
+                                       12,
+                                       10.0f);
+        }
+        ImGui::End();
+    }
+
+    void RenderWindow::renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage)
+    {
+        ProfileFunction;
+
+        // Display the existing frame without triggering new rendering
+        // This keeps the UI responsive during parameter changes
+        ImGuiWindowFlags const window_flags =
+          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
+        ImGui::SetNextWindowBgAlpha(1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::Begin("Preview", &m_isVisible, window_flags);
+
+        // Get content area for potential spinner positioning
+        ImVec2 const contentMin = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMin().y};
+        ImVec2 const contentMax = {
+          ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x,
+          ImGui::GetWindowPos().y + ImGui::GetWindowContentRegionMax().y};
+        ImVec2 const windowCenter = {
+          0.5f * (contentMin.x + contentMax.x),
+          0.5f * (contentMin.y + contentMax.y)};
+
+        // Cache window state
+        m_isWindowHovered = ImGui::IsWindowHovered();
+        m_isWindowFocused = ImGui::IsWindowFocused();
+
+        // Handle key input if focused
+        if (ImGui::IsWindowFocused() && !ImGui::IsAnyItemFocused() &&
+            ImGui::IsMouseHoveringRect(m_contentAreaMin, m_contentAreaMax))
+        {
+            handleKeyInput();
+        }
+
+        // Simple menu bar (limited functionality without compute token)
+        if (ImGui::BeginMenuBar())
+        {
+            ImGui::EndMenuBar();
+        }
+
+        // Display the image
+        auto const textureId = displayImage->GetTextureId();
+        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+                     ImVec2(static_cast<float>(m_renderWindowSize_px.x),
+                            static_cast<float>(m_renderWindowSize_px.y)));
+
+        ImGui::End();
+        ImGui::PopStyleVar();
+        displayImage->unbind();
+
+        // Check if compilation is in progress using non-blocking atomic check
+        // Show busy indicator during actual kernel compilation
+        if (m_core->isAnyCompilationInProgressNonBlocking())
+        {
+            m_view->startAnimationMode();
+            ImGuiWindowFlags const overlayFlags =
+              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+              ImGuiWindowFlags_NoNav;
+
+            bool open = true;
+            ImGui::SetNextWindowBgAlpha(0.0f);
+
+            if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
+            {
+                ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
+                // Red color for compilation
+                ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
+                ui::loadingIndicatorCircle("compiling",
+                                           30,
+                                           indicatorColor,
+                                           ImVec4(1.0f, 1.0f, 1.0f, 0.5f),
+                                           12,
+                                           10.0f);
+            }
+            ImGui::End();
+        }
     }
 
     bool RenderWindow::isVisible() const

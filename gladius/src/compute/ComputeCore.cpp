@@ -351,6 +351,16 @@ namespace gladius
         return m_autoUpdateBoundingBox;
     }
 
+    bool ComputeCore::isSdfComputationInProgress() const
+    {
+        return m_sdfComputationInProgress.load();
+    }
+
+    bool ComputeCore::isBoundingBoxComputationInProgress() const
+    {
+        return m_boundingBoxComputationInProgress.load();
+    }
+
     ProgramManager & ComputeCore::getProgramManager()
     {
         return m_programs;
@@ -500,11 +510,14 @@ namespace gladius
     {
         ProfileFunction
 
+        m_boundingBoxComputationInProgress.store(true);
+
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
 
         if (m_boundingBox && isBoundingBoxMeaningful(*m_boundingBox))
         {
+            m_boundingBoxComputationInProgress.store(false);
             return true;
         }
 
@@ -521,6 +534,7 @@ namespace gladius
             {
             }
             LOG_LOCATION
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -539,6 +553,7 @@ namespace gladius
             {
             }
             LOG_LOCATION
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -565,6 +580,7 @@ namespace gladius
                 logMsg("updateBoundingBoxFast: Failed to get ComputeContext diagnostics");
             }
 
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -591,6 +607,7 @@ namespace gladius
                        "queue.finish() failure");
             }
 
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
         m_resources->getConvexHullVertices().read();
@@ -640,6 +657,7 @@ namespace gladius
             m_boundingBox = BoundingBox{{0.f, 0.f, 0.f, 0.f}, {400.f, 400.f, 400.f, 0.f}};
         }
         LOG_LOCATION;
+        m_boundingBoxComputationInProgress.store(false);
         return true;
     }
 
@@ -842,6 +860,11 @@ namespace gladius
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgress() const
     {
         return m_programs.isAnyCompilationInProgress();
+    }
+
+    [[nodiscard]] bool ComputeCore::isAnyCompilationInProgressNonBlocking() const noexcept
+    {
+        return m_programs.isAnyCompilationInProgressNonBlocking();
     }
 
     bool ComputeCore::updateBBox()
@@ -1089,6 +1112,8 @@ namespace gladius
     {
         ProfileFunction;
 
+        m_sdfComputationInProgress.store(true);
+
         // No mutex lock for async operation - caller must ensure thread safety
         // Validate preconditions
         if (!m_programs.getSlicerState().isModelUpToDate())
@@ -1099,6 +1124,7 @@ namespace gladius
             if (!m_programs.getSlicerState().isModelUpToDate())
             {
                 logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after recompilation");
+                m_sdfComputationInProgress.store(false);
                 return cl::Event{};
             }
             else
@@ -1115,6 +1141,7 @@ namespace gladius
             if (!m_programs.getSlicerProgram()->isValid())
             {
                 logMsg("ComputeCore::precomputeSdfAsync: slicer program remained invalid");
+                m_sdfComputationInProgress.store(false);
                 return cl::Event{};
             }
             else
@@ -1126,6 +1153,7 @@ namespace gladius
         if (m_precompSdfIsValid)
         {
             logMsg("ComputeCore::precomputeSdfAsync: SDF already valid, skipping");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
@@ -1133,12 +1161,14 @@ namespace gladius
         if (!updateBBox())
         {
             logMsg("ComputeCore::precomputeSdfAsync: updateBBox failed");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
         if (!m_boundingBox.has_value())
         {
             logMsg("ComputeCore::precomputeSdfAsync: no bounding box available, skipping");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
@@ -1886,6 +1916,7 @@ namespace gladius
     void ComputeCore::setSdfValid(bool valid)
     {
         m_precompSdfIsValid = valid;
+        m_sdfComputationInProgress.store(false);
     }
 
     bool ComputeCore::isSdfValid() const

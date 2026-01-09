@@ -50,6 +50,10 @@ namespace gladius
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
+        /// Non-blocking check for compilation progress using atomic flags only.
+        /// Safe to call from any thread without risk of blocking.
+        [[nodiscard]] bool isAnyCompilationInProgressNonBlocking() const noexcept;
+
         [[nodiscard]] ComputeContext & getComputeContext() const;
 
         void compileSlicerProgramBlocking();

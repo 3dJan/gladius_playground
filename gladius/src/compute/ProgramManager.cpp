@@ -297,6 +297,17 @@ namespace gladius
              (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
     }
 
+    [[nodiscard]] bool ProgramManager::isAnyCompilationInProgressNonBlocking() const noexcept
+    {
+        // Non-blocking check using atomic flags only - no mutex needed
+        // Each isCompilationInProgress() returns an atomic<bool>
+        return (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
+            (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
+            (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
+            (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
+            (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
+    }
+
     ComputeContext & ProgramManager::getComputeContext() const
     {
         return *m_ComputeContext;
