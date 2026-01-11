@@ -1,7 +1,9 @@
 #include "ShellGenerator.h"
 
+#include "FaceColorSampler.h"
 #include "FrontlitThicknessSolver.h"
 #include "SurfaceExtractionOptions.h"
+#include "SurfaceThicknessField.h"
 #include "compute/ComputeCore.h"
 #include "compute/ManifoldDualContouringGpu.h"
 #include "HierarchicalDualContouring.h"
@@ -184,7 +186,8 @@ namespace gladius::io
         ManifoldDualContouringOptions const& options,
         int thicknessLutResolution,
         ThicknessConstraints thicknessConstraints,
-        std::vector<std::vector<float>> const* precomputedLuts)
+        std::vector<std::vector<float>> const* precomputedLuts,
+        bool useSurfaceColorSampling)
     {
         std::vector<ShellMesh> shells;
         
@@ -206,6 +209,15 @@ namespace gladius::io
         }
 
         bool const useVariableThickness = thicknessLutResolution > 1;
+
+        // NEW: Use surface-aligned color sampling if requested
+        if (useSurfaceColorSampling && useVariableThickness)
+        {
+            std::cout << "[ShellGenerator] Using surface-aligned color sampling" << std::endl;
+            return generateShellsWithSurfaceSampling(
+                stack, options, thicknessLutResolution, thicknessConstraints);
+        }
+
         std::unique_ptr<FrontlitThicknessSolver> lutSolver;
 
         // Always create the solver for shell volume mode - we need to build LUTs dynamically
@@ -424,6 +436,178 @@ namespace gladius::io
             }
         }
         
+        return shells;
+    }
+
+    std::vector<ShellGenerator::ShellMesh> ShellGenerator::generateShellsWithSurfaceSampling(
+        FilamentStack const& stack,
+        ManifoldDualContouringOptions const& options,
+        int lutResolution,
+        ThicknessConstraints const& thicknessConstraints)
+    {
+        std::vector<ShellMesh> shells;
+
+        auto const boundingBox = m_core.getBoundingBox();
+        if (!boundingBox.has_value())
+        {
+            std::cerr << "[ShellGenerator] Surface sampling: No bounding box available" << std::endl;
+            return shells;
+        }
+
+        // Phase 1: Extract outer surface mesh at SDF=0
+        std::cout << "[ShellGenerator] Phase 1: Extracting outer surface mesh..." << std::endl;
+        
+        hierarchical_dc::HierarchicalConfig outerConfig = toHierarchicalConfig(options);
+        outerConfig.isoValue = 0.0F;
+        outerConfig.useShellVolumeMode = false;
+
+        hierarchical_dc::HierarchicalOctreeBuilder outerBuilder(m_core, outerConfig);
+        outerBuilder.buildOctree(boundingBox.value());
+
+        std::vector<Eigen::Vector3f> surfaceVertices;
+        std::vector<std::uint32_t> surfaceIndices;
+        outerBuilder.extractMesh(surfaceVertices, surfaceIndices);
+
+        if (surfaceVertices.empty())
+        {
+            std::cerr << "[ShellGenerator] Surface sampling: Failed to extract outer surface mesh" 
+                      << std::endl;
+            return shells;
+        }
+
+        std::cout << "[ShellGenerator] Phase 1 complete: " << surfaceVertices.size() 
+                  << " vertices, " << surfaceIndices.size() / 3 << " triangles" << std::endl;
+
+        // Phase 2: Sample colors at surface vertices
+        std::cout << "[ShellGenerator] Phase 2: Sampling colors at surface vertices..." << std::endl;
+
+        auto* samplingProgram = m_core.getProgramManager().getDualContouringSamplingProgram();
+        auto primitives = m_core.getPrimitives();
+        
+        if (samplingProgram == nullptr || primitives == nullptr)
+        {
+            std::cerr << "[ShellGenerator] Surface sampling: Failed to get sampling program or primitives"
+                      << std::endl;
+            return shells;
+        }
+
+        // Sample colors directly at vertex positions using the GPU sampling program
+        std::vector<Eigen::Vector3f> surfaceColors;
+        samplingProgram->sampleColors(surfaceVertices, surfaceColors, *primitives);
+
+        if (surfaceColors.size() != surfaceVertices.size())
+        {
+            std::cerr << "[ShellGenerator] Surface sampling: Color sampling size mismatch" 
+                      << std::endl;
+            return shells;
+        }
+
+        std::cout << "[ShellGenerator] Phase 2 complete: " << surfaceColors.size() 
+                  << " colors sampled" << std::endl;
+
+        // Create solver for building LUTs
+        FrontlitThicknessSolver solver(stack, thicknessConstraints);
+        std::size_t const numLayers = stack.size();
+
+        // Phase 3-5: Build thickness fields and extract shells for each layer
+        for (int i = static_cast<int>(numLayers) - 1; i >= 0; --i)
+        {
+            std::cout << "[ShellGenerator] Phase 3-5: Building thickness field for layer " 
+                      << i << " (" << stack[i].name << ")..." << std::endl;
+
+            // Build outer LUT: cumulative thickness of layers ABOVE this one
+            std::vector<float> outerLut;
+            if (i == static_cast<int>(numLayers) - 1)
+            {
+                // Outermost layer: outer boundary is the model surface (thickness = 0)
+                std::size_t const lutSize = static_cast<std::size_t>(lutResolution) *
+                                           static_cast<std::size_t>(lutResolution) *
+                                           static_cast<std::size_t>(lutResolution);
+                outerLut.resize(lutSize, 0.0F);
+            }
+            else
+            {
+                outerLut = buildCumulativeThicknessLutInternal(
+                    solver,
+                    static_cast<std::size_t>(i + 1),
+                    lutResolution);
+            }
+
+            // Build inner LUT: cumulative thickness of layers ABOVE AND INCLUDING this one
+            std::vector<float> innerLut = buildCumulativeThicknessLutInternal(
+                solver,
+                static_cast<std::size_t>(i),
+                lutResolution);
+
+            if (outerLut.empty() || (i != 0 && innerLut.empty()))
+            {
+                std::cout << "[ShellGenerator] Layer " << i << ": Skipping - empty LUT" << std::endl;
+                continue;
+            }
+
+            // Build SurfaceThicknessField for outer boundary
+            SurfaceThicknessFieldConfig fieldConfig;
+            fieldConfig.gridResolution = std::max(64, 1 << options.maxDepth);  // Match DC resolution
+            fieldConfig.defaultThickness = 0.0F;
+
+            SurfaceThicknessField outerField;
+            outerField.build(surfaceVertices, surfaceColors, outerLut, lutResolution,
+                            boundingBox.value(), fieldConfig);
+
+            SurfaceThicknessField innerField;
+            if (i != 0)
+            {
+                innerField.build(surfaceVertices, surfaceColors, innerLut, lutResolution,
+                                boundingBox.value(), fieldConfig);
+            }
+
+            std::cout << "[ShellGenerator] Layer " << i << ": Thickness fields built ("
+                      << fieldConfig.gridResolution << "³ grid, "
+                      << outerField.getMemoryUsage() / (1024 * 1024) << " MB)" << std::endl;
+
+            // Configure for shell volume mode with thickness fields
+            hierarchical_dc::HierarchicalConfig shellConfig = toHierarchicalConfig(options);
+            shellConfig.useShellVolumeMode = true;
+            shellConfig.useSurfaceAlignedThickness = true;
+            shellConfig.outerThicknessField = outerField.getFieldBuffer();
+            shellConfig.innerThicknessField = (i != 0) ? innerField.getFieldBuffer() : std::vector<float>{};
+            shellConfig.thicknessFieldResolution = fieldConfig.gridResolution;
+            shellConfig.worldToThicknessField = outerField.getWorldToGridTransform();
+            shellConfig.isInnermostLayer = (i == 0);
+            shellConfig.isoValue = 0.0F;
+
+            // Build octree and extract shell mesh
+            hierarchical_dc::HierarchicalOctreeBuilder shellBuilder(m_core, shellConfig);
+            shellBuilder.buildOctree(boundingBox.value());
+
+            std::vector<Eigen::Vector3f> shellVertices;
+            std::vector<std::uint32_t> shellIndices;
+            shellBuilder.extractMesh(shellVertices, shellIndices);
+
+            auto const& stats = shellBuilder.getStats();
+            std::cout << "[ShellGenerator] Layer " << i << " octree: "
+                      << stats.totalNodes << " nodes, "
+                      << stats.intersectingLeaves << " intersecting leaves" << std::endl;
+
+            std::cout << "[ShellGenerator] Layer " << i << " result: "
+                      << shellVertices.size() << " vertices, "
+                      << shellIndices.size() / 3 << " triangles" << std::endl;
+
+            if (!shellVertices.empty() && !shellIndices.empty())
+            {
+                ShellMesh shell;
+                shell.vertices = std::move(shellVertices);
+                shell.indices = std::move(shellIndices);
+                shell.filamentName = stack[i].name;
+                shell.layerIndex = i;
+                
+                shells.push_back(std::move(shell));
+            }
+        }
+
+        std::cout << "[ShellGenerator] Surface sampling complete: " << shells.size() 
+                  << " shells generated" << std::endl;
+
         return shells;
     }
 }

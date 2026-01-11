@@ -390,6 +390,66 @@ namespace gladius::dual_contouring
         }
     }
 
+    bool GpuSamplingSession::sampleCornersWithThicknessField(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<float> & outValues,
+        std::vector<float> const & outerField,
+        std::vector<float> const & innerField,
+        int fieldResolution,
+        Eigen::Matrix4f const & worldToField,
+        bool isInnermostLayer)
+    {
+        if (positions.empty())
+        {
+            outValues.clear();
+            return true;
+        }
+
+        if (!m_gpuAvailable)
+        {
+            return false;
+        }
+
+        if (outerField.empty() || fieldResolution <= 0)
+        {
+            logError("Invalid thickness field: empty or invalid resolution");
+            return false;
+        }
+
+        outValues.resize(positions.size());
+
+        try
+        {
+            auto context = m_core->getComputeContext();
+            if (!context || !context->isValid())
+            {
+                return false;
+            }
+
+            auto * program = m_core->getProgramManager().getDualContouringSamplingProgram();
+            if (!program)
+            {
+                logError("DualContouringSamplingProgram not available");
+                return false;
+            }
+
+            // Call the new kernel with precomputed thickness fields
+            program->sampleCornersWithThicknessField(
+                positions, outValues, *m_core->getPrimitives(),
+                outerField, innerField, fieldResolution, worldToField, isInnermostLayer);
+
+            m_stats.cornerBatches += 1;
+            m_stats.totalCornerSamples += positions.size();
+
+            return true;
+        }
+        catch (std::exception const & ex)
+        {
+            logError(fmt::format("Thickness field sampling failed: {}", ex.what()));
+            return false;
+        }
+    }
+
     bool GpuSamplingSession::sampleHermite(std::vector<Eigen::Vector3f> const & positions,
                                            std::vector<float> & outValues,
                                            std::vector<Eigen::Vector3f> & outGradients,

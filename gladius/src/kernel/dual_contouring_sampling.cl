@@ -425,3 +425,139 @@ __kernel void sampleCornersShellVolume(
     
     #undef SHELL_LUT_IDX
 }
+
+// ============================================================================
+// Surface-aligned thickness field sampling kernels
+// These sample from a precomputed 3D thickness field instead of color→LUT
+// ============================================================================
+
+/// Helper: Transform world position to field grid coordinates and sample
+inline float sampleThicknessField(
+    __global const float* thicknessField,  // 3D grid of precomputed thickness values
+    const int fieldResolution,              // Resolution of the 3D grid (e.g., 128)
+    const float16 worldToGrid,              // 4x4 transform: world → grid coordinates
+    const float3 worldPos)
+{
+    // Transform to grid coordinates using 4x4 matrix
+    // worldToGrid is packed as: row0(0-3), row1(4-7), row2(8-11), row3(12-15)
+    float3 gridPos;
+    gridPos.x = worldToGrid.s0 * worldPos.x + worldToGrid.s1 * worldPos.y + 
+                worldToGrid.s2 * worldPos.z + worldToGrid.s3;
+    gridPos.y = worldToGrid.s4 * worldPos.x + worldToGrid.s5 * worldPos.y + 
+                worldToGrid.s6 * worldPos.z + worldToGrid.s7;
+    gridPos.z = worldToGrid.s8 * worldPos.x + worldToGrid.s9 * worldPos.y + 
+                worldToGrid.sa * worldPos.z + worldToGrid.sb;
+    
+    // Trilinear interpolation in grid space
+    float3 uvw = gridPos;
+    int3 idx = convert_int3(floor(uvw));
+    float3 f = uvw - convert_float3(idx);
+    
+    // Clamp to valid range
+    idx = clamp(idx, 0, fieldResolution - 2);
+    f = clamp(f, 0.0f, 1.0f);
+    
+    // Helper for 3D grid access
+    #define FIELD_IDX(x, y, z) (((x) * fieldResolution + (y)) * fieldResolution + (z))
+    
+    float c000 = thicknessField[FIELD_IDX(idx.x, idx.y, idx.z)];
+    float c001 = thicknessField[FIELD_IDX(idx.x, idx.y, idx.z + 1)];
+    float c010 = thicknessField[FIELD_IDX(idx.x, idx.y + 1, idx.z)];
+    float c011 = thicknessField[FIELD_IDX(idx.x, idx.y + 1, idx.z + 1)];
+    float c100 = thicknessField[FIELD_IDX(idx.x + 1, idx.y, idx.z)];
+    float c101 = thicknessField[FIELD_IDX(idx.x + 1, idx.y, idx.z + 1)];
+    float c110 = thicknessField[FIELD_IDX(idx.x + 1, idx.y + 1, idx.z)];
+    float c111 = thicknessField[FIELD_IDX(idx.x + 1, idx.y + 1, idx.z + 1)];
+    
+    float c00 = mix(c000, c001, f.z);
+    float c01 = mix(c010, c011, f.z);
+    float c10 = mix(c100, c101, f.z);
+    float c11 = mix(c110, c111, f.z);
+    
+    float c0 = mix(c00, c01, f.y);
+    float c1 = mix(c10, c11, f.y);
+    
+    float thickness = mix(c0, c1, f.x);
+    
+    #undef FIELD_IDX
+    
+    return thickness;
+}
+
+/// Sample corners using precomputed surface-aligned thickness field (single boundary)
+/// This is the surface-color-corrected version of sampleCornersVariableThickness
+__kernel void sampleCornersWithThicknessField(
+    __global const float4* positions,       // Input: world positions
+    __global float* values,                 // Output: SDF values
+    const unsigned int count,
+    PAYLOAD_ARGS,
+    const float baseIsoValue,               // Base ISO offset
+    __global const float* thicknessField,   // 3D precomputed thickness grid
+    const int fieldResolution,              // Grid resolution (e.g., 128)
+    const float16 worldToGrid               // 4x4 transform matrix
+)
+{
+    const int gid = get_global_id(0);
+    if (gid >= count) return;
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Evaluate base SDF
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
+    
+    // Sample thickness from precomputed field (surface colors propagated inward)
+    float thickness = sampleThicknessField(
+        thicknessField, fieldResolution, worldToGrid, worldPos);
+    
+    // Surface at SDF = -thickness
+    values[gid] = distance + thickness + baseIsoValue;
+}
+
+/// Sample corners for shell volume using two precomputed thickness fields
+/// This is the surface-color-corrected version of sampleCornersShellVolume
+__kernel void sampleCornersShellVolumeWithField(
+    __global const float4* positions,       // Input: world positions
+    __global float* values,                 // Output: SDF values
+    const unsigned int count,
+    PAYLOAD_ARGS,
+    __global const float* outerField,       // 3D precomputed outer boundary thickness
+    __global const float* innerField,       // 3D precomputed inner boundary thickness
+    const int fieldResolution,              // Grid resolution (e.g., 128)
+    const float16 worldToGrid,              // 4x4 transform matrix
+    const int isInnermostLayer              // 1 if innermost (no inner boundary)
+)
+{
+    const int gid = get_global_id(0);
+    if (gid >= count) return;
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Evaluate base SDF
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
+    
+    // Sample outer thickness from precomputed field
+    float outerThickness = sampleThicknessField(
+        outerField, fieldResolution, worldToGrid, worldPos);
+    
+    if (isInnermostLayer)
+    {
+        // Innermost layer: solid core from outer boundary inward
+        values[gid] = distance + outerThickness;
+    }
+    else
+    {
+        // Sample inner thickness from precomputed field
+        float innerThickness = sampleThicknessField(
+            innerField, fieldResolution, worldToGrid, worldPos);
+        
+        // Shell volume: closed surface using fabs()
+        float shellCenter = (outerThickness + innerThickness) * 0.5f;
+        float halfThickness = (innerThickness - outerThickness) * 0.5f;
+        
+        values[gid] = fabs(distance + shellCenter) - halfThickness;
+    }
+}

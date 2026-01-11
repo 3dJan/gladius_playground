@@ -85,6 +85,24 @@ namespace gladius::dual_contouring
                                          int lutResolution,
                                          bool isInnermostLayer);
 
+        /// Sample SDF values using precomputed surface-aligned thickness field
+        /// This is the surface-color-corrected version that samples from spatial position
+        /// instead of color→LUT lookup at interior points
+        /// @param outerField 3D grid of outer boundary thickness (position → thickness)
+        /// @param innerField 3D grid of inner boundary thickness (position → thickness), empty for single boundary
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost material layer (no inner boundary)
+        /// @return False if GPU sampling fails
+        [[nodiscard]] bool sampleCornersWithThicknessField(
+            std::vector<Eigen::Vector3f> const & positions,
+            std::vector<float> & outValues,
+            std::vector<float> const & outerField,
+            std::vector<float> const & innerField,
+            int fieldResolution,
+            Eigen::Matrix4f const & worldToField,
+            bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// Returns false if GPU sampling fails and CPU fallback should be used
         [[nodiscard]] bool sampleHermite(std::vector<Eigen::Vector3f> const & positions,

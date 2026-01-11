@@ -29,6 +29,7 @@ namespace gladius::io
         int lutResolution = 16;                           ///< LUT grid resolution
         ThicknessConstraints thicknessConstraints;        ///< Thickness limits
         ManifoldDualContouringOptions mdcOptions;         ///< Mesh extraction options
+        bool useSurfaceColorSampling = false;             ///< Use surface colors instead of interior
     };
 
     /// @brief Async exporter for shell-based color 3MF export

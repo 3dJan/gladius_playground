@@ -210,7 +210,8 @@ namespace gladius::io
             m_config.mdcOptions,
             m_config.lutResolution,
             m_config.thicknessConstraints,
-            &m_config.precomputedLuts);
+            &m_config.precomputedLuts,
+            m_config.useSurfaceColorSampling);
 
         if (isCancellationRequested())
         {

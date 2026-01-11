@@ -890,6 +890,20 @@ namespace gladius::ui
                 ImGui::TextDisabled("One build item per shell with solid colors.");
                 ImGui::EndDisabled();
 
+                // Surface color sampling option (nested under shell export)
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::Indent();
+                ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                {
+                        ImGui::SetTooltip(
+                            "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                            "This fixes color accuracy for projected images and textures.\n"
+                            "Recommended for HueForge-style multi-color prints.");
+                }
+                ImGui::Unindent();
+                ImGui::EndDisabled();
+
                 ImGui::Indent();
                 if (lutReady)
                 {
@@ -1201,6 +1215,7 @@ namespace gladius::ui
         config.lutResolution = lutResolution;
         config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
         config.mdcOptions = std::move(options);
+        config.useSurfaceColorSampling = m_useSurfaceColorSampling;
 
         // Reset cancellation token for the new export
         m_cancellationToken.reset();

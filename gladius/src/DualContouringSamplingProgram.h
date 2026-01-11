@@ -58,6 +58,25 @@ namespace gladius
                           int lutResolution,
                           bool isInnermostLayer);
 
+        /// Sample SDF values using precomputed surface-aligned thickness field
+        /// This samples from a 3D grid (position → thickness) instead of color→LUT
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerField 3D grid of outer boundary thickness
+        /// @param innerField 3D grid of inner boundary thickness (empty for single boundary)
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        void sampleCornersWithThicknessField(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerField,
+                          std::vector<float> const & innerField,
+                          int fieldResolution,
+                          Eigen::Matrix4f const & worldToField,
+                          bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// @param positions Input positions to sample
         /// @param outValues Output SDF values (must be pre-sized)

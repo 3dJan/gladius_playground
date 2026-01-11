@@ -69,6 +69,14 @@ namespace gladius::hierarchical_dc
         std::vector<float> innerLUT;             ///< 3D LUT for inner boundary thickness (layers above + this)
         bool isInnermostLayer{false};            ///< True if no inner boundary (innermost material layer)
         bool useShellVolumeMode{false};          ///< True to use shell volume sampling instead of single LUT
+        
+        // Surface-aligned thickness field mode: uses precomputed 3D grids for accurate surface colors
+        // When enabled, thickness is sampled from spatial position rather than color→LUT
+        std::vector<float> outerThicknessField;  ///< 3D grid: position → outer boundary thickness
+        std::vector<float> innerThicknessField;  ///< 3D grid: position → inner boundary thickness
+        int thicknessFieldResolution{0};         ///< Resolution of thickness fields (e.g., 128)
+        Eigen::Matrix4f worldToThicknessField{Eigen::Matrix4f::Identity()}; ///< Transform: world → field grid
+        bool useSurfaceAlignedThickness{false};  ///< True to use precomputed thickness fields
     };
 
     /// Quality presets for hierarchical dual contouring

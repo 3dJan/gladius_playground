@@ -138,6 +138,7 @@ namespace gladius::ui
         io::ColorMode m_colorMode = io::ColorMode::PerFace; ///< Color export mode
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
+        bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
 
         ColorToThicknessDialog m_colorToThicknessDialog;
 

@@ -1840,7 +1840,21 @@ namespace gladius::hierarchical_dc
                 }
             }
 
-            if (m_config.useShellVolumeMode && !m_config.outerLUT.empty())
+            // Surface-aligned thickness field mode: sample from precomputed spatial grid
+            if (m_config.useSurfaceAlignedThickness && !m_config.outerThicknessField.empty())
+            {
+                if (!m_gpuSampler->sampleCornersWithThicknessField(m_cornerSamplePositions,
+                                                                   m_cornerSampleValues,
+                                                                   m_config.outerThicknessField,
+                                                                   m_config.innerThicknessField,
+                                                                   m_config.thicknessFieldResolution,
+                                                                   m_config.worldToThicknessField,
+                                                                   m_config.isInnermostLayer))
+                {
+                    return false;
+                }
+            }
+            else if (m_config.useShellVolumeMode && !m_config.outerLUT.empty())
             {
                 // Shell volume mode: sample with two LUTs for material band
                 if (!m_gpuSampler->sampleCornersShellVolume(m_cornerSamplePositions,
