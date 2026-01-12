@@ -929,13 +929,13 @@ namespace gladius::compute::tests
         auto core =
           std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
 
-        ManifoldDualContouringGpu gpu(*core);
+        auto gpu = std::make_unique<ManifoldDualContouringGpu>(*core);
 
         ManifoldDualContouringConfig config;
         config.enableGpu = true;
-        gpu.setConfig(config);
+        gpu->setConfig(config);
 
-        gpu.generateMesh();
+        gpu->generateMesh();
     }
 
     TEST(ManifoldDualContouring_EdgeNeighbors, EdgeNeighborOffsets_AreWellFormed)

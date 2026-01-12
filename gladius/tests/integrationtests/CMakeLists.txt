@@ -26,6 +26,7 @@ if(NOT ENABLE_OPENCL_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/MeshSdfPerformance_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/ShellGenerator_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/ColorExport_Integration_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ShellExportMeshQuality_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/GlobalMortonOctree_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/NodeLayoutEngine_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/PaletteExtractor_tests.cpp"
