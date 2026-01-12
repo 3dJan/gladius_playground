@@ -562,6 +562,75 @@ namespace gladius::dual_contouring
         }
     }
 
+    bool GpuSamplingSession::sampleHermiteWithThicknessField(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<float> & outValues,
+        std::vector<Eigen::Vector3f> & outGradients,
+        std::vector<float> const & outerField,
+        std::vector<float> const & innerField,
+        int fieldResolution,
+        Eigen::Matrix4f const & worldToField,
+        bool isInnermostLayer,
+        float epsilonOverride)
+    {
+        if (positions.empty())
+        {
+            outValues.clear();
+            outGradients.clear();
+            return true;
+        }
+
+        if (!m_gpuAvailable)
+        {
+            return false;
+        }
+
+        if (outerField.empty() || fieldResolution <= 0)
+        {
+            logError("Invalid thickness field: empty or invalid resolution");
+            return false;
+        }
+
+        outValues.resize(positions.size());
+        outGradients.resize(positions.size());
+
+        float const epsilon = (epsilonOverride > 0.0F) ? epsilonOverride : m_config.gradientEpsilon;
+
+        try
+        {
+            auto context = m_core->getComputeContext();
+            if (!context || !context->isValid())
+            {
+                return false;
+            }
+
+            auto * program = m_core->getProgramManager().getDualContouringSamplingProgram();
+            if (!program)
+            {
+                logError("DualContouringSamplingProgram not available");
+                return false;
+            }
+
+            // Note: Caching is disabled for shell-aware Hermite sampling because
+            // the cached values would be for the model SDF, not the shell SDF.
+            // Each shell layer has different thickness fields so caching would be incorrect.
+
+            program->sampleHermiteWithThicknessField(
+                positions, outValues, outGradients, *m_core->getPrimitives(),
+                outerField, innerField, fieldResolution, worldToField, isInnermostLayer, epsilon);
+
+            m_stats.hermiteBatches += 1;
+            m_stats.totalHermiteSamples += positions.size();
+
+            return true;
+        }
+        catch (std::exception const & ex)
+        {
+            logError(fmt::format("Shell Hermite sampling failed: {}", ex.what()));
+            return false;
+        }
+    }
+
     void GpuSamplingSession::logError(std::string const & message)
     {
         // Logger is private in ComputeCore, so we skip logging for now

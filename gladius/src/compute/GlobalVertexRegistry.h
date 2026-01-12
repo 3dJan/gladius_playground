@@ -232,9 +232,9 @@ namespace gladius::compute
         }
 
       private:
-        Eigen::Vector3f m_globalBboxMin{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxMax{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxSize{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f m_globalBboxMin = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxMax = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxSize = Eigen::Vector3f::Zero();
         std::uint32_t m_maxDepth{0U};
 
         /// (Cell Morton code, component) → global vertex index

@@ -261,7 +261,7 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
-        gpuPipeline.setConfig(config);
+        gpuPipeline.setConfig(std::move(config));
         
         // Wire progress callback to update exporter's atomic progress
         // Mesh generation phase spans 5-80% of total export progress

@@ -9,10 +9,14 @@
 #include "HierarchicalDualContouring.h"
 #include "kernel/types.h"
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <cmath>
-#include <iostream>
+#include <limits>
 #include <memory>
+#include <numeric>
+#include <unordered_map>
 
 namespace
 {
@@ -164,11 +168,16 @@ namespace gladius::io
         }
 
         /// Convert ManifoldDualContouringOptions to HierarchicalConfig for LUT-based shell generation
+        /// Note: For shell generation, we force a uniform grid (initialDepth == maxDepth) to avoid
+        /// fragmented meshes caused by multi-level octree neighbor handling issues
         [[nodiscard]] hierarchical_dc::HierarchicalConfig toHierarchicalConfig(
             ManifoldDualContouringOptions const& options)
         {
             hierarchical_dc::HierarchicalConfig cfg{};
-            cfg.initialDepth = options.initialDepth;
+            // Force uniform grid by setting initialDepth = maxDepth
+            // This avoids the fragmented mesh issue where cells at different octree levels
+            // don't share vertices properly
+            cfg.initialDepth = options.maxDepth;
             cfg.maxDepth = options.maxDepth;
             cfg.enableGpuAcceleration = options.enableGpu;
             cfg.gpuFallbackToCpu = options.enableCpuFallback;
@@ -177,6 +186,149 @@ namespace gladius::io
             cfg.minFeatureSize = options.minFeatureSize;
             cfg.projectVerticesToSurface = options.projectToSurface;
             return cfg;
+        }
+
+        /// Weld duplicate vertices in a mesh to create proper connectivity
+        /// This fixes the fragmented mesh output from HierarchicalOctreeBuilder
+        void weldMeshVertices(
+            std::vector<Eigen::Vector3f> & vertices,
+            std::vector<std::uint32_t> & indices,
+            float tolerance)
+        {
+            if (vertices.size() < 2U || indices.empty())
+            {
+                return;
+            }
+
+            float const toleranceSq = tolerance * tolerance;
+            std::size_t const numVertices = vertices.size();
+
+            // Build a simple spatial hash for faster neighbor lookup
+            float const cellSize = tolerance * 2.0F;
+            float const invCellSize = 1.0F / cellSize;
+
+            auto hashPos = [invCellSize](Eigen::Vector3f const & pos) -> std::uint64_t
+            {
+                auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
+                auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
+                auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
+
+                std::uint64_t const hx = static_cast<std::uint64_t>(ix) & 0x1FFFFF;
+                std::uint64_t const hy = static_cast<std::uint64_t>(iy) & 0x1FFFFF;
+                std::uint64_t const hz = static_cast<std::uint64_t>(iz) & 0x1FFFFF;
+                return (hx << 42) | (hy << 21) | hz;
+            };
+
+            // Map from cell hash to vertex indices in that cell
+            std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> spatialHash;
+            for (std::uint32_t i = 0U; i < numVertices; ++i)
+            {
+                std::uint64_t const hash = hashPos(vertices[i]);
+                spatialHash[hash].push_back(i);
+            }
+
+            // Vertex remapping: vertexRemap[old] = new (canonical vertex)
+            std::vector<std::uint32_t> vertexRemap(numVertices);
+            std::iota(vertexRemap.begin(), vertexRemap.end(), 0U);
+
+            // For each vertex, find nearby vertices and potentially merge
+            for (std::uint32_t i = 0U; i < numVertices; ++i)
+            {
+                if (vertexRemap[i] != i)
+                {
+                    continue; // Already remapped
+                }
+
+                Eigen::Vector3f const & pos = vertices[i];
+                auto const ix = static_cast<std::int32_t>(std::floor(pos.x() * invCellSize));
+                auto const iy = static_cast<std::int32_t>(std::floor(pos.y() * invCellSize));
+                auto const iz = static_cast<std::int32_t>(std::floor(pos.z() * invCellSize));
+
+                // Check neighboring cells
+                for (int dz = -1; dz <= 1; ++dz)
+                {
+                    for (int dy = -1; dy <= 1; ++dy)
+                    {
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            std::uint64_t const hx = static_cast<std::uint64_t>(ix + dx) & 0x1FFFFF;
+                            std::uint64_t const hy = static_cast<std::uint64_t>(iy + dy) & 0x1FFFFF;
+                            std::uint64_t const hz = static_cast<std::uint64_t>(iz + dz) & 0x1FFFFF;
+                            std::uint64_t const neighborHash = (hx << 42) | (hy << 21) | hz;
+
+                            auto it = spatialHash.find(neighborHash);
+                            if (it == spatialHash.end())
+                            {
+                                continue;
+                            }
+
+                            for (std::uint32_t j : it->second)
+                            {
+                                if (j <= i || vertexRemap[j] != j)
+                                {
+                                    continue;
+                                }
+
+                                float const distSq = (vertices[j] - pos).squaredNorm();
+                                if (distSq < toleranceSq)
+                                {
+                                    vertexRemap[j] = i;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build compaction map and count surviving vertices
+            std::vector<std::uint32_t> compactMap(numVertices, std::numeric_limits<std::uint32_t>::max());
+            std::uint32_t newVertexCount = 0U;
+
+            for (std::uint32_t i = 0U; i < numVertices; ++i)
+            {
+                if (vertexRemap[i] == i)
+                {
+                    compactMap[i] = newVertexCount++;
+                }
+            }
+
+            // Update remap to point to compact indices
+            for (std::uint32_t i = 0U; i < numVertices; ++i)
+            {
+                std::uint32_t canonical = vertexRemap[i];
+                vertexRemap[i] = compactMap[canonical];
+            }
+
+            // Compact vertices
+            std::vector<Eigen::Vector3f> newVertices(newVertexCount);
+            for (std::uint32_t i = 0U; i < numVertices; ++i)
+            {
+                if (compactMap[i] != std::numeric_limits<std::uint32_t>::max())
+                {
+                    newVertices[compactMap[i]] = vertices[i];
+                }
+            }
+
+            // Remap indices and remove degenerate triangles
+            std::vector<std::uint32_t> newIndices;
+            newIndices.reserve(indices.size());
+            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
+            {
+                std::uint32_t const a = vertexRemap[indices[i]];
+                std::uint32_t const b = vertexRemap[indices[i + 1]];
+                std::uint32_t const c = vertexRemap[indices[i + 2]];
+
+                // Skip degenerate triangles
+                if (a != b && b != c && a != c)
+                {
+                    newIndices.push_back(a);
+                    newIndices.push_back(b);
+                    newIndices.push_back(c);
+                }
+            }
+
+            vertices = std::move(newVertices);
+            indices = std::move(newIndices);
         }
     }
 
@@ -213,7 +365,7 @@ namespace gladius::io
         // NEW: Use surface-aligned color sampling if requested
         if (useSurfaceColorSampling && useVariableThickness)
         {
-            std::cout << "[ShellGenerator] Using surface-aligned color sampling" << std::endl;
+            fmt::print("[ShellGenerator] Using surface-aligned color sampling\n");
             return generateShellsWithSurfaceSampling(
                 stack, options, thicknessLutResolution, thicknessConstraints);
         }
@@ -414,7 +566,7 @@ namespace gladius::io
                 config.isoValue = -currentOffset;
                 currentOffset += solution.thicknesses[i];
 
-                gpuPipeline.setConfig(config);
+                gpuPipeline.setConfig(std::move(config));
                 gpuPipeline.generateMesh();
 
                 auto const& mesh = gpuPipeline.getMesh();
@@ -450,12 +602,12 @@ namespace gladius::io
         auto const boundingBox = m_core.getBoundingBox();
         if (!boundingBox.has_value())
         {
-            std::cerr << "[ShellGenerator] Surface sampling: No bounding box available" << std::endl;
+            fmt::print(stderr, "[ShellGenerator] Surface sampling: No bounding box available\n");
             return shells;
         }
 
         // Phase 1: Extract outer surface mesh at SDF=0
-        std::cout << "[ShellGenerator] Phase 1: Extracting outer surface mesh..." << std::endl;
+        fmt::print("[ShellGenerator] Phase 1: Extracting outer surface mesh...\n");
         
         hierarchical_dc::HierarchicalConfig outerConfig = toHierarchicalConfig(options);
         outerConfig.isoValue = 0.0F;
@@ -470,24 +622,22 @@ namespace gladius::io
 
         if (surfaceVertices.empty())
         {
-            std::cerr << "[ShellGenerator] Surface sampling: Failed to extract outer surface mesh" 
-                      << std::endl;
+            fmt::print(stderr, "[ShellGenerator] Surface sampling: Failed to extract outer surface mesh\n");
             return shells;
         }
 
-        std::cout << "[ShellGenerator] Phase 1 complete: " << surfaceVertices.size() 
-                  << " vertices, " << surfaceIndices.size() / 3 << " triangles" << std::endl;
+        fmt::print("[ShellGenerator] Phase 1 complete: {} vertices, {} triangles\n",
+                   surfaceVertices.size(), surfaceIndices.size() / 3);
 
         // Phase 2: Sample colors at surface vertices
-        std::cout << "[ShellGenerator] Phase 2: Sampling colors at surface vertices..." << std::endl;
+        fmt::print("[ShellGenerator] Phase 2: Sampling colors at surface vertices...\n");
 
         auto* samplingProgram = m_core.getProgramManager().getDualContouringSamplingProgram();
         auto primitives = m_core.getPrimitives();
         
         if (samplingProgram == nullptr || primitives == nullptr)
         {
-            std::cerr << "[ShellGenerator] Surface sampling: Failed to get sampling program or primitives"
-                      << std::endl;
+            fmt::print(stderr, "[ShellGenerator] Surface sampling: Failed to get sampling program or primitives\n");
             return shells;
         }
 
@@ -497,13 +647,11 @@ namespace gladius::io
 
         if (surfaceColors.size() != surfaceVertices.size())
         {
-            std::cerr << "[ShellGenerator] Surface sampling: Color sampling size mismatch" 
-                      << std::endl;
+            fmt::print(stderr, "[ShellGenerator] Surface sampling: Color sampling size mismatch\n");
             return shells;
         }
 
-        std::cout << "[ShellGenerator] Phase 2 complete: " << surfaceColors.size() 
-                  << " colors sampled" << std::endl;
+        fmt::print("[ShellGenerator] Phase 2 complete: {} colors sampled\n", surfaceColors.size());
 
         // Create solver for building LUTs
         FrontlitThicknessSolver solver(stack, thicknessConstraints);
@@ -512,8 +660,8 @@ namespace gladius::io
         // Phase 3-5: Build thickness fields and extract shells for each layer
         for (int i = static_cast<int>(numLayers) - 1; i >= 0; --i)
         {
-            std::cout << "[ShellGenerator] Phase 3-5: Building thickness field for layer " 
-                      << i << " (" << stack[i].name << ")..." << std::endl;
+            fmt::print("[ShellGenerator] Phase 3-5: Building thickness field for layer {} ({})...\n",
+                       i, stack[i].name);
 
             // Build outer LUT: cumulative thickness of layers ABOVE this one
             std::vector<float> outerLut;
@@ -541,13 +689,15 @@ namespace gladius::io
 
             if (outerLut.empty() || (i != 0 && innerLut.empty()))
             {
-                std::cout << "[ShellGenerator] Layer " << i << ": Skipping - empty LUT" << std::endl;
+                fmt::print("[ShellGenerator] Layer {}: Skipping - empty LUT\n", i);
                 continue;
             }
 
             // Build SurfaceThicknessField for outer boundary
+            // Use higher resolution for accurate color reproduction
             SurfaceThicknessFieldConfig fieldConfig;
-            fieldConfig.gridResolution = std::max(64, 1 << options.maxDepth);  // Match DC resolution
+            fieldConfig.gridResolution = std::max(128, 1 << (options.maxDepth + 1));
+            fieldConfig.maxPropagationDistance = fieldConfig.gridResolution;  // Fill entire grid
             fieldConfig.defaultThickness = 0.0F;
 
             SurfaceThicknessField outerField;
@@ -561,52 +711,47 @@ namespace gladius::io
                                 boundingBox.value(), fieldConfig);
             }
 
-            std::cout << "[ShellGenerator] Layer " << i << ": Thickness fields built ("
-                      << fieldConfig.gridResolution << "³ grid, "
-                      << outerField.getMemoryUsage() / (1024 * 1024) << " MB)" << std::endl;
+            fmt::print("[ShellGenerator] Layer {}: Thickness fields built ({}³ grid, {} MB)\n",
+                       i, fieldConfig.gridResolution, outerField.getMemoryUsage() / (1024 * 1024));
 
-            // Configure for shell volume mode with thickness fields
-            hierarchical_dc::HierarchicalConfig shellConfig = toHierarchicalConfig(options);
-            shellConfig.useShellVolumeMode = true;
-            shellConfig.useSurfaceAlignedThickness = true;
+            // Use ManifoldDualContouringGpu with thickness field for watertight mesh output
+            compute::ManifoldDualContouringConfig shellConfig = toComputeConfig(options);
+            shellConfig.useThicknessField = true;
             shellConfig.outerThicknessField = outerField.getFieldBuffer();
             shellConfig.innerThicknessField = (i != 0) ? innerField.getFieldBuffer() : std::vector<float>{};
             shellConfig.thicknessFieldResolution = fieldConfig.gridResolution;
             shellConfig.worldToThicknessField = outerField.getWorldToGridTransform();
             shellConfig.isInnermostLayer = (i == 0);
             shellConfig.isoValue = 0.0F;
+            // Disable quality improvement for shell meshes - prioritize watertightness
+            shellConfig.enableQualityImprovement = false;
+            // Use hierarchical octree for innermost layer (solid core) - produces watertight meshes
+            // Use non-hierarchical path for non-innermost layers (thin shells) - better gap filling
+            // Thin shells have thickness < voxel size, causing topology issues in both paths
+            shellConfig.enableHierarchicalOctree = (i == 0);
 
-            // Build octree and extract shell mesh
-            hierarchical_dc::HierarchicalOctreeBuilder shellBuilder(m_core, shellConfig);
-            shellBuilder.buildOctree(boundingBox.value());
+            // Use heap allocation to avoid potential stack issues with large config
+            auto gpuPipeline = std::make_unique<compute::ManifoldDualContouringGpu>(m_core);
+            gpuPipeline->setConfig(std::move(shellConfig));
+            gpuPipeline->generateMesh();
 
-            std::vector<Eigen::Vector3f> shellVertices;
-            std::vector<std::uint32_t> shellIndices;
-            shellBuilder.extractMesh(shellVertices, shellIndices);
+            auto const& mesh = gpuPipeline->getMesh();
 
-            auto const& stats = shellBuilder.getStats();
-            std::cout << "[ShellGenerator] Layer " << i << " octree: "
-                      << stats.totalNodes << " nodes, "
-                      << stats.intersectingLeaves << " intersecting leaves" << std::endl;
+            fmt::print("[ShellGenerator] Layer {} result: {} vertices, {} triangles\n",
+                       i, mesh.positions.size(), mesh.indices.size() / 3);
 
-            std::cout << "[ShellGenerator] Layer " << i << " result: "
-                      << shellVertices.size() << " vertices, "
-                      << shellIndices.size() / 3 << " triangles" << std::endl;
-
-            if (!shellVertices.empty() && !shellIndices.empty())
+            if (!mesh.positions.empty() && !mesh.indices.empty())
             {
                 ShellMesh shell;
-                shell.vertices = std::move(shellVertices);
-                shell.indices = std::move(shellIndices);
+                shell.vertices = mesh.positions;
+                shell.indices = mesh.indices;
                 shell.filamentName = stack[i].name;
                 shell.layerIndex = i;
-                
                 shells.push_back(std::move(shell));
             }
         }
 
-        std::cout << "[ShellGenerator] Surface sampling complete: " << shells.size() 
-                  << " shells generated" << std::endl;
+        fmt::print("[ShellGenerator] Surface sampling complete: {} shells generated\n", shells.size());
 
         return shells;
     }

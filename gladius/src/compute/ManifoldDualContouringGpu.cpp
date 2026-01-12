@@ -631,13 +631,24 @@ namespace gladius::compute
         loadKernels();
     }
 
-    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig config)
+    ManifoldDualContouringGpu::~ManifoldDualContouringGpu() = default;
+
+    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig const& config)
+    {
+        m_config = config;
+        if (m_config.initialDepth > m_config.maxDepth)
+        {
+            m_config.initialDepth = m_config.maxDepth;
+        }
+    }
+
+    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig&& config)
     {
         if (config.initialDepth > config.maxDepth)
         {
             config.initialDepth = config.maxDepth;
         }
-        m_config = config;
+        m_config = std::move(config);
     }
 
     void ManifoldDualContouringGpu::setMeshGenerationProgressCallback(MeshGenerationProgressCallback callback)
@@ -819,7 +830,8 @@ namespace gladius::compute
 
         // Project vertices to SDF surface AFTER simplification and quality improvement
         // This snaps simplified vertices back onto the iso-surface, fixing off-surface artifacts
-        if (m_config.projectToSurface && !m_mesh.indices.empty())
+        // Note: Skip projection for thickness field mode - the shell surface is not SDF=0
+        if (m_config.projectToSurface && !m_mesh.indices.empty() && !m_config.useThicknessField)
         {
             projectVerticesToSurface();
         }
@@ -1020,6 +1032,13 @@ namespace gladius::compute
                 dumpTopologyStats("after triangle cleanup", m_mesh);
             }
         }
+
+        // Ensure all GPU operations complete before returning
+        auto context = m_core.getComputeContext();
+        if (context)
+        {
+            context->GetQueue().finish();
+        }
     }
 
     void ManifoldDualContouringGpu::constructOctree()
@@ -1087,14 +1106,58 @@ namespace gladius::compute
 
         try
         {
-            m_program->constructOctree(m_octreeBuffer,
-                                       m_octreeNodeCount,
-                                       bboxMin,
-                                       bboxMax,
-                                       static_cast<std::uint32_t>(m_config.initialDepth),
-                                       static_cast<std::uint32_t>(m_config.maxDepth),
-                                       *primitives,
-                                       m_config.isoValue);
+            if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+            {
+                // Upload thickness field buffers
+                auto context = m_core.getComputeContext();
+                m_outerThicknessFieldBuffer = context->createBufferChecked(
+                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                    m_config.outerThicknessField.size() * sizeof(float),
+                    const_cast<float *>(m_config.outerThicknessField.data()));
+                
+                // Inner field may be empty for innermost layer - create a dummy buffer
+                if (!m_config.innerThicknessField.empty())
+                {
+                    m_innerThicknessFieldBuffer = context->createBufferChecked(
+                        CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                        m_config.innerThicknessField.size() * sizeof(float),
+                        const_cast<float *>(m_config.innerThicknessField.data()));
+                }
+                else
+                {
+                    // Create a small dummy buffer for innermost layer
+                    float dummy = 0.0F;
+                    m_innerThicknessFieldBuffer = context->createBufferChecked(
+                        CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                        sizeof(float),
+                        &dummy);
+                }
+
+                m_program->constructOctreeWithThicknessField(
+                    m_octreeBuffer,
+                    m_octreeNodeCount,
+                    bboxMin,
+                    bboxMax,
+                    static_cast<std::uint32_t>(m_config.initialDepth),
+                    static_cast<std::uint32_t>(m_config.maxDepth),
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer);
+            }
+            else
+            {
+                m_program->constructOctree(m_octreeBuffer,
+                                           m_octreeNodeCount,
+                                           bboxMin,
+                                           bboxMax,
+                                           static_cast<std::uint32_t>(m_config.initialDepth),
+                                           static_cast<std::uint32_t>(m_config.maxDepth),
+                                           *primitives,
+                                           m_config.isoValue);
+            }
 
             std::cout << "Octree construction complete. Nodes before halo: " << m_octreeNodeCount
                       << std::endl;
@@ -1102,14 +1165,33 @@ namespace gladius::compute
             // Add halo nodes around surface-crossing cells to ensure all neighbors exist for quad
             // generation. This fixes holes in thin structures where boundary cells lack neighbors.
             std::uint32_t const maxCoord = m_gridResolution - 1;
-            m_program->addHaloNodes(m_octreeBuffer,
-                                    m_octreeNodeCount,
-                                    maxCoord,
-                                    static_cast<std::uint8_t>(m_config.maxDepth),
-                                    bboxMin,
-                                    bboxMax,
-                                    *primitives,
-                                    m_config.isoValue);
+            if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+            {
+                m_program->addHaloNodesWithThicknessField(
+                    m_octreeBuffer,
+                    m_octreeNodeCount,
+                    maxCoord,
+                    static_cast<std::uint8_t>(m_config.maxDepth),
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer);
+            }
+            else
+            {
+                m_program->addHaloNodes(m_octreeBuffer,
+                                        m_octreeNodeCount,
+                                        maxCoord,
+                                        static_cast<std::uint8_t>(m_config.maxDepth),
+                                        bboxMin,
+                                        bboxMax,
+                                        *primitives,
+                                        m_config.isoValue);
+            }
 
             std::cout << "Octree construction complete. Total nodes after halo: "
                       << m_octreeNodeCount << std::endl;
@@ -1162,14 +1244,33 @@ namespace gladius::compute
 
         try
         {
-            m_program->countVertices(*m_octreeBuffer,
-                                     *m_countBuffer,
-                                     numNodes,
-                                     bboxMin,
-                                     bboxMax,
-                                     *primitives,
-                                     m_config.isoValue,
-                                     gradientEpsilon);
+            if (m_config.useThicknessField && m_outerThicknessFieldBuffer)
+            {
+                m_program->countVerticesWithThicknessField(
+                    *m_octreeBuffer,
+                    *m_countBuffer,
+                    numNodes,
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer,
+                    gradientEpsilon);
+            }
+            else
+            {
+                m_program->countVertices(*m_octreeBuffer,
+                                         *m_countBuffer,
+                                         numNodes,
+                                         bboxMin,
+                                         bboxMax,
+                                         *primitives,
+                                         m_config.isoValue,
+                                         gradientEpsilon);
+            }
         }
         catch (std::exception & e)
         {
@@ -1228,16 +1329,37 @@ namespace gladius::compute
 
         try
         {
-            m_program->generateVertices(*m_octreeBuffer,
-                                        *m_offsetBuffer,
-                                        *m_vertexBuffer,
-                                        *m_edgeComponentBuffer,
-                                        numNodes,
-                                        bboxMin,
-                                        bboxMax,
-                                        *primitives,
-                                        m_config.isoValue,
-                                        gradientEpsilon);
+            if (m_config.useThicknessField && m_outerThicknessFieldBuffer)
+            {
+                m_program->generateVerticesWithThicknessField(
+                    *m_octreeBuffer,
+                    *m_offsetBuffer,
+                    *m_vertexBuffer,
+                    *m_edgeComponentBuffer,
+                    numNodes,
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer,
+                    gradientEpsilon);
+            }
+            else
+            {
+                m_program->generateVertices(*m_octreeBuffer,
+                                            *m_offsetBuffer,
+                                            *m_vertexBuffer,
+                                            *m_edgeComponentBuffer,
+                                            numNodes,
+                                            bboxMin,
+                                            bboxMax,
+                                            *primitives,
+                                            m_config.isoValue,
+                                            gradientEpsilon);
+            }
 
             std::vector<GpuVertex> hostVertices(static_cast<std::size_t>(totalVertices));
             queue.enqueueReadBuffer(*m_vertexBuffer,
@@ -4731,6 +4853,14 @@ namespace gladius::compute
         octreeConfig.curvatureThreshold = m_config.curvatureThreshold;
         octreeConfig.refinementPasses = m_config.refinementPasses;
         octreeConfig.boundingBoxOverride = paddedBbox;
+
+        // Pass thickness field parameters for shell mesh generation
+        octreeConfig.useThicknessField = m_config.useThicknessField;
+        octreeConfig.outerThicknessField = m_config.outerThicknessField;
+        octreeConfig.innerThicknessField = m_config.innerThicknessField;
+        octreeConfig.thicknessFieldResolution = m_config.thicknessFieldResolution;
+        octreeConfig.worldToThicknessField = m_config.worldToThicknessField;
+        octreeConfig.isInnermostLayer = m_config.isInnermostLayer;
 
         // Build the octree
         m_hierarchicalOctree->build(octreeConfig);

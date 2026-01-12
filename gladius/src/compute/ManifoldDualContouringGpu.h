@@ -79,6 +79,16 @@ namespace gladius::compute
         
         // Legacy compatibility
         bool enableSimplification{false};           ///< DEPRECATED: Use simplificationMethod instead
+        
+        // Surface-aligned thickness field for shell generation (variable thickness per point)
+        // When enabled, uses a precomputed 3D thickness field instead of constant isoValue.
+        // The thickness field maps each point to its offset from the model surface.
+        bool useThicknessField{false};              ///< Enable thickness field-based surface extraction
+        std::vector<float> outerThicknessField{};   ///< 3D grid of outer boundary thickness values
+        std::vector<float> innerThicknessField{};   ///< 3D grid of inner boundary thickness values (empty for innermost)
+        int thicknessFieldResolution{0};            ///< Resolution of the 3D thickness grid (N³)
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity(); ///< Transform from world to grid coords
+        bool isInnermostLayer{false};               ///< If true, no inner boundary (solid to center)
     };
 
     struct ManifoldDualContouringMesh
@@ -101,8 +111,10 @@ namespace gladius::compute
     {
       public:
         explicit ManifoldDualContouringGpu(ComputeCore & core);
+        ~ManifoldDualContouringGpu();
 
-        void setConfig(ManifoldDualContouringConfig config);
+        void setConfig(ManifoldDualContouringConfig const& config);
+        void setConfig(ManifoldDualContouringConfig&& config);
         void generateMesh();
 
         /// Set progress callback for mesh generation phases
@@ -123,9 +135,9 @@ namespace gladius::compute
                 ManifoldDualContouringProgram * m_program{nullptr}; // Not owned - managed by ProgramManager
 
                 // Cached bounds for current octree build
-                Eigen::Vector3f m_cachedBboxMin{Eigen::Vector3f::Zero()};
-                Eigen::Vector3f m_cachedBboxMax{Eigen::Vector3f::Zero()};
-                Eigen::Vector3f m_cachedBboxSize{Eigen::Vector3f::Zero()};
+                Eigen::Vector3f m_cachedBboxMin = Eigen::Vector3f::Zero();
+                Eigen::Vector3f m_cachedBboxMax = Eigen::Vector3f::Zero();
+                Eigen::Vector3f m_cachedBboxSize = Eigen::Vector3f::Zero();
                 std::optional<BoundingBox> m_cachedBoundingBox;
                 std::uint32_t m_octreeDepth{0U};
                 std::uint32_t m_gridResolution{1U};
@@ -137,6 +149,10 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> m_countBuffer;
         std::unique_ptr<cl::Buffer> m_offsetBuffer;
         std::unique_ptr<cl::Buffer> m_edgeComponentBuffer;
+        
+        // Thickness field buffers for surface-aligned shell generation
+        std::unique_ptr<cl::Buffer> m_outerThicknessFieldBuffer;
+        std::unique_ptr<cl::Buffer> m_innerThicknessFieldBuffer;
 
             // CPU copies for topology reconstruction
             std::vector<OctreeNode> m_cpuOctreeNodes;

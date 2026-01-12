@@ -13,6 +13,9 @@ namespace gladius::io
 {
     namespace
     {
+        /// Padding fraction added to bounds to avoid edge sampling issues
+        constexpr float kBoundsPaddingFraction = 0.01f;
+
         /// @brief Convert BoundingBox (float4-based) to Eigen min/max vectors
         void extractBounds(BoundingBox const& bounds, Eigen::Vector3f& outMin, Eigen::Vector3f& outMax)
         {
@@ -54,7 +57,7 @@ namespace gladius::io
         extractBounds(modelBounds, boundsMin, boundsMax);
 
         // Add small padding to bounds to avoid edge issues
-        float const padding = 0.01f * (boundsMax - boundsMin).norm();
+        float const padding = kBoundsPaddingFraction * (boundsMax - boundsMin).norm();
         
         m_bounds = BBox();
         m_bounds.extend(boundsMin - Eigen::Vector3f::Constant(padding));
@@ -91,8 +94,8 @@ namespace gladius::io
         // Phase 1: Rasterize surface vertices into grid
         rasterizeSurfaceVertices(vertices, vertexThicknesses);
 
-        // Phase 2: Propagate inward
-        int const maxPropDist = config.maxPropagationDistance > 0 ? config.maxPropagationDistance : m_resolution / 4;
+        // Phase 2: Propagate inward - default to filling entire grid
+        int const maxPropDist = config.maxPropagationDistance > 0 ? config.maxPropagationDistance : m_resolution;
         propagateInward(maxPropDist);
 
         m_isBuilt = true;

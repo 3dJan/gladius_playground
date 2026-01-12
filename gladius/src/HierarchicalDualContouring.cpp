@@ -2419,12 +2419,31 @@ namespace gladius::hierarchical_dc
             auto const gpuStart = std::chrono::high_resolution_clock::now();
             try
             {
-                gpuSampled = m_gpuSampler->sampleHermite(positions,
-                                                         values,
-                                                         gradients,
-                                                         adaptiveEpsilon) &&
-                              values.size() == positions.size() &&
-                              gradients.size() == positions.size();
+                // Use shell-aware Hermite sampling when using surface-aligned thickness fields
+                if (m_config.useSurfaceAlignedThickness && !m_config.outerThicknessField.empty())
+                {
+                    gpuSampled = m_gpuSampler->sampleHermiteWithThicknessField(
+                                     positions,
+                                     values,
+                                     gradients,
+                                     m_config.outerThicknessField,
+                                     m_config.innerThicknessField,
+                                     m_config.thicknessFieldResolution,
+                                     m_config.worldToThicknessField,
+                                     m_config.isInnermostLayer,
+                                     adaptiveEpsilon) &&
+                                 values.size() == positions.size() &&
+                                 gradients.size() == positions.size();
+                }
+                else
+                {
+                    gpuSampled = m_gpuSampler->sampleHermite(positions,
+                                                             values,
+                                                             gradients,
+                                                             adaptiveEpsilon) &&
+                                  values.size() == positions.size() &&
+                                  gradients.size() == positions.size();
+                }
             }
             catch (std::exception const & ex)
             {

@@ -91,6 +91,29 @@ namespace gladius
                           float isoValue,
                           float gradientEpsilon = 0.001F);
 
+        /// Sample shell SDF values and gradients at Hermite positions using thickness fields
+        /// This is the shell-aware version that samples gradient on the shell SDF, not model SDF
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param outGradients Output gradient vectors (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerField 3D grid of outer boundary thickness
+        /// @param innerField 3D grid of inner boundary thickness (empty for single boundary)
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        /// @param gradientEpsilon Finite difference step size for gradient
+        void sampleHermiteWithThicknessField(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          std::vector<Eigen::Vector3f> & outGradients,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerField,
+                          std::vector<float> const & innerField,
+                          int fieldResolution,
+                          Eigen::Matrix4f const & worldToField,
+                          bool isInnermostLayer,
+                          float gradientEpsilon = 0.001F);
+
         /// Sample volumetric colors at positions
         /// @param positions Input positions to sample
         /// @param outColors Output RGB colors in linear sRGB [0,1]

@@ -75,7 +75,7 @@ namespace gladius::hierarchical_dc
         std::vector<float> outerThicknessField;  ///< 3D grid: position → outer boundary thickness
         std::vector<float> innerThicknessField;  ///< 3D grid: position → inner boundary thickness
         int thicknessFieldResolution{0};         ///< Resolution of thickness fields (e.g., 128)
-        Eigen::Matrix4f worldToThicknessField{Eigen::Matrix4f::Identity()}; ///< Transform: world → field grid
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity(); ///< Transform: world → field grid
         bool useSurfaceAlignedThickness{false};  ///< True to use precomputed thickness fields
     };
 
@@ -126,7 +126,7 @@ namespace gladius::hierarchical_dc
         std::array<std::size_t, 8> childIndices{}; ///< Indices into node array (if !isLeaf)
         std::optional<Eigen::Vector3f> vertexPosition; ///< QEF-solved vertex (for leaves)
         std::vector<HermiteSample> hermiteSamples; ///< Hermite data collected for this leaf
-        Eigen::Vector3f vertexNormal{Eigen::Vector3f::Zero()}; ///< Averaged vertex normal
+        Eigen::Vector3f vertexNormal = Eigen::Vector3f::Zero(); ///< Averaged vertex normal
         float vertexResidual{0.0F};                ///< Residual error from QEF solve
         bool hasVertex{false};                     ///< True when a vertex was solved
     };

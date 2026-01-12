@@ -457,8 +457,8 @@ inline float sampleThicknessField(
     idx = clamp(idx, 0, fieldResolution - 2);
     f = clamp(f, 0.0f, 1.0f);
     
-    // Helper for 3D grid access
-    #define FIELD_IDX(x, y, z) (((x) * fieldResolution + (y)) * fieldResolution + (z))
+    // Helper for 3D grid access (z-major order to match CPU: (z * res + y) * res + x)
+    #define FIELD_IDX(x, y, z) (((z) * fieldResolution + (y)) * fieldResolution + (x))
     
     float c000 = thicknessField[FIELD_IDX(idx.x, idx.y, idx.z)];
     float c001 = thicknessField[FIELD_IDX(idx.x, idx.y, idx.z + 1)];
@@ -554,10 +554,152 @@ __kernel void sampleCornersShellVolumeWithField(
         float innerThickness = sampleThicknessField(
             innerField, fieldResolution, worldToGrid, worldPos);
         
-        // Shell volume: closed surface using fabs()
-        float shellCenter = (outerThickness + innerThickness) * 0.5f;
-        float halfThickness = (innerThickness - outerThickness) * 0.5f;
+        // Shell volume: CSG difference of outer and inner offset surfaces
+        // Outer boundary at SDF = -outerThickness, inner at SDF = -innerThickness
+        // Shell is intersection of (outside outer) and (inside inner)
+        float outerSDF = distance + outerThickness;  // negative inside outer boundary
+        float innerSDF = distance + innerThickness;  // negative inside inner boundary
         
-        values[gid] = fabs(distance + shellCenter) - halfThickness;
+        // max(outer, -inner) gives the shell between the two boundaries
+        values[gid] = max(outerSDF, -innerSDF);
     }
+}
+
+// ============================================================================
+// Shell-aware Hermite sampling with thickness field
+// Computes both SDF value and gradient for the shell volume SDF
+// ============================================================================
+
+/// Helper: Compute shell SDF value at a position using thickness fields
+inline float computeShellSdf(
+    __global const float* outerField,
+    __global const float* innerField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const float3 worldPos,
+    const int isInnermostLayer,
+    PAYLOAD_ARGS)
+{
+    // Evaluate base model SDF
+    const float4 sdfResult = model(worldPos, PASS_PAYLOAD_ARGS);
+    const float distance = sdfResult.w;
+    
+    // Sample outer thickness from precomputed field
+    float outerThickness = sampleThicknessField(
+        outerField, fieldResolution, worldToGrid, worldPos);
+    
+    if (isInnermostLayer)
+    {
+        // Innermost layer: solid core from outer boundary inward
+        return distance + outerThickness;
+    }
+    else
+    {
+        // Sample inner thickness from precomputed field
+        float innerThickness = sampleThicknessField(
+            innerField, fieldResolution, worldToGrid, worldPos);
+        
+        // Shell volume: CSG difference of outer and inner offset surfaces
+        float outerSDF = distance + outerThickness;
+        float innerSDF = distance + innerThickness;
+        
+        return max(outerSDF, -innerSDF);
+    }
+}
+
+/// Hermite data sampling for shell volumes using thickness fields
+/// Computes shell SDF value and gradient at each position
+__kernel void sampleHermiteShellVolumeWithField(
+    __global const float4* positions,       // Input: world positions
+    __global float* values,                 // Output: SDF values
+    __global float4* gradients,             // Output: normalized gradients
+    const unsigned int count,
+    PAYLOAD_ARGS,
+    __global const float* outerField,       // 3D precomputed outer boundary thickness
+    __global const float* innerField,       // 3D precomputed inner boundary thickness
+    const int fieldResolution,              // Grid resolution (e.g., 128)
+    const float16 worldToGrid,              // 4x4 transform matrix
+    const int isInnermostLayer,             // 1 if innermost (no inner boundary)
+    const float epsilon)                    // Step size for gradient computation
+{
+    const int gid = get_global_id(0);
+    if (gid >= count) return;
+    
+    const float4 pos = positions[gid];
+    const float3 worldPos = (float3)(pos.x, pos.y, pos.z);
+    
+    // Compute shell SDF value at center
+    const float centerValue = computeShellSdf(
+        outerField, innerField, fieldResolution, worldToGrid, 
+        worldPos, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    values[gid] = centerValue;
+    
+    // Compute gradient using central differences on the shell SDF
+    const float h = epsilon;
+    const float h2 = 2.0f * h;
+    
+    const float3 posXp = worldPos + (float3)(h, 0.0f, 0.0f);
+    const float3 posXn = worldPos - (float3)(h, 0.0f, 0.0f);
+    const float3 posYp = worldPos + (float3)(0.0f, h, 0.0f);
+    const float3 posYn = worldPos - (float3)(0.0f, h, 0.0f);
+    const float3 posZp = worldPos + (float3)(0.0f, 0.0f, h);
+    const float3 posZn = worldPos - (float3)(0.0f, 0.0f, h);
+    
+    const float sdfXp = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posXp, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    const float sdfXn = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posXn, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    const float sdfYp = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posYp, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    const float sdfYn = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posYn, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    const float sdfZp = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posZp, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    const float sdfZn = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posZn, isInnermostLayer, PASS_PAYLOAD_ARGS);
+    
+    float3 gradient;
+    gradient.x = (sdfXp - sdfXn) / h2;
+    gradient.y = (sdfYp - sdfYn) / h2;
+    gradient.z = (sdfZp - sdfZn) / h2;
+    
+    // Normalize gradient
+    const float gradLengthSq = dot(gradient, gradient);
+    
+    if (gradLengthSq > 1e-8f)
+    {
+        const float gradLength = sqrt(gradLengthSq);
+        gradient /= gradLength;
+    }
+    else
+    {
+        // Degenerate gradient - try wider spacing
+        const float h_wide = h * 5.0f;
+        const float h2_wide = 2.0f * h_wide;
+        
+        const float3 posXp_wide = worldPos + (float3)(h_wide, 0.0f, 0.0f);
+        const float3 posXn_wide = worldPos - (float3)(h_wide, 0.0f, 0.0f);
+        const float3 posYp_wide = worldPos + (float3)(0.0f, h_wide, 0.0f);
+        const float3 posYn_wide = worldPos - (float3)(0.0f, h_wide, 0.0f);
+        const float3 posZp_wide = worldPos + (float3)(0.0f, 0.0f, h_wide);
+        const float3 posZn_wide = worldPos - (float3)(0.0f, 0.0f, h_wide);
+        
+        const float sdfXp_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posXp_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        const float sdfXn_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posXn_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        const float sdfYp_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posYp_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        const float sdfYn_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posYn_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        const float sdfZp_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posZp_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        const float sdfZn_wide = computeShellSdf(outerField, innerField, fieldResolution, worldToGrid, posZn_wide, isInnermostLayer, PASS_PAYLOAD_ARGS);
+        
+        gradient.x = (sdfXp_wide - sdfXn_wide) / h2_wide;
+        gradient.y = (sdfYp_wide - sdfYn_wide) / h2_wide;
+        gradient.z = (sdfZp_wide - sdfZn_wide) / h2_wide;
+        
+        const float gradLengthSq_wide = dot(gradient, gradient);
+        if (gradLengthSq_wide > 1e-10f)
+        {
+            gradient /= sqrt(gradLengthSq_wide);
+        }
+        else
+        {
+            // Last resort: use Z-up
+            gradient = (float3)(0.0f, 0.0f, 1.0f);
+        }
+    }
+    
+    gradients[gid] = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);
 }

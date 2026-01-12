@@ -28,8 +28,8 @@ namespace gladius::dual_contouring
       private:
         struct Sample
         {
-            Eigen::Vector3f position{Eigen::Vector3f::Zero()};
-            Eigen::Vector3f normal{Eigen::Vector3f::Zero()};
+            Eigen::Vector3f position = Eigen::Vector3f::Zero();
+            Eigen::Vector3f normal = Eigen::Vector3f::Zero();
         };
 
         [[nodiscard]] bool hasSufficientData() const;
