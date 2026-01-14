@@ -20,6 +20,18 @@ namespace gladius::nodes
     {
     }
 
+    bool GraphFlattener::hasAnyUsedOutput(nodes::FunctionCall const & functionCall)
+    {
+        for (auto const & output : functionCall.getOutputs())
+        {
+            if (output.second.isUsed())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Integrate one functionCall into the target model
     void GraphFlattener::integrateFunctionCall(nodes::FunctionCall const & functionCall,
                                                Model & target)
@@ -35,18 +47,7 @@ namespace gladius::nodes
             return; // Skip function integration immediately if not in used functions set
         }
 
-        // Check if any outputs are actually used
-        bool isFunctionOutputUsed = false;
-        for (auto const & output : functionCall.getOutputs())
-        {
-            if (output.second.isUsed())
-            {
-                isFunctionOutputUsed = true;
-                break;
-            }
-        }
-
-        if (!isFunctionOutputUsed)
+        if (!hasAnyUsedOutput(functionCall))
         {
             return;
         }
@@ -74,7 +75,7 @@ namespace gladius::nodes
               "Function {} references itself", referencedFunction->getDisplayName().value_or("")));
         }
 
-        if (m_flatteningDepth > 100)
+        if (m_flatteningDepth > MAX_RECURSION_DEPTH)
         {
             throw std::runtime_error(
               fmt::format("Flattening depth of {} exceeded",
@@ -699,18 +700,7 @@ namespace gladius::nodes
         auto functionCallVisitor = OnTypeVisitor<FunctionCall>(
           [&](FunctionCall & functionCallNode)
           {
-              // Check if any output is used before proceeding
-              bool isFunctionOutputUsed = false;
-              for (auto const & output : functionCallNode.getOutputs())
-              {
-                  if (output.second.isUsed())
-                  {
-                      isFunctionOutputUsed = true;
-                      break;
-                  }
-              }
-
-              if (!isFunctionOutputUsed)
+              if (!hasAnyUsedOutput(functionCallNode))
               {
                   return; // Skip if no outputs are used
               }
@@ -754,18 +744,7 @@ namespace gladius::nodes
         auto functionCallVisitor = OnTypeVisitor<FunctionCall>(
           [&](FunctionCall & functionCallNode)
           {
-              // Skip if no outputs are used
-              bool isFunctionOutputUsed = false;
-              for (auto const & output : functionCallNode.getOutputs())
-              {
-                  if (output.second.isUsed())
-                  {
-                      isFunctionOutputUsed = true;
-                      break;
-                  }
-              }
-
-              if (!isFunctionOutputUsed)
+              if (!hasAnyUsedOutput(functionCallNode))
                   return;
 
               ResourceId functionId = functionCallNode.getFunctionId();
@@ -818,18 +797,7 @@ namespace gladius::nodes
             auto nestedFunctionCallVisitor = OnTypeVisitor<FunctionCall>(
               [&](FunctionCall & functionCallNode)
               {
-                  // Skip if no outputs are used
-                  bool isFunctionOutputUsed = false;
-                  for (auto const & output : functionCallNode.getOutputs())
-                  {
-                      if (output.second.isUsed())
-                      {
-                          isFunctionOutputUsed = true;
-                          break;
-                      }
-                  }
-
-                  if (!isFunctionOutputUsed)
+                  if (!hasAnyUsedOutput(functionCallNode))
                       return;
 
                   ResourceId nestedFunctionId = functionCallNode.getFunctionId();
@@ -902,18 +870,7 @@ namespace gladius::nodes
         auto functionCallVisitor = OnTypeVisitor<FunctionCall>(
           [&](FunctionCall & functionCallNode)
           {
-              // Check if any output is actually used
-              bool isFunctionOutputUsed = false;
-              for (auto const & output : functionCallNode.getOutputs())
-              {
-                  if (output.second.isUsed())
-                  {
-                      isFunctionOutputUsed = true;
-                      break;
-                  }
-              }
-
-              if (!isFunctionOutputUsed)
+              if (!hasAnyUsedOutput(functionCallNode))
               {
                   return; // Skip if no outputs are used
               }

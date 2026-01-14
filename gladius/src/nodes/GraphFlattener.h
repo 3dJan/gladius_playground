@@ -10,12 +10,23 @@ namespace gladius::io
 
 namespace gladius::nodes
 {
+    /**
+     * @brief Flattens a hierarchical function graph into a single model
+     *
+     * The GraphFlattener creates a deep copy of the input Assembly during construction.
+     * All flattening operations are performed on this internal copy, ensuring the
+     * original user-visible graph remains unmodified. This is essential for code
+     * generation workflows where flattening is needed but the user's graph must
+     * be preserved.
+     *
+     * @note The flatten() method returns the modified copy, not the original.
+     */
     class GraphFlattener
     {
       public:
         /**
          * @brief Constructs a GraphFlattener with an assembly
-         * @param assembly The assembly to flatten
+         * @param assembly The assembly to flatten (will be deep-copied internally)
          */
         GraphFlattener(Assembly const & assembly);
 
@@ -29,6 +40,8 @@ namespace gladius::nodes
 
         /**
          * @brief Flatten the graph, so the assembly will only have one single function (model)
+         * @return The flattened assembly (a modified copy of the original)
+         * @note The original assembly passed to the constructor remains unmodified
          */
         Assembly flatten();
 
@@ -53,6 +66,10 @@ namespace gladius::nodes
         }
 
       private:
+        /// Maximum recursion depth to prevent stack overflow from circular references
+        static constexpr size_t MAX_RECURSION_DEPTH = 100;
+
+        /// Deep copy of the input assembly; all mutations happen here, not on the original
         Assembly m_assembly;
         std::unordered_set<ResourceId> m_usedFunctions;
         io::ResourceDependencyGraph const * m_dependencyGraph = nullptr;
@@ -150,6 +167,11 @@ namespace gladius::nodes
                             Model & target,
                             nodes::FunctionCall const & functionCall,
                             std::unordered_map<std::string, std::string> const & nameMapping);
+
+        /// @brief Check if any output port of a function call is marked as used
+        /// @param functionCall The function call to check
+        /// @return true if at least one output is used, false otherwise
+        static bool hasAnyUsedOutput(nodes::FunctionCall const & functionCall);
 
         size_t m_flatteningDepth = 0;
 

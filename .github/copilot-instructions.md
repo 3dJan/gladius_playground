@@ -3,7 +3,7 @@
 # C++ Coding Guidelines
 
 ## Build Instructions
-- **Build System**: Use the "Build ALL" task. Never run cmake manually.
+- **Build System**: Use the "Build ALL (linux-releaseWithDebug)" task. Never run cmake or ninja manually.
 - **Run Tests**: Use the "Run Gladius Tests" task.
 - **Analyse Test Results**: Use the "testfailure" tool to analyze test results.
 

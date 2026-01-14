@@ -16,6 +16,7 @@
 #include "Document.h"
 #include "FunctionComparator.h"
 #include "ImageExtractor.h"
+#include "MeshBVH.h"
 #include "Parameter.h"
 #include "Profiling.h"
 #include "VdbImporter.h"
@@ -1243,26 +1244,41 @@ namespace gladius::io
             return;
         }
 
-        vdb::TriangleMesh mesh;
-
+        auto const numVertices = meshObject->GetVertexCount();
         auto const numFaces = meshObject->GetTriangleCount();
 
-        for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
-        {
-            auto const & triangle = meshObject->GetTriangle(faceIndex);
-            auto const a = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[0]));
-            auto const b = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[1]));
-            auto const c = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[2]));
-            mesh.addTriangle(a, b, c);
-        }
-
-        if (mesh.indices.size() == 0u)
+        if (numFaces == 0u)
         {
             // Still check for beam lattice even if mesh has no triangles
             loadBeamLatticeIfNecessary(model, meshObject, doc);
             return;
         }
-        doc.getGeneratorContext().resourceManager.addResource(key, std::move(mesh));
+
+        // Build spatial mesh data using BVH for fast SDF queries
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        vertices.reserve(numVertices);
+        indices.reserve(numFaces);
+
+        for (auto vertexIndex = 0u; vertexIndex < numVertices; ++vertexIndex)
+        {
+            auto const v = meshObject->GetVertex(vertexIndex);
+            vertices.push_back(float4{v.m_Coordinates[0], v.m_Coordinates[1], v.m_Coordinates[2], 0.0f});
+        }
+
+        for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
+        {
+            auto const & triangle = meshObject->GetTriangle(faceIndex);
+            indices.push_back(TriangleIndices{
+                static_cast<int>(triangle.m_Indices[0]),
+                static_cast<int>(triangle.m_Indices[1]),
+                static_cast<int>(triangle.m_Indices[2])
+            });
+        }
+
+        MeshBVHBuilder builder;
+        auto spatialData = builder.build(vertices, indices);
+        doc.getGeneratorContext().resourceManager.addResource(key, std::move(spatialData));
 
         // Also load beam lattice if present
         loadBeamLatticeIfNecessary(model, meshObject, doc);

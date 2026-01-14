@@ -1055,260 +1055,331 @@ namespace gladius::ui
 
     void NodeView::functionCallControls(nodes::FunctionCall & node)
     {
-        ImGui::Spacing();
-        if (ImGui::Button("Create Function Gradient"))
+        // Compact icon button that opens a popup menu with actions
+        if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_ELLIPSIS_H)))
         {
-            if (!m_assembly || !m_currentModel)
-            {
-                return;
-            }
+            m_showContextMenu = true;
+            auto popupName = fmt::format("FunctionCallActions_{}", node.getId());
+            // Capture node ID by value - safer than capturing pointer for deferred execution
+            auto nodeId = node.getId();
+            m_modelEditor->showPopupMenu(
+              [this, popupName, nodeId]()
+              {
+                  if (m_showContextMenu)
+                  {
+                      ImGui::OpenPopup(popupName.c_str());
+                      m_showContextMenu = false;
+                  }
 
-            try
-            {
-                // Create a new FunctionGradient node
-                auto * gradientNode = m_currentModel->create<nodes::FunctionGradient>();
-                if (!gradientNode)
-                {
-                    return;
-                }
+                  if (ImGui::BeginPopup(popupName.c_str()))
+                  {
+                      if (ImGui::Selectable(reinterpret_cast<const char *>(ICON_FA_CHART_LINE
+                                                                           " Create Function Gradient")))
+                      {
+                          // Look up the node by ID when action is executed
+                          if (auto * funcNode =
+                                dynamic_cast<nodes::FunctionCall *>(findNodeById(nodeId)))
+                          {
+                              createFunctionGradientFromCall(*funcNode);
+                          }
+                          m_modelEditor->closePopupMenu();
+                      }
+                      if (ImGui::IsItemHovered())
+                      {
+                          ImGui::SetTooltip(
+                            "Creates a FunctionGradient node that computes the gradient of this "
+                            "function call.");
+                      }
 
-                // Configure the gradient node with the same function ID as the call
-                gradientNode->setFunctionId(node.getFunctionId());
+                      if (ImGui::Selectable(reinterpret_cast<const char *>(ICON_FA_RULER_COMBINED
+                                                                           " Normalize Distance")))
+                      {
+                          // Look up the node by ID when action is executed
+                          if (auto * funcNode =
+                                dynamic_cast<nodes::FunctionCall *>(findNodeById(nodeId)))
+                          {
+                              createNormalizeFromCall(*funcNode);
+                          }
+                          m_modelEditor->closePopupMenu();
+                      }
+                      if (ImGui::IsItemHovered())
+                      {
+                          ImGui::SetTooltip(
+                            "Creates a NormalizeDistanceField node that normalizes the distance "
+                            "field gradient.");
+                      }
 
-                // Get the referenced model to update inputs/outputs
-                auto referencedModel = m_assembly->findModel(node.getFunctionId());
-                if (referencedModel)
-                {
-                    gradientNode->updateInputsAndOutputs(*referencedModel);
+                      ImGui::EndPopup();
+                  }
+              });
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Actions");
+        }
+    }
 
-                    // Auto-select vector input if there's only one float3 input
-                    std::string vectorInputCandidate;
-                    int vectorInputCount = 0;
-                    auto & inputs = referencedModel->getInputs();
-                    for (auto & [inputName, inputPort] : inputs)
-                    {
-                        if (inputPort.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
-                        {
-                            vectorInputCandidate = inputName;
-                            vectorInputCount++;
-                        }
-                    }
-                    if (vectorInputCount == 1)
-                    {
-                        gradientNode->setSelectedVectorInput(vectorInputCandidate);
-                    }
-
-                    // Auto-select scalar output if there's only one float output
-                    std::string scalarOutputCandidate;
-                    int scalarOutputCount = 0;
-                    auto & outputs = referencedModel->getOutputs();
-                    for (auto & [outputName, outputParam] : outputs)
-                    {
-                        if (outputParam.getTypeIndex() == nodes::ParameterTypeIndex::Float)
-                        {
-                            scalarOutputCandidate = outputName;
-                            scalarOutputCount++;
-                        }
-                    }
-                    if (scalarOutputCount == 1)
-                    {
-                        gradientNode->setSelectedScalarOutput(scalarOutputCandidate);
-                    }
-                }
-
-                // Create a constant scalar node for step size
-                auto * stepSizeConstant = m_currentModel->create<nodes::ConstantScalar>();
-                if (stepSizeConstant)
-                {
-                    stepSizeConstant->setDisplayName("gradient_step_size");
-                    auto & valueParam = stepSizeConstant->parameter()[nodes::FieldNames::Value];
-                    valueParam.setValue(nodes::VariantType{1e-5f});
-                    valueParam.setInputSourceRequired(false);
-                    valueParam.setModifiable(true);
-
-                    m_currentModel->registerInputs(*stepSizeConstant);
-                    m_currentModel->registerOutputs(*stepSizeConstant);
-                }
-
-                // Register the new node
-                m_currentModel->registerInputs(*gradientNode);
-                m_currentModel->registerOutputs(*gradientNode);
-
-                // Copy parameter links from FunctionCall to FunctionGradient
-                auto & functionCallParams = node.parameter();
-                auto & gradientParams = gradientNode->parameter();
-
-                for (auto & [paramName, gradientParam] : gradientParams)
-                {
-                    // Skip the FunctionId parameter as it's already set
-                    if (paramName == nodes::FieldNames::FunctionId)
-                    {
-                        continue;
-                    }
-
-                    // Connect StepSize to the constant node we created
-                    if (paramName == nodes::FieldNames::StepSize && stepSizeConstant)
-                    {
-                        auto & constantOutput =
-                          stepSizeConstant->getOutputs().at(nodes::FieldNames::Value);
-                        m_currentModel->addLink(constantOutput.getId(), gradientParam.getId());
-                        continue;
-                    }
-
-                    // Find corresponding parameter in FunctionCall
-                    auto callParamIter = functionCallParams.find(paramName);
-                    if (callParamIter != functionCallParams.end())
-                    {
-                        auto const & callParam = callParamIter->second;
-
-                        // Copy the source link if it exists
-                        auto const & source = callParam.getConstSource();
-                        if (source.has_value() && source->port)
-                        {
-                            m_currentModel->addLink(source->port->getId(), gradientParam.getId());
-                        }
-                        else
-                        {
-                            // Copy the parameter value if no link exists
-                            gradientParam.setValue(callParam.getValue());
-                        }
-                    }
-                }
-
-                // Mark outputs as used
-                auto & outputs = gradientNode->getOutputs();
-                for (auto & [name, port] : outputs)
-                {
-                    port.setIsUsed(true);
-                }
-
-                // Notify of changes
-                m_parameterChanged = true;
-                m_modelChanged = true;
-                if (m_modelEditor)
-                {
-                    m_modelEditor->markModelAsModified();
-                    m_modelEditor->invalidatePrimitiveData();
-                }
-            }
-            catch (std::exception const & e)
-            {
-                // Could add error reporting here if needed
-                std::cerr << "Failed to create FunctionGradient: " << e.what() << std::endl;
-            }
+    void NodeView::createFunctionGradientFromCall(nodes::FunctionCall & node)
+    {
+        if (!m_assembly || !m_currentModel)
+        {
+            return;
         }
 
-        ImGui::TextColored(
-          ImVec4(0.6f, 0.8f, 1.f, 1.f),
-          "Creates a FunctionGradient node that computes the gradient of this function call.");
-
-        ImGui::Spacing();
-        if (ImGui::Button("Normalize Distance"))
+        try
         {
-            if (!m_assembly || !m_currentModel)
+            // Create a new FunctionGradient node
+            auto * gradientNode = m_currentModel->create<nodes::FunctionGradient>();
+            if (!gradientNode)
             {
                 return;
             }
 
-            try
+            // Configure the gradient node with the same function ID as the call
+            gradientNode->setFunctionId(node.getFunctionId());
+
+            // Get the referenced model to update inputs/outputs
+            auto referencedModel = m_assembly->findModel(node.getFunctionId());
+            if (referencedModel)
             {
-                // Create a new NormalizeDistanceField node
-                auto * normalizeNode = m_currentModel->create<nodes::NormalizeDistanceField>();
-                if (!normalizeNode)
+                gradientNode->updateInputsAndOutputs(*referencedModel);
+
+                // Collect all float3 inputs for vector input selection
+                std::vector<std::string> vectorInputCandidates;
+                auto & inputs = referencedModel->getInputs();
+                for (auto & [inputName, inputPort] : inputs)
                 {
-                    return;
-                }
-
-                // Set the FunctionId from the FunctionCall node
-                auto functionId = node.getFunctionId();
-                normalizeNode->setFunctionId(functionId);
-
-                // Configure selections: Distance output and Pos input by default
-                normalizeNode->setSelectedScalarOutput(nodes::FieldNames::Distance);
-                normalizeNode->setSelectedVectorInput(nodes::FieldNames::Pos);
-
-                // Update inputs and outputs to mirror the referenced function
-                if (auto referencedModel = m_assembly->findModel(functionId))
-                {
-                    normalizeNode->updateInputsAndOutputs(*referencedModel);
-                }
-
-                // Register the new node
-                m_currentModel->registerInputs(*normalizeNode);
-                m_currentModel->registerOutputs(*normalizeNode);
-
-                // Copy parameter links from FunctionCall to NormalizeDistanceField
-                // (mirrored arguments should have matching names)
-                auto & functionCallParams = node.parameter();
-                auto & normalizeParams = normalizeNode->parameter();
-
-                for (auto & [name, normalizeParam] : normalizeParams)
-                {
-                    if (!normalizeParam.isArgument())
+                    if (inputPort.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
                     {
-                        continue; // Skip non-argument parameters (FunctionId, StepSize, etc.)
-                    }
-
-                    auto callParamIter = functionCallParams.find(name);
-                    if (callParamIter != functionCallParams.end())
-                    {
-                        auto const & source = callParamIter->second.getConstSource();
-                        if (source.has_value() && source->port)
-                        {
-                            m_currentModel->addLink(source->port->getId(), normalizeParam.getId());
-                        }
+                        vectorInputCandidates.push_back(inputName);
                     }
                 }
 
-                // Create constant node for step size with default
-                auto * stepSizeConstant = m_currentModel->create<nodes::ConstantScalar>();
-                if (stepSizeConstant)
+                // Select vector input: prefer "Pos", otherwise take first available
+                if (!vectorInputCandidates.empty())
                 {
-                    stepSizeConstant->setDisplayName("normalize_step_size");
-                    auto & valueParam = stepSizeConstant->parameter()[nodes::FieldNames::Value];
-                    valueParam.setValue(nodes::VariantType{1e-3f});
-                    valueParam.setInputSourceRequired(false);
-                    valueParam.setModifiable(true);
+                    auto posIt = std::find(vectorInputCandidates.begin(),
+                                           vectorInputCandidates.end(),
+                                           nodes::FieldNames::Pos);
+                    if (posIt != vectorInputCandidates.end())
+                    {
+                        gradientNode->setSelectedVectorInput(*posIt);
+                    }
+                    else
+                    {
+                        gradientNode->setSelectedVectorInput(vectorInputCandidates.front());
+                    }
+                }
 
-                    m_currentModel->registerInputs(*stepSizeConstant);
-                    m_currentModel->registerOutputs(*stepSizeConstant);
+                // Collect all float outputs for scalar output selection
+                std::vector<std::string> scalarOutputCandidates;
+                auto & outputs = referencedModel->getOutputs();
+                for (auto & [outputName, outputParam] : outputs)
+                {
+                    if (outputParam.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                    {
+                        scalarOutputCandidates.push_back(outputName);
+                    }
+                }
 
+                // Select scalar output: prefer "Distance", otherwise take first available
+                if (!scalarOutputCandidates.empty())
+                {
+                    auto distIt = std::find(scalarOutputCandidates.begin(),
+                                            scalarOutputCandidates.end(),
+                                            nodes::FieldNames::Distance);
+                    if (distIt != scalarOutputCandidates.end())
+                    {
+                        gradientNode->setSelectedScalarOutput(*distIt);
+                    }
+                    else
+                    {
+                        gradientNode->setSelectedScalarOutput(scalarOutputCandidates.front());
+                    }
+                }
+            }
+
+            // Create a constant scalar node for step size
+            auto * stepSizeConstant = m_currentModel->create<nodes::ConstantScalar>();
+            if (stepSizeConstant)
+            {
+                stepSizeConstant->setDisplayName("gradient_step_size");
+                auto & valueParam = stepSizeConstant->parameter()[nodes::FieldNames::Value];
+                valueParam.setValue(nodes::VariantType{1e-5f});
+                valueParam.setInputSourceRequired(false);
+                valueParam.setModifiable(true);
+
+                m_currentModel->registerInputs(*stepSizeConstant);
+                m_currentModel->registerOutputs(*stepSizeConstant);
+            }
+
+            // Register the new node
+            m_currentModel->registerInputs(*gradientNode);
+            m_currentModel->registerOutputs(*gradientNode);
+
+            // Copy parameter links from FunctionCall to FunctionGradient
+            auto & functionCallParams = node.parameter();
+            auto & gradientParams = gradientNode->parameter();
+
+            for (auto & [paramName, gradientParam] : gradientParams)
+            {
+                // Skip the FunctionId parameter as it's already set
+                if (paramName == nodes::FieldNames::FunctionId)
+                {
+                    continue;
+                }
+
+                // Connect StepSize to the constant node we created
+                if (paramName == nodes::FieldNames::StepSize && stepSizeConstant)
+                {
                     auto & constantOutput =
                       stepSizeConstant->getOutputs().at(nodes::FieldNames::Value);
-                    auto stepParamIter = normalizeParams.find(nodes::FieldNames::StepSize);
-                    if (stepParamIter != normalizeParams.end())
+                    m_currentModel->addLink(constantOutput.getId(), gradientParam.getId());
+                    continue;
+                }
+
+                // Find corresponding parameter in FunctionCall
+                auto callParamIter = functionCallParams.find(paramName);
+                if (callParamIter != functionCallParams.end())
+                {
+                    auto const & callParam = callParamIter->second;
+
+                    // Copy the source link if it exists
+                    auto const & source = callParam.getConstSource();
+                    if (source.has_value() && source->port)
                     {
-                        m_currentModel->addLink(constantOutput.getId(),
-                                                stepParamIter->second.getId());
+                        m_currentModel->addLink(source->port->getId(), gradientParam.getId());
+                    }
+                    else
+                    {
+                        // Copy the parameter value if no link exists
+                        gradientParam.setValue(callParam.getValue());
                     }
                 }
-
-                // Mark output as used
-                auto & outputs = normalizeNode->getOutputs();
-                for (auto & [name, port] : outputs)
-                {
-                    port.setIsUsed(true);
-                }
-
-                // Notify of changes
-                m_parameterChanged = true;
-                m_modelChanged = true;
-                if (m_modelEditor)
-                {
-                    m_modelEditor->markModelAsModified();
-                    m_modelEditor->invalidatePrimitiveData();
-                }
             }
-            catch (std::exception const & e)
+
+            // Mark outputs as used
+            auto & outputs = gradientNode->getOutputs();
+            for (auto & [name, port] : outputs)
             {
-                // Could add error reporting here if needed
-                std::cerr << "Failed to create NormalizeDistanceField: " << e.what() << std::endl;
+                port.setIsUsed(true);
+            }
+
+            // Notify of changes
+            m_parameterChanged = true;
+            m_modelChanged = true;
+            if (m_modelEditor)
+            {
+                m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
         }
+        catch (std::exception const & e)
+        {
+            logError(fmt::format("Failed to create FunctionGradient: {}", e.what()));
+        }
+    }
 
-        ImGui::TextColored(
-          ImVec4(0.6f, 0.8f, 1.f, 1.f),
-          "Creates a NormalizeDistanceField node that normalizes the distance field gradient.");
+    void NodeView::createNormalizeFromCall(nodes::FunctionCall & node)
+    {
+        if (!m_assembly || !m_currentModel)
+        {
+            return;
+        }
+
+        try
+        {
+            // Create a new NormalizeDistanceField node
+            auto * normalizeNode = m_currentModel->create<nodes::NormalizeDistanceField>();
+            if (!normalizeNode)
+            {
+                return;
+            }
+
+            // Set the FunctionId from the FunctionCall node
+            auto functionId = node.getFunctionId();
+            normalizeNode->setFunctionId(functionId);
+
+            // Configure selections: Distance output and Pos input by default
+            normalizeNode->setSelectedScalarOutput(nodes::FieldNames::Distance);
+            normalizeNode->setSelectedVectorInput(nodes::FieldNames::Pos);
+
+            // Update inputs and outputs to mirror the referenced function
+            if (auto referencedModel = m_assembly->findModel(functionId))
+            {
+                normalizeNode->updateInputsAndOutputs(*referencedModel);
+            }
+
+            // Register the new node
+            m_currentModel->registerInputs(*normalizeNode);
+            m_currentModel->registerOutputs(*normalizeNode);
+
+            // Copy parameter links from FunctionCall to NormalizeDistanceField
+            // (mirrored arguments should have matching names)
+            auto & functionCallParams = node.parameter();
+            auto & normalizeParams = normalizeNode->parameter();
+
+            for (auto & [name, normalizeParam] : normalizeParams)
+            {
+                if (!normalizeParam.isArgument())
+                {
+                    continue; // Skip non-argument parameters (FunctionId, StepSize, etc.)
+                }
+
+                auto callParamIter = functionCallParams.find(name);
+                if (callParamIter != functionCallParams.end())
+                {
+                    auto const & source = callParamIter->second.getConstSource();
+                    if (source.has_value() && source->port)
+                    {
+                        m_currentModel->addLink(source->port->getId(), normalizeParam.getId());
+                    }
+                }
+            }
+
+            // Create constant node for step size with default
+            auto * stepSizeConstant = m_currentModel->create<nodes::ConstantScalar>();
+            if (stepSizeConstant)
+            {
+                stepSizeConstant->setDisplayName("normalize_step_size");
+                auto & valueParam = stepSizeConstant->parameter()[nodes::FieldNames::Value];
+                valueParam.setValue(nodes::VariantType{1e-3f});
+                valueParam.setInputSourceRequired(false);
+                valueParam.setModifiable(true);
+
+                m_currentModel->registerInputs(*stepSizeConstant);
+                m_currentModel->registerOutputs(*stepSizeConstant);
+
+                auto & constantOutput =
+                  stepSizeConstant->getOutputs().at(nodes::FieldNames::Value);
+                auto stepParamIter = normalizeParams.find(nodes::FieldNames::StepSize);
+                if (stepParamIter != normalizeParams.end())
+                {
+                    m_currentModel->addLink(constantOutput.getId(),
+                                            stepParamIter->second.getId());
+                }
+            }
+
+            // Mark output as used
+            auto & outputs = normalizeNode->getOutputs();
+            for (auto & [name, port] : outputs)
+            {
+                port.setIsUsed(true);
+            }
+
+            // Notify of changes
+            m_parameterChanged = true;
+            m_modelChanged = true;
+            if (m_modelEditor)
+            {
+                m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
+            }
+        }
+        catch (std::exception const & e)
+        {
+            logError(fmt::format("Failed to create NormalizeDistanceField: {}", e.what()));
+        }
     }
 
     void NodeView::footer(NodeBase & baseNode)
@@ -1357,28 +1428,42 @@ namespace gladius::ui
                 m_modelEditor->clearNodeFocus();
             }
 
+            // Check for async file dialog result for this node/parameter
+            if (parameter.first == FieldNames::Filename && 
+                m_asyncFileDialogNodeId == node.getId() && 
+                m_asyncFileDialogParamName == parameter.first)
+            {
+                if (auto result = m_asyncFileDialog.checkResult())
+                {
+                    m_asyncFileDialogNodeId = 0;
+                    m_asyncFileDialogParamName.clear();
+                    if (*result)
+                    {
+                        const std::filesystem::path filename{result->value()};
+                        *name = filename.string();
+                        m_modelEditor->invalidatePrimitiveData();
+                        m_modelEditor->markModelAsModified();
+                        m_parameterChanged = true;
+                    }
+                }
+            }
+
             bool changed = ImGui::InputText("", name);
 
             if (parameter.first == FieldNames::Filename)
             {
                 ImGui::SameLine();
                 const auto baseDir = m_assembly->getFilename().remove_filename();
-                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN)))
+                bool const dialogActive = m_asyncFileDialog.isActive();
+                ImGui::BeginDisabled(dialogActive);
+                if (ImGui::Button(reinterpret_cast<const char *>(
+                      dialogActive ? ICON_FA_SPINNER : ICON_FA_FOLDER_OPEN)))
                 {
-
-                    const auto queriedFilename = queryLoadFilename({{"*.stl"}}, baseDir);
-
-                    if (queriedFilename && queriedFilename->has_filename())
-                    {
-                        const std::filesystem::path filename{queriedFilename.value()};
-
-                        *name = filename.string();
-                        changed = true;
-                        m_modelEditor->invalidatePrimitiveData();
-                        m_modelEditor->markModelAsModified();
-                        m_parameterChanged = true;
-                    }
+                    m_asyncFileDialogNodeId = node.getId();
+                    m_asyncFileDialogParamName = parameter.first;
+                    m_asyncFileDialog.openFile({{"*.stl"}}, baseDir);
                 }
+                ImGui::EndDisabled();
                 ImGui::SameLine();
                 if (ImGui::Button("Make relative"))
                 {
@@ -2145,6 +2230,19 @@ namespace gladius::ui
             it = m_columnWidths.insert({nodeId, ColumnWidths{0, 0, 0, 0, 0, 0, 0, 0}}).first;
         }
         return it->second;
+    }
+
+    void NodeView::logError(const std::string & message)
+    {
+        if (m_modelEditor && m_modelEditor->getDocument())
+        {
+            m_modelEditor->getDocument()->getSharedLogger()->addEvent(
+              {message, events::Severity::Error});
+        }
+        else
+        {
+            std::cerr << message << std::endl;
+        }
     }
 
     bool NodeView::columnWidthsAreInitialized() const

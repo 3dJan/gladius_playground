@@ -156,13 +156,88 @@
             "name": "ReleaseWithDebug",
             "description": "",
             "displayName": "",
-            "configurePreset": "linux-releaseWithDebug"
+            "configurePreset": "linux-releaseWithDebug",
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "verbose",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-ReleaseWithDebug.log"
+            }
         },
         {
             "name": "ReleaseWithDebug-noOpenCL",
             "description": "Tests without OpenCL requirements",
             "displayName": "RelWithDebInfo Tests (No OpenCL)",
-            "configurePreset": "linux-releaseWithDebug-noOpenCL"
+            "configurePreset": "linux-releaseWithDebug-noOpenCL",
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "verbose",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug-noOpenCL/ctest-ReleaseWithDebug-noOpenCL.log"
+            }
+        },
+        {
+            "name": "UnitTests",
+            "description": "Fast unit tests only (<60s, no GPU required)",
+            "displayName": "Unit Tests",
+            "configurePreset": "linux-releaseWithDebug",
+            "filter": {
+                "include": {
+                    "label": "unit"
+                }
+            },
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "default",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-UnitTests.log"
+            }
+        },
+        {
+            "name": "IntegrationTests",
+            "description": "Integration tests (GPU tests, longer running)",
+            "displayName": "Integration Tests",
+            "configurePreset": "linux-releaseWithDebug",
+            "filter": {
+                "include": {
+                    "label": "integration"
+                }
+            },
+            "environment": {
+                "GLADIUS_RUN_GPU_TESTS": "1"
+            },
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "default",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-IntegrationTests.log"
+            }
+        },
+        {
+            "name": "ApiTests",
+            "description": "API tests (MCP, external interfaces)",
+            "displayName": "API Tests",
+            "configurePreset": "linux-releaseWithDebug",
+            "filter": {
+                "include": {
+                    "label": "api"
+                }
+            },
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "default",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-ApiTests.log"
+            }
+        },
+        {
+            "name": "AllTests",
+            "description": "Run all tests (unit, integration, api)",
+            "displayName": "All Tests",
+            "configurePreset": "linux-releaseWithDebug",
+            "environment": {
+                "GLADIUS_RUN_GPU_TESTS": "1"
+            },
+            "output": {
+                "outputOnFailure": true,
+                "verbosity": "default",
+                "outputLogFile": "${sourceDir}/out/build/linux-releaseWithDebug/ctest-AllTests.log"
+            }
         }
     ]
 }

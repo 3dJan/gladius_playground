@@ -126,6 +126,8 @@ namespace gladius
 
     void GLView::init()
     {
+        LOG_SCOPE_DURATION_NAMED("GLView::init()");
+
         if (m_initialized)
         {
             return;
@@ -254,6 +256,7 @@ namespace gladius
 
     void GLView::initImgUI()
     {
+        LOG_SCOPE_DURATION_NAMED("GLView::initImgUI()");
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO & io = ImGui::GetIO();
@@ -295,7 +298,17 @@ namespace gladius
                 // If our custom config exists, load it immediately
                 if (std::filesystem::is_regular_file(m_gladiusImgUiFilename))
                 {
-                    ImGui::LoadIniSettingsFromDisk(m_iniFileNameStorage.c_str());
+                    try
+                    {
+                        ImGui::LoadIniSettingsFromDisk(m_iniFileNameStorage.c_str());
+                    }
+                    catch (const std::exception & ex)
+                    {
+                        std::cerr << "Warning: Failed to load ImGui layout from "
+                                  << m_iniFileNameStorage << ": " << ex.what()
+                                  << ". Using default layout.\n";
+                        // Continue with default layout - ImGui will handle this gracefully
+                    }
                 }
             }
             catch (const std::exception & ex)

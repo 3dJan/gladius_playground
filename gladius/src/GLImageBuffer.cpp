@@ -85,6 +85,31 @@ namespace gladius
         m_dirty = true;
     }
 
+    void GLImageBuffer::clear(float r, float g, float b, float a)
+    {
+        if (glIsTexture(m_textureID) == 0u)
+        {
+            return;
+        }
+
+        // Fill host data with the specified color
+        cl_float4 const clearColor = {r, g, b, a};
+        std::fill(m_data.begin(), m_data.end(), clearColor);
+
+        // Upload to GL texture
+        glBindTexture(GL_TEXTURE_2D, m_textureID);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA32F,
+                     static_cast<GLsizei>(m_width),
+                     static_cast<GLsizei>(m_height),
+                     0,
+                     GL_RGBA,
+                     GL_FLOAT,
+                     m_data.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
     void GLImageBuffer::setupForInterOp()
     {
         m_buffer = m_ComputeContext.createImageGLInteropChecked(

@@ -2,6 +2,7 @@
 
 #include "GLImageBuffer.h"
 #include "ImageRGBA.h"
+#include "MeshVoxelGridManager.h"
 #include "Primitives.h"
 #include "ProgramBase.h"
 #include "ResourceContext.h"
@@ -64,6 +65,14 @@ namespace gladius
                                     cl_float z_mm);
 
         void setKernelReplacements(SharedKernelReplacements replacements);
+        
+        /**
+         * @brief Build a voxel acceleration grid for mesh SDF queries
+         * @param primitives The primitives buffer containing mesh BVH data
+         * @param params Build parameters specifying offsets and counts
+         * @return true if the kernel executed successfully
+         */
+        bool buildMeshVoxelGrid(Primitives & primitives, MeshVoxelGridBuildParams const & params);
 
       private:
         [[nodiscard]] cl_float determineBranchThreshold(const cl_int2 & res,

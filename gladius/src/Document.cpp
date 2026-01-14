@@ -5,6 +5,7 @@
 #include "CliWriter.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
+#include "MeshBVH.h"
 #include "MeshExporter.h"
 #include "ResourceManager.h"
 #include "TimeMeasurement.h"
@@ -17,7 +18,9 @@
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
+#include "io/DualContouringStlExporter.h"
 #include "io/ImporterVdb.h"
+#include "io/ManifoldDualContouringStlExporter.h"
 #include "io/VdbImporter.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/LowerFunctionGradient.h"
@@ -93,16 +96,25 @@ namespace gladius
         m_backupManager.initialize();
     }
 
-    void Document::refreshModelAsync()
+    bool Document::refreshModelAsync()
     {
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
+
+        // Early validation: Skip expensive compilation if model is in an invalid state
+        // (e.g., during graph editing when nodes have missing connections)
+        if (!validateAssembly())
+        {
+            return false;
+        }
+
         // saveBackup();
         {
             m_futureModelRefresh = std::async(std::launch::async, [&]() { refreshWorker(); });
         }
+        return true;
     }
 
     void Document::loadAllMeshResources()
@@ -139,10 +151,10 @@ namespace gladius
         updateFlatAssembly();
 
         m_core->refreshProgram(m_flatAssembly);
-        
+
         // Use non-blocking compilation with polling
         m_core->recompileIfRequired();
-        
+
         // Wait for compilation to complete with periodic checks
         while (m_core->isCompilationInProgress())
         {
@@ -152,11 +164,11 @@ namespace gladius
         // One more pass ensures ProgramManager updates its internal ModelState flags
         // (signalCompilationFinished) so subsequent steps observe up-to-date slicer state.
         m_core->recompileIfRequired();
-        
+
         // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
         // The async computation will atomically replace it
         m_core->resetBoundingBox();
-        
+
         // Launch async SDF precomputation with OpenCL events
         auto const & queue = m_core->getComputeContext()->GetQueue();
         cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
@@ -179,9 +191,7 @@ namespace gladius
             {
                 sdfUpdated = true;
             }
-            else
-            {
-            }
+            else {}
         }
 
         if (sdfUpdated)
@@ -189,7 +199,8 @@ namespace gladius
             m_core->setSdfValid(true);
             if (sdfUpdatedViaAsync)
             {
-                // Now that the SDF exists, update the bounding box serially (still off the UI thread)
+                // Now that the SDF exists, update the bounding box serially (still off the UI
+                // thread)
                 m_core->updateBBox();
             }
         }
@@ -326,9 +337,7 @@ namespace gladius
             return false;
         }
 
-        refreshModelAsync();
-
-        return true;
+        return refreshModelAsync();
     }
 
     void Document::newModel()
@@ -526,6 +535,13 @@ namespace gladius
 
                 m_generatorContext->resourceManager.loadResources();
                 m_generatorContext->resourceManager.writeResources(*m_generatorContext->primitives);
+                
+                // Build voxel acceleration grids for spatial mesh resources on GPU
+                auto buildParams = m_generatorContext->resourceManager.collectVoxelGridBuildParams();
+                if (!buildParams.empty())
+                {
+                    m_core->buildMeshVoxelGrids(buildParams);
+                }
             }
 
             // update start and end indices
@@ -572,19 +588,84 @@ namespace gladius
 
     void Document::exportAsStl(std::filesystem::path const & filename)
     {
+        exportAsStl(filename, io::StlExportOptions{});
+    }
+
+    void Document::exportAsStl(std::filesystem::path const & filename,
+                               io::StlExportOptions const & options)
+    {
         refreshModelBlocking();
 
-        vdb::MeshExporter exporter;
-        exporter.beginExport(filename, *m_core);
         auto logger = getSharedLogger();
-        while (exporter.advanceExport(*m_core))
+
+        switch (options.method)
         {
-            if (logger)
-                logger->addEvent(
-                  {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
-                   events::Severity::Info});
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+        {
+            vdb::MeshExporter exporter;
+            exporter.setQualityLevel(options.marchingCubesQualityLevel);
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core))
+            {
+                if (logger)
+                {
+                    logger->addEvent(
+                      {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
+                       events::Severity::Info});
+                }
+            }
+            exporter.finalizeExportSTL(*m_core);
+            break;
         }
-        exporter.finalizeExportSTL(*m_core);
+        case io::SurfaceExtractionMethod::DualContouring:
+        {
+            io::DualContouringOptions dualOptions = options.dualContouring;
+            io::DualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(dualOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core)) {}
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(errorText.empty() ? "Dual contouring STL export failed"
+                                                           : errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent(
+                  {fmt::format("Dual contouring STL export completed: {}", filename.string()),
+                   events::Severity::Info});
+            }
+            break;
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            io::ManifoldDualContouringOptions manifoldOptions = options.manifoldDualContouring;
+            io::ManifoldDualContouringStlExporter exporter(logger);
+            exporter.setOptions(std::move(manifoldOptions));
+            exporter.beginExport(filename, *m_core);
+            while (exporter.advanceExport(*m_core)) {}
+            bool const failed = exporter.hasError();
+            auto const errorText = exporter.errorMessage();
+            exporter.finalize();
+            if (failed)
+            {
+                throw std::runtime_error(
+                  errorText.empty() ? "Manifold dual contouring STL export failed" : errorText);
+            }
+            if (logger)
+            {
+                logger->addEvent({fmt::format("Manifold dual contouring STL export completed: {}",
+                                              filename.string()),
+                                  events::Severity::Info});
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported surface extraction method");
+        }
     }
 
     void Document::markFileAsChanged()
@@ -608,14 +689,71 @@ namespace gladius
 
     void Document::loadNonBlocking(std::filesystem::path filename)
     {
-        loadImpl(filename);
-        refreshModelAsync();
+        // Wait for any previous load operation to complete
+        if (m_futureFileLoad.valid())
+        {
+            try
+            {
+                m_futureFileLoad.get();
+            }
+            catch (const std::exception &)
+            {
+                // Previous load error already stored
+            }
+        }
+
+        // Clear any previous error
+        {
+            std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+            m_loadingError.clear();
+        }
+
+        m_isLoading = true;
+
+        // Launch async file loading
+        m_futureFileLoad =
+          std::async(std::launch::async,
+                     [this, filename]()
+                     {
+                         try
+                         {
+                             loadImpl(filename);
+                             // Chain into async model refresh
+                             refreshWorker();
+                         }
+                         catch (const std::exception & e)
+                         {
+                             // Store error for UI to display
+                             {
+                                 std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                                 m_loadingError = e.what();
+                             }
+                             auto logger = getSharedLogger();
+                             if (logger)
+                             {
+                                 logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                                   events::Severity::Error});
+                             }
+                         }
+                         m_isLoading = false;
+                     });
+    }
+
+    bool Document::isLoadingInProgress() const
+    {
+        return m_isLoading.load();
+    }
+
+    std::string Document::getLoadingError() const
+    {
+        std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+        return m_loadingError;
     }
 
     void Document::merge(std::filesystem::path filename)
     {
         mergeImpl(filename);
-        refreshModelAsync();
+        (void) refreshModelAsync(); // Result intentionally ignored for merge
     }
 
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
@@ -1143,7 +1281,29 @@ namespace gladius
 
         ResourceKey key = ResourceKey(new3mfMesh->GetModelResourceID(), ResourceType::Mesh);
         key.setDisplayName(name);
-        resourceManager.addResource(key, std::move(mesh));
+
+        // Build spatial mesh data using BVH for fast SDF queries
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        vertices.reserve(mesh.vertices.size());
+        indices.reserve(mesh.indices.size());
+
+        for (auto const & v : mesh.vertices)
+        {
+            vertices.push_back(float4{static_cast<float>(v.x()), static_cast<float>(v.y()), 
+                                      static_cast<float>(v.z()), 0.0f});
+        }
+
+        for (auto const & tri : mesh.indices)
+        {
+            indices.push_back(TriangleIndices{static_cast<int>(tri[0]), 
+                                              static_cast<int>(tri[1]), 
+                                              static_cast<int>(tri[2])});
+        }
+
+        MeshBVHBuilder builder;
+        auto spatialData = builder.build(vertices, indices);
+        resourceManager.addResource(key, std::move(spatialData));
 
         resourceManager.loadResources();
 

@@ -3,6 +3,7 @@
 #include "Buffer.h"
 #include "ImageRGBA.h"
 #include "ImageStackOCLBuffer.h"
+#include "kernel/types.h"
 #include "Primitives.h"
 #include "ResourceManager.h"
 
@@ -102,6 +103,19 @@ namespace gladius
 
         MarchingSquaresStates & getMarchingSquareStates() const;
 
+        /// @brief Allocates the distance initialization buffer for ray march acceleration.
+        /// @param width Width of the buffer (matches low-res preview width).
+        /// @param height Height of the buffer (matches low-res preview height).
+        void allocateDistanceInitBuffer(size_t width, size_t height);
+
+        /// @brief Returns the distance initialization buffer, or nullptr if not allocated.
+        /// @return Pointer to the distance init buffer.
+        [[nodiscard]] DistanceInitBuffer * getDistanceInitBuffer() const;
+
+        /// @brief Returns the metrics buffer, allocating it if needed (T033).
+        /// @return Reference to the GPU buffer for ray march metrics collection.
+        [[nodiscard]] cl::Buffer & getMetricsBuffer();
+
       private:
         void clearDistanceMaps();
         std::unique_ptr<Vertices> m_contourVertexPos;
@@ -152,6 +166,12 @@ namespace gladius
         std::unique_ptr<CommandBuffer> m_commands;
 
         ImageStacks m_imageStacks;
+
+        /// @brief Buffer for storing ray-marched distance for HQ render acceleration
+        std::unique_ptr<DistanceInitBuffer> m_distanceInitBuffer;
+
+        /// @brief Buffer for ray march metrics collection (4 x uint32: totalRays, totalSteps, cacheHits, nonConverged)
+        std::optional<cl::Buffer> m_metricsBuffer;
 
         bool m_resizeOfBuildAreaBufferRequired = true;
         bool m_resizeOfDistanceMapsRequired = true;

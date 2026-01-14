@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../nodes/Model.h"
+#include "FileDialogService.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -214,6 +215,17 @@ namespace gladius::ui
         void functionCallControls(nodes::FunctionCall & node);
         void normalizeDistanceFieldControls(nodes::NormalizeDistanceField & node);
 
+        /// Helper to create a FunctionGradient node from a FunctionCall node
+        void createFunctionGradientFromCall(nodes::FunctionCall & node);
+        /// Helper to create a NormalizeDistanceField node from a FunctionCall node
+        void createNormalizeFromCall(nodes::FunctionCall & node);
+
+        /**
+         * @brief Log an error message to the document logger or stderr
+         * @param message The error message to log
+         */
+        void logError(const std::string & message);
+
         bool typeControl(std::string const & label, std::type_index & typeIndex);
 
         /**
@@ -301,6 +313,11 @@ namespace gladius::ui
         std::string m_draggingGroup;
         bool m_isDraggingGroup = false;
         ImVec2 m_groupDragStartPos;
+
+        /// Async file dialog for filename parameters
+        AsyncFileDialog m_asyncFileDialog;
+        nodes::NodeId m_asyncFileDialogNodeId{0};  ///< Node whose filename is being edited
+        std::string m_asyncFileDialogParamName;    ///< Parameter name being edited
 
         ColumnWidths & getOrCreateColumnWidths(nodes::NodeId nodeId);
     };

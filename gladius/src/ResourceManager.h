@@ -1,5 +1,6 @@
 #pragma once
 #include "ImageRGBA.h"
+#include "MeshVoxelGridManager.h"
 #include "Primitives.h"
 #include "ResourceKey.h"
 #include "types.h"
@@ -25,6 +26,7 @@ namespace gladius
         class ImageStack;
     }
 
+    struct SpatialMeshData;
     class Mesh;
     class ResourceContext;
     class ImageStackOCLBuffer;
@@ -138,6 +140,7 @@ namespace gladius
         void addResource(ResourceKey key, openvdb::GridBase::Ptr && grid);
         void addResource(ResourceKey key, io::ImageStack && stack);
         void addResource(ResourceKey key, std::unique_ptr<BeamLatticeResource> && resource);
+        void addResource(ResourceKey key, SpatialMeshData && spatialData);
 
         /**
          * \brief Loads all resources that have not been load yet
@@ -161,6 +164,13 @@ namespace gladius
         bool hasResource(ResourceKey const & key) const;
 
         void deleteResource(ResourceKey const & key);
+        
+        /// Collect voxel grid build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need voxel grid builds
+        [[nodiscard]] std::vector<MeshVoxelGridBuildParams> collectVoxelGridBuildParams() const;
+        
+        /// Mark all SpatialMeshResource instances as having their voxel grids built
+        void markVoxelGridsBuilt();
 
       private:
         void increaseImageNumber();

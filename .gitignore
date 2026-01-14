@@ -43,3 +43,7 @@ vcpkg/buildtrees/
 **/vcpkg_installed/
 _CPack_Packages/*
 *.deb
+gladius/.serena/*
+gladius/debug.cl
+Testing/Temporary/*
+gladius/test_output.log

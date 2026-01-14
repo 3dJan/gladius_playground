@@ -126,6 +126,30 @@ namespace gladius::ui::async_rendering
         /// (used when epoch changes to clean up cancelled jobs)
         void releaseStaleBuffers(uint64_t oldEpoch) noexcept;
 
+        // ============== Preview Buffer Management ==============
+        // Separate from HQ triple buffer to avoid contention
+
+        /// Acquire a preview buffer for writing (returns nullptr if none available)
+        [[nodiscard]] FrameBuffer * acquirePreviewBuffer(uint64_t epoch) noexcept;
+
+        /// Publish completed preview frame (Writing → Ready)
+        void publishPreviewFrame(FrameBuffer * buffer, PreviewResultMeta const & meta) noexcept;
+
+        /// Try to consume a completed preview result (non-blocking)
+        [[nodiscard]] std::optional<PreviewResultMeta> tryConsumePreviewResult() noexcept;
+
+        /// Get the current front preview buffer (may be nullptr if no preview rendered yet)
+        [[nodiscard]] FrameBuffer * frontPreviewBuffer() noexcept;
+
+        /// Promote Ready preview buffer to Front (for UI display)
+        [[nodiscard]] FrameBuffer * promotePreviewReadyToFront() noexcept;
+
+        /// Release stale preview buffers when epoch changes
+        void releaseStalePreviewBuffers(uint64_t oldEpoch) noexcept;
+
+        /// Directly store a preview result for UI thread consumption
+        void setLatestPreviewResult(PreviewResultMeta const & meta) noexcept;
+
       private:
         struct ControllerState;
 
@@ -141,9 +165,18 @@ namespace gladius::ui::async_rendering
         size_t m_stagingWidth{0};
         size_t m_stagingHeight{0};
 
-        // Triple buffer state machine
+        // Triple buffer state machine (for HQ progressive rendering)
         std::array<FrameBuffer, 3> m_frameBuffers;
         std::atomic<size_t> m_frontBufferIndex{0};
         mutable std::mutex m_bufferMutex;
+
+        // Preview buffer state machine (separate from HQ, double buffer)
+        std::array<FrameBuffer, 2> m_previewBuffers;
+        std::atomic<size_t> m_previewFrontIndex{0};
+        mutable std::mutex m_previewBufferMutex;
+        
+        // Lock-free queue for preview results
+        std::optional<PreviewResultMeta> m_latestPreviewResult;
+        std::atomic<bool> m_previewResultReady{false};
     };
 }

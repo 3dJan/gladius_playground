@@ -243,7 +243,7 @@ namespace gladius::nodes
         // static auto constexpr Part = "part";
         static auto constexpr FunctionId = "functionID";
         static auto constexpr StepSize = "step";
-        static auto constexpr NormalizedGradient = "normalizedgradient";
+        static auto constexpr NormalizedGradient = Vector;
         static auto constexpr Epsilon = "epsilon";
         static auto constexpr MaxDistance = "maxdistance";
         static auto constexpr Source = "source";

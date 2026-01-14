@@ -3,8 +3,8 @@
 #include "../types.h"
 #include "GLView.h"
 #include "OrbitalCamera.h"
-#include "render/AsyncRenderController.h"
 #include "compute/ComputeCore.h"
+#include "render/AsyncRenderController.h"
 #include <CL/cl_platform.h>
 #include <atomic>
 #include <chrono>
@@ -21,6 +21,7 @@ namespace gladius::ui
 namespace gladius
 {
     class ConfigManager;
+    class Document;
 }
 
 namespace gladius::ui
@@ -36,7 +37,7 @@ namespace gladius::ui
         bool isRendering = false;
         bool isMoving = false;
         size_t currentLine = 0;
-        size_t renderingStepSize = 20;
+        size_t renderingStepSize = 100; ///< Lines rendered per frame during progressive rendering
 
         float fpsPreviousError = 0.0f;
         float fpsIntegral = 0.0f;
@@ -50,6 +51,12 @@ namespace gladius::ui
                         GLView * view,
                         std::shared_ptr<ShortcutManager> shortcutManager,
                         gladius::ConfigManager * configManager);
+
+        /**
+         * @brief Set the document reference for checking loading state
+         * @param doc Pointer to the document (can be nullptr)
+         */
+        void setDocument(Document * doc);
 
         void renderWindow();
         void updateCamera();
@@ -121,42 +128,57 @@ namespace gladius::ui
 
         bool isFocused() const;
 
+        /**
+         * @brief Check if camera is currently moving (for UI status display)
+         * @return true if the camera is being manipulated
+         */
+        [[nodiscard]] bool isCameraMoving() const;
+
       private:
-                void render(RenderWindowState & state);
-                void slider();
-                void initializeAsyncRendering();
-                void renderSync(RenderWindowState & state);
-                void renderAsync(RenderWindowState & state);
-                void processAsyncResults(RenderWindowState & state);
-                bool scheduleAsyncRenderJob(RenderWindowState & state);
-                                coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
-                                    async_rendering::RenderJob const & job,
-                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
-                void notifyAsyncEpochIncrement();
-                void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
+        void render(RenderWindowState & state);
+        void renderLoadingOverlay();
+        void slider();
+        void initializeAsyncRendering();
+        void renderSync(RenderWindowState & state);
+        void renderAsync(RenderWindowState & state);
+        void processAsyncResults(RenderWindowState & state);
+        bool scheduleAsyncRenderJob(RenderWindowState & state);
+        coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void notifyAsyncEpochIncrement();
+        void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
 
-                [[nodiscard]] bool isAsyncBackendActive() const noexcept;
-                [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
+        [[nodiscard]] bool isAsyncBackendActive() const noexcept;
+        [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
 
-                // Async bounding box computation
-                void scheduleAsyncBboxUpdate();
-                                coro::task<async_rendering::FrameResultMeta> executeAsyncBboxUpdate(
-                                    async_rendering::RenderJob const & job,
-                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        // Async bounding box computation
+        void scheduleAsyncBboxUpdate();
+        coro::task<async_rendering::FrameResultMeta> executeAsyncBboxUpdate(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
-                // Async SDF precomputation
-                                coro::task<async_rendering::FrameResultMeta> executeAsyncSdfPrecomputation(
-                                    async_rendering::RenderJob const & job,
-                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        // Async SDF precomputation
+        coro::task<async_rendering::FrameResultMeta> executeAsyncSdfPrecomputation(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
-                // Async parameter update
-                                coro::task<async_rendering::FrameResultMeta> executeAsyncParameterUpdate(
-                                    async_rendering::RenderJob const & job,
-                                    async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        // Async parameter update
+        coro::task<async_rendering::FrameResultMeta> executeAsyncParameterUpdate(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+
+        // Async preview rendering (non-blocking low-res preview during camera movement)
+        bool scheduleAsyncPreviewJob();
+        coro::task<async_rendering::FrameResultMeta> executeAsyncPreviewJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void processAsyncPreviewResults();
 
         GLView * m_view{};
 
         ComputeCore * m_core;
+        Document * m_document{nullptr};
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         gladius::ConfigManager * m_configManager;
 
@@ -266,13 +288,27 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
         std::atomic<bool> m_asyncBboxJobInFlight{false};
-        std::atomic<bool> m_asyncBboxUpdatePending{false};  // Tracks if bbox needs update after current job
+        std::atomic<bool> m_asyncBboxUpdatePending{
+          false}; // Tracks if bbox needs update after current job
         std::atomic<bool> m_asyncSdfJobInFlight{false};
+        std::atomic<uint64_t> m_asyncSdfInFlightEpoch{0};
         std::atomic<bool> m_lowResFeedbackPending{false};
+        std::atomic<uint64_t> m_lastLowResPreviewEpoch{0};
         bool m_asyncInitialized{false};
-        
+
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
+
+        // Async preview rendering state (separate from HQ progressive rendering)
+        std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation
+        std::atomic<bool> m_asyncPreviewJobInFlight{false}; ///< True if preview job is executing
+        std::atomic<uint64_t> m_asyncPreviewFrameId{0};     ///< Latest completed preview frame ID
+        uint64_t m_asyncPreviewFrameCounter{0};             ///< Counter for generating unique frame IDs
+        std::chrono::steady_clock::time_point m_asyncPreviewEnqueueTime{}; ///< For latency tracking
+
+        // Framebuffer preservation during resize (prevents flicker)
+        bool m_preserveContentDuringResize{false}; ///< Keep displaying old texture during resize
+        bool m_deferredResizePending{false}; ///< Buffer reallocation deferred until render completes
     };
 }

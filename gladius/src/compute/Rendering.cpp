@@ -25,6 +25,7 @@
 #include "ToOCLVisitor.h"
 #include "compute/Rendering.h"
 #include "gpgpu.h"
+#include "kernel/types.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/OptimizeOutputs.h"
 
@@ -240,6 +241,10 @@ namespace gladius
         }
         m_lowResPreviewImage = std::make_unique<GLImageBuffer>(*m_ComputeContext, width, height);
         m_lowResPreviewImage->allocateOnDevice();
+
+        // Allocate distance init buffer at same resolution as low-res preview (T009)
+        m_resources->allocateDistanceInitBuffer(width, height);
+
         return true;
     }
 
@@ -489,6 +494,85 @@ namespace gladius
     {
         getResourceContext().setEyePosition(camera.getEyePosition());
         getResourceContext().setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
+    }
+
+    void Rendering::allocateMetricsBuffer()
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (m_metricsBufferAllocated)
+        {
+            return;
+        }
+
+        cl_int err = CL_SUCCESS;
+        m_metricsBuffer = cl::Buffer(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE,
+            sizeof(RayMarchMetrics),
+            nullptr,
+            &err);
+        CL_ERROR(err);
+        m_metricsBufferAllocated = true;
+
+        // Initialize to zero
+        clearMetricsBuffer();
+    }
+
+    RayMarchMetrics Rendering::readMetricsBuffer() const
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        RayMarchMetrics metrics{};
+        if (!m_metricsBufferAllocated)
+        {
+            return metrics;
+        }
+
+        cl_int err = m_ComputeContext->GetQueue().enqueueReadBuffer(
+            m_metricsBuffer,
+            CL_TRUE,  // blocking read
+            0,
+            sizeof(RayMarchMetrics),
+            &metrics);
+        CL_ERROR(err);
+
+        return metrics;
+    }
+
+    void Rendering::clearMetricsBuffer()
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!m_metricsBufferAllocated)
+        {
+            allocateMetricsBuffer();
+            return;  // allocateMetricsBuffer already clears
+        }
+
+        RayMarchMetrics zeroMetrics{};
+        cl_int err = m_ComputeContext->GetQueue().enqueueWriteBuffer(
+            m_metricsBuffer,
+            CL_TRUE,  // blocking write
+            0,
+            sizeof(RayMarchMetrics),
+            &zeroMetrics);
+        CL_ERROR(err);
+    }
+
+    cl::Buffer & Rendering::getMetricsBuffer()
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!m_metricsBufferAllocated)
+        {
+            allocateMetricsBuffer();
+        }
+        return m_metricsBuffer;
     }
 
     // void Rendering::injectSmoothingKernel(std::string const & kernel)

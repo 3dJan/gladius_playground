@@ -3,6 +3,7 @@
 #include "BeamLatticeResource.h"
 #include "ImageStackResource.h"
 #include "ResourceContext.h"
+#include "SpatialMeshResource.h"
 #include "StlResource.h"
 #include "VdbImporter.h"
 #include "VdbResource.h"
@@ -69,6 +70,11 @@ namespace gladius
                                       std::unique_ptr<BeamLatticeResource> && resource)
     {
         m_resources[key] = std::move(resource);
+    }
+
+    void ResourceManager::addResource(ResourceKey key, SpatialMeshData && spatialData)
+    {
+        m_resources[key] = std::make_unique<SpatialMeshResource>(key, std::move(spatialData));
     }
 
     void ResourceManager::loadResources()
@@ -142,5 +148,49 @@ namespace gladius
 
         // remove the resource
         m_resources.erase(iter);
+    }
+    
+    std::vector<MeshVoxelGridBuildParams> ResourceManager::collectVoxelGridBuildParams() const
+    {
+        std::vector<MeshVoxelGridBuildParams> params;
+        params.reserve(m_resources.size());  // Upper bound estimate
+        
+        for (auto const & [key, resource] : m_resources)
+        {
+            // Fast path: skip non-mesh resources without RTTI
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            
+            auto* spatialMesh = dynamic_cast<SpatialMeshResource*>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsVoxelGridBuild())
+            {
+                auto buildParams = spatialMesh->getVoxelGridBuildParams();
+                if (buildParams.has_value())
+                {
+                    params.push_back(buildParams.value());
+                }
+            }
+        }
+        
+        return params;
+    }
+    
+    void ResourceManager::markVoxelGridsBuilt()
+    {
+        for (auto & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            
+            auto* spatialMesh = dynamic_cast<SpatialMeshResource*>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsVoxelGridBuild())
+            {
+                spatialMesh->markVoxelGridBuilt();
+            }
+        }
     }
 }

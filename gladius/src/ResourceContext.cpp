@@ -433,4 +433,43 @@ namespace gladius
     {
         return *m_marchinSquareStates;
     }
+
+    void ResourceContext::allocateDistanceInitBuffer(size_t width, size_t height)
+    {
+        // Re-allocate if dimensions changed or not yet created
+        if (m_distanceInitBuffer &&
+            m_distanceInitBuffer->getWidth() == width &&
+            m_distanceInitBuffer->getHeight() == height)
+        {
+            return; // Already allocated at correct size
+        }
+
+        try
+        {
+            m_distanceInitBuffer = std::make_unique<DistanceInitBuffer>(*m_ComputeContext, width, height);
+            m_distanceInitBuffer->allocateOnDevice();
+        }
+        catch (std::exception const &)
+        {
+            m_distanceInitBuffer.reset(); // Ensure nullptr on failure
+        }
+    }
+
+    DistanceInitBuffer * ResourceContext::getDistanceInitBuffer() const
+    {
+        return m_distanceInitBuffer.get();
+    }
+
+    cl::Buffer & ResourceContext::getMetricsBuffer()
+    {
+        if (!m_metricsBuffer.has_value())
+        {
+            // Allocate metrics buffer: 4 x uint32 (totalRays, totalSteps, cacheHits, nonConverged)
+            m_metricsBuffer = cl::Buffer(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                sizeof(RayMarchMetrics));
+        }
+        return m_metricsBuffer.value();
+    }
 }

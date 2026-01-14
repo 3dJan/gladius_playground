@@ -35,6 +35,12 @@ enum PrimitiveType
     SDF_PRIMITIVE_INDICES,        // Primitive indices mapping for BVH traversal
     SDF_BEAM_LATTICE_VOXEL_INDEX, // Voxel grid with primitive indices
     SDF_BEAM_LATTICE_VOXEL_TYPE,  // Voxel grid with primitive types (optional)
+
+    // Spatial mesh SDF (BVH-accelerated mesh with pseudo-normal sign)
+    SDF_SPATIAL_MESH_ROOT,        // Root node with bounding box and buffer offsets
+    SDF_SPATIAL_MESH_NODES,       // BVH node buffer (MeshBVHNode array)
+    SDF_SPATIAL_MESH_TRIS,        // Triangle buffer (MeshTriangle array)
+    SDF_SPATIAL_MESH_NORMALS,     // Vertex normal buffer (MeshVertexNormal array)
 };
 
 enum ApproximationMode
@@ -42,7 +48,8 @@ enum ApproximationMode
     AM_FULL_MODEL = (1u << 0),
     AM_HYBRID = (1u << 1),
     AM_ONLY_PRECOMPSDF = (1u << 2),
-    AM_DISABLE_INTERPOLATION = (1u << 3)
+    AM_DISABLE_INTERPOLATION = (1u << 3),
+    AM_USE_DISTANCE_INIT = (1u << 4)  // Use low-res distance buffer to initialize HQ ray start
 };
 
 enum RenderingFlags
@@ -51,7 +58,9 @@ enum RenderingFlags
     RF_CUT_OFF_OBJECT = (1u << 1),
     RF_SHOW_FIELD = (1u << 2),
     RF_SHOW_STACK = (1u << 3),
-    RF_SHOW_COORDINATE_SYSTEM = (1u << 4)
+    RF_SHOW_COORDINATE_SYSTEM = (1u << 4),
+    RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
+    RF_DEBUG_METRICS = (1u << 15)  // Enable debug metrics collection (dev builds)
 };
 
 enum SamplingFilter
@@ -172,6 +181,17 @@ struct RayCastResult
     float edge;
     float type;
     float4 color;
+    int stepCount;  ///< Number of ray march steps (for debug metrics)
+};
+
+/// Per-frame rendering metrics for debug instrumentation (FR-014)
+/// Storage: GPU buffer for atomic updates; read back to host after frame completion
+struct RayMarchMetrics
+{
+    unsigned int totalRays;      ///< Total rays cast this frame
+    unsigned int totalSteps;     ///< Sum of steps across all rays
+    unsigned int cacheHits;      ///< Number of times cachedSdf() returned early
+    unsigned int nonConverged;   ///< Rays that hit maxRaySteps without hitting surface
 };
 
 struct Command

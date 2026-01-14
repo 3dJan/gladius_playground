@@ -4,6 +4,7 @@
 #include "imgui.h"
 #include <functional>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -259,10 +260,7 @@ namespace gladius::ui
          * @brief Get all registered actions
          * @return Vector of registered actions
          */
-        std::vector<std::shared_ptr<ShortcutAction>> const & getActions() const
-        {
-            return m_actions;
-        }
+        std::vector<std::shared_ptr<ShortcutAction>> getActions() const;
 
         /**
          * @brief Get the shortcut assigned to an action
@@ -306,6 +304,7 @@ namespace gladius::ui
         std::vector<std::shared_ptr<ShortcutAction>> m_actions;
         std::unordered_map<std::string, ShortcutCombo> m_shortcuts;
         std::unordered_map<std::string, ShortcutCombo> m_defaultShortcuts;
+        mutable std::shared_mutex m_mutex;
 
         // Disable copy and move
         ShortcutManager(ShortcutManager const &) = delete;

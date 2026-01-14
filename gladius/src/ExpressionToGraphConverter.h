@@ -118,7 +118,7 @@ namespace gladius
         /**
          * @brief Track current variable context for Begin node port resolution
          */
-        static thread_local std::string s_currentVariableContext;
+        static thread_local std::vector<std::string> s_variableContextStack;
 
         /**
          * @brief Create a mathematical operation node

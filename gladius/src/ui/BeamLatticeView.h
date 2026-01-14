@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Document.h"
+#include "ExportState.h"
+#include "FileDialogService.h"
 #include <memory>
 
 namespace Lib3MF
@@ -26,6 +28,12 @@ namespace gladius::ui
          */
         bool render(SharedDocument document);
 
+        /// @brief Set the export state for blocking UI modifications during export
+        void setExportState(ExportState * state)
+        {
+            m_exportState = state;
+        }
+
       private:
         void renderImportDialog(SharedDocument document, bool & propertiesChanged);
 
@@ -42,5 +50,11 @@ namespace gladius::ui
         bool m_showImportDialog = false;
         std::string m_filename;
         float m_beamDiameter = 2.0f;
+
+        // Async file dialog for browsing STL files
+        AsyncFileDialog m_asyncFileDialog;
+
+        // Export state for blocking UI modifications
+        ExportState * m_exportState{nullptr};
     };
 }

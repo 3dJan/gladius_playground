@@ -56,9 +56,9 @@ namespace gladius
         {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - m_start);
-            constexpr int64_t threshold = 1;
+            constexpr int64_t threshold = 100; // Only log if > 100ms
 
-            //if (duration.count() > threshold)
+            if (duration.count() > threshold)
             {
                 std::cout << m_name << " took " << duration.count() << "ms" << std::endl;
             }

@@ -5,6 +5,8 @@
 #include <EventLogger.h>
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
+#include <kernel/types.h>
+#include <MeshVoxelGridManager.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>
@@ -18,8 +20,10 @@
 
 #include <compute/ProgramManager.h>
 
-#include <string_view>
+#include <array>
 #include <mutex>
+#include <optional>
+#include <string_view>
 
 namespace cl
 {
@@ -423,6 +427,106 @@ namespace gladius
 
         void renderLowResPreview() const;
 
+        /**
+         * @brief Starts asynchronous low-resolution preview render (non-blocking).
+         * 
+         * Unlike renderLowResPreview(), this method does not call glFinish() and returns
+         * an OpenCL event for async completion tracking. The caller is responsible for
+         * synchronization and texture binding.
+         * 
+         * @param queue OpenCL command queue to use for async execution
+         * @param targetImage Pure CL image buffer to render into (no GL texture)
+         * @return OpenCL event that signals when rendering is complete
+         * 
+         * @thread Any thread with compute context access
+         * @note Does not call bind() on result image - caller must handle GL texture update
+         */
+        [[nodiscard]] cl::Event renderLowResPreviewAsync(cl::CommandQueue const & queue,
+                                                         ImageRGBA & targetImage) const;
+
+        /**
+         * @brief Renders low-res preview and outputs distance traveled to distance init buffer.
+         *
+         * This variant writes the ray-marched distance to the internal distance init buffer
+         * which can be used to accelerate subsequent HQ renders via distance initialization.
+         *
+         * @param queue OpenCL command queue to use for async execution
+         * @param targetImage Pure CL image buffer to render into
+         * @return OpenCL event that signals when rendering is complete
+         *
+         * @thread Any thread with compute context access
+         * @see renderSceneWithDistanceInit for using the distance buffer
+         */
+        [[nodiscard]] cl::Event renderLowResPreviewWithDistanceOutputAsync(
+            cl::CommandQueue const & queue,
+            ImageRGBA & targetImage) const;
+
+        /**
+         * @brief Renders scene using distance initialization from a previous low-res pass.
+         *
+         * Uses the internal distance init buffer to skip early ray marching steps,
+         * improving HQ render performance by 20-30%.
+         *
+         * @param commandQueue OpenCL command queue used for dispatch
+         * @param startLine Starting line for rendering
+         * @param endLine Ending line for rendering
+         * @param targetImage Pure CL image buffer to render into
+         * @param completionEvent Optional event for async completion tracking
+         * @return true if rendering succeeded, false otherwise
+         *
+         * @pre Distance init buffer must be populated via renderLowResPreviewWithDistanceOutputAsync
+         * @thread Any thread with compute context access
+         */
+        [[nodiscard]] bool renderSceneWithDistanceInit(
+            cl::CommandQueue const & commandQueue,
+            size_t startLine,
+            size_t endLine,
+            ImageRGBA & targetImage,
+            cl::Event * completionEvent = nullptr);
+
+        /**
+         * @brief Returns true if the distance init buffer is valid and can be used for HQ rendering.
+         * @return true if distance buffer has been populated and matches current parameters
+         */
+        [[nodiscard]] bool isDistanceInitBufferValid() const;
+
+        /**
+         * @brief Invalidates the distance init buffer, forcing next HQ render to use standard path.
+         */
+        void invalidateDistanceInitBuffer();
+
+        /**
+         * @brief Marks the distance init buffer as valid after successful population.
+         * @note Call this after renderLowResPreviewWithDistanceOutputAsync completes
+         */
+        void setDistanceInitBufferValid();
+
+        /**
+         * @brief Render scene with metrics collection for performance analysis (T033/SC-002).
+         * 
+         * Renders the scene while collecting ray marching metrics (total rays, total steps,
+         * cache hits, non-converged rays). Use readMetricsBuffer() after completion to retrieve.
+         *
+         * @param commandQueue OpenCL command queue used for dispatch
+         * @param startLine Starting line for rendering
+         * @param endLine Ending line for rendering
+         * @param targetImage Pure CL image buffer to render into
+         * @param completionEvent Optional event for async completion tracking
+         * @return true if rendering succeeded, false otherwise
+         */
+        [[nodiscard]] bool renderSceneWithMetrics(
+            cl::CommandQueue const & commandQueue,
+            size_t startLine,
+            size_t endLine,
+            ImageRGBA & targetImage,
+            cl::Event * completionEvent = nullptr);
+
+        /// @brief Clear metrics buffer before starting a metrics collection pass
+        void clearMetricsBuffer();
+
+        /// @brief Read ray marching metrics after a renderSceneWithMetrics pass completes
+        [[nodiscard]] RayMarchMetrics readMetricsBuffer() const;
+
         bool precomputeSdfForWholeBuildPlatform();
         void precomputeSdfForBBox(const BoundingBox & boundingBox);
 
@@ -437,6 +541,11 @@ namespace gladius
         /// @return true if preparation succeeded, false otherwise
         bool prepareImageRendering();
         [[nodiscard]] SharedGLImageBuffer getResultImage() const;
+        
+        /// @brief Returns the low-resolution preview image buffer.
+        /// @return Shared pointer to the low-res preview image, may be null if not initialized.
+        [[nodiscard]] SharedGLImageBuffer getLowResPreviewImage() const;
+        
         [[nodiscard]] SharedContourExtractor getContour() const;
 
         [[nodiscard]] cl_float getSliceHeight() const;
@@ -502,6 +611,9 @@ namespace gladius
         void invalidatePreCompSdf(std::string_view reason = {});
         void setSdfValid(bool valid);
         [[nodiscard]] bool isSdfValid() const;
+        [[nodiscard]] ApproximationMode getLastUsedApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedPreviewApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedHQApproximation() const;
         [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
@@ -530,19 +642,31 @@ namespace gladius
         [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
 
         void setPreCompSdfSize(size_t size);
+        
+        /// Build voxel acceleration grids for spatial mesh resources
+        /// @param buildParams Vector of build parameters from ResourceManager::collectVoxelGridBuildParams()
+        /// @return Number of grids successfully built
+        size_t buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams);
 
         void adoptVertexOfMeshToSurface(VertexBuffer & vertices);
 
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// Get the program manager for direct access to specialized programs
+        [[nodiscard]] ProgramManager & getProgramManager();
+        [[nodiscard]] ProgramManager const & getProgramManager() const;
+
       private:
         bool updateBoundingBoxFast();
+                [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
+                [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
         cl_int2 determineBufferSize(float2 pixelSize_mm) const;
         void reinitIfNecssary();
+        [[nodiscard]] bool requiresNanoVdbLocked() const;
 
         [[nodiscard]] int layerNumber() const;
 
@@ -585,6 +709,18 @@ namespace gladius
         size_t m_preCompSdfSize = 256u;
 
         bool m_autoUpdateBoundingBox = true;
+
+        /// @brief Tracks whether the distance init buffer contains valid data
+        /// @note Invalidated on parameter changes, camera changes, or resolution changes
+        bool m_distanceInitBufferValid = false;
+
+        /// @brief Tracks last used approximation modes for UI status display only
+        /// @note Mutable because these are purely diagnostic and set during const render methods
+        /// @{
+        mutable ApproximationMode m_lastUsedApproximation = AM_FULL_MODEL;
+        mutable ApproximationMode m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
+        /// @}
 
         CodeGenerator m_codeGenerator = CodeGenerator::Code;
 

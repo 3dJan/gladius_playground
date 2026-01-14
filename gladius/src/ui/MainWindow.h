@@ -4,17 +4,20 @@
 
 #include <atomic>
 #include <filesystem>
+#include <future>
 
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "AboutDialog.h"
 #include "CliExportDialog.h"
+#include "ExportState.h"
+#include "FileDialogService.h"
 #include "GLView.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
-#include "MeshExportDialog3mf.h"
 #include "ModelEditor.h"
 #include "Outline.h"
+#include "RecentFilesManager.h"
 #include "RenderWindow.h"
 #include "SliceView.h"
 #include "WelcomeScreen.h"
@@ -36,6 +39,24 @@ namespace gladius::ui
         OpenFile
     };
 
+    /// @brief Identifies which async file dialog operation is pending
+    enum class AsyncDialogOperation
+    {
+        None,
+        ExportCliCurrentLayer,
+        ExportCliSliced,
+        ExportSvgCurrentLayer,
+        ExportVdb,
+        ExportNvdb,
+        Import,
+        Open,
+        Merge,
+        SaveAs,
+        SaveCurrentFunction,
+        ImportImageStack,
+        OpenAfterSavePrompt  ///< Open dialog triggered from "save before opening" popup
+    };
+
     class MainWindow
     {
       public:
@@ -48,6 +69,7 @@ namespace gladius::ui
         void setConfigManager(ConfigManager & configManager)
         {
             m_configManager = &configManager;
+            m_recentFilesManager = std::make_unique<RecentFilesManager>(m_configManager);
         }
 
         void setup(std::shared_ptr<ComputeCore> core,
@@ -121,6 +143,24 @@ namespace gladius::ui
             return m_doc;
         }
 
+        /**
+         * @brief Get the export state for checking if export is in progress
+         * @return Reference to the export state
+         */
+        ExportState & getExportState()
+        {
+            return m_exportState;
+        }
+
+        /**
+         * @brief Get the export state (const version)
+         * @return Const reference to the export state
+         */
+        ExportState const & getExportState() const
+        {
+            return m_exportState;
+        }
+
       private:
         void render();
         void nodeEditor();
@@ -130,7 +170,6 @@ namespace gladius::ui
         void mainMenu();
         void sliceWindow();
         void meshExportDialog();
-        void meshExportDialog3mf();
         void cliExportDialog();
         void showExitPopUp();
         void showSaveBeforeFileOperationPopUp();
@@ -154,6 +193,12 @@ namespace gladius::ui
         void importImageStack();
 
         /**
+         * @brief Helper to load a file asynchronously and defer editor reset
+         * @param filename Path to the file to load
+         */
+        void loadFileDeferred(const std::filesystem::path & filename);
+
+        /**
          * @brief Save rendering settings to configuration
          */
         void saveRenderSettings();
@@ -166,18 +211,21 @@ namespace gladius::ui
         void onPreviewProgramSwap();
 
         /**
-         * @brief Add a file to the list of recently modified files
-         * @param filePath Path to the file that has been modified
+         * @brief Add a file to the recent files list
+         * @param filePath Path to the file
          */
-        void addToRecentFiles(const std::filesystem::path & filePath);
+        void addToRecentFiles(std::filesystem::path const & filePath);
 
         /**
-         * @brief Get the list of recently modified files
+         * @brief Get the list of recent files
          * @param maxCount Maximum number of files to return
          * @return List of pairs containing file paths and timestamps
          */
         std::vector<std::pair<std::filesystem::path, std::time_t>>
         getRecentFiles(size_t maxCount = 100) const;
+
+        /// Recent files manager
+        std::unique_ptr<RecentFilesManager> m_recentFilesManager;
 
         GLView m_mainView;
 
@@ -208,7 +256,6 @@ namespace gladius::ui
 
         bool m_showAuthoringTools{true};
         MeshExportDialog m_meshExporterDialog;
-        MeshExportDialog3mf m_meshExporterDialog3mf;
         CliExportDialog m_cliExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
@@ -218,6 +265,15 @@ namespace gladius::ui
 
         std::shared_ptr<Document> m_doc;
         events::SharedLogger m_logger;
+
+        /// @brief State for async file loading coordination
+        enum class AsyncLoadState
+        {
+            Idle,
+            Loading,
+            LoadingWithReset
+        };
+        AsyncLoadState m_asyncLoadState{AsyncLoadState::Idle};
 
         // Flag to remember if library browser was visible
         bool m_isLibraryBrowserVisible = false;
@@ -261,5 +317,43 @@ namespace gladius::ui
 
         // Instance-level flag to propagate OpenCL debug verbosity to contexts we create
         bool m_openclDebugEnabled{false};
+
+        // Async file dialog for non-blocking file/directory selection
+        AsyncFileDialog m_asyncFileDialog;
+        AsyncDialogOperation m_asyncDialogOp{AsyncDialogOperation::None};
+
+        /// @brief Process async file dialog results and execute pending operations
+        void processAsyncFileDialog();
+
+        // Export state for blocking UI modifications during mesh export
+        ExportState m_exportState;
+
+        // --- Deferred OpenCL initialization ---
+        /// @brief State of the async compute initialization
+        enum class ComputeInitState
+        {
+            NotStarted,   ///< Not yet started
+            InProgress,   ///< Async device enumeration running
+            Completed,    ///< Enumeration completed, needs finalization on main thread
+            Finalized     ///< Fully initialized
+        };
+        ComputeInitState m_computeInitState{ComputeInitState::NotStarted};
+
+        /// @brief Result of async device enumeration
+        struct ComputeEnumResult
+        {
+            AcceleratorList accelerators;
+            bool success = false;
+            std::string errorMessage;
+        };
+
+        /// @brief Future for async compute initialization
+        std::future<ComputeEnumResult> m_computeInitFuture;
+
+        /// @brief Start async compute initialization
+        void startAsyncComputeInit();
+
+        /// @brief Poll and finalize async compute initialization (called from render loop)
+        void pollComputeInit();
     };
 }

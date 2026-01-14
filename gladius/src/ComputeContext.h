@@ -6,6 +6,10 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <vector>
+#include <atomic>
+#include <iosfwd>
 
 #include "EventLogger.h"
 
@@ -45,8 +49,10 @@ namespace gladius
         bool correctlyRoundedDivedSqrt{false};
         bool cpu{false};
         bool gpu{false};
+        bool rusticl{false};
         double performanceEstimation{}; // very rough estimation: number of compute units times max
                                         // clock frequency
+        bool imageSupport{false};
         OpenCLVersion openCLVersion{1.0};
     };
 
@@ -71,6 +77,19 @@ namespace gladius
 
         explicit ComputeContext(EnableGLOutput enableOutput);
 
+        /**
+         * @brief Construct ComputeContext with a pre-selected accelerator
+         *
+         * This constructor allows separating the slow device enumeration phase
+         * (via queryAccelerators()) from the context creation phase. Useful for
+         * deferred initialization where enumeration runs on a background thread
+         * and context creation (which may require GL interop) runs on the main thread.
+         *
+         * @param enableOutput Whether to enable GL output/interop
+         * @param accelerator The pre-selected accelerator (device + platform + capabilities)
+         */
+        ComputeContext(EnableGLOutput enableOutput, Accelerator const & accelerator);
+
         /// @brief Check if OpenCL acceleration is available on the system
         /// @return true if OpenCL is available and at least one suitable device is found, false
         /// otherwise
@@ -87,6 +106,12 @@ namespace gladius
         [[nodiscard]] bool isValid() const;
 
         [[nodiscard]] const cl::Device & GetDevice() const;
+
+        [[nodiscard]] Capabilities const & getCapabilities() const;
+
+        [[nodiscard]] bool supportsFp64() const;
+
+        [[nodiscard]] bool hasImageSupport() const;
 
         // Logger injection
         void setLogger(events::SharedLogger logger)
@@ -201,6 +226,7 @@ namespace gladius
 
       private:
         void initContext();
+        void initContextWithAccelerator(Accelerator const & accelerator);
         void queryDeviceMemoryCaps();
         bool tryQueryVendorFreeMem(size_t & freeBytesOut) const; // best-effort
 
@@ -211,6 +237,7 @@ namespace gladius
         mutable std::mutex m_queuesMutex;
 
         cl::Device m_device;
+        Capabilities m_capabilities{};
 
         bool m_isValid = false;
         EnableGLOutput m_outputGL = EnableGLOutput::disabled;
