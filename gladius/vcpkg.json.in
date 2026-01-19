@@ -7,6 +7,7 @@
     "eigen3",
     "tinyfiledialogs",
     "gtest",
+    "nlopt",
     "platform-folders",
     "opencl",
      {
