@@ -120,8 +120,10 @@ namespace gladius::ui
         /**
          * @brief Navigate to a function and record the navigation in history.
          *        Use this instead of switchToFunction() for user-triggered navigation.
+         * @param functionId The ResourceId of the function to navigate to
+         * @param sourceNodeId Optional: the node that triggered navigation (for view restoration)
          */
-        bool navigateToFunction(nodes::ResourceId functionId);
+        bool navigateToFunction(nodes::ResourceId functionId, nodes::NodeId sourceNodeId = 0);
 
         // Navigation history controls
         bool canGoBack() const;
@@ -188,8 +190,16 @@ namespace gladius::ui
         void pushNodeColor(nodes::NodeBase & node);
         void popNodeColor(nodes::NodeBase & node);
 
+        /// Returns the editor context for the given function, creating one if needed.
+        ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
+
+        /// Returns the editor context for the current model, or nullptr if no model is set.
+        ed::EditorContext * getCurrentEditorContext();
+
         bool m_visible = false;
-        ed::EditorContext * m_editorContext{};
+        std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
+        std::set<nodes::ResourceId> m_visitedFunctions;  ///< Track first-time visits for NavigateToContent
+        bool m_pendingCenterView = false;  ///< Defer NavigateToContent to after autolayout
         bool m_dirty{true};
         bool m_parameterDirty{false};
         bool m_primitiveDataDirty{false};

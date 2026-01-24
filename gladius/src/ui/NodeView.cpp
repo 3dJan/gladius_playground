@@ -311,31 +311,6 @@ namespace gladius::ui
     {
         header(baseNode);
         content(baseNode);
-
-        // Check for double-click on FunctionCall nodes to navigate to referenced function
-        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
-        {
-            nodes::ResourceId functionId = 0;
-
-            if (auto * functionCallNode = dynamic_cast<nodes::FunctionCall *>(&baseNode))
-            {
-                functionId = functionCallNode->getFunctionId();
-            }
-            else if (auto * functionGradientNode =
-                       dynamic_cast<nodes::FunctionGradient *>(&baseNode))
-            {
-                functionGradientNode->resolveFunctionId();
-                functionId = functionGradientNode->getFunctionId();
-            }
-
-            if (m_modelEditor && functionId != 0)
-            {
-                // Use navigateToFunction so history is recorded
-                m_modelEditor->navigateToFunction(functionId);
-            }
-        }
-
         footer(baseNode);
     }
 

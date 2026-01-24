@@ -31,6 +31,8 @@
 #include "Widgets.h"
 #include "imgui.h"
 #include "nodesfwd.h"
+#include "nodes/DerivedNodes.h"
+#include "nodes/LowerFunctionGradient.h"
 #include "ui/LevelSetView.h"
 #include "ui/VolumeDataView.h"
 #include <nodes/Assembly.h>
@@ -180,7 +182,7 @@ namespace gladius::ui
 
     ModelEditor::ModelEditor()
     {
-        m_editorContext = ed::CreateEditor();
+        // Editor contexts are created on-demand per function in getOrCreateEditorContext()
         m_nodeTypeToColor = createNodeTypeToColors();
 
         // Setup expression dialog callbacks
@@ -201,17 +203,50 @@ namespace gladius::ui
 
     ModelEditor::~ModelEditor()
     {
-        DestroyEditor(m_editorContext);
+        // Destroy all per-function editor contexts
+        for (auto & [id, ctx] : m_editorContexts)
+        {
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
+        }
+        m_editorContexts.clear();
     }
 
     void ModelEditor::resetEditorContext()
     {
-        if (m_editorContext != nullptr)
+        // Destroy all per-function editor contexts
+        for (auto & [id, ctx] : m_editorContexts)
         {
-            DestroyEditor(m_editorContext);
-            m_editorContext = nullptr;
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
         }
-        m_editorContext = ed::CreateEditor();
+        m_editorContexts.clear();
+        m_visitedFunctions.clear();
+    }
+
+    ed::EditorContext * ModelEditor::getOrCreateEditorContext(nodes::ResourceId functionId)
+    {
+        auto it = m_editorContexts.find(functionId);
+        if (it != m_editorContexts.end())
+        {
+            return it->second;
+        }
+        auto * ctx = ed::CreateEditor();
+        m_editorContexts[functionId] = ctx;
+        return ctx;
+    }
+
+    ed::EditorContext * ModelEditor::getCurrentEditorContext()
+    {
+        if (!m_currentModel)
+        {
+            return nullptr;
+        }
+        return getOrCreateEditorContext(m_currentModel->getResourceId());
     }
 
     void ModelEditor::outline()
@@ -1035,13 +1070,13 @@ namespace gladius::ui
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0., 0.));
             if (ImGui::Begin("Model Editor", &m_visible, ImGuiWindowFlags_MenuBar))
             {
-                SetCurrentEditor(m_editorContext);
+                SetCurrentEditor(getCurrentEditorContext());
 
                 if (ImGui::BeginMenuBar())
                 {
                     // Function extraction refactoring
                     {
-                        auto selection = selectedNodes(m_editorContext);
+                        auto selection = selectedNodes(getCurrentEditorContext());
                         bool canExtract = !selection.empty();
                         if (!canExtract)
                         {
@@ -1110,7 +1145,7 @@ namespace gladius::ui
                     }
 
                     // Copy / Paste
-                    auto selectionForCopy = selectedNodes(m_editorContext);
+                    auto selectionForCopy = selectedNodes(getCurrentEditorContext());
                     if (selectionForCopy.empty())
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
@@ -1223,7 +1258,7 @@ namespace gladius::ui
                     m_nodeViewVisitor.setResourceNodesVisible(showResourceNodes);
 
                     // Add group assignment functionality
-                    auto selection = selectedNodes(m_editorContext);
+                    auto selection = selectedNodes(getCurrentEditorContext());
                     if (!selection.empty())
                     {
                         if (ImGui::MenuItem(
@@ -1263,7 +1298,8 @@ namespace gladius::ui
 
                 m_popupMenuFunction();
 
-                ed::SetCurrentEditor(m_editorContext);
+                auto * currentCtx = getCurrentEditorContext();
+                ed::SetCurrentEditor(currentCtx);
 
                 ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
                                    ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
@@ -1301,6 +1337,13 @@ namespace gladius::ui
                     {
                         m_pendingAutoLayout = false;
                         autoLayout();
+                    }
+
+                    // Center view AFTER autolayout completes for first-time visits
+                    if (m_pendingCenterView)
+                    {
+                        m_pendingCenterView = false;
+                        ed::NavigateToContent();
                     }
                 }
                 onCreateNode();
@@ -1353,10 +1396,48 @@ namespace gladius::ui
                     m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
                 }
 
+                // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
+                // Uses ed::GetHoveredNode() for correct node-level hover detection
+                ed::NodeId hoveredNodeId = ed::GetHoveredNode();
+                if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                {
+                    auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
+                    auto nodeOpt = m_currentModel->getNode(nodeId);
+                    if (nodeOpt)
+                    {
+                        nodes::NodeBase * node = *nodeOpt;
+                        nodes::ResourceId functionId = 0;
+                        if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                        {
+                            functionId = fc->getFunctionId();
+                        }
+                        else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
+                        {
+                            fg->resolveFunctionId();
+                            functionId = fg->getFunctionId();
+                        }
+
+                        if (functionId != 0)
+                        {
+                            // Pass nodeId as sourceNode - when user navigates back,
+                            // the view will center on this FunctionCall/FunctionGradient node
+                            navigateToFunction(functionId, nodeId);
+                        }
+                    }
+                }
+
                 ed::End();
                 ed::PopStyleColor();
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
+
+                // Process deferred node focus (must happen after ed::End() but needs SetCurrentEditor)
+                if (m_shouldFocusNode && m_nodeToFocus != 0)
+                {
+                    ed::SetCurrentEditor(getCurrentEditorContext());
+                    ed::CenterNodeOnScreen(ed::NodeId(static_cast<uint64_t>(m_nodeToFocus)));
+                    clearNodeFocus();
+                }
 
                 if (m_nodeViewVisitor.haveParameterChanged())
                 {
@@ -1416,7 +1497,7 @@ namespace gladius::ui
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
 
-                    auto selectionIds = selectedNodes(m_editorContext);
+                    auto selectionIds = selectedNodes(getCurrentEditorContext());
                     std::set<nodes::NodeId> selection;
                     for (auto const & nid : selectionIds)
                         selection.insert(static_cast<nodes::NodeId>(nid.Get()));
@@ -1505,7 +1586,7 @@ namespace gladius::ui
                     // Perform extraction with overrides
                     if (m_doc && m_currentModel)
                     {
-                        auto selectionIds = selectedNodes(m_editorContext);
+                        auto selectionIds = selectedNodes(getCurrentEditorContext());
                         std::set<nodes::NodeId> selection;
                         for (auto const & nid : selectionIds)
                             selection.insert(static_cast<nodes::NodeId>(nid.Get()));
@@ -1638,6 +1719,17 @@ namespace gladius::ui
         {
             return;
         }
+
+        // Clear all editor contexts for new document - each function will get a fresh context
+        for (auto & [id, ctx] : m_editorContexts)
+        {
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
+        }
+        m_editorContexts.clear();
+        m_visitedFunctions.clear();
 
         m_assembly = std::move(assembly);
         m_currentModel = m_assembly->assemblyModel();
@@ -2047,12 +2139,22 @@ namespace gladius::ui
 
         m_nodePositionsNeedUpdate = false;
 
-        for (auto & node : *currentModel())
+        // Check if this is the first visit to this function
+        auto const funcId = m_currentModel->getResourceId();
+        bool const isFirstVisit = m_visitedFunctions.find(funcId) == m_visitedFunctions.end();
+
+        // Only set node positions on first visit - subsequent visits preserve the editor's internal state
+        if (isFirstVisit)
         {
-            auto const targetPos = node.second->screenPos();
-            ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
+            for (auto & node : *currentModel())
+            {
+                auto const targetPos = node.second->screenPos();
+                ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
+            }
+            // Defer NavigateToContent until after autolayout completes
+            m_pendingCenterView = true;
+            m_visitedFunctions.insert(funcId);
         }
-        ed::NavigateToContent();
     }
 
     void ModelEditor::placeTransformation(nodes::NodeBase & createdNode,
@@ -2152,7 +2254,7 @@ namespace gladius::ui
 
     void ModelEditor::placeNode(nodes::NodeBase & createdNode)
     {
-        auto selection = selectedNodes(m_editorContext);
+        auto selection = selectedNodes(getCurrentEditorContext());
         auto const category = createdNode.getCategory();
         if (!selection.empty())
         {
@@ -2379,7 +2481,7 @@ namespace gladius::ui
             return;
         }
 
-        auto selectionIds = selectedNodes(m_editorContext);
+        auto selectionIds = selectedNodes(getCurrentEditorContext());
         if (selectionIds.empty())
         {
             return;
@@ -2528,7 +2630,7 @@ namespace gladius::ui
         return true;
     }
 
-    bool ModelEditor::navigateToFunction(nodes::ResourceId functionId)
+    bool ModelEditor::navigateToFunction(nodes::ResourceId functionId, nodes::NodeId sourceNodeId)
     {
         if (!m_assembly)
         {
@@ -2542,8 +2644,10 @@ namespace gladius::ui
         }
 
         // Record navigation in history (returns false if no-op)
+        // sourceNodeId is stored as the anchor for the current function - when returning,
+        // the view will center on this node (the FunctionCall/FunctionGradient that was clicked)
         nodes::ResourceId const currentId = m_currentModel ? m_currentModel->getResourceId() : 0u;
-        if (!m_navHistory.recordNavigation(currentId, functionId))
+        if (!m_navHistory.recordNavigation(currentId, functionId, sourceNodeId))
         {
             return true; // No-op navigation, already at target
         }
@@ -2564,18 +2668,32 @@ namespace gladius::ui
     bool ModelEditor::goBack()
     {
         m_navHistory.setInHistoryNavigation(true);
-        auto const targetId = m_navHistory.goBack();
-        bool const ok = (targetId != 0u) && switchToFunction(targetId);
+        auto const entry = m_navHistory.goBack();
+        bool const ok = (entry.functionId != 0u) && switchToFunction(entry.functionId);
         m_navHistory.setInHistoryNavigation(false);
+        
+        // Request centering on anchor node (the node user clicked to leave this function)
+        // This will be processed in the next render frame inside ed::Begin()/End() context
+        if (ok && entry.anchorNode != 0)
+        {
+            requestNodeFocus(entry.anchorNode);
+        }
         return ok;
     }
 
     bool ModelEditor::goForward()
     {
         m_navHistory.setInHistoryNavigation(true);
-        auto const targetId = m_navHistory.goForward();
-        bool const ok = (targetId != 0u) && switchToFunction(targetId);
+        auto const entry = m_navHistory.goForward();
+        bool const ok = (entry.functionId != 0u) && switchToFunction(entry.functionId);
         m_navHistory.setInHistoryNavigation(false);
+        
+        // Request centering on anchor node
+        // This will be processed in the next render frame inside ed::Begin()/End() context
+        if (ok && entry.anchorNode != 0)
+        {
+            requestNodeFocus(entry.anchorNode);
+        }
         return ok;
     }
 
@@ -2614,7 +2732,7 @@ namespace gladius::ui
             return;
         }
 
-        auto selection = selectedNodes(m_editorContext);
+        auto selection = selectedNodes(getCurrentEditorContext());
         if (selection.empty())
         {
             return;
