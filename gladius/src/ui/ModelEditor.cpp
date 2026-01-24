@@ -36,6 +36,7 @@
 #include "ui/LevelSetView.h"
 #include "ui/VolumeDataView.h"
 #include <nodes/Assembly.h>
+#include <nodes/FunctionDeduplicator.h>
 #include <nodes/Model.h>
 
 namespace gladius::ui
@@ -275,6 +276,38 @@ namespace gladius::ui
                     logger->addEvent(
                       {"No unused resources found in the model", events::Severity::Info});
                 }
+            }
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>(ICON_FA_COPY "\tRemove duplicate functions")))
+            {
+                // Store state for undo support (T043)
+                m_history.storeState(*m_assembly, "Remove duplicate functions");
+                
+                auto result = FunctionDeduplicator::deduplicate(*m_assembly);
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    if (result.removedCount > 0)
+                    {
+                        logger->addEvent(
+                          {fmt::format("Removed {} duplicate function(s), updated {} reference(s)",
+                                       result.removedCount,
+                                       result.updatedReferences),
+                           events::Severity::Info});
+                        markModelAsModified();
+                    }
+                    else
+                    {
+                        logger->addEvent(
+                          {"No duplicate functions found", events::Severity::Info});
+                    }
+                }
+            }
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tShow Library Browser"),
+                  nullptr,
+                  m_libraryBrowser.isVisible()))
+            {
+                toggleLibraryVisibility();
             }
             ImGui::EndMenuBar();
         }
@@ -559,6 +592,9 @@ namespace gladius::ui
                             m_doc->deleteFunction(model.second->getResourceId());
                             m_currentModel = m_assembly->assemblyModel();
                             m_dirty = true;
+                            ImGui::TreePop();
+                            ImGui::PopID();
+                            break; // Map was modified, iterator is invalidated
                         }
                     }
 
@@ -1664,6 +1700,9 @@ namespace gladius::ui
                 ImGui::EndPopup();
             }
         }
+
+        // Render the library browser (separate window)
+        m_libraryBrowser.render(m_doc);
 
         m_parameterDirty = parameterChanged;
         return m_parameterDirty;
