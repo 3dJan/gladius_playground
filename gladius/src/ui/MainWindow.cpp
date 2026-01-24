@@ -536,6 +536,8 @@ namespace gladius::ui
                        events::Severity::Error});
                 }
             }
+            // No pending file is normal for "New Project", "Open Existing", 
+            // backup restore, or manual close - no action needed
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
 
