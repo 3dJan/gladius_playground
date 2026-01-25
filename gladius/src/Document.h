@@ -9,6 +9,7 @@
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
+#include "nodes/IssueList.h"
 #include "nodes/Model.h"
 #include "ui/GLView.h"
 
@@ -300,11 +301,27 @@ namespace gladius
          * @brief Validates the current assembly
          *
          * Validates the assembly using the nodes::Validator.
-         * Logs any validation errors.
+         * Populates the issue list with any validation errors.
+         * When called during file loading or API operations, also logs events.
          *
+         * @param context The validation context (Interactive, FileLoad, or Api)
          * @return True if the assembly is valid, false otherwise
          */
-        bool validateAssembly() const;
+        bool validateAssembly(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings
+         *
+         * @return Reference to the issue list
+         */
+        nodes::IssueList& getIssueList();
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings (const version)
+         *
+         * @return Const reference to the issue list
+         */
+        nodes::IssueList const& getIssueList() const;
 
         /**
          * @brief Get the backup manager instance
@@ -394,6 +411,9 @@ namespace gladius
 
         /// Flag to track if UI mode is active (determines if backups should be created)
         bool m_uiMode = false;
+
+        /// Issue list containing validation errors and warnings
+        nodes::IssueList m_issueList;
     };
 
     using SharedDocument = std::shared_ptr<Document>;

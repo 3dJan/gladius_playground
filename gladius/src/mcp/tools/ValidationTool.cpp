@@ -116,7 +116,7 @@ namespace gladius
                     assembly->updateInputsAndOutputs();
                 }
 
-                bool validAsm = document->validateAssembly();
+                bool validAsm = document->validateAssembly(nodes::ValidationContext::Api);
                 auto logger = document->getSharedLogger();
                 auto diag = snapshotLogger(logger);
                 phase1.update(diag);

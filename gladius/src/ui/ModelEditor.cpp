@@ -31,6 +31,7 @@
 #include "Widgets.h"
 #include "imgui.h"
 #include "nodesfwd.h"
+#include "nodes/IssueList.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/LowerFunctionGradient.h"
 #include "ui/LevelSetView.h"
@@ -1330,6 +1331,97 @@ namespace gladius::ui
                     }
 
                     ImGui::EndMenuBar();
+                }
+
+                // VALIDATION ISSUES OVERLAY (collapsible)
+                if (m_doc != nullptr && m_doc->getIssueList().hasErrors())
+                {
+                    auto const& issueList = m_doc->getIssueList();
+                    
+                    // Get issues for all models (in future, can filter to current model)
+                    auto const allIssues = issueList.getAll();
+                    size_t const errorCount = issueList.errorCount();
+                    size_t const warningCount = issueList.warningCount();
+
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.1f, 0.1f, 0.9f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.0f);
+                    
+                    std::string const headerText = 
+                        fmt::format("{} Validation Issues ({} errors, {} warnings)", 
+                                    reinterpret_cast<const char*>(ICON_FA_EXCLAMATION_TRIANGLE),
+                                    errorCount, warningCount);
+                    
+                    if (ImGui::CollapsingHeader(headerText.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        float const maxHeight = std::min(150.0f, static_cast<float>(allIssues.size()) * 25.0f + 10.0f);
+                        ImGui::BeginChild("IssuesListChild", ImVec2(0, maxHeight), false);
+                        
+                        int issueIndex = 0;
+                        for (auto const& issue : allIssues)
+                        {
+                            char const* icon = (issue.severity == nodes::IssueSeverity::Error) 
+                                             ? reinterpret_cast<const char*>(ICON_FA_TIMES_CIRCLE)
+                                             : reinterpret_cast<const char*>(ICON_FA_EXCLAMATION_CIRCLE);
+                            
+                            ImVec4 const color = (issue.severity == nodes::IssueSeverity::Error)
+                                              ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f)
+                                              : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                            
+                            // Make the issue clickable - navigate to problem node
+                            ImGui::PushID(issueIndex++);
+                            ImGui::PushStyleColor(ImGuiCol_Text, color);
+                            
+                            bool const hasNode = (issue.nodeId != 0);
+                            std::string buttonLabel = fmt::format("{} {}", icon, issue.message);
+                            
+                            if (hasNode)
+                            {
+                                // Clickable button for navigation
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.2f, 0.2f, 0.5f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.3f, 0.3f, 0.7f));
+                                
+                                if (ImGui::Button(buttonLabel.c_str()))
+                                {
+                                    requestNodeFocus(issue.nodeId);
+                                }
+                                
+                                if (ImGui::IsItemHovered())
+                                {
+                                    ImGui::BeginTooltip();
+                                    ImGui::TextUnformatted("Click to navigate to node");
+                                    ImGui::EndTooltip();
+                                }
+                                
+                                ImGui::PopStyleColor(3);
+                            }
+                            else
+                            {
+                                // Non-clickable text for issues without specific node
+                                ImGui::TextUnformatted(buttonLabel.c_str());
+                            }
+                            
+                            ImGui::PopStyleColor();
+                            
+                            if (!issue.fixSuggestion.empty())
+                            {
+                                ImGui::SameLine();
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                                ImGui::TextUnformatted(
+                                    fmt::format("(Tip: {})", issue.fixSuggestion).c_str());
+                                ImGui::PopStyleColor();
+                            }
+                            
+                            ImGui::PopID();
+                        }
+                        
+                        ImGui::EndChild();
+                    }
+                    
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                    
+                    ImGui::Separator();
                 }
 
                 m_popupMenuFunction();
