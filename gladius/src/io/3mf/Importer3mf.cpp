@@ -598,9 +598,9 @@ namespace gladius::io
 
         connectOutputs(*model, *model->getEndNode(), *func);
 
-        model->setLogger(doc.getSharedLogger());
-
-        model->updateTypes();
+        // Don't set logger or call updateTypes() during import - validation runs after loading
+        // completes and will update types properly. Setting the logger here causes validation
+        // errors to be logged for the temporarily incomplete graph.
     }
 
     void Importer3mf::connectNode(Lib3MF::CImplicitNode & node3mf,
@@ -633,13 +633,7 @@ namespace gladius::io
 
             if (!parameter)
             {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent({fmt::format("Failed to find parameter {} in node {}",
-                                                         parameterName,
-                                                         node3mf.GetIdentifier()),
-                                             events::Severity::Error});
-                }
+                // Skip silently - validation will catch missing parameters after load
                 continue;
             }
 
@@ -777,6 +771,13 @@ namespace gladius::io
             }
             auto resourceId = resource->GetModelResourceID();
             resourceNode->setResourceId(resourceId);
+            
+            // Mark resourceid parameter as not requiring input connection - value is set directly
+            auto * param = resourceNode->getParameter(nodes::FieldNames::ResourceId);
+            if (param)
+            {
+                param->setInputSourceRequired(false);
+            }
         }
 
         if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::FunctionGradient)
@@ -832,40 +833,17 @@ namespace gladius::io
                 auto parameter = endNode.getParameter(parameterName);
                 if (!parameter)
                 {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not find parameter {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
+                    // Skip silently - validation will catch missing parameters after load
                     continue;
                 }
 
                 auto sourcePort = resolveInput(model, output);
                 if (sourcePort)
                 {
-                    if (!model.addLink(sourcePort->getId(), parameter->getId()))
-                    {
-                        if (m_eventLogger)
-                        {
-                            m_eventLogger->addEvent({fmt::format("Could not add link from {} to {}",
-                                                                 sourcePort->getUniqueName(),
-                                                                 parameterName),
-                                                     events::Severity::Warning});
-                        }
-                    }
+                    // Silently ignore link failures - validation will catch these after load
+                    (void) model.addLink(sourcePort->getId(), parameter->getId());
                 }
-                else
-                {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not resolve input for {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
-                }
+                // Skip silently if source port not found - validation will catch these after load
             }
         }
     }
@@ -892,11 +870,7 @@ namespace gladius::io
             auto sourceNodeIter = idToNode.find(sourceNodeName);
             if (sourceNodeIter == idToNode.end())
             {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent({fmt::format("Node not found: {}\n", sourceNodeName),
-                                             events::Severity::Error});
-                }
+                // Skip silently - validation will catch missing nodes after load
                 return nullptr;
             }
             sourceNode = sourceNodeIter->second;
@@ -940,23 +914,7 @@ namespace gladius::io
                 }
             }
 
-            if (m_eventLogger)
-            {
-                std::string suggestion;
-                if (!outputs.empty())
-                {
-                    suggestion = outputs.begin()->first;
-                }
-                m_eventLogger->addEvent(
-                  {fmt::format("Resolving {} failed. Port of node {} not found: {}{}",
-                               refName,
-                               sourceNodeName,
-                               sourcePortName,
-                               suggestion.empty() ? std::string{}
-                                                  : fmt::format(". Did you mean {}?", suggestion)),
-                   events::Severity::Error});
-            }
-
+            // Skip silently - validation will catch missing ports after load
             return nullptr;
         }
         return &sourcePortIter->second;
