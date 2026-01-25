@@ -298,6 +298,25 @@ namespace gladius
         void rebuildResourceDependencyGraph();
 
         /**
+         * @brief Mark validation as needing to be re-run.
+         *
+         * Called when the graph structure changes (nodes added/removed, connections changed).
+         * The next call to validateAssemblyIfDirty() will re-run validation.
+         */
+        void markValidationDirty();
+
+        /**
+         * @brief Validate the assembly only if marked dirty.
+         *
+         * Efficient method for UI use - only re-validates when the graph has changed.
+         * Clears the dirty flag after validation.
+         *
+         * @param context The validation context (Interactive, FileLoad, or Api)
+         * @return True if the assembly is valid, false otherwise
+         */
+        bool validateAssemblyIfDirty(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
          * @brief Validates the current assembly
          *
          * Validates the assembly using the nodes::Validator.
@@ -411,6 +430,9 @@ namespace gladius
 
         /// Flag to track if UI mode is active (determines if backups should be created)
         bool m_uiMode = false;
+
+        /// Flag to track if validation needs to be re-run
+        std::atomic<bool> m_validationDirty{true};
 
         /// Issue list containing validation errors and warnings
         nodes::IssueList m_issueList;

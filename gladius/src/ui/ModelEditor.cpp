@@ -1335,6 +1335,11 @@ namespace gladius::ui
                 }
 
                 // VALIDATION ISSUES OVERLAY (collapsible)
+                // Validate on demand - only when graph has changed (dirty flag)
+                if (m_doc != nullptr)
+                {
+                    m_doc->validateAssemblyIfDirty(nodes::ValidationContext::Interactive);
+                }
                 if (m_doc != nullptr && m_doc->getIssueList().hasErrors())
                 {
                     auto const& issueList = m_doc->getIssueList();
@@ -1494,6 +1499,14 @@ namespace gladius::ui
                                 {
                                     ImGui::BeginTooltip();
                                     ImGui::TextUnformatted("Click to navigate to node");
+                                    // Show fix suggestion if available
+                                    if (!issues.front()->fixSuggestion.empty())
+                                    {
+                                        ImGui::Separator();
+                                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 0.7f, 1.0f));
+                                        ImGui::TextWrapped("%s", issues.front()->fixSuggestion.c_str());
+                                        ImGui::PopStyleColor();
+                                    }
                                     ImGui::EndTooltip();
                                 }
                                 

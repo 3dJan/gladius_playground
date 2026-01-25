@@ -671,6 +671,7 @@ namespace gladius
     void Document::markFileAsChanged()
     {
         m_fileChanged = true;
+        m_validationDirty = true;
     }
 
     void Document::invalidatePrimitiveData()
@@ -1878,6 +1879,21 @@ namespace gladius
     const gladius::io::ResourceDependencyGraph * Document::getResourceDependencyGraph() const
     {
         return m_resourceDependencyGraph.get();
+    }
+
+    void Document::markValidationDirty()
+    {
+        m_validationDirty = true;
+    }
+
+    bool Document::validateAssemblyIfDirty(nodes::ValidationContext context)
+    {
+        if (!m_validationDirty)
+        {
+            return !m_issueList.hasErrors();
+        }
+        m_validationDirty = false;
+        return validateAssembly(context);
     }
 
     bool Document::validateAssembly(nodes::ValidationContext context)
