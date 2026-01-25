@@ -8,6 +8,7 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "NodeClipboard.h"
+#include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
@@ -287,6 +288,7 @@ namespace gladius::ui
         BeamLatticeView m_beamLatticeView;
 
         Outline m_outline;
+        ValidationOverlay m_validationOverlay;
 
         NodeTypeToColor m_nodeTypeToColor;
         float m_uiScale = 1.0f;
