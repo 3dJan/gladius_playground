@@ -7,6 +7,7 @@
 #include <cctype>
 #include <fmt/format.h>
 #include <limits>
+#include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -1353,28 +1354,129 @@ namespace gladius::ui
                     
                     if (ImGui::CollapsingHeader(headerText.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
-                        float const maxHeight = std::min(150.0f, static_cast<float>(allIssues.size()) * 25.0f + 10.0f);
-                        ImGui::BeginChild("IssuesListChild", ImVec2(0, maxHeight), false);
+                        // Group issues by (modelId, nodeId, type) to create smart messages
+                        struct NodeTypeKey
+                        {
+                            nodes::ResourceId modelId;
+                            nodes::NodeId nodeId;
+                            nodes::IssueType type;
+                            bool operator<(NodeTypeKey const& other) const
+                            {
+                                if (modelId != other.modelId) return modelId < other.modelId;
+                                if (nodeId != other.nodeId) return nodeId < other.nodeId;
+                                return static_cast<int>(type) < static_cast<int>(other.type);
+                            }
+                        };
                         
-                        int issueIndex = 0;
+                        std::map<NodeTypeKey, std::vector<nodes::ValidationIssue const*>> groupedIssues;
                         for (auto const& issue : allIssues)
                         {
-                            char const* icon = (issue.severity == nodes::IssueSeverity::Error) 
+                            groupedIssues[{issue.modelId, issue.nodeId, issue.type}].push_back(&issue);
+                        }
+                        
+                        // Calculate actual content height based on item count
+                        float const itemHeight = ImGui::GetTextLineHeightWithSpacing();
+                        float const maxHeight = std::min(150.0f, static_cast<float>(groupedIssues.size()) * itemHeight + 8.0f);
+                        ImGui::BeginChild("IssuesListChild", ImVec2(0, maxHeight), false);
+                        
+                        int groupIndex = 0;
+                        for (auto const& [key, issues] : groupedIssues)
+                        {
+                            ImGui::PushID(groupIndex++);
+                            
+                            // Determine worst severity for color
+                            bool hasError = std::any_of(issues.begin(), issues.end(),
+                                [](auto const* i) { return i->severity == nodes::IssueSeverity::Error; });
+                            
+                            char const* icon = hasError
                                              ? reinterpret_cast<const char*>(ICON_FA_TIMES_CIRCLE)
                                              : reinterpret_cast<const char*>(ICON_FA_EXCLAMATION_CIRCLE);
                             
-                            ImVec4 const color = (issue.severity == nodes::IssueSeverity::Error)
+                            ImVec4 const color = hasError
                                               ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f)
                                               : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
                             
-                            // Make the issue clickable - navigate to problem node
-                            ImGui::PushID(issueIndex++);
-                            ImGui::PushStyleColor(ImGuiCol_Text, color);
+                            // Build smart imperative message based on issue type
+                            std::string const& nodeName = issues.front()->node;
+                            std::string const& modelName = issues.front()->model;
+                            std::string nodePrefix = modelName.empty() ? nodeName : fmt::format("{}.{}", modelName, nodeName);
                             
-                            bool const hasNode = (issue.nodeId != 0);
-                            std::string buttonLabel = issue.model.empty()
-                                ? fmt::format("{} {}", icon, issue.message)
-                                : fmt::format("{} [{}] {}", icon, issue.model, issue.message);
+                            std::string message;
+                            switch (key.type)
+                            {
+                            case nodes::IssueType::MissingConnection:
+                            {
+                                // Collect all parameter names
+                                std::vector<std::string> params;
+                                for (auto const* issue : issues)
+                                {
+                                    if (!issue->parameter.empty())
+                                        params.push_back(fmt::format("'{}'", issue->parameter));
+                                }
+                                if (params.size() == 1)
+                                {
+                                    message = fmt::format("{}: Connect input {}", nodePrefix, params[0]);
+                                }
+                                else if (params.size() == 2)
+                                {
+                                    message = fmt::format("{}: Connect inputs {} and {}", nodePrefix, params[0], params[1]);
+                                }
+                                else if (params.size() > 2)
+                                {
+                                    std::string paramList;
+                                    for (size_t i = 0; i < params.size() - 1; ++i)
+                                    {
+                                        if (i > 0) paramList += ", ";
+                                        paramList += params[i];
+                                    }
+                                    message = fmt::format("{}: Connect inputs {}, and {}", nodePrefix, paramList, params.back());
+                                }
+                                else
+                                {
+                                    message = fmt::format("{}: Connect missing inputs", nodePrefix);
+                                }
+                                break;
+                            }
+                            case nodes::IssueType::TypeMismatch:
+                            {
+                                std::vector<std::string> params;
+                                for (auto const* issue : issues)
+                                {
+                                    if (!issue->parameter.empty())
+                                        params.push_back(fmt::format("'{}'", issue->parameter));
+                                }
+                                if (params.size() == 1)
+                                {
+                                    message = fmt::format("{}: Fix type mismatch on {}", nodePrefix, params[0]);
+                                }
+                                else if (params.size() >= 2)
+                                {
+                                    message = fmt::format("{}: Fix type mismatches on {} inputs", nodePrefix, params.size());
+                                }
+                                else
+                                {
+                                    message = fmt::format("{}: Fix type mismatch", nodePrefix);
+                                }
+                                break;
+                            }
+                            case nodes::IssueType::InvalidReference:
+                                message = fmt::format("{}: Remove invalid reference", nodePrefix);
+                                break;
+                            case nodes::IssueType::CyclicDependency:
+                                message = fmt::format("{}: Break cycle in graph", nodePrefix);
+                                break;
+                            case nodes::IssueType::FunctionNotFound:
+                                message = fmt::format("{}: Function not found", nodePrefix);
+                                break;
+                            default:
+                                message = fmt::format("{}: {}", nodePrefix, issues.front()->message);
+                                break;
+                            }
+                            
+                            bool const hasNode = (key.nodeId != 0);
+                            std::string buttonLabel = fmt::format("{} {}", icon, message);
+                            
+                            ImGui::PushStyleColor(ImGuiCol_Text, color);
                             
                             if (hasNode)
                             {
@@ -1385,7 +1487,7 @@ namespace gladius::ui
                                 
                                 if (ImGui::Button(buttonLabel.c_str()))
                                 {
-                                    requestNodeFocus(issue.nodeId, issue.modelId);
+                                    requestNodeFocus(key.nodeId, key.modelId);
                                 }
                                 
                                 if (ImGui::IsItemHovered())
@@ -1404,16 +1506,6 @@ namespace gladius::ui
                             }
                             
                             ImGui::PopStyleColor();
-                            
-                            if (!issue.fixSuggestion.empty())
-                            {
-                                ImGui::SameLine();
-                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
-                                ImGui::TextUnformatted(
-                                    fmt::format("(Tip: {})", issue.fixSuggestion).c_str());
-                                ImGui::PopStyleColor();
-                            }
-                            
                             ImGui::PopID();
                         }
                         
