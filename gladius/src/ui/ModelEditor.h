@@ -91,6 +91,8 @@ namespace gladius::ui
 
         /// Focus management for keyboard-driven workflow
         void requestNodeFocus(nodes::NodeId nodeId);
+        /// Focus node and switch to its function if different from current
+        void requestNodeFocus(nodes::NodeId nodeId, nodes::ResourceId modelId);
         [[nodiscard]] bool shouldFocusNode(nodes::NodeId nodeId) const;
         void clearNodeFocus();
 

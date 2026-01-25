@@ -1372,7 +1372,9 @@ namespace gladius::ui
                             ImGui::PushStyleColor(ImGuiCol_Text, color);
                             
                             bool const hasNode = (issue.nodeId != 0);
-                            std::string buttonLabel = fmt::format("{} {}", icon, issue.message);
+                            std::string buttonLabel = issue.model.empty()
+                                ? fmt::format("{} {}", icon, issue.message)
+                                : fmt::format("{} [{}] {}", icon, issue.model, issue.message);
                             
                             if (hasNode)
                             {
@@ -1383,7 +1385,7 @@ namespace gladius::ui
                                 
                                 if (ImGui::Button(buttonLabel.c_str()))
                                 {
-                                    requestNodeFocus(issue.nodeId);
+                                    requestNodeFocus(issue.nodeId, issue.modelId);
                                 }
                                 
                                 if (ImGui::IsItemHovered())
@@ -1473,6 +1475,7 @@ namespace gladius::ui
                         m_pendingCenterView = false;
                         ed::NavigateToContent();
                     }
+
                 }
                 onCreateNode();
                 onDeleteNode();
@@ -1558,14 +1561,6 @@ namespace gladius::ui
                 ed::PopStyleColor();
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
-
-                // Process deferred node focus (must happen after ed::End() but needs SetCurrentEditor)
-                if (m_shouldFocusNode && m_nodeToFocus != 0)
-                {
-                    ed::SetCurrentEditor(getCurrentEditorContext());
-                    ed::CenterNodeOnScreen(ed::NodeId(static_cast<uint64_t>(m_nodeToFocus)));
-                    clearNodeFocus();
-                }
 
                 if (m_nodeViewVisitor.haveParameterChanged())
                 {
@@ -2838,6 +2833,18 @@ namespace gladius::ui
     {
         m_nodeToFocus = nodeId;
         m_shouldFocusNode = true;
+    }
+
+    void ModelEditor::requestNodeFocus(nodes::NodeId nodeId, nodes::ResourceId modelId)
+    {
+        // Switch to the function containing the node first
+        if (modelId != 0 && m_currentModel && m_currentModel->getResourceId() != modelId)
+        {
+            switchToFunction(modelId);
+        }
+        // Call immediately like outline does - commands are queued by node editor for next frame
+        ed::SelectNode(ed::NodeId(static_cast<uint64_t>(nodeId)));
+        ed::NavigateToSelection(true);
     }
 
     bool ModelEditor::shouldFocusNode(nodes::NodeId nodeId) const
