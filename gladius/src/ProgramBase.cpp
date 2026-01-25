@@ -52,6 +52,14 @@ namespace gladius
         m_programFront->finishCompilation();
     }
 
+    void ProgramBase::requestShutdown()
+    {
+        if (m_programFront)
+        {
+            m_programFront->requestShutdown();
+        }
+    }
+
     void ProgramBase::dumpSource(std::filesystem::path const & path) const
     {
         ProfileFunction m_programFront->dumpSource(path);

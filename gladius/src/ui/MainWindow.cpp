@@ -1677,6 +1677,14 @@ namespace gladius::ui
             return;
         }
 
+        // Gracefully stop any ongoing compilations before exit
+        auto & programManager = m_core->getProgramManager();
+        if (programManager.isAnyCompilationInProgressNonBlocking())
+        {
+            programManager.requestShutdownAll();
+            programManager.waitForAllCompilations();
+        }
+
         if (m_fileChanged)
         {
             m_showSaveBeforeExit = true;

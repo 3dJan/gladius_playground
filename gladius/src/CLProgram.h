@@ -93,6 +93,13 @@ namespace gladius
         /// blocks until an ongoing compilation has finished
         void finishCompilation();
 
+        /// Request shutdown of any ongoing compilation.
+        /// This sets a flag that will cause compile() to abort early.
+        void requestShutdown();
+
+        /// Check if shutdown was requested
+        [[nodiscard]] bool isShutdownRequested() const noexcept;
+
         template <typename... ArgumentTypes>
         [[nodiscard]] cl::Event runNonBlocking(cl::CommandQueue const & queue,
                                                const std::string & methodName,
@@ -448,6 +455,7 @@ namespace gladius
         std::map<std::string, cl::Kernel> m_kernels;
         std::atomic<bool> m_valid{false};
         std::atomic<bool> m_isCompilationInProgress{false};
+        std::atomic<bool> m_shutdownRequested{false};
 
         CallBackUserData m_callBackUserData;
 
