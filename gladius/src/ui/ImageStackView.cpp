@@ -255,6 +255,7 @@ namespace gladius::ui
         // Determine format based on pixel format
         GLenum format = GL_RGBA;
         GLenum internalFormat = GL_RGBA8;
+        bool needsGrayscaleSwizzle = false;
         
         switch (image.getFormat())
         {
@@ -262,10 +263,12 @@ namespace gladius::ui
         case io::PixelFormat::GRAYSCALE_1BIT:
             format = GL_RED;
             internalFormat = GL_R8;
+            needsGrayscaleSwizzle = true;
             break;
         case io::PixelFormat::GRAYSCALE_ALPHA_8BIT:
             format = GL_RG;
             internalFormat = GL_RG8;
+            needsGrayscaleSwizzle = true;
             break;
         case io::PixelFormat::RGB_8BIT:
             format = GL_RGB;
@@ -279,10 +282,12 @@ namespace gladius::ui
         case io::PixelFormat::GRAYSCALE_16BIT:
             format = GL_RED;
             internalFormat = GL_R16;
+            needsGrayscaleSwizzle = true;
             break;
         case io::PixelFormat::GRAYSCALE_ALPHA_16BIT:
             format = GL_RG;
             internalFormat = GL_RG16;
+            needsGrayscaleSwizzle = true;
             break;
         case io::PixelFormat::RGB_16BIT:
             format = GL_RGB;
@@ -292,6 +297,23 @@ namespace gladius::ui
             format = GL_RGBA;
             internalFormat = GL_RGBA16;
             break;
+        }
+
+        // For grayscale textures, set swizzle to replicate R channel to RGB
+        if (needsGrayscaleSwizzle)
+        {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+        }
+        else
+        {
+            // Reset to default swizzle for non-grayscale
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
         }
 
         GLenum const dataType = (image.getBitDepth() == 16) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;

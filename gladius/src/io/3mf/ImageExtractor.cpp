@@ -183,16 +183,11 @@ namespace gladius::io
                 continue;
             }
 
-            // Get original format info before decoding
-            m_pngInfo = lodepng::getPNGHeaderInfo(fileContents);
-            auto const originalColorType = m_pngInfo.color.colortype;
-            auto const originalBitDepth = m_pngInfo.color.bitdepth;
-
             std::vector<unsigned char> image;
             unsigned int width, height;
-            // Decode to original format to preserve VRAM
-            unsigned const int error =
-                lodepng::decode(image, width, height, fileContents, originalColorType, originalBitDepth);
+            // Always decode to RGBA for consistent handling of all PNG formats
+            // (including indexed/palette which lodepng converts automatically)
+            unsigned const int error = lodepng::decode(image, width, height, fileContents);
             if (error)
             {
                 throw std::runtime_error(
@@ -201,8 +196,8 @@ namespace gladius::io
 
             Image img{std::move(image), width, height};
             img.swapXYData();
-            img.setFormat(fromPngColorType(m_pngInfo.color));
-            img.setBitDepth(originalBitDepth);
+            img.setFormat(PixelFormat::RGBA_8BIT);
+            img.setBitDepth(8);
             images.emplace_back(std::move(img));
         }
 
