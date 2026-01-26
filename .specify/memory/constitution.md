@@ -1,8 +1,8 @@
 <!--
 === SYNC IMPACT REPORT ===
-Version change: 1.0.0 → 1.1.0
+Version change: 1.1.0 → 1.2.0
 Modified principles: None
-Added sections: Domain Knowledge (3MF Volumetric/Implicit), Reference Documents
+Added sections: Principle VI (UI Responsiveness)
 Removed sections: None
 Templates requiring updates:
   - plan-template.md: ✅ Compatible (Constitution Check section exists)
@@ -121,6 +121,24 @@ Public APIs MUST be documented with Doxygen-style comments.
 **Rationale**: Good documentation accelerates onboarding and reduces support burden while
 avoiding the maintenance cost of redundant or stale comments.
 
+### VI. UI Responsiveness
+
+The user interface MUST remain responsive at all times. Expensive operations MUST NOT block the main thread.
+
+- Long-running tasks (file I/O, mesh generation, OpenCL operations) MUST execute asynchronously
+- Use `std::async`, `std::future`, or dedicated worker threads for background operations
+- Progress feedback MUST be provided for operations exceeding ~100ms
+- Cancellation support SHOULD be implemented for long-running operations
+- Shared state between threads MUST be protected with appropriate synchronization primitives
+- Prefer message-passing and immutable data over shared mutable state
+- Avoid blocking calls (`wait()`, `get()`) on the main/UI thread without timeout or progress handling
+- Race conditions MUST be prevented through careful synchronization design, not added as fixes
+- Use RAII for lock management (`std::lock_guard`, `std::unique_lock`)
+
+**Rationale**: A responsive UI is critical for user experience. Blocking the main thread leads to
+application freezes and poor perceived performance. Async operations introduce concurrency hazards;
+disciplined synchronization prevents race conditions and deadlocks that are notoriously difficult to debug.
+
 ## Technology Stack
 
 Gladius maintains a specific technology stack for consistency and performance.
@@ -174,6 +192,7 @@ Gladius maintains a specific technology stack for consistency and performance.
 - [ ] No unnecessary complexity (Principle III)
 - [ ] Follows code style conventions (Principle IV)
 - [ ] Public APIs are documented (Principle V)
+- [ ] UI remains responsive; async operations are thread-safe (Principle VI)
 - [ ] Files remain under 400 lines
 - [ ] No static variables in functions
 - [ ] No global variables (use singletons or namespaces)
@@ -196,7 +215,7 @@ This constitution supersedes all other development practices in Gladius.
 - Complexity violations MUST be justified in PR description
 - Use `docs/developer_onboarding.md` for runtime development guidance
 
-**Version**: 1.1.0 | **Ratified**: 2025-12-29 | **Last Amended**: 2026-01-26
+**Version**: 1.2.0 | **Ratified**: 2025-12-29 | **Last Amended**: 2026-01-26
 
 ## Reference Documents
 
