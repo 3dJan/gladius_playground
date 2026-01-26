@@ -1,8 +1,8 @@
 <!--
 === SYNC IMPACT REPORT ===
-Version change: 0.0.0 → 1.0.0
-Modified principles: N/A (initial version)
-Added sections: Core Principles (5), Technology Stack, Development Workflow, Governance
+Version change: 1.0.0 → 1.1.0
+Modified principles: None
+Added sections: Domain Knowledge (3MF Volumetric/Implicit), Reference Documents
 Removed sections: None
 Templates requiring updates:
   - plan-template.md: ✅ Compatible (Constitution Check section exists)
@@ -13,6 +13,32 @@ Follow-up TODOs: None
 -->
 
 # Gladius Constitution
+
+## Project Overview
+
+Gladius is a **C++20 development tool and library** for processing **implicit geometries** using the
+3MF Volumetric Extension. It serves as a reference implementation for the 3MF Consortium's
+volumetric specification.
+
+For comprehensive technical details, see:
+[Gladius & 3MF Volumetric Extension Technical Overview](gladius-3mf-volumetric-overview.md)
+
+### Key Domain Concepts
+
+**Implicit Surfaces / Signed Distance Fields (SDF)**:
+- Geometry is defined by mathematical functions evaluated at any 3D point
+- Negative values = inside, zero = surface, positive = outside
+- Boolean operations: union = `min()`, intersection = `max()`, subtraction = `max(a, -b)`
+
+**3MF Volumetric Extension**:
+- Extends 3MF with volumetric properties (spatially varying color, materials)
+- `<levelset>` defines object shape via implicit function (iso-surface at 0)
+- `<functionfromimage3d>` samples from voxel data (PNG image stacks)
+
+**3MF Implicit Extension**:
+- Node-based mathematical function graphs within 3MF files
+- `<implicitfunction>` contains computation nodes connected via references
+- Supports ~50 native node types (arithmetic, trigonometric, geometry, etc.)
 
 ## Core Principles
 
@@ -110,6 +136,7 @@ Gladius maintains a specific technology stack for consistency and performance.
 - OpenCL 1.2+ for GPU compute
 - OpenGL for rendering
 - ImGui for user interface
+- lib3mf for 3MF file handling
 
 **Compiler Requirements**:
 - Clang (Linux default: `/usr/bin/clang`, `/usr/bin/clang++`)
@@ -118,6 +145,12 @@ Gladius maintains a specific technology stack for consistency and performance.
 **File Organization**:
 - `.h` for declarations, `.cpp` for definitions
 - Headers use `""` for relative paths, `<>` for system/external headers
+
+**Key Directories**:
+- `gladius/src/nodes/` — Node/graph system for implicit functions
+- `gladius/src/io/3mf/` — 3MF import/export with volumetric support
+- `gladius/src/compute/` — OpenCL program management and GPU kernels
+- `gladius/src/kernel/` — OpenCL kernel source files
 
 ## Development Workflow
 
@@ -163,4 +196,14 @@ This constitution supersedes all other development practices in Gladius.
 - Complexity violations MUST be justified in PR description
 - Use `docs/developer_onboarding.md` for runtime development guidance
 
-**Version**: 1.0.0 | **Ratified**: 2025-12-29 | **Last Amended**: 2025-12-29
+**Version**: 1.1.0 | **Ratified**: 2025-12-29 | **Last Amended**: 2026-01-26
+
+## Reference Documents
+
+For detailed technical information, see these companion documents:
+
+| Document | Description |
+|----------|-------------|
+| [Gladius & 3MF Volumetric Overview](gladius-3mf-volumetric-overview.md) | Comprehensive guide to 3MF volumetric/implicit extensions and Gladius implementation |
+| [Developer Onboarding](../../docs/developer_onboarding.md) | Practical guide for setting up development environment |
+| [Graph to OpenCL Architecture](../../docs/architecture/graph_to_opencl.md) | How function graphs compile to GPU kernels |
