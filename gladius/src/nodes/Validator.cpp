@@ -33,6 +33,11 @@ namespace gladius::nodes
 
         for (auto & [name, function] : assembly.getFunctions())
         {
+            // Skip validation for managed functions (e.g., auto-generated FunctionFromImage3D)
+            if (function->isManaged())
+            {
+                continue;
+            }
             validateModel(*function, assembly, issueList);
         }
 

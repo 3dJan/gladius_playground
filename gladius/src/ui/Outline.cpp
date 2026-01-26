@@ -1,5 +1,6 @@
 #include "Outline.h"
 #include "ImageStackResource.h"
+#include "io/3mf/ResourceIdUtil.h"
 #include "nodes/Builder.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
@@ -130,34 +131,50 @@ namespace gladius::ui
                                     auto model3mf = m_document->get3mfModel();
                                     if (model3mf)
                                     {
-                                        // Create FunctionFromImage3D via Lib3MF API
-                                        auto funcPkg = model3mf->AddFunctionFromImage3D(nullptr);
-                                        if (funcPkg)
+                                        try
                                         {
-                                            // Get the underlying ImageStack from 3MF
+                                            auto uniqueResId = gladius::io::resourceIdToUniqueResourceId(
+                                                model3mf, imageStackId.value());
                                             auto imageStack =
-                                              model3mf->GetImageStackByID(imageStackId.value());
+                                              model3mf->GetImageStackByID(uniqueResId);
                                             if (imageStack)
                                             {
-                                                funcPkg->SetImage3D(imageStack.get());
+                                                auto func =
+                                                  model3mf->AddFunctionFromImage3D(imageStack.get());
+                                                if (func)
+                                                {
+                                                    func->SetFilter(Lib3MF::eTextureFilter::Linear);
+                                                    func->SetTileStyles(
+                                                      Lib3MF::eTextureTileStyle::Wrap,
+                                                      Lib3MF::eTextureTileStyle::Wrap,
+                                                      Lib3MF::eTextureTileStyle::Wrap);
+                                                    func->SetOffset(0.0);
+                                                    func->SetScale(1.0);
+
+                                                    // Register the function in the assembly
+                                                    nodes::Builder builder;
+                                                    nodes::SamplingSettings settings;
+                                                    builder.createFunctionFromImage3D(
+                                                        *m_document->getAssembly(),
+                                                        func->GetModelResourceID(),
+                                                        imageStackId.value(),
+                                                        settings);
+
+                                                    m_document->update3mfModel();
+                                                    m_document->markFileAsChanged();
+                                                }
                                             }
-
-                                            // T064: Set default values (Linear filter, Repeat
-                                            // tiling)
-                                            funcPkg->SetFilter(Lib3MF::eTextureFilter::Linear);
-                                            funcPkg->SetTileStyles(
-                                              Lib3MF::eTextureTileStyle::Wrap,
-                                              Lib3MF::eTextureTileStyle::Wrap,
-                                              Lib3MF::eTextureTileStyle::Wrap);
-                                            funcPkg->SetOffset(0.0);
-                                            funcPkg->SetScale(1.0);
-
-                                            // Update the document model
-                                            m_document->update3mfModel();
-                                            m_document->markFileAsChanged();
-
-                                            // T065: Note - selection is handled by ModelEditor
-                                            // when it detects new functions during refresh
+                                        }
+                                        catch (std::exception const & e)
+                                        {
+                                            auto logger = m_document->getSharedLogger();
+                                            if (logger)
+                                            {
+                                                logger->addEvent(
+                                                    {fmt::format("Failed to create FunctionFromImage3D: {}",
+                                                                 e.what()),
+                                                     events::Severity::Error});
+                                            }
                                         }
                                     }
                                 }

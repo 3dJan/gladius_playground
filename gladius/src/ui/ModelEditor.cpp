@@ -2811,6 +2811,16 @@ namespace gladius::ui
         return false;
     }
 
+    void ModelEditor::refreshAssembly()
+    {
+        if (m_doc)
+        {
+            // Just update the assembly reference without clearing editor contexts
+            // This is a lightweight refresh for when functions are added externally
+            m_assembly = m_doc->getAssembly();
+        }
+    }
+
     void ModelEditor::requestNodeFocus(nodes::NodeId nodeId)
     {
         m_nodeToFocus = nodeId;

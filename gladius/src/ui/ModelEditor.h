@@ -147,6 +147,13 @@ namespace gladius::ui
          */
         bool isFunctionFromImage3D() const;
 
+        /**
+         * @brief Refresh the assembly from the current document.
+         *        Call this after external modifications to the assembly (e.g., creating functions
+         *        via ResourceView).
+         */
+        void refreshAssembly();
+
         /// Tab mode for FunctionFromImage3D functions
         enum class TabMode
         {

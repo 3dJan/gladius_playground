@@ -1,6 +1,7 @@
 #include "ResourceView.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h"
+#include "nodes/Builder.h"
 
 #include "FileChooser.h"
 #include "ImageStackResource.h"
@@ -605,6 +606,78 @@ namespace gladius::ui
 
                     // delete image stack
                     auto safeResult = document->isItSafeToDeleteResource(key);
+
+                    // Create FunctionFromImage3D button
+                    ImGui::BeginDisabled(exportInProgress);
+                    if (ImGui::Button("Create Function"))
+                    {
+                        auto resourceId = key.getResourceId();
+                        if (resourceId.has_value())
+                        {
+                            auto model3mf = document->get3mfModel();
+                            if (model3mf)
+                            {
+                                try
+                                {
+                                    auto uniqueResId = gladius::io::resourceIdToUniqueResourceId(
+                                        model3mf, resourceId.value());
+                                    auto imageStack =
+                                        model3mf->GetImageStackByID(uniqueResId);
+                                    if (imageStack)
+                                    {
+                                        auto func =
+                                            model3mf->AddFunctionFromImage3D(imageStack.get());
+                                        if (func)
+                                        {
+                                            func->SetFilter(Lib3MF::eTextureFilter::Linear);
+                                            func->SetTileStyles(Lib3MF::eTextureTileStyle::Wrap,
+                                                                Lib3MF::eTextureTileStyle::Wrap,
+                                                                Lib3MF::eTextureTileStyle::Wrap);
+                                            func->SetOffset(0.0);
+                                            func->SetScale(1.0);
+
+                                            // Register the function in the assembly
+                                            nodes::Builder builder;
+                                            nodes::SamplingSettings settings;
+                                            builder.createFunctionFromImage3D(
+                                                *document->getAssembly(),
+                                                func->GetModelResourceID(),
+                                                resourceId.value(),
+                                                settings);
+
+                                            document->update3mfModel();
+                                            document->markFileAsChanged();
+
+                                            // Refresh ModelEditor to show the new function
+                                            if (m_modelEditor)
+                                            {
+                                                m_modelEditor->refreshAssembly();
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (std::exception const & e)
+                                {
+                                    auto logger = document->getSharedLogger();
+                                    if (logger)
+                                    {
+                                        logger->addEvent(
+                                            {fmt::format("Failed to create FunctionFromImage3D: {}",
+                                                         e.what()),
+                                             events::Severity::Error});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    {
+                        ImGui::SetTooltip(
+                            "Create a FunctionFromImage3D that samples this ImageStack");
+                    }
+
+                    ImGui::SameLine();
                     if (ImGui::Button("Delete"))
                     {
                         if (safeResult.canBeRemoved)
