@@ -46,11 +46,15 @@ namespace gladius::io
         std::vector<unsigned char>
         loadFileFromFilesystem(std::filesystem::path const & filename) const;
 
-        ImageStack loadImageStack(FileList const & filenames);
+        ImageStack loadImageStack(FileList const & filenames,
+                                  FileLoaderType fileLoaderType = FileLoaderType::Archive);
 
         void printAllFiles() const;
 
         PixelFormat determinePixelFormat(std::filesystem::path const & filename) const;
+
+        /// Determine pixel format from a filesystem file (not archive)
+        PixelFormat determinePixelFormatFromFile(std::filesystem::path const & filename) const;
 
         LodePNGInfo const & getPNGInfo() const;
 

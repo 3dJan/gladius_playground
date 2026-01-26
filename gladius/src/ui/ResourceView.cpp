@@ -6,6 +6,7 @@
 #include "ImageStackResource.h"
 #include "ImageStackView.h"
 #include "MeshResource.h"
+#include "ModelEditor.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
 
@@ -457,7 +458,87 @@ namespace gladius::ui
                             // Get or create the view for this resource
                             auto & view = m_imageStackViews[key];
                             view.setImageStack(imgStack);
-                            
+
+                            // T059/T060/T061: Set up transform callback with undo support
+                            view.setTransformCallback(
+                                [this, document, key, &view](ImageStackTransform transform)
+                                {
+                                    // Get mutable ImageStack
+                                    auto & resourceManager =
+                                        document->getGeneratorContext().resourceManager;
+                                    auto const & resources = resourceManager.getResourceMap();
+
+                                    io::ImageStack * mutableStack = nullptr;
+                                    for (auto & [resKey, res] : resources)
+                                    {
+                                        if (resKey == key)
+                                        {
+                                            auto * stackRes =
+                                                dynamic_cast<ImageStackResource *>(res.get());
+                                            if (stackRes)
+                                            {
+                                                mutableStack = stackRes->getImageStack();
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if (!mutableStack)
+                                    {
+                                        return;
+                                    }
+
+                                    // T060: Create undo restore point
+                                    if (m_modelEditor)
+                                    {
+                                        switch (transform)
+                                        {
+                                        case ImageStackTransform::FlipHorizontal:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Flip ImageStack Horizontal");
+                                            break;
+                                        case ImageStackTransform::FlipVertical:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Flip ImageStack Vertical");
+                                            break;
+                                        case ImageStackTransform::Rotate90CW:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Rotate ImageStack 90\xC2\xB0 CW");
+                                            break;
+                                        case ImageStackTransform::Rotate90CCW:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Rotate ImageStack 90\xC2\xB0 CCW");
+                                            break;
+                                        }
+                                    }
+
+                                    // Apply the transform
+                                    switch (transform)
+                                    {
+                                    case ImageStackTransform::FlipHorizontal:
+                                        mutableStack->flipHorizontal();
+                                        break;
+                                    case ImageStackTransform::FlipVertical:
+                                        mutableStack->flipVertical();
+                                        break;
+                                    case ImageStackTransform::Rotate90CW:
+                                        mutableStack->rotate90CW();
+                                        break;
+                                    case ImageStackTransform::Rotate90CCW:
+                                        mutableStack->rotate90CCW();
+                                        break;
+                                    }
+
+                                    // Mark model as modified
+                                    if (m_modelEditor)
+                                    {
+                                        m_modelEditor->markModelAsModified();
+                                    }
+
+                                    // T061: Refresh layer texture
+                                    view.invalidateTexture();
+                                });
+
                             ImGui::Separator();
                             ImGui::Text("Layer Preview:");
                             view.render();
@@ -604,7 +685,40 @@ namespace gladius::ui
         case ResourceViewDialogOp::ImportImageStack:
             if (document)
             {
-                document->addImageStackResource(path);
+                auto importResult = document->addImageStackResourceWithPadding(path);
+
+                // Show notification if any images were padded
+                if (importResult.hasPaddedFiles())
+                {
+                    auto logger = document->getSharedLogger();
+                    if (logger)
+                    {
+                        std::string message = fmt::format(
+                            "ImageStack imported with padding to {}x{}. Padded {} file(s): ",
+                            importResult.maxWidth,
+                            importResult.maxHeight,
+                            importResult.paddedFiles.size());
+
+                        size_t const maxFilesToShow = 5;
+                        for (size_t i = 0;
+                             i < std::min(importResult.paddedFiles.size(), maxFilesToShow);
+                             ++i)
+                        {
+                            if (i > 0)
+                            {
+                                message += ", ";
+                            }
+                            message += importResult.paddedFiles[i];
+                        }
+                        if (importResult.paddedFiles.size() > maxFilesToShow)
+                        {
+                            message += fmt::format(
+                                " and {} more", importResult.paddedFiles.size() - maxFilesToShow);
+                        }
+
+                        logger->addEvent({message, events::Severity::Info});
+                    }
+                }
             }
             break;
         case ResourceViewDialogOp::AddMesh:

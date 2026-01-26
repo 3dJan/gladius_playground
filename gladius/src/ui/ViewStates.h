@@ -33,5 +33,13 @@ namespace gladius::ui
         // Cached preview texture
         unsigned int previewTextureId = 0;
         bool previewDirty = true;
+
+        // Preview throttling (T046)
+        double lastPreviewUpdateTime = 0.0;
+        static constexpr double previewUpdateIntervalMs = 500.0;
+
+        // Preview texture dimensions
+        int previewWidth = 128;
+        int previewHeight = 128;
     };
 }

@@ -1,6 +1,7 @@
 #include "ImageStackView.h"
 #include "io/3mf/ImageStack.h"
 
+#include <IconsFontAwesome6.h>
 #include <glad/glad.h>
 #include <algorithm>
 #include <fmt/format.h>
@@ -57,6 +58,77 @@ namespace gladius::ui
         }
     }
 
+    void ImageStackView::setTransformCallback(TransformCallback callback)
+    {
+        m_transformCallback = std::move(callback);
+    }
+
+    void ImageStackView::invalidateTexture()
+    {
+        m_state.textureDirty = true;
+    }
+
+    void ImageStackView::renderTransformButtons()
+    {
+        // T059: Transform buttons (Flip H, Flip V, Rotate CW, Rotate CCW)
+        bool const hasCallback = m_transformCallback != nullptr;
+
+        ImGui::BeginDisabled(!hasCallback);
+
+        if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_ARROWS_LEFT_RIGHT)))
+        {
+            if (m_transformCallback)
+            {
+                m_transformCallback(ImageStackTransform::FlipHorizontal);
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Flip Horizontal");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_ARROWS_UP_DOWN)))
+        {
+            if (m_transformCallback)
+            {
+                m_transformCallback(ImageStackTransform::FlipVertical);
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Flip Vertical");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_ROTATE_RIGHT)))
+        {
+            if (m_transformCallback)
+            {
+                m_transformCallback(ImageStackTransform::Rotate90CW);
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Rotate 90\xC2\xB0 Clockwise");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_ROTATE_LEFT)))
+        {
+            if (m_transformCallback)
+            {
+                m_transformCallback(ImageStackTransform::Rotate90CCW);
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Rotate 90\xC2\xB0 Counter-Clockwise");
+        }
+
+        ImGui::EndDisabled();
+    }
+
     bool ImageStackView::render()
     {
         bool changed = false;
@@ -77,6 +149,11 @@ namespace gladius::ui
 
         int const layerCount = static_cast<int>(m_imageStack->size());
         auto const & currentImage = m_imageStack->at(static_cast<size_t>(m_state.currentLayerIndex));
+
+        // T059: Transform buttons
+        renderTransformButtons();
+
+        ImGui::Separator();
 
         // Layer navigation slider (1-based display for user-friendliness)
         int displayIndex = m_state.currentLayerIndex + 1;

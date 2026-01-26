@@ -1,5 +1,6 @@
 #include "Outline.h"
 #include "ImageStackResource.h"
+#include "nodes/Builder.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
 #include "imgui.h"
@@ -115,6 +116,53 @@ namespace gladius::ui
                         if (ImGui::TreeNodeEx(displayName.c_str(), leafFlags))
                         {
                             ImGui::TreePop();
+                        }
+
+                        // T062: Context menu for ImageStack items
+                        if (ImGui::BeginPopupContextItem())
+                        {
+                            if (ImGui::MenuItem("Create FunctionFromImage3D"))
+                            {
+                                // T063/T064: Create function with default settings
+                                auto imageStackId = key.getResourceId();
+                                if (imageStackId.has_value() && m_document && m_document->getCore())
+                                {
+                                    auto model3mf = m_document->get3mfModel();
+                                    if (model3mf)
+                                    {
+                                        // Create FunctionFromImage3D via Lib3MF API
+                                        auto funcPkg = model3mf->AddFunctionFromImage3D(nullptr);
+                                        if (funcPkg)
+                                        {
+                                            // Get the underlying ImageStack from 3MF
+                                            auto imageStack =
+                                              model3mf->GetImageStackByID(imageStackId.value());
+                                            if (imageStack)
+                                            {
+                                                funcPkg->SetImage3D(imageStack.get());
+                                            }
+
+                                            // T064: Set default values (Linear filter, Repeat
+                                            // tiling)
+                                            funcPkg->SetFilter(Lib3MF::eTextureFilter::Linear);
+                                            funcPkg->SetTileStyles(
+                                              Lib3MF::eTextureTileStyle::Wrap,
+                                              Lib3MF::eTextureTileStyle::Wrap,
+                                              Lib3MF::eTextureTileStyle::Wrap);
+                                            funcPkg->SetOffset(0.0);
+                                            funcPkg->SetScale(1.0);
+
+                                            // Update the document model
+                                            m_document->update3mfModel();
+                                            m_document->markFileAsChanged();
+
+                                            // T065: Note - selection is handled by ModelEditor
+                                            // when it detects new functions during refresh
+                                        }
+                                    }
+                                }
+                            }
+                            ImGui::EndPopup();
                         }
                     }
                     ImGui::TreePop();

@@ -208,6 +208,9 @@ namespace gladius::ui
         m_validationOverlay.setNavigationCallback(
           [this](nodes::NodeId nodeId, nodes::ResourceId modelId)
           { requestNodeFocus(nodeId, modelId); });
+
+        // T060: Setup ResourceView with ModelEditor for undo support in transforms
+        m_resourceView.setModelEditor(this);
     }
 
     ModelEditor::~ModelEditor()

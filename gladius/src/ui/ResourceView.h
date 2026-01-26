@@ -10,6 +10,8 @@
 
 namespace gladius::ui
 {
+    class ModelEditor;
+
     /// @brief Identifies async file dialog operations in ResourceView
     enum class ResourceViewDialogOp
     {
@@ -27,6 +29,12 @@ namespace gladius::ui
         void setExportState(ExportState * state)
         {
             m_exportState = state;
+        }
+
+        /// @brief Set the model editor for undo support in transforms (T060)
+        void setModelEditor(ModelEditor * editor)
+        {
+            m_modelEditor = editor;
         }
 
       private:
@@ -66,6 +74,9 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications
         ExportState * m_exportState{nullptr};
+
+        // Model editor for undo support (T060)
+        ModelEditor * m_modelEditor{nullptr};
 
         // ImageStackView instances per resource
         std::unordered_map<ResourceKey, ImageStackView> m_imageStackViews;
