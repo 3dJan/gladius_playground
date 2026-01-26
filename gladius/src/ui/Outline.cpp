@@ -1,9 +1,13 @@
 #include "Outline.h"
+#include "ImageStackResource.h"
+#include "ResourceManager.h"
 #include "Widgets.h"
 #include "imgui.h"
 #include "nodes/BuildItem.h"
 #include "nodes/Components.h"
 #include "nodes/Object.h"
+
+#include <fmt/format.h>
 
 namespace gladius::ui
 {
@@ -69,6 +73,59 @@ namespace gladius::ui
                      " Position and rotate parts\n"
                      " Combine multiple objects in your design\n"
                      " Arrange items for optimal printing");
+
+        // Image Stacks section
+        if (m_document && m_document->getCore())
+        {
+            auto & resourceManager = m_document->getGeneratorContext().resourceManager;
+            auto const & resources = resourceManager.getResourceMap();
+
+            // Count ImageStack resources
+            size_t imageStackCount = 0;
+            for (auto const & [key, res] : resources)
+            {
+                if (dynamic_cast<ImageStackResource const *>(res.get()))
+                {
+                    ++imageStackCount;
+                }
+            }
+
+            if (imageStackCount > 0)
+            {
+                ImGui::BeginGroup();
+                if (ImGui::TreeNodeEx("Image Stacks", baseFlags))
+                {
+                    ImGuiTreeNodeFlags const leafFlags =
+                      ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanAvailWidth;
+
+                    for (auto const & [key, res] : resources)
+                    {
+                        auto const * stack = dynamic_cast<ImageStackResource const *>(res.get());
+                        if (!stack)
+                        {
+                            continue;
+                        }
+
+                        auto const displayName = fmt::format("{} ({}x{}x{})",
+                                                             key.getDisplayName(),
+                                                             stack->getWidth(),
+                                                             stack->getHeight(),
+                                                             stack->getNumSheets());
+
+                        if (ImGui::TreeNodeEx(displayName.c_str(), leafFlags))
+                        {
+                            ImGui::TreePop();
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::EndGroup();
+                frameOverlay(ImVec4(1.0f, 0.65f, 0.0f, 0.1f),
+                             "Image Stacks\n\n"
+                             "3D image data used for volumetric operations.\n"
+                             "Select an image stack to view and edit its layers.");
+            }
+        }
 
         return propertiesChanged;
     }

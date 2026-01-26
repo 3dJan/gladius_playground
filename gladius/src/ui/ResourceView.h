@@ -3,6 +3,10 @@
 #include "Document.h"
 #include "ExportState.h"
 #include "FileDialogService.h"
+#include "ImageStackView.h"
+#include "ResourceKey.h"
+
+#include <unordered_map>
 
 namespace gladius::ui
 {
@@ -62,5 +66,8 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications
         ExportState * m_exportState{nullptr};
+
+        // ImageStackView instances per resource
+        std::unordered_map<ResourceKey, ImageStackView> m_imageStackViews;
     };
 }

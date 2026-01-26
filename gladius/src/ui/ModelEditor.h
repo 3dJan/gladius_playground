@@ -5,6 +5,7 @@
 #include "BeamLatticeView.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
+#include "FunctionFromImage3DView.h"
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "NodeClipboard.h"
@@ -139,6 +140,19 @@ namespace gladius::ui
          * @return true if the model editor is being hovered
          */
         bool isHovered() const;
+
+        /**
+         * @brief Check if the current model is a FunctionFromImage3D
+         * @return true if the model contains an ImageSampler node
+         */
+        bool isFunctionFromImage3D() const;
+
+        /// Tab mode for FunctionFromImage3D functions
+        enum class TabMode
+        {
+            Graph = 0,     ///< Normal graph view
+            Properties = 1 ///< FunctionFromImage3D properties panel
+        };
 
       private:
         // Extraction helper
@@ -327,6 +341,10 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};
+
+        // FunctionFromImage3D UI
+        FunctionFromImage3DView m_functionFromImage3DView;
+        TabMode m_currentTabMode{TabMode::Graph};
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

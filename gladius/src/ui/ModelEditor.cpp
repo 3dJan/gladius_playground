@@ -1350,8 +1350,46 @@ namespace gladius::ui
 
                 m_popupMenuFunction();
 
-                auto * currentCtx = getCurrentEditorContext();
-                ed::SetCurrentEditor(currentCtx);
+                // Tab bar for FunctionFromImage3D functions
+                bool const showTabs = isFunctionFromImage3D();
+                if (showTabs)
+                {
+                    if (ImGui::BeginTabBar("FunctionTabs"))
+                    {
+                        if (ImGui::BeginTabItem("Graph"))
+                        {
+                            m_currentTabMode = TabMode::Graph;
+                            ImGui::EndTabItem();
+                        }
+                        if (ImGui::BeginTabItem("Properties"))
+                        {
+                            m_currentTabMode = TabMode::Properties;
+                            ImGui::EndTabItem();
+                        }
+                        ImGui::EndTabBar();
+                    }
+                }
+                else
+                {
+                    m_currentTabMode = TabMode::Graph;
+                }
+
+                // Render Properties panel if in Properties tab
+                if (showTabs && m_currentTabMode == TabMode::Properties)
+                {
+                    m_functionFromImage3DView.setFunction(m_currentModel.get(),
+                                                         m_assembly.get());
+                    m_functionFromImage3DView.setModelEditor(this);
+                    if (m_functionFromImage3DView.render())
+                    {
+                        parameterChanged = true;
+                    }
+                }
+                else
+                {
+                    // Normal graph view
+                    auto * currentCtx = getCurrentEditorContext();
+                    ed::SetCurrentEditor(currentCtx);
 
                 ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
                                    ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
@@ -1481,6 +1519,7 @@ namespace gladius::ui
 
                 ed::End();
                 ed::PopStyleColor();
+                } // end else (Graph view)
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
 
@@ -2749,6 +2788,24 @@ namespace gladius::ui
     {
         // Check if any of the editor windows are hovered
         return ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) && isVisible();
+    }
+
+    bool ModelEditor::isFunctionFromImage3D() const
+    {
+        if (!m_currentModel)
+        {
+            return false;
+        }
+
+        // Check if the model contains an ImageSampler node
+        for (auto const & [id, node] : *m_currentModel)
+        {
+            if (dynamic_cast<nodes::ImageSampler *>(node.get()))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void ModelEditor::requestNodeFocus(nodes::NodeId nodeId)

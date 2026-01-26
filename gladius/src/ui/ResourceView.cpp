@@ -4,6 +4,7 @@
 
 #include "FileChooser.h"
 #include "ImageStackResource.h"
+#include "ImageStackView.h"
 #include "MeshResource.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
@@ -444,6 +445,22 @@ namespace gladius::ui
                               infoNodeFlags))
                         {
                             ImGui::TreePop();
+                        }
+                    }
+
+                    // Render ImageStackView for image stacks
+                    if (stack)
+                    {
+                        auto imgStack = stack->getImageStack();
+                        if (imgStack && !imgStack->empty())
+                        {
+                            // Get or create the view for this resource
+                            auto & view = m_imageStackViews[key];
+                            view.setImageStack(imgStack);
+                            
+                            ImGui::Separator();
+                            ImGui::Text("Layer Preview:");
+                            view.render();
                         }
                     }
 
