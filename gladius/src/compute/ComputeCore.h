@@ -21,6 +21,7 @@
 #include <compute/ProgramManager.h>
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -572,6 +573,10 @@ namespace gladius
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
+        /// Non-blocking check for compilation progress using atomic flags only.
+        /// Safe to call from any thread without risk of blocking on mutex.
+        [[nodiscard]] bool isAnyCompilationInProgressNonBlocking() const noexcept;
+
         bool updateBBox();
         void updateBBoxOrThrow();
 
@@ -653,6 +658,14 @@ namespace gladius
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// @brief Check if SDF precomputation is currently in progress
+        /// @return True if SDF computation is running asynchronously
+        [[nodiscard]] bool isSdfComputationInProgress() const noexcept;
+
+        /// @brief Check if bounding box computation is currently in progress
+        /// @return True if bounding box calculation is running
+        [[nodiscard]] bool isBoundingBoxComputationInProgress() const noexcept;
+
         /// Get the program manager for direct access to specialized programs
         [[nodiscard]] ProgramManager & getProgramManager();
         [[nodiscard]] ProgramManager const & getProgramManager() const;
@@ -709,6 +722,12 @@ namespace gladius
         size_t m_preCompSdfSize = 256u;
 
         bool m_autoUpdateBoundingBox = true;
+
+        /// @brief Tracks whether SDF precomputation is currently running
+        std::atomic<bool> m_sdfComputationInProgress{false};
+
+        /// @brief Tracks whether bounding box computation is currently running
+        std::atomic<bool> m_boundingBoxComputationInProgress{false};
 
         /// @brief Tracks whether the distance init buffer contains valid data
         /// @note Invalidated on parameter changes, camera changes, or resolution changes

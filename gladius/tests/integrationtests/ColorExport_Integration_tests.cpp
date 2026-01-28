@@ -103,7 +103,8 @@ namespace gladius_tests::color_export
             // Use the currently available Manifold Dual Contouring GPU pipeline.
             // For unit tests we explicitly disable the experimental hierarchical path
             // to keep results stable and avoid empty-mesh edge cases.
-            compute::ManifoldDualContouringGpu extractor(core);
+            // Note: Use heap allocation to avoid stack overflow - ManifoldDualContouringGpu is large
+            auto extractor = std::make_unique<compute::ManifoldDualContouringGpu>(core);
             compute::ManifoldDualContouringConfig cfg{};
             cfg.initialDepth = 5U;
             cfg.maxDepth = 7U;
@@ -117,10 +118,10 @@ namespace gladius_tests::color_export
             cfg.qualityMinAngleThreshold = 15.0F;
             cfg.projectToSurface = true;
 
-            extractor.setConfig(cfg);
-            extractor.generateMesh();
+            extractor->setConfig(cfg);
+            extractor->generateMesh();
 
-            auto const & result = extractor.getMesh();
+            auto const & result = extractor->getMesh();
 
             std::vector<Eigen::Vector3f> vertices = result.positions;
             std::vector<std::uint32_t> const & indices = result.indices;

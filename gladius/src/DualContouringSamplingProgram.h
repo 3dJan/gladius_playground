@@ -42,6 +42,41 @@ namespace gladius
                           std::vector<float> const & thicknessLUT,
                           int lutResolution);
 
+        /// Sample SDF values for shell volumes (material bands between two depth boundaries)
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerLUT 3D LUT for outer boundary thickness (layers above this one)
+        /// @param innerLUT 3D LUT for inner boundary thickness (layers above and including this one)
+        /// @param lutResolution Resolution of the LUTs (e.g. 16)
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        void sampleCornersShellVolume(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerLUT,
+                          std::vector<float> const & innerLUT,
+                          int lutResolution,
+                          bool isInnermostLayer);
+
+        /// Sample SDF values using precomputed surface-aligned thickness field
+        /// This samples from a 3D grid (position → thickness) instead of color→LUT
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerField 3D grid of outer boundary thickness
+        /// @param innerField 3D grid of inner boundary thickness (empty for single boundary)
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        void sampleCornersWithThicknessField(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerField,
+                          std::vector<float> const & innerField,
+                          int fieldResolution,
+                          Eigen::Matrix4f const & worldToField,
+                          bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// @param positions Input positions to sample
         /// @param outValues Output SDF values (must be pre-sized)
@@ -54,6 +89,29 @@ namespace gladius
                           std::vector<Eigen::Vector3f> & outGradients,
                           Primitives const & primitives,
                           float isoValue,
+                          float gradientEpsilon = 0.001F);
+
+        /// Sample shell SDF values and gradients at Hermite positions using thickness fields
+        /// This is the shell-aware version that samples gradient on the shell SDF, not model SDF
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values (must be pre-sized)
+        /// @param outGradients Output gradient vectors (must be pre-sized)
+        /// @param primitives Model primitives for SDF evaluation
+        /// @param outerField 3D grid of outer boundary thickness
+        /// @param innerField 3D grid of inner boundary thickness (empty for single boundary)
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        /// @param gradientEpsilon Finite difference step size for gradient
+        void sampleHermiteWithThicknessField(std::vector<Eigen::Vector3f> const & positions,
+                          std::vector<float> & outValues,
+                          std::vector<Eigen::Vector3f> & outGradients,
+                          Primitives const & primitives,
+                          std::vector<float> const & outerField,
+                          std::vector<float> const & innerField,
+                          int fieldResolution,
+                          Eigen::Matrix4f const & worldToField,
+                          bool isInnermostLayer,
                           float gradientEpsilon = 0.001F);
 
         /// Sample volumetric colors at positions

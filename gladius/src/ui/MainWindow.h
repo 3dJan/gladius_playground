@@ -172,10 +172,14 @@ namespace gladius::ui
         void meshExportDialog();
         void cliExportDialog();
         void showExitPopUp();
+        void showExportInProgressWarning();
         void showSaveBeforeFileOperationPopUp();
         void logViewer();
         void renderStatusBar();
         void renderComputeErrorModal();
+
+        /// Renders a fullscreen semi-transparent overlay when export is in progress
+        void renderExportOverlay();
 
         void refreshModel();
 
@@ -247,6 +251,7 @@ namespace gladius::ui
         bool m_isSlicePreviewVisible{false};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
+        bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;
 

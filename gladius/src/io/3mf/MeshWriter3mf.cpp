@@ -239,6 +239,7 @@ namespace gladius::io
             // placeholder at index 0
             colorGroup->AddColor({0, 0, 0, 0});
 
+            std::size_t meshesProcessed = 0;
             for (auto const & [mesh, name, color] : meshesWithColors)
             {
                 if (!mesh || !validateMesh(*mesh))
@@ -249,6 +250,14 @@ namespace gladius::io
                             {fmt::format("Skipping invalid mesh: {}", name), events::Severity::Warning});
                     }
                     continue;
+                }
+
+                if (m_logger)
+                {
+                    m_logger->addEvent(
+                        {fmt::format("Processing mesh '{}' with {} faces, color ({:.2f}, {:.2f}, {:.2f})",
+                                     name, mesh->getNumberOfFaces(), color.x(), color.y(), color.z()),
+                         events::Severity::Info});
                 }
 
                 // Convert Eigen color to 8-bit
@@ -262,9 +271,10 @@ namespace gladius::io
                 auto meshObject = addMeshToModel(model3mf, *mesh, name);
 
                 // Apply uniform color to every triangle
-                std::size_t const numFaces = mesh->getNumberOfFaces();
-                std::vector<Lib3MF::sTriangleProperties> triProps(numFaces);
-                for (std::size_t i = 0; i < numFaces; ++i)
+                // Use actual triangle count from 3MF object (may differ from input due to filtering)
+                Lib3MF_uint64 const numTris = meshObject->GetTriangleCount();
+                std::vector<Lib3MF::sTriangleProperties> triProps(numTris);
+                for (Lib3MF_uint64 i = 0; i < numTris; ++i)
                 {
                     triProps[i].m_ResourceID = colorGroupId;
                     triProps[i].m_PropertyIDs[0] = colorPropertyId;
@@ -274,6 +284,15 @@ namespace gladius::io
                 meshObject->SetAllTriangleProperties(triProps);
 
                 createBuildItem(model3mf, meshObject, name);
+                ++meshesProcessed;
+            }
+
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Created {} build items from {} input meshes",
+                                 meshesProcessed, meshesWithColors.size()),
+                     events::Severity::Info});
             }
 
             if (writeThumbnail && sourceDocument)

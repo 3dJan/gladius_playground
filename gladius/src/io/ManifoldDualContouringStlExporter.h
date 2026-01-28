@@ -78,7 +78,7 @@ namespace gladius::io
         void writeMeshToFile(ComputeCore & generator,
                              std::vector<Eigen::Vector3f> const & positions,
                              std::vector<std::uint32_t> const & indices,
-                             std::vector<Eigen::Vector3f> const & normals) const;
+                             std::vector<Eigen::Vector3f> const & normals);
 
         events::SharedLogger m_logger;
         ManifoldDualContouringOptions m_options{};

@@ -78,6 +78,20 @@ namespace gladius::compute
         /// When set, the caller must ensure the precomputed SDF buffer corresponds
         /// to the same bounding box, otherwise sampling will be incorrect.
         std::optional<BoundingBox> boundingBoxOverride{std::nullopt};
+
+        // ---- Thickness Field Support ----
+        /// Enable shell SDF mode using thickness fields
+        bool useThicknessField{false};
+        /// 3D outer thickness field buffer (flattened, size = resolution^3)
+        std::vector<float> outerThicknessField;
+        /// 3D inner thickness field buffer (empty for innermost layer)
+        std::vector<float> innerThicknessField;
+        /// Resolution of the thickness field grid
+        int thicknessFieldResolution{128};
+        /// World-to-grid transformation matrix for thickness field sampling
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity();
+        /// True if this is the innermost layer (no inner boundary)
+        bool isInnermostLayer{false};
     };
 
     /**
@@ -245,6 +259,22 @@ namespace gladius::compute
             return m_vertexRegistry;
         }
 
+        /// Cancellation check callback
+        /// @return true if the operation should be cancelled
+        using CancellationCheckCallback = std::function<bool()>;
+
+        /**
+         * @brief Set cancellation check callback.
+         * @param callback Function that returns true if the operation should be cancelled
+         */
+        void setCancellationCheckCallback(CancellationCheckCallback callback);
+
+        /**
+         * @brief Check if the operation was cancelled.
+         * @return true if cancelled
+         */
+        [[nodiscard]] bool wasCancelled() const { return m_wasCancelled; }
+
       private:
         ComputeCore& m_core;
         ManifoldDualContouringProgram* m_program{nullptr};
@@ -252,9 +282,9 @@ namespace gladius::compute
         OctreeStats m_stats;
 
         // Global bounding box
-        Eigen::Vector3f m_globalBboxMin{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxMax{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxSize{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f m_globalBboxMin = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxMax = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxSize = Eigen::Vector3f::Zero();
 
         // Octree structure
         std::vector<GlobalOctreeNode> m_nodes;
@@ -326,5 +356,25 @@ namespace gladius::compute
         [[nodiscard]] float sampleSdf(Eigen::Vector3f const& position) const;
         [[nodiscard]] Eigen::Vector3f sampleGradient(Eigen::Vector3f const& position,
                                                       float epsilon) const;
+
+        // Thickness field support
+        [[nodiscard]] float sampleThicknessField(std::vector<float> const& field,
+                                                  Eigen::Vector3f const& position) const;
+        [[nodiscard]] float sampleShellSdf(Eigen::Vector3f const& position) const;
+        [[nodiscard]] Eigen::Vector3f sampleShellGradient(Eigen::Vector3f const& position,
+                                                           float epsilon) const;
+
+        /// Sample the effective SDF (shell SDF if thickness field enabled, base SDF otherwise)
+        [[nodiscard]] float sampleEffectiveSdf(Eigen::Vector3f const& position) const;
+        /// Sample the effective gradient (shell gradient if thickness field enabled, base gradient otherwise)
+        [[nodiscard]] Eigen::Vector3f sampleEffectiveGradient(Eigen::Vector3f const& position,
+                                                               float epsilon) const;
+        
+        // Cancellation support
+        CancellationCheckCallback m_cancellationCheckCallback{nullptr};
+        bool m_wasCancelled{false};
+        
+        /// Check if the operation should be cancelled
+        [[nodiscard]] bool isCancelled();
     };
 }

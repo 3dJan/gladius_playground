@@ -1,6 +1,7 @@
 #include "NodeView.h"
 
 #include "Assembly.h"
+#include "ExportState.h"
 #include "FileChooser.h"
 #include "InputList.h"
 #include "LinkColors.h"
@@ -251,6 +252,11 @@ namespace gladius::ui
         reset();
     }
 
+    void NodeView::setExportState(ExportState * state)
+    {
+        m_exportState = state;
+    }
+
     bool NodeView::haveParameterChanged() const
     {
         return m_parameterChanged;
@@ -305,31 +311,6 @@ namespace gladius::ui
     {
         header(baseNode);
         content(baseNode);
-
-        // Check for double-click on FunctionCall nodes to navigate to referenced function
-        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
-        {
-            nodes::ResourceId functionId = 0;
-
-            if (auto * functionCallNode = dynamic_cast<nodes::FunctionCall *>(&baseNode))
-            {
-                functionId = functionCallNode->getFunctionId();
-            }
-            else if (auto * functionGradientNode =
-                       dynamic_cast<nodes::FunctionGradient *>(&baseNode))
-            {
-                functionGradientNode->resolveFunctionId();
-                functionId = functionGradientNode->getFunctionId();
-            }
-
-            if (m_modelEditor && functionId != 0)
-            {
-                // Use navigateToFunction so history is recorded
-                m_modelEditor->navigateToFunction(functionId);
-            }
-        }
-
         footer(baseNode);
     }
 
@@ -1412,6 +1393,12 @@ namespace gladius::ui
                               ParameterMap::reference parameter,
                               VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto name = std::get_if<std::string>(&val))
         {
             const auto previousText = *name;
@@ -1480,6 +1467,11 @@ namespace gladius::ui
             val = *name;
             ImGui::PopItemWidth();
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
         return false;
     }
 
@@ -1487,6 +1479,12 @@ namespace gladius::ui
                              nodes::ParameterMap::reference parameter,
                              nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<float>(&val))
         {
             ImGui::SameLine();
@@ -1534,12 +1532,23 @@ namespace gladius::ui
 
             m_parameterChanged |= changed;
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewFloat3(nodes::NodeBase const & node,
                               nodes::ParameterMap::reference parameter,
                               nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<float3>(&val))
         {
             ImGui::TextUnformatted("Vector");
@@ -1591,12 +1600,23 @@ namespace gladius::ui
 
             ImGui::PopItemWidth();
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewMatrix(nodes::NodeBase const & node,
                               nodes::ParameterMap::reference parameter,
                               nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<Matrix4x4>(&val))
         {
             ImGui::PushItemWidth(300 * m_uiScale);
@@ -1623,12 +1643,23 @@ namespace gladius::ui
 
             m_parameterChanged |= changed;
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewResource(nodes::NodeBase & node,
                                 nodes::ParameterMap::reference parameter,
                                 nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (auto * pval = std::get_if<ResourceId>(&val))
         {
             ImGui::SameLine();
@@ -1716,12 +1747,23 @@ namespace gladius::ui
                   });
             }
         }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
     }
 
     void NodeView::viewInt(nodes::NodeBase const & node,
                            nodes::ParameterMap::reference parameter,
                            nodes::VariantType & val)
     {
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
         if (const auto pval = std::get_if<int>(&val))
         {
             ImGui::SameLine();
@@ -1748,6 +1790,11 @@ namespace gladius::ui
             }
 
             m_parameterChanged |= changed;
+        }
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
         }
     }
 

@@ -671,6 +671,7 @@ namespace gladius
     void Document::markFileAsChanged()
     {
         m_fileChanged = true;
+        m_validationDirty = true;
     }
 
     void Document::invalidatePrimitiveData()
@@ -683,6 +684,10 @@ namespace gladius
         loadImpl(filename);
         // reset back up time
         m_lastBackupTime = std::chrono::system_clock::now();
+
+        // Initial validation with FileLoad context - logs errors once for file loading
+        validateAssembly(nodes::ValidationContext::FileLoad);
+
         refreshModelBlocking();
         m_core->updateBBox();
     }
@@ -718,6 +723,8 @@ namespace gladius
                          try
                          {
                              loadImpl(filename);
+                             // Initial validation with FileLoad context - logs errors once
+                             validateAssembly(nodes::ValidationContext::FileLoad);
                              // Chain into async model refresh
                              refreshWorker();
                          }
@@ -1874,27 +1881,57 @@ namespace gladius
         return m_resourceDependencyGraph.get();
     }
 
-    bool Document::validateAssembly() const
+    void Document::markValidationDirty()
+    {
+        m_validationDirty = true;
+    }
+
+    bool Document::validateAssemblyIfDirty(nodes::ValidationContext context)
+    {
+        if (!m_validationDirty)
+        {
+            return !m_issueList.hasErrors();
+        }
+        m_validationDirty = false;
+        return validateAssembly(context);
+    }
+
+    bool Document::validateAssembly(nodes::ValidationContext context)
     {
         nodes::Validator validator;
         auto logger = getSharedLogger();
 
-        if (!validator.validate(*m_assembly))
+        m_issueList.clear();
+
+        if (!validator.validate(*m_assembly, m_issueList))
         {
-            for (auto const & error : validator.getErrors())
+            // Only log events for non-interactive contexts (API usage, file loading)
+            if (context != nodes::ValidationContext::Interactive && logger)
             {
-                if (logger)
+                for (auto const & issue : m_issueList.getAll())
+                {
                     logger->addEvent({fmt::format("{}: Review parameter {} of node {} in model {}",
-                                                  error.message,
-                                                  error.parameter,
-                                                  error.node,
-                                                  error.model),
+                                                  issue.message,
+                                                  issue.parameter,
+                                                  issue.node,
+                                                  issue.model),
                                       events::Severity::Error});
+                }
             }
             return false;
         }
 
         return true;
+    }
+
+    nodes::IssueList& Document::getIssueList()
+    {
+        return m_issueList;
+    }
+
+    nodes::IssueList const& Document::getIssueList() const
+    {
+        return m_issueList;
     }
 
     BackupManager & Document::getBackupManager()

@@ -119,6 +119,20 @@ namespace gladius::compute
 
     GlobalMortonOctree::~GlobalMortonOctree() = default;
 
+    void GlobalMortonOctree::setCancellationCheckCallback(CancellationCheckCallback callback)
+    {
+        m_cancellationCheckCallback = std::move(callback);
+    }
+
+    bool GlobalMortonOctree::isCancelled()
+    {
+        if (!m_wasCancelled && m_cancellationCheckCallback && m_cancellationCheckCallback())
+        {
+            m_wasCancelled = true;
+        }
+        return m_wasCancelled;
+    }
+
     void GlobalMortonOctree::build(GlobalMortonOctreeConfig const& config)
     {
         auto const startTime = std::chrono::high_resolution_clock::now();
@@ -383,7 +397,7 @@ namespace gladius::compute
             for (std::uint8_t c = 0U; c < 8U; ++c)
             {
                 Eigen::Vector3f const corner = cornerPosition(c, bounds);
-                node.cornerValues[c] = sampleSdf(corner) - m_config.isoValue;
+                node.cornerValues[c] = sampleEffectiveSdf(corner);
             }
             
             // Debug: Print first node's corner values
@@ -579,6 +593,13 @@ namespace gladius::compute
         bool changed = true;
         while (changed && passes < MAX_BALANCE_PASSES)
         {
+            // Check for cancellation between balance passes
+            if (isCancelled())
+            {
+                std::cout << "  Balancing cancelled after " << passes << " passes" << std::endl;
+                return;
+            }
+            
             changed = false;
             ++passes;
             std::size_t neighborsThisPass = 0U;
@@ -786,7 +807,7 @@ namespace gladius::compute
         for (std::uint8_t c = 0U; c < 8U; ++c)
         {
             Eigen::Vector3f const cornerPos = cornerPosition(c, bounds);
-            float const v = sampleSdf(cornerPos) - m_config.isoValue;
+            float const v = sampleEffectiveSdf(cornerPos);
             node.cornerValues[c] = v;
             if (v < 0.0F)
             {
@@ -841,13 +862,13 @@ namespace gladius::compute
 
         for (std::size_t iter = 0U; iter < 16U; ++iter)
         {
-            float const value = sampleSdf(p) - m_config.isoValue;
+            float const value = sampleEffectiveSdf(p);
             if (std::abs(value) < ZERO_CROSSING_TOLERANCE)
             {
                 break;
             }
 
-            Eigen::Vector3f const grad = sampleGradient(p, epsilon);
+            Eigen::Vector3f const grad = sampleEffectiveGradient(p, epsilon);
             float const g2 = grad.squaredNorm();
             if (g2 < 1e-20F)
             {
@@ -860,7 +881,7 @@ namespace gladius::compute
             p.z() = std::clamp(p.z(), bounds.min.s[2], bounds.max.s[2]);
         }
 
-        Eigen::Vector3f normal = sampleGradient(p, epsilon);
+        Eigen::Vector3f normal = sampleEffectiveGradient(p, epsilon);
         float const nLen = normal.norm();
         if (nLen > 1e-12F)
         {
@@ -1130,7 +1151,7 @@ namespace gladius::compute
                 (bounds.min.s[2] + bounds.max.s[2]) * 0.5F);
 
             // Central gradient
-            Eigen::Vector3f const gradCenter = sampleGradient(center, epsilon);
+            Eigen::Vector3f const gradCenter = sampleEffectiveGradient(center, epsilon);
             Eigen::Vector3f const normCenter = gradCenter.normalized();
 
             // Sample gradients at 6 neighbors and compute variance
@@ -1142,7 +1163,7 @@ namespace gladius::compute
             float variance = 0.0F;
             for (auto const& offset : offsets)
             {
-                Eigen::Vector3f const gradNeighbor = sampleGradient(center + offset, epsilon);
+                Eigen::Vector3f const gradNeighbor = sampleEffectiveGradient(center + offset, epsilon);
                 Eigen::Vector3f const normNeighbor = gradNeighbor.normalized();
                 Eigen::Vector3f const diff = normCenter - normNeighbor;
                 variance += diff.squaredNorm();
@@ -1313,7 +1334,7 @@ namespace gladius::compute
             Eigen::Vector3f position;
             refineZeroCrossing(start, end, node.cornerValues[c0], node.cornerValues[c1], position);
 
-            Eigen::Vector3f const gradient = sampleGradient(position, epsilon);
+            Eigen::Vector3f const gradient = sampleEffectiveGradient(position, epsilon);
 
             HermiteSample sample;
             sample.position = position;
@@ -1359,7 +1380,7 @@ namespace gladius::compute
         for (std::size_t iter = 0U; iter < MAX_BISECTION_ITERATIONS; ++iter)
         {
             Eigen::Vector3f const mid = (lo + hi) * 0.5F;
-            float const vMid = sampleSdf(mid) - m_config.isoValue;
+            float const vMid = sampleEffectiveSdf(mid);
 
             if (std::abs(vMid) < ZERO_CROSSING_TOLERANCE)
             {
@@ -1580,7 +1601,7 @@ namespace gladius::compute
 
                     Eigen::Vector3f const deciderPos = p0 + xStar * (p1 - p0) + yStar * (p3 - p0);
 
-                    bool const centerInside = (sampleSdf(deciderPos) - m_config.isoValue) < 0.0F;
+                    bool const centerInside = sampleEffectiveSdf(deciderPos) < 0.0F;
                     bool const diagonal02Inside = isCornerInside(f.corners[0]) && isCornerInside(f.corners[2]);
 
                     // If center sign matches the (0,2) diagonal's inside-ness, connect edges
@@ -3664,7 +3685,7 @@ namespace gladius::compute
                 
                 // Use the midpoint of edge 0 (which is on the surface) for sampling
                 Eigen::Vector3f const edgeMid = (p0 + p1) * 0.5F;
-                float const sdfValue = sampleSdf(edgeMid);
+                float const sdfValue = sampleEffectiveSdf(edgeMid);
                 
                 // Only vote if the sample point is close to the surface
                 // Points far from the surface may have unreliable gradients
@@ -3674,7 +3695,7 @@ namespace gladius::compute
                     continue;
                 }
                 
-                Eigen::Vector3f const gradient = sampleGradient(edgeMid, gradEpsilon);
+                Eigen::Vector3f const gradient = sampleEffectiveGradient(edgeMid, gradEpsilon);
                 
                 // For outward-facing normals, the normal should point AWAY from the solid (positive SDF)
                 // The gradient points from negative to positive SDF, i.e., OUTWARD from solid
@@ -3859,5 +3880,128 @@ namespace gladius::compute
                          sampleSdf(position - Eigen::Vector3f(0.0F, 0.0F, epsilon));
 
         return Eigen::Vector3f(dx, dy, dz) / (2.0F * epsilon);
+    }
+
+    float GlobalMortonOctree::sampleThicknessField(std::vector<float> const& field,
+                                                    Eigen::Vector3f const& position) const
+    {
+        if (field.empty())
+        {
+            return 0.0F;
+        }
+
+        int const resolution = m_config.thicknessFieldResolution;
+        if (resolution <= 0)
+        {
+            return 0.0F;
+        }
+
+        // Transform world position to grid coordinates using the world-to-grid matrix
+        Eigen::Vector4f const worldPos(position.x(), position.y(), position.z(), 1.0F);
+        Eigen::Vector4f const gridPos = m_config.worldToThicknessField * worldPos;
+
+        // Clamp to grid bounds
+        float const gx = std::clamp(gridPos.x(), 0.0F, static_cast<float>(resolution - 1));
+        float const gy = std::clamp(gridPos.y(), 0.0F, static_cast<float>(resolution - 1));
+        float const gz = std::clamp(gridPos.z(), 0.0F, static_cast<float>(resolution - 1));
+
+        // Trilinear interpolation
+        auto const x0 = static_cast<std::size_t>(std::floor(gx));
+        auto const y0 = static_cast<std::size_t>(std::floor(gy));
+        auto const z0 = static_cast<std::size_t>(std::floor(gz));
+        std::size_t const x1 = std::min(x0 + 1U, static_cast<std::size_t>(resolution - 1));
+        std::size_t const y1 = std::min(y0 + 1U, static_cast<std::size_t>(resolution - 1));
+        std::size_t const z1 = std::min(z0 + 1U, static_cast<std::size_t>(resolution - 1));
+
+        float const fx = gx - static_cast<float>(x0);
+        float const fy = gy - static_cast<float>(y0);
+        float const fz = gz - static_cast<float>(z0);
+
+        auto sampleAt = [&](std::size_t x, std::size_t y, std::size_t z) -> float {
+            std::size_t const width = static_cast<std::size_t>(resolution);
+            std::size_t const index = z * width * width + y * width + x;
+            return (index < field.size()) ? field[index] : 0.0F;
+        };
+
+        float const v000 = sampleAt(x0, y0, z0);
+        float const v100 = sampleAt(x1, y0, z0);
+        float const v010 = sampleAt(x0, y1, z0);
+        float const v110 = sampleAt(x1, y1, z0);
+        float const v001 = sampleAt(x0, y0, z1);
+        float const v101 = sampleAt(x1, y0, z1);
+        float const v011 = sampleAt(x0, y1, z1);
+        float const v111 = sampleAt(x1, y1, z1);
+
+        float const v00 = v000 * (1.0F - fx) + v100 * fx;
+        float const v01 = v001 * (1.0F - fx) + v101 * fx;
+        float const v10 = v010 * (1.0F - fx) + v110 * fx;
+        float const v11 = v011 * (1.0F - fx) + v111 * fx;
+
+        float const v0 = v00 * (1.0F - fy) + v10 * fy;
+        float const v1 = v01 * (1.0F - fy) + v11 * fy;
+
+        return v0 * (1.0F - fz) + v1 * fz;
+    }
+
+    float GlobalMortonOctree::sampleShellSdf(Eigen::Vector3f const& position) const
+    {
+        float const baseSdf = sampleSdf(position);
+        float const outerThickness = sampleThicknessField(m_config.outerThicknessField, position);
+
+        if (m_config.isInnermostLayer)
+        {
+            // Innermost layer: solid core from outer boundary inward
+            // The isosurface is at baseSdf = -outerThickness
+            return baseSdf + outerThickness;
+        }
+        else
+        {
+            // Non-innermost layer: shell between outer and inner boundaries
+            float const innerThickness = sampleThicknessField(m_config.innerThicknessField, position);
+            float const outerSDF = baseSdf + outerThickness;
+            float const innerSDF = baseSdf + innerThickness;
+            // Shell is where outerSDF < 0 AND innerSDF > 0
+            // Using CSG: max(outerSDF, -innerSDF)
+            return std::max(outerSDF, -innerSDF);
+        }
+    }
+
+    Eigen::Vector3f GlobalMortonOctree::sampleShellGradient(Eigen::Vector3f const& position,
+                                                             float epsilon) const
+    {
+        // Central differences on the shell SDF
+        float const dx = sampleShellSdf(position + Eigen::Vector3f(epsilon, 0.0F, 0.0F)) -
+                         sampleShellSdf(position - Eigen::Vector3f(epsilon, 0.0F, 0.0F));
+        float const dy = sampleShellSdf(position + Eigen::Vector3f(0.0F, epsilon, 0.0F)) -
+                         sampleShellSdf(position - Eigen::Vector3f(0.0F, epsilon, 0.0F));
+        float const dz = sampleShellSdf(position + Eigen::Vector3f(0.0F, 0.0F, epsilon)) -
+                         sampleShellSdf(position - Eigen::Vector3f(0.0F, 0.0F, epsilon));
+
+        return Eigen::Vector3f(dx, dy, dz) / (2.0F * epsilon);
+    }
+
+    float GlobalMortonOctree::sampleEffectiveSdf(Eigen::Vector3f const& position) const
+    {
+        if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+        {
+            return sampleShellSdf(position);
+        }
+        else
+        {
+            return sampleSdf(position) - m_config.isoValue;
+        }
+    }
+
+    Eigen::Vector3f GlobalMortonOctree::sampleEffectiveGradient(Eigen::Vector3f const& position,
+                                                                  float epsilon) const
+    {
+        if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+        {
+            return sampleShellGradient(position, epsilon);
+        }
+        else
+        {
+            return sampleGradient(position, epsilon);
+        }
     }
 }

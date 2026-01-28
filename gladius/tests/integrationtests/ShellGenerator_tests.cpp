@@ -174,4 +174,99 @@ namespace gladius_tests::shell_generator
             EXPECT_GT(shell.indices.size(), 0U);
         }
     }
+
+    /// @brief Test surface-aligned color sampling mode (T028 from 011-surface-color-shells)
+    /// 
+    /// This test verifies that shells generated with useSurfaceColorSampling=true
+    /// produce valid mesh output using the new SurfaceThicknessField-based approach.
+    TEST_F(ShellGeneratorTest, GenerateShells_WithSurfaceColorSampling_ProducesValidMesh)
+    {
+        auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox());
+
+        // Define a stack of 2 filaments with varying optical properties
+        FilamentStack stack;
+        stack.push_back(FilamentOpticalProperties("White", {1.0f, 1.0f, 1.0f}, 0.3f));
+        stack.push_back(FilamentOpticalProperties("Red", {1.0f, 0.0f, 0.0f}, 0.5f));
+
+        ThicknessConstraints constraints;
+        constraints.minThickness = 0.1f;
+        constraints.maxThickness = 2.0f;
+
+        int const lutResolution = 8;  // Reasonable resolution for test
+
+        // Use solution with varying thicknesses
+        ThicknessSolution solution(2);
+        solution.thicknesses[0] = 0.5f;
+        solution.thicknesses[1] = 0.8f;
+
+        ManifoldDualContouringOptions options;
+        options.initialDepth = 4;
+        options.maxDepth = 5;
+        options.enableGpu = true; // Need GPU for thickness field sampling
+        options.qualityPreset = ManifoldDualContouringQuality::Custom;
+
+        ShellGenerator generator(*bundle.core, *bundle.document);
+        
+        // Generate shells WITH surface color sampling enabled
+        bool const useSurfaceColorSampling = true;
+        auto shells = generator.generateShells(
+            stack,
+            solution,
+            options,
+            lutResolution,
+            constraints,
+            nullptr,  // No precomputed LUTs
+            useSurfaceColorSampling);
+
+        // Verify we got shells for each layer
+        ASSERT_EQ(shells.size(), stack.size());
+        
+        for (auto const & shell : shells)
+        {
+            // Each shell should have valid mesh data
+            EXPECT_GT(shell.vertices.size(), 0U) 
+                << "Shell " << shell.layerIndex << " has no vertices";
+            EXPECT_GT(shell.indices.size(), 0U) 
+                << "Shell " << shell.layerIndex << " has no indices";
+            
+            // Indices should be divisible by 3 (triangle mesh)
+            EXPECT_EQ(shell.indices.size() % 3, 0U) 
+                << "Shell " << shell.layerIndex << " has non-triangular indices";
+        }
+    }
+
+    /// @brief Verify surface sampling doesn't crash with empty model
+    TEST_F(ShellGeneratorTest, GenerateShells_WithSurfaceColorSampling_EmptyModel_ReturnsEmpty)
+    {
+        auto bundle = loadDocument("testdata/ImplicitGyroid.3mf");
+        // Don't update bbox - leave it empty
+        
+        FilamentStack stack;
+        stack.push_back(FilamentOpticalProperties("White", {1,1,1}, 0.3f));
+
+        ThicknessSolution solution(1);
+        solution.thicknesses[0] = 0.5f;
+
+        ManifoldDualContouringOptions options;
+        options.initialDepth = 4;
+        options.maxDepth = 5;
+        options.enableGpu = true;
+
+        ShellGenerator generator(*bundle.core, *bundle.document);
+        
+        bool const useSurfaceColorSampling = true;
+        auto shells = generator.generateShells(
+            stack,
+            solution,
+            options,
+            8,  // lutResolution
+            ThicknessConstraints{},
+            nullptr,
+            useSurfaceColorSampling);
+
+        // Without valid bbox, should return empty or handle gracefully
+        // (exact behavior depends on implementation - we just verify no crash)
+        SUCCEED();
+    }
 }

@@ -26,8 +26,8 @@ namespace gladius::dual_contouring
 {
     struct AxisAlignedBoundingBox
     {
-        Eigen::Vector3f min{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f max{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f min = Eigen::Vector3f::Zero();
+        Eigen::Vector3f max = Eigen::Vector3f::Zero();
 
         [[nodiscard]] Eigen::Vector3f center() const;
         [[nodiscard]] Eigen::Vector3f extent() const;
@@ -40,12 +40,12 @@ namespace gladius::dual_contouring
         std::array<std::unique_ptr<OctreeNode>, 8> children{};
         struct HermiteSample
         {
-            Eigen::Vector3f position{Eigen::Vector3f::Zero()};
-            Eigen::Vector3f normal{Eigen::Vector3f::Zero()};
+            Eigen::Vector3f position = Eigen::Vector3f::Zero();
+            Eigen::Vector3f normal = Eigen::Vector3f::Zero();
         };
         std::vector<HermiteSample> hermiteSamples{};
-        Eigen::Vector3f vertexPosition{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f vertexNormal{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f vertexPosition = Eigen::Vector3f::Zero();
+        Eigen::Vector3f vertexNormal = Eigen::Vector3f::Zero();
         float vertexResidual{0.0F};
         bool isLeaf{true};
         bool isIntersecting{false};
@@ -105,9 +105,9 @@ namespace gladius::dual_contouring
       private:
         struct SdfGrid
         {
-            Eigen::Vector3f min{Eigen::Vector3f::Zero()};
-            Eigen::Vector3f max{Eigen::Vector3f::Zero()};
-                        Eigen::Vector3f spacing{Eigen::Vector3f::Ones()};
+            Eigen::Vector3f min = Eigen::Vector3f::Zero();
+            Eigen::Vector3f max = Eigen::Vector3f::Zero();
+                        Eigen::Vector3f spacing = Eigen::Vector3f::Ones();
             size_t width{1U};
             size_t height{1U};
             size_t depth{1U};

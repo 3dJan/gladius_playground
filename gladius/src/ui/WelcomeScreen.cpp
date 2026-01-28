@@ -1128,10 +1128,48 @@ namespace gladius::ui
 
     bool WelcomeScreen::trySetPendingFileOpen(std::filesystem::path const & path)
     {
-        if (m_clickProcessed || m_pendingFileOpen.has_value())
+        // Guard: Already processed a click this frame
+        if (m_clickProcessed)
         {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Welcome screen click ignored (already processed this frame): {}",
+                               path.string()),
+                   events::Severity::Warning});
+            }
             return false;
         }
+
+        // Guard: Already have a pending file (rapid clicks on different thumbnails)
+        if (m_pendingFileOpen.has_value())
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Welcome screen click ignored (pending file already set): {}",
+                               path.string()),
+                   events::Severity::Warning});
+            }
+            m_clickProcessed = true; // Prevent further clicks this frame
+            return false;
+        }
+
+        // Validate file exists before storing
+        if (!std::filesystem::exists(path))
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Cannot open file - does not exist: {}", path.string()),
+                   events::Severity::Error});
+            }
+            m_clickProcessed = true; // Prevent further clicks this frame
+            // Keep screen visible so user can click something else
+            return false;
+        }
+
+        // Success: Store path and hide screen atomically
         m_pendingFileOpen = path;
         m_clickProcessed = true;
         m_isVisible = false;
