@@ -1632,30 +1632,58 @@ namespace gladius
 
     ResourceKey Document::addImageStackResource(std::filesystem::path const & path)
     {
-        io::ImageStackCreator creator;
-        auto stack = creator.addImageStackFromDirectory(get3mfModel(), path);
+        auto result = addImageStackResourceWithPadding(path);
+        return result.imageStack
+                   ? ResourceKey{result.imageStack->GetModelResourceID(), ResourceType::ImageStack}
+                   : ResourceKey{0, ResourceType::Unknown};
+    }
 
-        if (!stack)
+    io::ImportResult Document::addImageStackResourceWithPadding(std::filesystem::path const & path)
+    {
+        io::ImageStackCreator creator;
+        auto importResult = creator.importDirectoryWithPadding(get3mfModel(), path);
+
+        if (!importResult.imageStack)
         {
             auto logger = getSharedLogger();
             if (logger)
             {
                 logger->addEvent(
-                  {fmt::format("Failed to import image stack from directory: {}", path.string()),
-                   events::Severity::Error});
+                    {fmt::format("Failed to import image stack from directory: {}", path.string()),
+                     events::Severity::Error});
             }
-
-            return ResourceKey{0, ResourceType::Unknown};
+            return importResult;
         }
+
         auto & resourceManager = getGeneratorContext().resourceManager;
-        auto const key = ResourceKey{stack->GetModelResourceID(), ResourceType::ImageStack};
+        auto const key =
+            ResourceKey{importResult.imageStack->GetModelResourceID(), ResourceType::ImageStack};
 
         io::ImageExtractor extractor;
+        auto const files = creator.getFiles(path);
 
-        auto grid = extractor.loadAsVdbGrid(creator.getFiles(path), io::FileLoaderType::Filesystem);
-        resourceManager.addResource(key, std::move(grid));
+        // Detect pixel format from first file to choose import method
+        io::PixelFormat pixelFormat = io::PixelFormat::GRAYSCALE_8BIT;
+        if (!files.empty())
+        {
+            pixelFormat = extractor.determinePixelFormatFromFile(files.front());
+        }
+
+        if (pixelFormat == io::PixelFormat::GRAYSCALE_8BIT)
+        {
+            // Use VDB grid for grayscale 8-bit images
+            auto grid = extractor.loadAsVdbGrid(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(grid));
+        }
+        else
+        {
+            // Use 3D texture for other formats (RGBA, RGB, etc.)
+            auto stack = extractor.loadImageStack(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(stack));
+        }
+
         resourceManager.loadResources();
-        return key;
+        return importResult;
     }
 
     void Document::update3mfModel()

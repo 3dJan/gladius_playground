@@ -5,6 +5,7 @@
 #include "Mesh.h"
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
+#include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
@@ -238,6 +239,9 @@ namespace gladius
         void addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius);
 
         ResourceKey addImageStackResource(std::filesystem::path const & path);
+
+        /// Import image stack with padding support - returns ImportResult for notification handling
+        io::ImportResult addImageStackResourceWithPadding(std::filesystem::path const & path);
 
         // syncing of the 3MF model with the document
 

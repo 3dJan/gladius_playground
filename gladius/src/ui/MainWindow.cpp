@@ -975,7 +975,35 @@ namespace gladius::ui
         case AsyncDialogOperation::ImportImageStack:
         {
             io::ImageStackCreator creator;
-            creator.importDirectoryAsFunctionFromImage3D(m_doc->get3mfModel(), filename);
+            auto result = creator.importDirectoryWithPadding(m_doc->get3mfModel(), filename);
+
+            // T052: Show notification if any images were padded
+            if (result.hasPaddedFiles() && m_logger)
+            {
+                std::string message = fmt::format(
+                    "ImageStack imported with padding to {}x{}. Padded {} file(s): ",
+                    result.maxWidth,
+                    result.maxHeight,
+                    result.paddedFiles.size());
+
+                // List first few padded files
+                size_t const maxFilesToShow = 5;
+                for (size_t i = 0; i < std::min(result.paddedFiles.size(), maxFilesToShow); ++i)
+                {
+                    if (i > 0)
+                    {
+                        message += ", ";
+                    }
+                    message += result.paddedFiles[i];
+                }
+                if (result.paddedFiles.size() > maxFilesToShow)
+                {
+                    message += fmt::format(
+                        " and {} more", result.paddedFiles.size() - maxFilesToShow);
+                }
+
+                m_logger->addEvent({message, events::Severity::Info});
+            }
             break;
         }
         case AsyncDialogOperation::OpenAfterSavePrompt:

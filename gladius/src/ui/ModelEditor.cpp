@@ -208,6 +208,9 @@ namespace gladius::ui
         m_validationOverlay.setNavigationCallback(
           [this](nodes::NodeId nodeId, nodes::ResourceId modelId)
           { requestNodeFocus(nodeId, modelId); });
+
+        // T060: Setup ResourceView with ModelEditor for undo support in transforms
+        m_resourceView.setModelEditor(this);
     }
 
     ModelEditor::~ModelEditor()
@@ -628,6 +631,11 @@ namespace gladius::ui
                     }
 
                     ImGui::SameLine();
+                }
+
+                // Allow renaming for all non-assembly functions (including managed ones)
+                if (!isAssembly)
+                {
                     if (ImGui::Button("Rename"))
                     {
                         m_outlineRenaming = true;
@@ -1350,8 +1358,46 @@ namespace gladius::ui
 
                 m_popupMenuFunction();
 
-                auto * currentCtx = getCurrentEditorContext();
-                ed::SetCurrentEditor(currentCtx);
+                // Tab bar for FunctionFromImage3D functions
+                bool const showTabs = isFunctionFromImage3D();
+                if (showTabs)
+                {
+                    if (ImGui::BeginTabBar("FunctionTabs"))
+                    {
+                        if (ImGui::BeginTabItem("Graph"))
+                        {
+                            m_currentTabMode = TabMode::Graph;
+                            ImGui::EndTabItem();
+                        }
+                        if (ImGui::BeginTabItem("Properties"))
+                        {
+                            m_currentTabMode = TabMode::Properties;
+                            ImGui::EndTabItem();
+                        }
+                        ImGui::EndTabBar();
+                    }
+                }
+                else
+                {
+                    m_currentTabMode = TabMode::Graph;
+                }
+
+                // Render Properties panel if in Properties tab
+                if (showTabs && m_currentTabMode == TabMode::Properties)
+                {
+                    m_functionFromImage3DView.setFunction(m_currentModel.get(),
+                                                         m_assembly.get());
+                    m_functionFromImage3DView.setModelEditor(this);
+                    if (m_functionFromImage3DView.render())
+                    {
+                        parameterChanged = true;
+                    }
+                }
+                else
+                {
+                    // Normal graph view
+                    auto * currentCtx = getCurrentEditorContext();
+                    ed::SetCurrentEditor(currentCtx);
 
                 ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
                                    ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
@@ -1481,6 +1527,7 @@ namespace gladius::ui
 
                 ed::End();
                 ed::PopStyleColor();
+                } // end else (Graph view)
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
 
@@ -1830,7 +1877,8 @@ namespace gladius::ui
         auto functions = m_assembly->getFunctions();
         for (auto & [id, model] : functions)
         {
-            if (!model || model->isManaged() || model == m_currentModel)
+            // Skip null models and current model (can't call self)
+            if (!model || model == m_currentModel)
             {
                 continue;
             }
@@ -2749,6 +2797,34 @@ namespace gladius::ui
     {
         // Check if any of the editor windows are hovered
         return ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) && isVisible();
+    }
+
+    bool ModelEditor::isFunctionFromImage3D() const
+    {
+        if (!m_currentModel)
+        {
+            return false;
+        }
+
+        // Check if the model contains an ImageSampler node
+        for (auto const & [id, node] : *m_currentModel)
+        {
+            if (dynamic_cast<nodes::ImageSampler *>(node.get()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void ModelEditor::refreshAssembly()
+    {
+        if (m_doc)
+        {
+            // Just update the assembly reference without clearing editor contexts
+            // This is a lightweight refresh for when functions are added externally
+            m_assembly = m_doc->getAssembly();
+        }
     }
 
     void ModelEditor::requestNodeFocus(nodes::NodeId nodeId)
