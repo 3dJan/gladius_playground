@@ -614,60 +614,10 @@ namespace gladius::ui
                         auto resourceId = key.getResourceId();
                         if (resourceId.has_value())
                         {
-                            auto model3mf = document->get3mfModel();
-                            if (model3mf)
-                            {
-                                try
-                                {
-                                    auto uniqueResId = gladius::io::resourceIdToUniqueResourceId(
-                                        model3mf, resourceId.value());
-                                    auto imageStack =
-                                        model3mf->GetImageStackByID(uniqueResId);
-                                    if (imageStack)
-                                    {
-                                        auto func =
-                                            model3mf->AddFunctionFromImage3D(imageStack.get());
-                                        if (func)
-                                        {
-                                            func->SetFilter(Lib3MF::eTextureFilter::Linear);
-                                            func->SetTileStyles(Lib3MF::eTextureTileStyle::Wrap,
-                                                                Lib3MF::eTextureTileStyle::Wrap,
-                                                                Lib3MF::eTextureTileStyle::Wrap);
-                                            func->SetOffset(0.0);
-                                            func->SetScale(1.0);
-
-                                            // Register the function in the assembly
-                                            nodes::Builder builder;
-                                            nodes::SamplingSettings settings;
-                                            builder.createFunctionFromImage3D(
-                                                *document->getAssembly(),
-                                                func->GetModelResourceID(),
-                                                resourceId.value(),
-                                                settings);
-
-                                            document->update3mfModel();
-                                            document->markFileAsChanged();
-
-                                            // Refresh ModelEditor to show the new function
-                                            if (m_modelEditor)
-                                            {
-                                                m_modelEditor->refreshAssembly();
-                                            }
-                                        }
-                                    }
-                                }
-                                catch (std::exception const & e)
-                                {
-                                    auto logger = document->getSharedLogger();
-                                    if (logger)
-                                    {
-                                        logger->addEvent(
-                                            {fmt::format("Failed to create FunctionFromImage3D: {}",
-                                                         e.what()),
-                                             events::Severity::Error});
-                                    }
-                                }
-                            }
+                            m_pendingImageStackId = resourceId.value();
+                            m_newFunctionName = key.getDisplayName();
+                            m_showCreateFunctionDialog = true;
+                            ImGui::OpenPopup("Create FunctionFromImage3D");
                         }
                     }
                     ImGui::EndDisabled();
@@ -675,6 +625,94 @@ namespace gladius::ui
                     {
                         ImGui::SetTooltip(
                             "Create a FunctionFromImage3D that samples this ImageStack");
+                    }
+
+                    // Create FunctionFromImage3D dialog
+                    if (ImGui::BeginPopupModal("Create FunctionFromImage3D", &m_showCreateFunctionDialog,
+                                               ImGuiWindowFlags_AlwaysAutoResize))
+                    {
+                        ImGui::Text("Enter a name for the new function:");
+                        ImGui::InputText("##FunctionName", &m_newFunctionName);
+
+                        if (ImGui::Button("Create", ImVec2(120, 0)))
+                        {
+                            if (m_pendingImageStackId.has_value())
+                            {
+                                auto model3mf = document->get3mfModel();
+                                if (model3mf)
+                                {
+                                    try
+                                    {
+                                        auto uniqueResId = gladius::io::resourceIdToUniqueResourceId(
+                                            model3mf, m_pendingImageStackId.value());
+                                        auto imageStack =
+                                            model3mf->GetImageStackByID(uniqueResId);
+                                        if (imageStack)
+                                        {
+                                            auto func =
+                                                model3mf->AddFunctionFromImage3D(imageStack.get());
+                                            if (func)
+                                            {
+                                                func->SetFilter(Lib3MF::eTextureFilter::Linear);
+                                                func->SetTileStyles(Lib3MF::eTextureTileStyle::Wrap,
+                                                                    Lib3MF::eTextureTileStyle::Wrap,
+                                                                    Lib3MF::eTextureTileStyle::Wrap);
+                                                func->SetOffset(0.0);
+                                                func->SetScale(1.0);
+
+                                                // Register the function in the assembly
+                                                nodes::Builder builder;
+                                                nodes::SamplingSettings settings;
+                                                builder.createFunctionFromImage3D(
+                                                    *document->getAssembly(),
+                                                    func->GetModelResourceID(),
+                                                    m_pendingImageStackId.value(),
+                                                    settings);
+
+                                                // Set the user-provided name
+                                                auto function = document->getAssembly()->findModel(
+                                                    func->GetModelResourceID());
+                                                if (function)
+                                                {
+                                                    function->setDisplayName(m_newFunctionName);
+                                                }
+
+                                                document->update3mfModel();
+                                                document->markFileAsChanged();
+
+                                                // Refresh ModelEditor to show the new function
+                                                if (m_modelEditor)
+                                                {
+                                                    m_modelEditor->refreshAssembly();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch (std::exception const & e)
+                                    {
+                                        auto logger = document->getSharedLogger();
+                                        if (logger)
+                                        {
+                                            logger->addEvent(
+                                                {fmt::format("Failed to create FunctionFromImage3D: {}",
+                                                             e.what()),
+                                                 events::Severity::Error});
+                                        }
+                                    }
+                                }
+                            }
+                            m_showCreateFunctionDialog = false;
+                            m_pendingImageStackId.reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                        {
+                            m_showCreateFunctionDialog = false;
+                            m_pendingImageStackId.reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
                     }
 
                     ImGui::SameLine();

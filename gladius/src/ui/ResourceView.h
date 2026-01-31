@@ -68,6 +68,11 @@ namespace gladius::ui
         std::string m_beamLatticeStlFilename;
         float m_beamDiameter = 1.0f;
 
+        // Dialog state for FunctionFromImage3D creation
+        bool m_showCreateFunctionDialog = false;
+        std::string m_newFunctionName;
+        std::optional<ResourceId> m_pendingImageStackId;
+
         // Async file dialog
         AsyncFileDialog m_asyncFileDialog;
         ResourceViewDialogOp m_asyncDialogOp{ResourceViewDialogOp::None};

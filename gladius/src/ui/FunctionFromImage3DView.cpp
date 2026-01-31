@@ -163,27 +163,84 @@ namespace gladius::ui
 
     float FunctionFromImage3DView::getOffset() const
     {
-        // Offset is typically stored in a Constant node connected to ImageSampler
-        // Return stored value from render loop
+        if (!m_function)
+        {
+            return 0.0f;
+        }
+
+        // Find the offset node by display name
+        for (auto & [id, node] : *const_cast<nodes::Model *>(m_function))
+        {
+            if (node->getDisplayName() == "offset")
+            {
+                auto const & param = node->parameter().at(nodes::FieldNames::Value);
+                auto const value = param.getValue();
+                if (std::holds_alternative<float>(value))
+                {
+                    return std::get<float>(value);
+                }
+            }
+        }
         return 0.0f;
     }
 
     void FunctionFromImage3DView::setOffset(float offset)
     {
-        // TODO: Find the Offset constant node and update it
-        (void)offset;
+        if (!m_function)
+        {
+            return;
+        }
+
+        // Find the offset node by display name and update it
+        for (auto & [id, node] : *m_function)
+        {
+            if (node->getDisplayName() == "offset")
+            {
+                node->parameter().at(nodes::FieldNames::Value).setValue(offset);
+                return;
+            }
+        }
     }
 
     float FunctionFromImage3DView::getScale() const
     {
-        // Scale is typically stored in a Constant node
+        if (!m_function)
+        {
+            return 1.0f;
+        }
+
+        // Find the scale node by display name
+        for (auto & [id, node] : *const_cast<nodes::Model *>(m_function))
+        {
+            if (node->getDisplayName() == "scale")
+            {
+                auto const & param = node->parameter().at(nodes::FieldNames::Value);
+                auto const value = param.getValue();
+                if (std::holds_alternative<float>(value))
+                {
+                    return std::get<float>(value);
+                }
+            }
+        }
         return 1.0f;
     }
 
     void FunctionFromImage3DView::setScale(float scale)
     {
-        // TODO: Find the Scale constant node and update it
-        (void)scale;
+        if (!m_function)
+        {
+            return;
+        }
+
+        // Find the scale node by display name and update it
+        for (auto & [id, node] : *m_function)
+        {
+            if (node->getDisplayName() == "scale")
+            {
+                node->parameter().at(nodes::FieldNames::Value).setValue(scale);
+                return;
+            }
+        }
     }
 
     ResourceId FunctionFromImage3DView::getImageStackId() const
@@ -544,6 +601,17 @@ namespace gladius::ui
 
         ImGui::Separator();
 
+        // NOTE: All property changes below require kernel recompilation via invalidatePrimitiveData()
+        // because:
+        // - Filter: Determines function name in generated code (sampleImageNearest vs sampleImageLinear)
+        // - TileStyle: Values are inlined as int3 constants in generated code
+        // - Offset/Scale: ConstantScalar values are inlined as float literals in generated code
+        //
+        // A future optimization could make Offset/Scale use the parameter buffer instead of
+        // inlining, which would allow using the fast path (tryToupdateParameter) for value-only
+        // changes. This would require changes to ConstantScalar code generation and parameter
+        // registration.
+
         // Filter mode combo
         int currentFilter = static_cast<int>(getFilter());
         if (ImGui::Combo("Filter", &currentFilter, filterNames, IM_ARRAYSIZE(filterNames)))
@@ -556,6 +624,7 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }
@@ -575,6 +644,7 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }
@@ -591,6 +661,7 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }
@@ -607,14 +678,15 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }
 
         ImGui::Separator();
 
-        // Offset (stored in local state for now, actual node update TODO for later)
-        static float offset = 0.0f;
+        // Offset - read current value from node
+        float offset = getOffset();
         if (ImGui::DragFloat("Offset", &offset, 0.01f))
         {
             if (m_modelEditor)
@@ -625,12 +697,13 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }
 
-        // Scale (stored in local state for now, actual node update TODO for later)
-        static float scale = 1.0f;
+        // Scale - read current value from node
+        float scale = getScale();
         if (ImGui::DragFloat("Scale", &scale, 0.01f))
         {
             if (m_modelEditor)
@@ -641,6 +714,7 @@ namespace gladius::ui
             if (m_modelEditor)
             {
                 m_modelEditor->markModelAsModified();
+                m_modelEditor->invalidatePrimitiveData();
             }
             changed = true;
         }

@@ -631,6 +631,11 @@ namespace gladius::ui
                     }
 
                     ImGui::SameLine();
+                }
+
+                // Allow renaming for all non-assembly functions (including managed ones)
+                if (!isAssembly)
+                {
                     if (ImGui::Button("Rename"))
                     {
                         m_outlineRenaming = true;
@@ -1872,7 +1877,8 @@ namespace gladius::ui
         auto functions = m_assembly->getFunctions();
         for (auto & [id, model] : functions)
         {
-            if (!model || model->isManaged() || model == m_currentModel)
+            // Skip null models and current model (can't call self)
+            if (!model || model == m_currentModel)
             {
                 continue;
             }
