@@ -6,9 +6,10 @@
 #include "FileChooser.h"
 #include "ImageStackResource.h"
 #include "ImageStackView.h"
-#include "MeshResource.h"
+#include "MeshResourceBase.h"
 #include "ModelEditor.h"
 #include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "Widgets.h"
 
 #include "imgui.h"
@@ -230,8 +231,11 @@ namespace gladius::ui
                 {
                     continue;
                 }
-                auto const * mesh = dynamic_cast<MeshResource const *>(res.get());
-                if (!mesh)
+                
+                // Check for any mesh resource type (base class covers all)
+                auto const * meshResource = dynamic_cast<MeshResourceBase const *>(res.get());
+                
+                if (!meshResource)
                 {
                     continue;
                 }
@@ -241,33 +245,38 @@ namespace gladius::ui
                 ImGui::BeginGroup();
                 if (ImGui::TreeNodeEx(name.c_str(), baseFlags))
                 {
-                    auto const & meshData = mesh->getMesh();
-
                     if (ImGui::BeginTable(
                           "MeshData", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
                     {
+                        // Display mesh statistics using base class interface
+                        auto const bbox = meshResource->getBoundingBox();
+                        
                         ImGui::TableNextColumn();
-                        ImGui::TextUnformatted("Faces");
+                        ImGui::TextUnformatted("Type");
                         ImGui::TableNextColumn();
-                        ImGui::TextUnformatted(fmt::format("{}", meshData.polygonCount()).c_str());
+                        ImGui::TextUnformatted(meshResource->getMeshTypeName().c_str());
+
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted("Triangles");
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(fmt::format("{}", meshResource->getTriangleCount()).c_str());
 
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Min");
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(fmt::format("({}, {}, {})",
-                                                           meshData.getMin().x,
-                                                           meshData.getMin().y,
-                                                           meshData.getMin().z)
+                                                           bbox.min.x,
+                                                           bbox.min.y,
+                                                           bbox.min.z)
                                                  .c_str());
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Max");
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(fmt::format("({}, {}, {})",
-                                                           meshData.getMax().x,
-                                                           meshData.getMax().y,
-                                                           meshData.getMax().z)
+                                                           bbox.max.x,
+                                                           bbox.max.y,
+                                                           bbox.max.z)
                                                  .c_str());
-
                         // Add Part Number field
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Part Number:");

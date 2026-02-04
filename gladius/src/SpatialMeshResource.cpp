@@ -24,7 +24,7 @@ namespace gladius
     // ========================================================================
 
     SpatialMeshResource::SpatialMeshResource(ResourceKey key, SpatialMeshData && data)
-        : ResourceBase(std::move(key))
+        : MeshResourceBase(std::move(key))
         , m_data(std::move(data))
     {
         ResourceBase::load();
@@ -33,7 +33,7 @@ namespace gladius
     SpatialMeshResource::SpatialMeshResource(ResourceKey key,
                                              std::span<float4 const> vertices,
                                              std::span<TriangleIndices const> indices)
-        : ResourceBase(std::move(key))
+        : MeshResourceBase(std::move(key))
     {
         MeshBVHBuilder builder;
         MeshBVHBuildParams params;

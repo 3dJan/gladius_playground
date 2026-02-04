@@ -8,7 +8,7 @@
 #include "ComputeContext.h"
 #include "Document.h"
 #include "EventLogger.h"
-#include "MeshResource.h"
+#include "MeshResourceVdb.h"
 #include "ResourceKey.h"
 #include "VdbResource.h"
 #include "nodes/Model.h"
@@ -484,11 +484,11 @@ namespace gladius::io
         // Get mesh from document's resource manager
         auto & resourceManager = document.getResourceManager();
         auto & resource = resourceManager.getResource(resourceKey);
-        auto const * meshResource = dynamic_cast<MeshResource const *>(&resource);
+        auto const * meshResource = dynamic_cast<MeshResourceVdb const *>(&resource);
         if (!meshResource)
         {
             throw std::runtime_error(
-              fmt::format("Resource is not a mesh: {}", resourceKey.getDisplayName()));
+              fmt::format("Resource is not a VDB mesh: {}", resourceKey.getDisplayName()));
         }
 
         // Get the triangle mesh from the resource
