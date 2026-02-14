@@ -90,6 +90,7 @@ namespace gladius::ui
         void setLibraryVisibility(bool visible);
         [[nodiscard]] bool isLibraryVisible() const;
         void refreshLibraryDirectories();
+        void renderLibraryBrowser();
 
         /// Focus management for keyboard-driven workflow
         void requestNodeFocus(nodes::NodeId nodeId);

@@ -1757,9 +1757,6 @@ namespace gladius::ui
             }
         }
 
-        // Render the library browser (separate window)
-        m_libraryBrowser.render(m_doc);
-
         m_parameterDirty = parameterChanged;
         return m_parameterDirty;
     }
@@ -2544,6 +2541,11 @@ namespace gladius::ui
     void ModelEditor::refreshLibraryDirectories()
     {
         m_libraryBrowser.refreshDirectories();
+    }
+
+    void ModelEditor::renderLibraryBrowser()
+    {
+        m_libraryBrowser.render(m_doc);
     }
 
     void ModelEditor::requestManualCompile()

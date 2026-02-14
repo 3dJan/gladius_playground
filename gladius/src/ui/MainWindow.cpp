@@ -814,6 +814,9 @@ namespace gladius::ui
                 showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
 
+                // Render library browser independently of the graph editor visibility.
+                m_modelEditor.renderLibraryBrowser();
+
                 if (m_shortcutSettingsDialog.isVisible())
                 {
                     m_shortcutSettingsDialog.render();
@@ -840,7 +843,7 @@ namespace gladius::ui
                 renderStatusBar();
             }
 
-            // Library browser is now rendered by the ModelEditor
+            // Library browser is rendered from the main UI loop.
         }
         catch (OpenCLError & e)
         {
@@ -1383,6 +1386,10 @@ namespace gladius::ui
               reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tLibrary Browser")))
         {
             closeMenu();
+            if (!m_modelEditor.isVisible())
+            {
+                m_modelEditor.setVisibility(true);
+            }
             m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
             m_modelEditor.setLibraryVisibility(true);
             m_isLibraryBrowserVisible = true;
@@ -2517,6 +2524,10 @@ namespace gladius::ui
           ShortcutCombo(ImGuiKey_B, true), // Ctrl+B
           [this]()
           {
+              if (!m_modelEditor.isVisible())
+              {
+                  m_modelEditor.setVisibility(true);
+              }
               m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
               m_modelEditor.toggleLibraryVisibility();
               m_isLibraryBrowserVisible = m_modelEditor.isLibraryVisible();
