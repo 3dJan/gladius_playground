@@ -809,6 +809,18 @@ namespace gladius::ui
                     meshExportDialog();
                     cliExportDialog();
                 }
+
+                // Library export dialog (modal, renders independently of compute)
+                m_libraryExportDialog.render();
+                if (m_libraryExportDialog.wasExportCompleted())
+                {
+                    m_modelEditor.refreshLibraryDirectories();
+                }
+                if (m_libraryExportDialog.hadError())
+                {
+                    m_logView.show();
+                }
+
                 mainMenu();
                 showExitPopUp();
                 showExportInProgressWarning();
@@ -1271,6 +1283,13 @@ namespace gladius::ui
             {
                 closeMenu();
                 saveCurrentFunction();
+            }
+
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>(ICON_FA_BOOK "\tExport to Library...")))
+            {
+                closeMenu();
+                m_libraryExportDialog.open(m_doc, getAppDir() / "library");
             }
 
             if (m_currentAssemblyFileName)

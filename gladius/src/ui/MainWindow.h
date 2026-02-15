@@ -13,6 +13,7 @@
 #include "ExportState.h"
 #include "FileDialogService.h"
 #include "GLView.h"
+#include "LibraryExportDialog.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
 #include "ModelEditor.h"
@@ -262,6 +263,7 @@ namespace gladius::ui
         bool m_showAuthoringTools{true};
         MeshExportDialog m_meshExporterDialog;
         CliExportDialog m_cliExportDialog;
+        LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
         RenderWindow m_renderWindow;

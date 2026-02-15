@@ -13,7 +13,7 @@ namespace gladius::ui
 {
     /**
      * @struct ThreemfFileInfo
-     * @brief Stores information about a 3MF file including its thumbnail
+     * @brief Stores information about a 3MF file including its thumbnail and library metadata
      */
     struct ThreemfFileInfo
     {
@@ -25,6 +25,16 @@ namespace gladius::ui
         unsigned int thumbnailHeight = 0;         ///< Thumbnail height
         bool hasThumbnail = false;                ///< Whether the file has a thumbnail
         bool thumbnailLoaded = false;             ///< Whether the thumbnail has been loaded
+
+        /// @brief Description from `gladius:library-description` metadata
+        std::string description;
+
+        /// @brief Display names of importable functions resolved from
+        ///        `gladius:library-functions` metadata
+        std::vector<std::string> libraryFunctionNames;
+
+        /// @brief Whether `gladius:library-functions` metadata was found in this file
+        bool hasLibraryMetadata = false;
     };
 
     /**
@@ -93,11 +103,16 @@ namespace gladius::ui
         void createThumbnailTexture(ThreemfFileInfo & fileInfo);
 
         /**
-         * @brief Extract thumbnail from a 3MF file using lib3mf
-         * @param filePath Path to the 3MF file
-         * @return Vector of bytes containing the PNG data, or empty vector if no thumbnail
+         * @brief Extract thumbnail and library metadata from a 3MF file
+         *
+         * Opens the file once, extracts the thumbnail PNG data and reads any
+         * `gladius:library-functions` / `gladius:library-description` metadata.
+         * Populates fileInfo.thumbnailData, fileInfo.description,
+         * fileInfo.libraryFunctionNames, and fileInfo.hasLibraryMetadata.
+         *
+         * @param fileInfo The file info to populate
          */
-        std::vector<unsigned char> extractThumbnail(const std::filesystem::path & filePath);
+        void extractFileInfo(ThreemfFileInfo & fileInfo);
 
         std::filesystem::path m_directory;    ///< Directory to scan
         std::vector<ThreemfFileInfo> m_files; ///< Found 3MF files

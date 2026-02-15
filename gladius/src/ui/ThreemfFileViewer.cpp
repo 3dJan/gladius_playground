@@ -4,6 +4,7 @@
 #include "Widgets.h"
 #include "imgui.h"
 #include "io/3mf/Importer3mf.h"
+#include "io/3mf/LibraryMetadata.h"
 #include <algorithm>
 #include <cstdint>
 #include <fmt/format.h>
@@ -105,14 +106,11 @@ namespace gladius::ui
         m_needsRefresh = false;
     }
 
-    std::vector<unsigned char>
-    ThreemfFileViewer::extractThumbnail(const std::filesystem::path & filePath)
+    void ThreemfFileViewer::extractFileInfo(ThreemfFileInfo & fileInfo)
     {
-        std::vector<unsigned char> thumbnailData;
-
         if (!m_wrapper)
         {
-            return thumbnailData;
+            return;
         }
 
         try
@@ -121,14 +119,43 @@ namespace gladius::ui
             auto reader = model->QueryReader("3mf");
 
             reader->SetStrictModeActive(false);
-            reader->ReadFromFile(filePath.string());
+            reader->ReadFromFile(fileInfo.filePath.string());
 
+            // Extract thumbnail
             if (model->HasPackageThumbnailAttachment())
             {
                 auto thumbnail = model->GetPackageThumbnailAttachment();
                 if (thumbnail)
                 {
-                    thumbnail->WriteToBuffer(thumbnailData);
+                    thumbnail->WriteToBuffer(fileInfo.thumbnailData);
+                }
+            }
+
+            // Read library metadata (functions + description)
+            auto metadata = io::readLibraryMetadata(model);
+            if (metadata)
+            {
+                fileInfo.hasLibraryMetadata = true;
+                fileInfo.description = metadata->libraryDescription;
+
+                // Resolve function display names from model resource IDs
+                auto const taggedIds = io::parseResourceIds(metadata->libraryFunctions);
+                auto funcIter = model->GetResources();
+                while (funcIter->MoveNext())
+                {
+                    auto res = funcIter->GetCurrent();
+                    auto implicitFunc =
+                      std::dynamic_pointer_cast<Lib3MF::CImplicitFunction>(res);
+                    if (!implicitFunc)
+                    {
+                        continue;
+                    }
+                    auto const modelId = res->GetModelResourceID();
+                    if (std::find(taggedIds.begin(), taggedIds.end(), modelId) != taggedIds.end())
+                    {
+                        fileInfo.libraryFunctionNames.push_back(
+                          implicitFunc->GetDisplayName());
+                    }
                 }
             }
         }
@@ -136,14 +163,12 @@ namespace gladius::ui
         {
             if (m_logger)
             {
-                m_logger->addEvent({fmt::format("Failed to extract thumbnail from {}: {}",
-                                                filePath.string(),
+                m_logger->addEvent({fmt::format("Failed to extract info from {}: {}",
+                                                fileInfo.filePath.string(),
                                                 e.what()),
                                     events::Severity::Warning});
             }
         }
-
-        return thumbnailData;
     }
 
     void ThreemfFileViewer::loadThumbnail(ThreemfFileInfo & fileInfo)
@@ -153,7 +178,7 @@ namespace gladius::ui
             return;
         }
 
-        fileInfo.thumbnailData = extractThumbnail(fileInfo.filePath);
+        extractFileInfo(fileInfo);
         fileInfo.hasThumbnail = !fileInfo.thumbnailData.empty();
         fileInfo.thumbnailLoaded = true;
 
@@ -261,7 +286,12 @@ namespace gladius::ui
               (windowWidth - ImGui::GetStyle().ItemSpacing.x * (m_columns - 1)) / m_columns;
 
             // Define standard item size for consistent layout
-            const float itemHeight = m_thumbnailSize + 40.0f; // Thumbnail + space for text
+            float const metadataExtra = 30.0f; // Extra height for metadata text
+            auto const itemHeightForFile = [&](ThreemfFileInfo const & fi)
+            {
+                return m_thumbnailSize + 40.0f +
+                       (fi.hasLibraryMetadata ? metadataExtra : 0.0f);
+            };
 
             // Loop through files and display them in a grid
             int fileIndex = 0;
@@ -315,6 +345,7 @@ namespace gladius::ui
                 ImVec2 itemStartPos = ImGui::GetCursorPos();
 
                 // Create a selectable container with fixed height for consistent layout
+                float const itemHeight = itemHeightForFile(fileInfo);
                 bool isClicked = ImGui::Selectable("##selector",
                                                    false,
                                                    ImGuiSelectableFlags_AllowDoubleClick,
@@ -406,6 +437,69 @@ namespace gladius::ui
                     float posX = itemStartPos.x + (m_thumbnailSize - textWidth) * 0.5f;
                     ImGui::SetCursorPos(ImVec2(posX, textY));
                     ImGui::TextUnformatted(fileInfo.fileName.c_str());
+                }
+
+                // Show library metadata below the filename
+                if (fileInfo.hasLibraryMetadata)
+                {
+                    float const metaY = textY + ImGui::GetTextLineHeight() + 2.0f;
+
+                    // Function names as comma-separated labels
+                    if (!fileInfo.libraryFunctionNames.empty())
+                    {
+                        std::string funcLabel;
+                        for (size_t i = 0; i < fileInfo.libraryFunctionNames.size(); ++i)
+                        {
+                            if (i > 0)
+                            {
+                                funcLabel += ", ";
+                            }
+                            funcLabel += fileInfo.libraryFunctionNames[i];
+                        }
+                        if (funcLabel.size() > 30)
+                        {
+                            funcLabel = funcLabel.substr(0, 27) + "...";
+                        }
+
+                        float const funcWidth = ImGui::CalcTextSize(funcLabel.c_str()).x;
+                        float const funcX =
+                          itemStartPos.x + (m_thumbnailSize - funcWidth) * 0.5f;
+                        ImGui::SetCursorPos(ImVec2(funcX, metaY));
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                        ImGui::TextUnformatted(funcLabel.c_str());
+                        ImGui::PopStyleColor();
+                    }
+
+                    // Description tooltip on hover
+                    if (!fileInfo.description.empty())
+                    {
+                        // Show truncated description
+                        std::string descDisplay = fileInfo.description;
+                        if (descDisplay.size() > 80)
+                        {
+                            descDisplay = descDisplay.substr(0, 77) + "...";
+                        }
+
+                        float const descY = metaY + ImGui::GetTextLineHeight() + 1.0f;
+                        float const descWidth = ImGui::CalcTextSize(descDisplay.c_str()).x;
+                        float const descX =
+                          itemStartPos.x + (m_thumbnailSize - descWidth) * 0.5f;
+                        ImGui::SetCursorPos(ImVec2(descX, descY));
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                        ImGui::TextUnformatted(descDisplay.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                }
+
+                // Show full description in tooltip when hovering over the card
+                if (fileInfo.hasLibraryMetadata && !fileInfo.description.empty())
+                {
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip("%s", fileInfo.description.c_str());
+                    }
                 }
 
                 ImGui::EndGroup();

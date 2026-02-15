@@ -1,5 +1,6 @@
 #include "Importer3mf.h"
 #include "BeamLatticeImporter.h"
+#include "LibraryMetadata.h"
 
 #include "Lib3mfLoader.h"
 #include <algorithm>
@@ -1992,8 +1993,30 @@ namespace gladius::io
 
         try
         {
-            // backup the list of function ids
+            // Selective import: if the source has library metadata, prune non-closure
+            // resources before merging so only tagged functions and their dependencies
+            // are imported
+            auto const libraryMetadata = readLibraryMetadata(modelToMergeFrom);
+            if (libraryMetadata)
+            {
+                auto const taggedIds = parseResourceIds(libraryMetadata->libraryFunctions);
+                auto const closure =
+                  computeSelectiveImportClosure(modelToMergeFrom, taggedIds, m_eventLogger);
+                if (closure)
+                {
+                    pruneModelForSelectiveImport(modelToMergeFrom, *closure);
+                }
+                else if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent(
+                      {fmt::format("Library metadata in {} contains invalid function IDs, "
+                                   "falling back to full merge",
+                                   filename.string()),
+                       events::Severity::Warning});
+                }
+            }
 
+            // backup the list of function ids
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions
             auto implicitFunctions = collectImplicitFunctions(targetModel);
