@@ -2007,7 +2007,13 @@ namespace gladius::ui
 
         // Create the FunctionCall node at the drop position.
         createUndoRestorePoint("Import library function");
+
+        // Suspend the node editor to correctly query the mouse position
+        // in screen space (same pattern as the right-click popup).
+        ed::Suspend();
         auto const mouseScreen = ImGui::GetMousePos();
+        ed::Resume();
+
         auto const posOnCanvas = ed::ScreenToCanvas(mouseScreen);
 
         auto * createdNode = m_currentModel->create<nodes::FunctionCall>();
