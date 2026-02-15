@@ -63,8 +63,11 @@ namespace gladius::ui
         m_doc->setUiMode(true);
 
         m_modelEditor.setDocument(m_doc);
-        // Set the library root directory
-        m_modelEditor.setLibraryRootDirectory(getAppDir() / "library");
+
+        // Sync shipped library items into the user's persistent library directory.
+        // This copies new files without overwriting existing user customizations.
+        syncShippedLibrary();
+        m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
 
         using namespace gladius;
 
@@ -1289,7 +1292,7 @@ namespace gladius::ui
                   reinterpret_cast<const char *>(ICON_FA_BOOK "\tExport to Library...")))
             {
                 closeMenu();
-                m_libraryExportDialog.open(m_doc, getAppDir() / "library");
+                m_libraryExportDialog.open(m_doc, getUserLibraryDir());
             }
 
             if (m_currentAssemblyFileName)
@@ -1409,7 +1412,7 @@ namespace gladius::ui
             {
                 m_modelEditor.setVisibility(true);
             }
-            m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+            m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
             m_modelEditor.setLibraryVisibility(true);
             m_isLibraryBrowserVisible = true;
         }
@@ -2547,7 +2550,7 @@ namespace gladius::ui
               {
                   m_modelEditor.setVisibility(true);
               }
-              m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+              m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
               m_modelEditor.toggleLibraryVisibility();
               m_isLibraryBrowserVisible = m_modelEditor.isLibraryVisible();
           });

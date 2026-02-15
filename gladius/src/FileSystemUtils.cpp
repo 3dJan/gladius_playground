@@ -9,6 +9,7 @@
 #ifndef _MSVC_LANG
 #include <unistd.h>
 #endif
+#include <sago/platform_folders.h>
 
 namespace gladius
 {
@@ -30,5 +31,66 @@ namespace gladius
 
         return std::filesystem::path{executablePath}.parent_path();
 #endif
+    }
+
+    std::filesystem::path getShippedLibraryDir()
+    {
+        return getAppDir() / "library";
+    }
+
+    std::filesystem::path getUserLibraryDir()
+    {
+        auto const dir =
+          std::filesystem::path{sago::getDataHome()} / "gladius" / "library";
+
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        // Silently ignore errors — the caller will notice if the dir is missing.
+        return dir;
+    }
+
+    std::size_t syncShippedLibrary()
+    {
+        auto const shipped = getShippedLibraryDir();
+        auto const userLib = getUserLibraryDir();
+
+        if (!std::filesystem::exists(shipped) ||
+            !std::filesystem::is_directory(shipped))
+        {
+            return 0;
+        }
+
+        std::size_t copiedCount = 0;
+
+        for (auto const & entry :
+             std::filesystem::recursive_directory_iterator(shipped))
+        {
+            auto const relativePath =
+              std::filesystem::relative(entry.path(), shipped);
+            auto const targetPath = userLib / relativePath;
+
+            if (entry.is_directory())
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(targetPath, ec);
+            }
+            else if (entry.is_regular_file() &&
+                     !std::filesystem::exists(targetPath))
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(targetPath.parent_path(), ec);
+                std::filesystem::copy_file(
+                  entry.path(),
+                  targetPath,
+                  std::filesystem::copy_options::skip_existing,
+                  ec);
+                if (!ec)
+                {
+                    ++copiedCount;
+                }
+            }
+        }
+
+        return copiedCount;
     }
 }
