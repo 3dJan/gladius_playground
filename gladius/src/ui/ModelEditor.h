@@ -8,6 +8,7 @@
 #include "FunctionFromImage3DView.h"
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
+#include "LibraryDragPayload.h"
 #include "NodeClipboard.h"
 #include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
@@ -205,6 +206,9 @@ namespace gladius::ui
         void beamLatticeResourceToolBox(ImVec2 mousePos);
         void showDeleteUnusedResourcesDialog();
         void validate();
+
+        /// @brief Handle drag-and-drop from the library browser onto the node editor canvas.
+        void handleLibraryDrop();
 
         void undo();
         void redo();

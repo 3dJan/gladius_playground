@@ -1,6 +1,7 @@
 #include "ThreemfFileViewer.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
 #include "FileChooser.h"
+#include "LibraryDragPayload.h"
 #include "Widgets.h"
 #include "imgui.h"
 #include "io/3mf/Importer3mf.h"
@@ -382,6 +383,30 @@ namespace gladius::ui
                                                 events::Severity::Error});
                         }
                     }
+                }
+
+                // --- Drag-and-drop source for library items ---
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+                {
+                    // Store a pointer to the current file info as the payload.
+                    // The pointer is valid for the duration of the drag because
+                    // m_files is stable while no directory refresh occurs.
+                    ThreemfFileInfo const * payloadPtr = &fileInfo;
+                    ImGui::SetDragDropPayload(
+                      LIBRARY_DND_TYPE, &payloadPtr, sizeof(payloadPtr));
+
+                    // Drag tooltip: show function name or file name
+                    if (fileInfo.hasLibraryMetadata &&
+                        !fileInfo.libraryFunctionNames.empty())
+                    {
+                        ImGui::TextUnformatted(
+                          fileInfo.libraryFunctionNames.front().c_str());
+                    }
+                    else
+                    {
+                        ImGui::TextUnformatted(fileInfo.fileName.c_str());
+                    }
+                    ImGui::EndDragDropSource();
                 }
 
                 // Center the thumbnail horizontally and vertically within the item area

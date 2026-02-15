@@ -1495,6 +1495,9 @@ namespace gladius::ui
                     m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
                 }
 
+                // Handle drag-and-drop from the library browser
+                handleLibraryDrop();
+
                 // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
                 // Uses ed::GetHoveredNode() for correct node-level hover detection
                 ed::NodeId hoveredNodeId = ed::GetHoveredNode();
@@ -1867,6 +1870,160 @@ namespace gladius::ui
                        [](unsigned char c) { return std::tolower(c); });
 
         return lowerText.find(lowerFilter) != std::string::npos;
+    }
+
+    void ModelEditor::handleLibraryDrop()
+    {
+        if (!m_currentModel || !m_assembly || !m_doc)
+        {
+            return;
+        }
+
+        // Only accept the drop when the node-editor canvas is hovered.
+        auto const * payload = ImGui::GetDragDropPayload();
+        if (!payload || !payload->IsDataType(LIBRARY_DND_TYPE))
+        {
+            return;
+        }
+
+        // The payload is a pointer to the ThreemfFileInfo in the library browser.
+        // We only proceed on mouse-release (drop).
+        if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            return;
+        }
+
+        auto const * const * ppFileInfo =
+          static_cast<ThreemfFileInfo const * const *>(payload->Data);
+        if (!ppFileInfo || !*ppFileInfo)
+        {
+            return;
+        }
+
+        auto const & fileInfo = **ppFileInfo;
+
+        // Determine which function display name to look for after merge.
+        std::string targetFunctionName;
+        if (fileInfo.hasLibraryMetadata && !fileInfo.libraryFunctionNames.empty())
+        {
+            targetFunctionName = fileInfo.libraryFunctionNames.front();
+        }
+
+        // Record current functions so we can detect newly imported ones.
+        std::set<nodes::ResourceId> existingFunctionIds;
+        for (auto const & [id, _] : m_assembly->getFunctions())
+        {
+            existingFunctionIds.insert(id);
+        }
+
+        // Merge the library file into the document.
+        try
+        {
+            m_doc->merge(fileInfo.filePath);
+        }
+        catch (std::exception const & e)
+        {
+            if (m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                  {fmt::format("Library drop failed: {}", e.what()),
+                   events::Severity::Error});
+            }
+            return;
+        }
+
+        // Find the function to reference in the new FunctionCall node.
+        // Strategy: prefer a newly imported function whose display name matches
+        // the library metadata. Fall back to any function matching by name.
+        nodes::ResourceId matchedId = 0;
+        nodes::Model * matchedModel = nullptr;
+
+        auto const functions = m_assembly->getFunctions();
+
+        if (!targetFunctionName.empty())
+        {
+            // First pass: prefer newly added function with the target name.
+            for (auto const & [id, model] : functions)
+            {
+                if (!model)
+                {
+                    continue;
+                }
+                auto const name = model->getDisplayName();
+                if (name.has_value() && *name == targetFunctionName)
+                {
+                    // Prefer a new function over a pre-existing one.
+                    if (existingFunctionIds.count(id) == 0 || matchedId == 0)
+                    {
+                        matchedId = id;
+                        matchedModel = model.get();
+                    }
+                }
+            }
+        }
+
+        // If no match by name (e.g. file has no library metadata), pick the
+        // first newly imported function.
+        if (matchedId == 0)
+        {
+            for (auto const & [id, model] : functions)
+            {
+                if (!model || model == m_currentModel)
+                {
+                    continue;
+                }
+                if (existingFunctionIds.count(id) == 0)
+                {
+                    matchedId = id;
+                    matchedModel = model.get();
+                    break;
+                }
+            }
+        }
+
+        // If still no match (everything already existed), find by name.
+        if (matchedId == 0 && !targetFunctionName.empty())
+        {
+            for (auto const & [id, model] : functions)
+            {
+                if (!model || model == m_currentModel)
+                {
+                    continue;
+                }
+                auto const name = model->getDisplayName();
+                if (name.has_value() && *name == targetFunctionName)
+                {
+                    matchedId = id;
+                    matchedModel = model.get();
+                    break;
+                }
+            }
+        }
+
+        if (matchedId == 0 || !matchedModel)
+        {
+            return; // Nothing to create a FunctionCall for
+        }
+
+        // Create the FunctionCall node at the drop position.
+        createUndoRestorePoint("Import library function");
+        auto const mouseScreen = ImGui::GetMousePos();
+        auto const posOnCanvas = ed::ScreenToCanvas(mouseScreen);
+
+        auto * createdNode = m_currentModel->create<nodes::FunctionCall>();
+        createdNode->setFunctionId(matchedId);
+        createdNode->updateInputsAndOutputs(*matchedModel);
+        m_currentModel->registerInputs(*createdNode);
+        m_currentModel->registerOutputs(*createdNode);
+        ed::SetNodePosition(createdNode->getId(), posOnCanvas);
+
+        if (matchedModel->getDisplayName().has_value())
+        {
+            createdNode->setDisplayName(matchedModel->getDisplayName().value());
+        }
+
+        requestNodeFocus(createdNode->getId());
+        markModelAsModified();
     }
 
     void ModelEditor::functionToolBox(ImVec2 mousePos)
