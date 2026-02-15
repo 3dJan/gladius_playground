@@ -106,22 +106,39 @@ namespace gladius::io
     namespace
     {
         /// Sets a metadata entry, creating it if it doesn't exist or updating
-        /// the value if it already does. This avoids "Duplicate Model Metadata"
-        /// errors from lib3mf's AddMetaData when the key is already present.
+        /// the value if it already does.
+        ///
+        /// Avoids GetMetaDataByKey (which can throw "Referenced resource must not
+        /// be nullptr" on certain deserialized models) by iterating metadata
+        /// entries by index instead.
         void setMetaDataValue(Lib3MF::PMetaDataGroup const & metaDataGroup,
                               std::string const & nameSpace,
                               std::string const & name,
                               std::string const & value)
         {
+            // Search for an existing entry by iterating — avoids GetMetaDataByKey
+            // which can crash on models deserialized from buffers.
             try
             {
-                auto existing = metaDataGroup->GetMetaDataByKey(nameSpace, name);
-                existing->SetValue(value);
+                auto const count = metaDataGroup->GetMetaDataCount();
+                for (Lib3MF_uint32 i = 0; i < count; ++i)
+                {
+                    auto meta = metaDataGroup->GetMetaData(i);
+                    if (meta && meta->GetNameSpace() == nameSpace &&
+                        meta->GetName() == name)
+                    {
+                        meta->SetValue(value);
+                        return;
+                    }
+                }
             }
             catch (...)
             {
-                metaDataGroup->AddMetaData(nameSpace, name, value, "xs:string", true);
+                // Iteration failed — the metadata group may be in an invalid
+                // state. Fall through to AddMetaData as a last resort.
             }
+
+            metaDataGroup->AddMetaData(nameSpace, name, value, "xs:string", true);
         }
     } // namespace
 
@@ -144,6 +161,38 @@ namespace gladius::io
                          LIBRARY_METADATA_NAMESPACE,
                          LIBRARY_DESCRIPTION_KEY,
                          metadata.libraryDescription);
+    }
+
+    void removeLibraryMetadata(Lib3MF::PModel model)
+    {
+        if (!model)
+        {
+            return;
+        }
+
+        auto metaDataGroup = model->GetMetaDataGroup();
+        if (!metaDataGroup)
+        {
+            return;
+        }
+
+        // Remove in reverse order to avoid index invalidation.
+        try
+        {
+            auto count = metaDataGroup->GetMetaDataCount();
+            for (Lib3MF_uint32 i = count; i > 0; --i)
+            {
+                auto meta = metaDataGroup->GetMetaData(i - 1);
+                if (meta && meta->GetNameSpace() == LIBRARY_METADATA_NAMESPACE)
+                {
+                    metaDataGroup->RemoveMetaDataByIndex(i - 1);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Best-effort cleanup — ignore errors.
+        }
     }
 
     std::optional<std::unordered_set<Lib3MF_uint32>>

@@ -61,6 +61,13 @@ namespace gladius::io
     /// @param metadata The metadata to write.
     void writeLibraryMetadata(Lib3MF::PModel model, LibraryMetadata const & metadata);
 
+    /// @brief Removes all library metadata entries from a 3MF model.
+    ///
+    /// Removes any metadata in the `gladius` namespace from the model-level
+    /// metadata group. Safe to call even if no library metadata is present.
+    /// @param model The 3MF model to clean up.
+    void removeLibraryMetadata(Lib3MF::PModel model);
+
     /// @brief Computes the selective import closure for a set of tagged functions.
     ///
     /// Given a source model and a list of model resource IDs identifying the

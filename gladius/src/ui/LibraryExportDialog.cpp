@@ -1,7 +1,6 @@
 #include "LibraryExportDialog.h"
 
 #include "imgui.h"
-#include "io/3mf/Lib3mfLoader.h"
 #include "io/3mf/LibraryMetadata.h"
 
 #include <algorithm>
@@ -351,52 +350,36 @@ namespace gladius::ui
 
             auto sourceModel = m_doc->get3mfModel();
 
-            // 2. Deep-clone via buffer round-trip.
-            auto wrapper = io::loadLib3mfScoped();
-
-            std::vector<Lib3MF_uint8> buffer;
-            {
-                auto writer = sourceModel->QueryWriter("3mf");
-                writer->WriteToBuffer(buffer);
-            }
-
-            auto workingCopy = wrapper->CreateModel();
-            {
-                auto reader = workingCopy->QueryReader("3mf");
-                reader->ReadFromBuffer(buffer);
-            }
-
-            // 3. Compute the dependency closure for the selected function.
+            // 2. Stamp library metadata on the SOURCE model before serialization.
+            //    We export the full model (no pruning) because lib3mf's
+            //    RemoveResource breaks internal state on models with cross-function
+            //    ResourceIdNode references. Selective import at merge time already
+            //    prunes correctly using the metadata tags.
             std::vector<Lib3MF_uint32> taggedIds;
             taggedIds.push_back(
               static_cast<Lib3MF_uint32>(selectedFunc.resourceId));
 
-            // 4. Stamp library metadata BEFORE pruning, because pruning may
-            //    invalidate internal model state that GetMetaDataByKey relies on.
             io::LibraryMetadata metadata;
             metadata.libraryFunctions = io::serializeResourceIds(taggedIds);
             metadata.libraryDescription = std::string(m_descriptionBuf);
-            io::writeLibraryMetadata(workingCopy, metadata);
+            io::writeLibraryMetadata(sourceModel, metadata);
 
-            auto closure =
-              io::computeSelectiveImportClosure(workingCopy, taggedIds, m_logger);
-            if (closure)
-            {
-                io::pruneModelForSelectiveImport(workingCopy, *closure);
-            }
-
-            // 5. Ensure the target directory exists.
+            // 3. Ensure the target directory exists.
             auto const targetDir = m_targetPath.parent_path();
             if (!std::filesystem::exists(targetDir))
             {
                 std::filesystem::create_directories(targetDir);
             }
 
-            // 6. Write to disk.
+            // 4. Write the model to disk (with metadata).
             {
-                auto writer = workingCopy->QueryWriter("3mf");
+                auto writer = sourceModel->QueryWriter("3mf");
                 writer->WriteToFile(m_targetPath.string());
             }
+
+            // 5. Remove library metadata from the live source model
+            //    so it doesn't persist across regular saves.
+            io::removeLibraryMetadata(sourceModel);
 
             if (m_logger)
             {
@@ -412,6 +395,19 @@ namespace gladius::ui
         }
         catch (std::exception const & e)
         {
+            // Ensure library metadata is cleaned up from the source model
+            // even if the export failed.
+            try
+            {
+                if (m_doc)
+                {
+                    io::removeLibraryMetadata(m_doc->get3mfModel());
+                }
+            }
+            catch (...)
+            {
+            }
+
             if (m_logger)
             {
                 m_logger->addEvent(
