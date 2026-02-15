@@ -240,7 +240,14 @@ namespace gladius::ui
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ── Action buttons ───────────────────────────────────────────
+        // Inform user that the full project is included in the export
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+        ImGui::TextWrapped(
+          "Note: The exported file will contain the complete project. "
+          "Only the selected function will be importable via the library.");
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
         bool const canExport = m_fileNameBuf[0] != '\0';
 
         if (!canExport)
@@ -283,7 +290,7 @@ namespace gladius::ui
             else
             {
                 performExport();
-                closePopup = m_exportCompleted;
+                closePopup = m_exportCompleted || m_exportError;
             }
         }
 
@@ -317,7 +324,7 @@ namespace gladius::ui
             {
                 ImGui::CloseCurrentPopup();
                 performExport();
-                closePopup = m_exportCompleted;
+                closePopup = m_exportCompleted || m_exportError;
             }
             ImGui::SameLine();
             if (ImGui::Button("No", ImVec2(120, 0)))
@@ -391,7 +398,6 @@ namespace gladius::ui
             }
 
             m_exportCompleted = true;
-            m_isOpen = false;
         }
         catch (std::exception const & e)
         {
@@ -415,7 +421,6 @@ namespace gladius::ui
                    events::Severity::Error});
             }
             m_exportError = true;
-            m_isOpen = false;
         }
     }
 

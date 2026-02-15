@@ -49,13 +49,12 @@ namespace gladius
         return dir;
     }
 
-    std::size_t syncShippedLibrary()
+    std::size_t syncLibraryDirectory(
+      std::filesystem::path const & source,
+      std::filesystem::path const & target)
     {
-        auto const shipped = getShippedLibraryDir();
-        auto const userLib = getUserLibraryDir();
-
-        if (!std::filesystem::exists(shipped) ||
-            !std::filesystem::is_directory(shipped))
+        if (!std::filesystem::exists(source) ||
+            !std::filesystem::is_directory(source))
         {
             return 0;
         }
@@ -63,11 +62,11 @@ namespace gladius
         std::size_t copiedCount = 0;
 
         for (auto const & entry :
-             std::filesystem::recursive_directory_iterator(shipped))
+             std::filesystem::recursive_directory_iterator(source))
         {
             auto const relativePath =
-              std::filesystem::relative(entry.path(), shipped);
-            auto const targetPath = userLib / relativePath;
+              std::filesystem::relative(entry.path(), source);
+            auto const targetPath = target / relativePath;
 
             if (entry.is_directory())
             {
@@ -92,5 +91,10 @@ namespace gladius
         }
 
         return copiedCount;
+    }
+
+    std::size_t syncShippedLibrary()
+    {
+        return syncLibraryDirectory(getShippedLibraryDir(), getUserLibraryDir());
     }
 }

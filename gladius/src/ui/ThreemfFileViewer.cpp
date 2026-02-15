@@ -160,13 +160,22 @@ namespace gladius::ui
                 }
             }
         }
-        catch (const std::exception & e)
+        catch (std::exception const & e)
         {
             if (m_logger)
             {
                 m_logger->addEvent({fmt::format("Failed to extract info from {}: {}",
                                                 fileInfo.filePath.string(),
                                                 e.what()),
+                                    events::Severity::Warning});
+            }
+        }
+        catch (...)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent({fmt::format("Failed to extract info from {}: unknown error",
+                                                fileInfo.filePath.string()),
                                     events::Severity::Warning});
             }
         }

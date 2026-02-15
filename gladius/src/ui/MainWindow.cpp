@@ -1104,10 +1104,16 @@ namespace gladius::ui
                   m_renderWindow.invalidateView();
               }
 
-              // Mark model as up to date after compilation check
-              if (modelWasModified || parameterModifiedByModelEditor)
+              // Only clear the modified flags when no compile request is
+              // pending.  If refreshModel() was skipped because a
+              // compilation was already in-progress, the flags must
+              // survive so the next frame retries the compilation.
+              if (!m_modelEditor.isCompileRequested())
               {
-                  m_modelEditor.markModelAsUpToDate();
+                  if (modelWasModified || parameterModifiedByModelEditor)
+                  {
+                      m_modelEditor.markModelAsUpToDate();
+                  }
               }
           });
     }

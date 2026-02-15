@@ -3,6 +3,7 @@
 #include "ResourceDependencyGraph.h"
 
 #include <algorithm>
+#include <charconv>
 #include <sstream>
 
 namespace gladius::io
@@ -28,14 +29,12 @@ namespace gladius::io
             auto const end = segment.find_last_not_of(" \t");
             auto const trimmed = segment.substr(start, end - start + 1);
 
-            try
+            unsigned long val = 0;
+            auto const [ptr, ec] =
+              std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), val);
+            if (ec == std::errc{})
             {
-                auto const id = static_cast<Lib3MF_uint32>(std::stoul(trimmed));
-                ids.push_back(id);
-            }
-            catch (std::exception const &)
-            {
-                // Skip non-numeric segments
+                ids.push_back(static_cast<Lib3MF_uint32>(val));
             }
         }
 
@@ -69,13 +68,30 @@ namespace gladius::io
             return std::nullopt;
         }
 
-        // library-functions is required for this to be a library file
+        // Iterate by index instead of GetMetaDataByKey, which can throw
+        // "Referenced resource must not be nullptr" on deserialized models.
         std::string functionsValue;
+        std::string descriptionValue;
+
         try
         {
-            auto meta =
-              metaDataGroup->GetMetaDataByKey(LIBRARY_METADATA_NAMESPACE, LIBRARY_FUNCTIONS_KEY);
-            functionsValue = meta->GetValue();
+            auto const count = metaDataGroup->GetMetaDataCount();
+            for (Lib3MF_uint32 i = 0; i < count; ++i)
+            {
+                auto meta = metaDataGroup->GetMetaData(i);
+                if (!meta || meta->GetNameSpace() != LIBRARY_METADATA_NAMESPACE)
+                {
+                    continue;
+                }
+                if (meta->GetName() == LIBRARY_FUNCTIONS_KEY)
+                {
+                    functionsValue = meta->GetValue();
+                }
+                else if (meta->GetName() == LIBRARY_DESCRIPTION_KEY)
+                {
+                    descriptionValue = meta->GetValue();
+                }
+            }
         }
         catch (...)
         {
@@ -85,19 +101,6 @@ namespace gladius::io
         if (functionsValue.empty())
         {
             return std::nullopt;
-        }
-
-        // library-description is optional
-        std::string descriptionValue;
-        try
-        {
-            auto meta =
-              metaDataGroup->GetMetaDataByKey(LIBRARY_METADATA_NAMESPACE, LIBRARY_DESCRIPTION_KEY);
-            descriptionValue = meta->GetValue();
-        }
-        catch (...)
-        {
-            // No description — that's fine
         }
 
         return LibraryMetadata{std::move(functionsValue), std::move(descriptionValue)};

@@ -763,6 +763,11 @@ namespace gladius
         (void) refreshModelAsync(); // Result intentionally ignored for merge
     }
 
+    void Document::mergeOnly(std::filesystem::path filename)
+    {
+        mergeImpl(filename);
+    }
+
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
     {
         if (filename.extension() == ".3mf")

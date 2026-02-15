@@ -120,6 +120,10 @@ namespace gladius
         void loadNonBlocking(std::filesystem::path filename);
         void merge(std::filesystem::path filename);
 
+        /// Import functions from another file without triggering recompilation.
+        /// Use when the caller will create additional nodes before compilation.
+        void mergeOnly(std::filesystem::path filename);
+
         /**
          * @brief Check if a file is currently being loaded asynchronously
          * @return true if a file load is in progress

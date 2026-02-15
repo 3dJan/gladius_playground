@@ -36,46 +36,10 @@ namespace gladius::tests
             std::filesystem::remove_all(m_tempDir);
         }
 
-        /// @brief Run a sync from m_shipped → m_user (bypassing getAppDir()).
+        /// @brief Run a sync from m_shipped → m_user using the real implementation.
         std::size_t syncDirs() const
         {
-            if (!std::filesystem::exists(m_shipped) ||
-                !std::filesystem::is_directory(m_shipped))
-            {
-                return 0;
-            }
-
-            std::size_t copiedCount = 0;
-            for (auto const & entry :
-                 std::filesystem::recursive_directory_iterator(m_shipped))
-            {
-                auto const rel =
-                  std::filesystem::relative(entry.path(), m_shipped);
-                auto const target = m_user / rel;
-
-                if (entry.is_directory())
-                {
-                    std::error_code ec;
-                    std::filesystem::create_directories(target, ec);
-                }
-                else if (entry.is_regular_file() &&
-                         !std::filesystem::exists(target))
-                {
-                    std::error_code ec;
-                    std::filesystem::create_directories(
-                      target.parent_path(), ec);
-                    std::filesystem::copy_file(
-                      entry.path(),
-                      target,
-                      std::filesystem::copy_options::skip_existing,
-                      ec);
-                    if (!ec)
-                    {
-                        ++copiedCount;
-                    }
-                }
-            }
-            return copiedCount;
+            return syncLibraryDirectory(m_shipped, m_user);
         }
 
         std::filesystem::path m_tempDir;

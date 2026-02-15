@@ -36,13 +36,13 @@ namespace gladius::io
     /// Whitespace around individual IDs is trimmed. Empty segments are skipped.
     /// @param value The semicolon-separated string (e.g. "5 ; 12 ; 3").
     /// @return Vector of parsed model resource IDs.
-    std::vector<Lib3MF_uint32> parseResourceIds(std::string const & value);
+    [[nodiscard]] std::vector<Lib3MF_uint32> parseResourceIds(std::string const & value);
 
     /// @brief Serializes a vector of resource IDs into a semicolon-separated string.
     ///
     /// @param ids The resource IDs to serialize.
     /// @return Semicolon-separated string (e.g. "5;12;3").
-    std::string serializeResourceIds(std::vector<Lib3MF_uint32> const & ids);
+    [[nodiscard]] std::string serializeResourceIds(std::vector<Lib3MF_uint32> const & ids);
 
     /// @brief Reads library metadata from a 3MF model's metadata group.
     ///
@@ -51,7 +51,7 @@ namespace gladius::io
     /// field will be empty.
     /// @param model The 3MF model to read metadata from.
     /// @return The library metadata, or std::nullopt if not a library file.
-    std::optional<LibraryMetadata> readLibraryMetadata(Lib3MF::PModel model);
+    [[nodiscard]] std::optional<LibraryMetadata> readLibraryMetadata(Lib3MF::PModel model);
 
     /// @brief Writes library metadata to a 3MF model's metadata group.
     ///
@@ -80,7 +80,7 @@ namespace gladius::io
     /// @param logger Logger for warnings and errors.
     /// @return Set of model resource IDs in the closure, or std::nullopt if any
     ///         tagged ID doesn't exist in the model or the input is empty.
-    std::optional<std::unordered_set<Lib3MF_uint32>>
+    [[nodiscard]] std::optional<std::unordered_set<Lib3MF_uint32>>
     computeSelectiveImportClosure(Lib3MF::PModel sourceModel,
                                   std::vector<Lib3MF_uint32> const & taggedModelResourceIds,
                                   events::SharedLogger logger);
@@ -95,7 +95,7 @@ namespace gladius::io
     /// @param model The 3MF model to prune.
     /// @param closureModelResourceIds Set of model resource IDs to keep.
     /// @return true if pruning was successful, false on error.
-    bool pruneModelForSelectiveImport(
+    [[nodiscard]] bool pruneModelForSelectiveImport(
       Lib3MF::PModel model,
       std::unordered_set<Lib3MF_uint32> const & closureModelResourceIds);
 

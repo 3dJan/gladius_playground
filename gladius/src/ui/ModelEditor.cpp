@@ -1874,7 +1874,7 @@ namespace gladius::ui
 
     void ModelEditor::handleLibraryDrop()
     {
-        if (!m_currentModel || !m_assembly || !m_doc)
+        if (!m_currentModel || !m_doc)
         {
             return;
         }
@@ -1906,7 +1906,17 @@ namespace gladius::ui
         std::string targetFunctionName;
         if (fileInfo.hasLibraryMetadata && !fileInfo.libraryFunctionNames.empty())
         {
+            // NOTE: Only the first tagged function gets a FunctionCall node.
+            // Additional tagged functions are imported but must be referenced manually.
             targetFunctionName = fileInfo.libraryFunctionNames.front();
+        }
+
+        // Refresh the assembly pointer — the document may have replaced it
+        // since we last captured it (e.g. during file load).
+        refreshAssembly();
+        if (!m_assembly)
+        {
+            return;
         }
 
         // Record current functions so we can detect newly imported ones.
@@ -1916,10 +1926,12 @@ namespace gladius::ui
             existingFunctionIds.insert(id);
         }
 
-        // Merge the library file into the document.
+        // Merge the library file into the document without triggering an
+        // immediate recompilation.  We create the FunctionCall node first so
+        // that the subsequent (flag-driven) compilation includes the new node.
         try
         {
-            m_doc->merge(fileInfo.filePath);
+            m_doc->mergeOnly(fileInfo.filePath);
         }
         catch (std::exception const & e)
         {
@@ -1932,17 +1944,33 @@ namespace gladius::ui
             return;
         }
 
-        // Find the function to reference in the new FunctionCall node.
-        // Strategy: prefer a newly imported function whose display name matches
-        // the library metadata. Fall back to any function matching by name.
+        // Re-fetch the assembly — merge may have replaced the shared_ptr.
+        refreshAssembly();
+
+        auto [matchedId, matchedModel] =
+          findImportedFunction(targetFunctionName, existingFunctionIds);
+
+        if (matchedId == 0 || !matchedModel)
+        {
+            return;
+        }
+
+        createFunctionCallNodeAtCursor(matchedId, matchedModel);
+    }
+
+    std::pair<nodes::ResourceId, nodes::SharedModel> ModelEditor::findImportedFunction(
+        std::string const & targetFunctionName,
+        std::set<nodes::ResourceId> const & existingFunctionIds) const
+    {
         nodes::ResourceId matchedId = 0;
-        nodes::Model * matchedModel = nullptr;
+        nodes::SharedModel matchedModel;
 
         auto const functions = m_assembly->getFunctions();
 
+        // Strategy 1: find a function whose display name matches the target.
+        // Prefer newly imported over pre-existing.
         if (!targetFunctionName.empty())
         {
-            // First pass: prefer newly added function with the target name.
             for (auto const & [id, model] : functions)
             {
                 if (!model)
@@ -1952,18 +1980,16 @@ namespace gladius::ui
                 auto const name = model->getDisplayName();
                 if (name.has_value() && *name == targetFunctionName)
                 {
-                    // Prefer a new function over a pre-existing one.
                     if (existingFunctionIds.count(id) == 0 || matchedId == 0)
                     {
                         matchedId = id;
-                        matchedModel = model.get();
+                        matchedModel = model;
                     }
                 }
             }
         }
 
-        // If no match by name (e.g. file has no library metadata), pick the
-        // first newly imported function.
+        // Strategy 2: pick the first newly imported function.
         if (matchedId == 0)
         {
             for (auto const & [id, model] : functions)
@@ -1975,13 +2001,13 @@ namespace gladius::ui
                 if (existingFunctionIds.count(id) == 0)
                 {
                     matchedId = id;
-                    matchedModel = model.get();
+                    matchedModel = model;
                     break;
                 }
             }
         }
 
-        // If still no match (everything already existed), find by name.
+        // Strategy 3: everything already existed — find by name.
         if (matchedId == 0 && !targetFunctionName.empty())
         {
             for (auto const & [id, model] : functions)
@@ -1994,18 +2020,18 @@ namespace gladius::ui
                 if (name.has_value() && *name == targetFunctionName)
                 {
                     matchedId = id;
-                    matchedModel = model.get();
+                    matchedModel = model;
                     break;
                 }
             }
         }
 
-        if (matchedId == 0 || !matchedModel)
-        {
-            return; // Nothing to create a FunctionCall for
-        }
+        return {matchedId, matchedModel};
+    }
 
-        // Create the FunctionCall node at the drop position.
+    void ModelEditor::createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
+                                                      nodes::SharedModel const & sourceModel)
+    {
         createUndoRestorePoint("Import library function");
 
         // Suspend the node editor to correctly query the mouse position
@@ -2017,15 +2043,15 @@ namespace gladius::ui
         auto const posOnCanvas = ed::ScreenToCanvas(mouseScreen);
 
         auto * createdNode = m_currentModel->create<nodes::FunctionCall>();
-        createdNode->setFunctionId(matchedId);
-        createdNode->updateInputsAndOutputs(*matchedModel);
+        createdNode->setFunctionId(functionId);
+        createdNode->updateInputsAndOutputs(*sourceModel);
         m_currentModel->registerInputs(*createdNode);
         m_currentModel->registerOutputs(*createdNode);
         ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
-        if (matchedModel->getDisplayName().has_value())
+        if (sourceModel->getDisplayName().has_value())
         {
-            createdNode->setDisplayName(matchedModel->getDisplayName().value());
+            createdNode->setDisplayName(sourceModel->getDisplayName().value());
         }
 
         requestNodeFocus(createdNode->getId());
@@ -2984,11 +3010,31 @@ namespace gladius::ui
 
     void ModelEditor::refreshAssembly()
     {
-        if (m_doc)
+        if (!m_doc)
         {
-            // Just update the assembly reference without clearing editor contexts
-            // This is a lightweight refresh for when functions are added externally
-            m_assembly = m_doc->getAssembly();
+            return;
+        }
+
+        auto newAssembly = m_doc->getAssembly();
+        if (newAssembly == m_assembly)
+        {
+            return; // Same object — nothing to update.
+        }
+
+        // The document replaced its assembly (e.g. on file load).
+        // Re-map m_currentModel to the equivalent model in the new assembly.
+        auto const oldResourceId =
+            m_currentModel ? m_currentModel->getResourceId() : nodes::ResourceId{0};
+
+        m_assembly = std::move(newAssembly);
+
+        if (m_assembly && oldResourceId != 0)
+        {
+            m_currentModel = m_assembly->findModel(oldResourceId);
+        }
+        if (!m_currentModel && m_assembly)
+        {
+            m_currentModel = m_assembly->assemblyModel();
         }
     }
 
