@@ -768,6 +768,29 @@ namespace gladius
         mergeImpl(filename);
     }
 
+    nodes::FunctionMatch Document::mergeAndResolve(std::filesystem::path filename,
+                                                   std::string const & targetFunctionName)
+    {
+        // Snapshot existing function IDs before the merge.
+        std::set<nodes::ResourceId> existingIds;
+        if (m_assembly)
+        {
+            for (auto const & [id, _] : m_assembly->getFunctions())
+            {
+                existingIds.insert(id);
+            }
+        }
+
+        mergeImpl(filename);
+
+        if (!m_assembly)
+        {
+            return {};
+        }
+
+        return m_assembly->findImportedFunction(targetFunctionName, existingIds, nullptr);
+    }
+
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
     {
         if (filename.extension() == ".3mf")

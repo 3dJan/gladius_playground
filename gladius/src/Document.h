@@ -124,6 +124,16 @@ namespace gladius
         /// Use when the caller will create additional nodes before compilation.
         void mergeOnly(std::filesystem::path filename);
 
+        /// Merge a library file and resolve the best matching imported function.
+        /// Does NOT trigger recompilation — the caller is expected to create a
+        /// FunctionCall node and let the flag-driven mechanism handle it.
+        /// @param filename  Path to the .3mf library file.
+        /// @param targetFunctionName  Display name to match (empty = first new).
+        /// @return FunctionMatch with the resolved function (id==0 on failure).
+        [[nodiscard]] nodes::FunctionMatch
+        mergeAndResolve(std::filesystem::path filename,
+                        std::string const & targetFunctionName);
+
         /**
          * @brief Check if a file is currently being loaded asynchronously
          * @return true if a file load is in progress

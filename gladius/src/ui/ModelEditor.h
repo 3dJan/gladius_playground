@@ -210,15 +210,6 @@ namespace gladius::ui
         /// @brief Handle drag-and-drop from the library browser onto the node editor canvas.
         void handleLibraryDrop();
 
-        /// @brief Find the best matching function after merging a library file.
-        /// Prefers newly imported functions whose display name matches the library metadata.
-        /// @param targetFunctionName Display name to match (empty = pick first new function).
-        /// @param existingFunctionIds Function IDs present before the merge.
-        /// @return Pair of (ResourceId, SharedModel) for the matched function, or (0, nullptr).
-        std::pair<nodes::ResourceId, nodes::SharedModel> findImportedFunction(
-            std::string const & targetFunctionName,
-            std::set<nodes::ResourceId> const & existingFunctionIds) const;
-
         /// @brief Create a FunctionCall node at the current cursor position.
         /// @param functionId The resource ID of the function to call.
         /// @param sourceModel The model providing inputs/outputs for the FunctionCall.

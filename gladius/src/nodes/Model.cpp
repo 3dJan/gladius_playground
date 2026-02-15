@@ -972,4 +972,20 @@ namespace gladius::nodes
         m_isValid = true;
     }
 
+    FunctionCall * Model::createFunctionCallNode(ResourceId functionId, Model & sourceModel)
+    {
+        auto * node = create<FunctionCall>();
+        node->setFunctionId(functionId);
+        node->updateInputsAndOutputs(sourceModel);
+        registerInputs(*node);
+        registerOutputs(*node);
+
+        if (sourceModel.getDisplayName().has_value())
+        {
+            node->setDisplayName(sourceModel.getDisplayName().value());
+        }
+
+        return node;
+    }
+
 } // namespace gladius::nodes

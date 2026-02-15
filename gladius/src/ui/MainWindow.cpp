@@ -66,7 +66,7 @@ namespace gladius::ui
 
         // Sync shipped library items into the user's persistent library directory.
         // This copies new files without overwriting existing user customizations.
-        syncShippedLibrary();
+        (void) syncShippedLibrary();
         m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
 
         using namespace gladius;
