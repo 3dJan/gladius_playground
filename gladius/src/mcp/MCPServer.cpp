@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -136,11 +137,8 @@ namespace gladius::mcp
     {
         m_toolInfo[name] = {name, description, schema};
         m_tools[name] = std::move(func);
-        // Only log in HTTP mode, not stdio mode
-        if (m_transportType == TransportType::HTTP)
-        {
-            std::cout << "Registered MCP tool: " << name << std::endl;
-        }
+        // Always log to stderr (stdout is reserved for MCP protocol in stdio mode)
+        std::cerr << "Registered MCP tool: " << name << std::endl;
     }
 
     bool MCPServer::start(int port, TransportType transport)
@@ -181,7 +179,7 @@ namespace gladius::mcp
     {
         if (m_running)
         {
-            std::cout << "MCP Server is already running" << std::endl;
+            std::cerr << "MCP Server is already running" << std::endl;
             return false;
         }
 
@@ -192,7 +190,7 @@ namespace gladius::mcp
           [this, port]()
           {
               m_running = true;
-              std::cout << "MCP Server starting on port " << port << std::endl;
+              std::cerr << "MCP Server starting on port " << port << std::endl;
 
               if (!m_server->listen("localhost", port))
               {
@@ -234,11 +232,8 @@ namespace gladius::mcp
         }
 
         m_port = 0;
-        // Only print if not in stdio mode
-        if (m_transportType == TransportType::HTTP)
-        {
-            std::cout << "MCP Server stopped" << std::endl;
-        }
+        // Log to stderr (stdout may be reserved for MCP protocol)
+        std::cerr << "MCP Server stopped" << std::endl;
     }
 
     bool MCPServer::isRunning() const
@@ -411,9 +406,85 @@ namespace gladius::mcp
 
             if (toolIt == m_tools.end())
             {
-                return createErrorResponse(request.contains("id") ? request["id"] : json(nullptr),
-                                           -32601,
-                                           "Tool not found: " + toolName);
+                std::string msg = "Tool not found: " + toolName + "\n\nAvailable tools by domain:\n";
+
+                // Group tools by domain prefix
+                struct DomainGroup
+                {
+                    std::string label;
+                    std::vector<std::string> prefixes;
+                };
+
+                std::vector<DomainGroup> const domains = {
+                  {"Library",   {"list_library", "get_library_entry_info", "create_library_entry",
+                                 "export_to_library", "import_library_entry", "delete_library_entry"}},
+                  {"Document",  {"create_document", "open_document", "save_document", "save_document_as",
+                                 "get_status", "get_3mf_structure", "validate_model",
+                                 "set_build_item_object", "set_build_item_transform",
+                                 "remove_unused_resources"}                                             },
+                  {"Graph",     {"get_function_graph", "set_function_graph", "get_node_info",
+                                 "create_node", "delete_node", "create_link", "delete_link",
+                                 "set_parameter", "set_parameter_value",
+                                 "create_function_call_node", "create_function_from_expression",
+                                 "create_levelset", "modify_levelset",
+                                 "create_image3d_function", "create_volumetric_color",
+                                 "create_volumetric_property"}                                          },
+                  {"Rendering", {"render_to_file", "render_with_camera", "generate_thumbnail",
+                                 "get_optimal_camera_position", "get_model_bounding_box"}               },
+                };
+
+                std::set<std::string> categorized;
+                for (auto const & domain : domains)
+                {
+                    std::vector<std::string> matched;
+                    for (auto const & name : domain.prefixes)
+                    {
+                        if (m_tools.count(name) > 0)
+                        {
+                            matched.push_back(name);
+                            categorized.insert(name);
+                        }
+                    }
+                    if (!matched.empty())
+                    {
+                        msg += "  " + domain.label + ": ";
+                        for (size_t i = 0; i < matched.size(); ++i)
+                        {
+                            if (i > 0)
+                            {
+                                msg += ", ";
+                            }
+                            msg += matched[i];
+                        }
+                        msg += "\n";
+                    }
+                }
+
+                // Collect any uncategorized tools
+                std::vector<std::string> other;
+                for (auto const & [name, _] : m_tools)
+                {
+                    if (categorized.count(name) == 0)
+                    {
+                        other.push_back(name);
+                    }
+                }
+                if (!other.empty())
+                {
+                    msg += "  Other: ";
+                    for (size_t i = 0; i < other.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            msg += ", ";
+                        }
+                        msg += other[i];
+                    }
+                    msg += "\n";
+                }
+
+                return createErrorResponse(
+                  request.contains("id") ? request["id"] : json(nullptr), -32601, msg);
             }
 
             json params = request["params"].value("arguments", json::object());
@@ -1565,6 +1636,264 @@ namespace gladius::mcp
                   return {{"success", false}, {"error", "No application available"}};
               }
               return m_application->removeUnusedResources();
+          });
+
+        // ===================================================================
+        // LIBRARY TOOLS
+        // Browse, create, import, export, and delete library entries
+        // ===================================================================
+
+        // LIST LIBRARY
+        registerTool(
+          "list_library",
+          "List all library categories and their entries. Returns category names, entry "
+          "names, descriptions, and tagged function IDs. Scans both shipped and user "
+          "library directories.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description",
+                "Optional: filter to a specific category (subdirectory name). "
+                "If omitted, lists all categories."}}}}},
+           {"required", json::array()}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              std::string category = params.value("category", "");
+              return m_application->listLibrary(category);
+          });
+
+        // GET LIBRARY ENTRY INFO
+        registerTool(
+          "get_library_entry_info",
+          "Get detailed information about a specific library entry, including function list "
+          "with names, types, and input/output parameter signatures. Does NOT open the file "
+          "as the active document.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->getLibraryEntryInfo(category, name);
+          });
+
+        // CREATE LIBRARY ENTRY
+        registerTool(
+          "create_library_entry",
+          "Create a new library entry from a math expression. Creates a 3MF file with "
+          "the specified function, library metadata, and saves it to the user library "
+          "directory. Expression syntax: variables x,y,z; operators + - * /; functions "
+          "sin, cos, tan, sqrt, abs, exp, log, pow; constants pi and e. Use pow(a,b) "
+          "instead of ^ operator.",
+          {{"type", "object"},
+           {"properties",
+            {{"name",
+              {{"type", "string"},
+               {"description",
+                "Entry name (will be used as filename, alphanumeric + hyphens + "
+                "underscores)"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Library category (subdirectory name, created if needed)"}}},
+             {"expression",
+              {{"type", "string"},
+               {"description",
+                "Math expression defining the SDF function. Example: "
+                "'sin(x*2*pi/10) + sin(y*2*pi/10) + sin(z*2*pi/10)'"}}},
+             {"description",
+              {{"type", "string"},
+               {"description", "Human-readable description of the function"}}},
+             {"overwrite",
+              {{"type", "boolean"},
+               {"description",
+                "If true, overwrite an existing entry with the same name. "
+                "Default: false."},
+               {"default", false}}}}},
+           {"required", {"name", "category", "expression", "description"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              auto missing = std::vector<std::string>{};
+              for (auto const & key : {"name", "category", "expression", "description"})
+              {
+                  if (!params.contains(key))
+                  {
+                      missing.emplace_back(key);
+                  }
+              }
+              if (!missing.empty())
+              {
+                  std::string missingList;
+                  for (size_t i = 0; i < missing.size(); ++i)
+                  {
+                      if (i > 0)
+                      {
+                          missingList += ", ";
+                      }
+                      missingList += missing[i];
+                  }
+                  return {{"success", false},
+                          {"error", "Missing required parameters: " + missingList},
+                          {"usage_example",
+                           {{"name", "my-sphere"},
+                            {"category", "primitives"},
+                            {"expression", "sqrt(x*x + y*y + z*z) - 5"},
+                            {"description", "Sphere with radius 5"}}}};
+              }
+              std::string name = params["name"];
+              std::string category = params["category"];
+              std::string expression = params["expression"];
+              std::string description = params["description"];
+              bool overwrite = params.value("overwrite", false);
+              return m_application->createLibraryEntry(
+                name, category, expression, description, overwrite);
+          });
+
+        // EXPORT TO LIBRARY
+        registerTool(
+          "export_to_library",
+          "Export a function from the current document to the library. The function and "
+          "all its transitive dependencies are exported as a library entry with proper "
+          "metadata. The current document is preserved.",
+          {{"type", "object"},
+           {"properties",
+            {{"function_id",
+              {{"type", "integer"},
+               {"description",
+                "ModelResourceID of the function to export (from get_3mf_structure)"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Library category (subdirectory name, created if needed)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}},
+             {"description",
+              {{"type", "string"}, {"description", "Human-readable description"}}},
+             {"overwrite",
+              {{"type", "boolean"},
+               {"description",
+                "If true, overwrite an existing entry. Default: false."},
+               {"default", false}}}}},
+           {"required", {"function_id", "category", "name", "description"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("function_id") || !params.contains("category") ||
+                  !params.contains("name") || !params.contains("description"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required parameters: function_id, category, name, "
+                           "description"},
+                          {"usage_example",
+                           {{"function_id", 5},
+                            {"category", "primitives"},
+                            {"name", "my-sphere"},
+                            {"description", "Sphere with radius 5"}}}};
+              }
+              uint32_t functionId = params["function_id"];
+              std::string category = params["category"];
+              std::string name = params["name"];
+              std::string description = params["description"];
+              bool overwrite = params.value("overwrite", false);
+              return m_application->exportToLibrary(
+                functionId, category, name, description, overwrite);
+          });
+
+        // IMPORT LIBRARY ENTRY
+        registerTool(
+          "import_library_entry",
+          "Import a library entry's tagged functions (and their dependencies) into the "
+          "current document. The imported functions can then be used via "
+          "create_function_call_node. Requires an active document.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->importLibraryEntry(category, name);
+          });
+
+        // DELETE LIBRARY ENTRY
+        registerTool(
+          "delete_library_entry",
+          "Delete a library entry from the user library. Cannot delete shipped "
+          "(read-only) library entries.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "my-sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->deleteLibraryEntry(category, name);
           });
     }
 

@@ -1886,7 +1886,7 @@ namespace gladius::ui
             return;
         }
 
-        // The payload is a pointer to the ThreemfFileInfo in the library browser.
+        // The payload is a pointer to the ThumbnailInfo in the library browser.
         // We only proceed on mouse-release (drop).
         if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
@@ -1894,7 +1894,7 @@ namespace gladius::ui
         }
 
         auto const * const * ppFileInfo =
-          static_cast<ThreemfFileInfo const * const *>(payload->Data);
+          static_cast<ThreemfThumbnailExtractor::ThumbnailInfo const * const *>(payload->Data);
         if (!ppFileInfo || !*ppFileInfo)
         {
             return;

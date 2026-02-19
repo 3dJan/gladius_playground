@@ -1,48 +1,25 @@
 #pragma once
 
 #include "../Document.h"
-#include "../io/3mf/ImageExtractor.h"
+#include "AsyncThumbnailLoader.h"
+#include "ThreemfThumbnailExtractor.h"
 #include <filesystem>
-#include <lib3mf_implicit.hpp>
+#include <list>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <vector>
+
+// Forward declare ImVec2 from imgui
+struct ImVec2;
 
 namespace gladius::ui
 {
-    /**
-     * @struct ThreemfFileInfo
-     * @brief Stores information about a 3MF file including its thumbnail and library metadata
-     */
-    struct ThreemfFileInfo
-    {
-        std::filesystem::path filePath;           ///< Path to the 3MF file
-        std::string fileName;                     ///< File name (without path)
-        unsigned int thumbnailTextureId = 0;      ///< OpenGL texture ID for the thumbnail
-        std::vector<unsigned char> thumbnailData; ///< Raw thumbnail data
-        unsigned int thumbnailWidth = 0;          ///< Thumbnail width
-        unsigned int thumbnailHeight = 0;         ///< Thumbnail height
-        bool hasThumbnail = false;                ///< Whether the file has a thumbnail
-        bool thumbnailLoaded = false;             ///< Whether the thumbnail has been loaded
-
-        /// @brief Description from `gladius:library-description` metadata
-        std::string description;
-
-        /// @brief Display names of importable functions resolved from
-        ///        `gladius:library-functions` metadata
-        std::vector<std::string> libraryFunctionNames;
-
-        /// @brief Whether `gladius:library-functions` metadata was found in this file
-        bool hasLibraryMetadata = false;
-    };
-
     /**
      * @class ThreemfFileViewer
      * @brief Widget that shows 3MF files in a given directory with their thumbnails
      *
      * This is a pure widget that can be embedded in any container. It does not create
      * its own window and should be placed inside another widget or window.
+     * Thumbnails are loaded asynchronously using the same infrastructure as the welcome screen.
      */
     class ThreemfFileViewer
     {
@@ -86,41 +63,40 @@ namespace gladius::ui
 
       private:
         /**
-         * @brief Scan the directory for 3MF files
+         * @brief Scan the directory for 3MF files and queue thumbnails for async loading
          */
         void scanDirectory();
 
         /**
-         * @brief Load thumbnail for a 3MF file
-         * @param fileInfo The file info to load the thumbnail for
+         * @brief Render a single thumbnail item in the grid
          */
-        void loadThumbnail(ThreemfFileInfo & fileInfo);
+        void renderThumbnailItem(ThreemfThumbnailExtractor::ThumbnailInfo & info,
+                                 SharedDocument doc,
+                                 float cellWidth,
+                                 float cellHeight,
+                                 const ImVec2 & itemPos);
 
         /**
-         * @brief Create OpenGL texture from thumbnail data
-         * @param fileInfo The file info containing the thumbnail data
+         * @brief Render the file name below a thumbnail, truncating if necessary
          */
-        void createThumbnailTexture(ThreemfFileInfo & fileInfo);
+        void renderFileName(const std::string & fileName,
+                            float cellWidth,
+                            const ImVec2 & itemPos);
 
-        /**
-         * @brief Extract thumbnail and library metadata from a 3MF file
-         *
-         * Opens the file once, extracts the thumbnail PNG data and reads any
-         * `gladius:library-functions` / `gladius:library-description` metadata.
-         * Populates fileInfo.thumbnailData, fileInfo.description,
-         * fileInfo.libraryFunctionNames, and fileInfo.hasLibraryMetadata.
-         *
-         * @param fileInfo The file info to populate
-         */
-        void extractFileInfo(ThreemfFileInfo & fileInfo);
+        std::filesystem::path m_directory; ///< Directory to scan
 
-        std::filesystem::path m_directory;    ///< Directory to scan
-        std::vector<ThreemfFileInfo> m_files; ///< Found 3MF files
-        bool m_needsRefresh = true;           ///< Whether the directory needs to be rescanned
-        events::SharedLogger m_logger;        ///< Logger for events
-        Lib3MF::PWrapper m_wrapper;           ///< lib3mf wrapper
-        float m_thumbnailSize = 150.0f;       ///< Size of thumbnails in the UI
-        int m_columns = 3;                    ///< Number of columns in the grid
+        /// List of thumbnail infos for 3MF files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_files;
+
+        bool m_needsRefresh = true;     ///< Whether the directory needs to be rescanned
+        events::SharedLogger m_logger;  ///< Logger for events
+        float m_thumbnailSize = 150.0f; ///< Size of thumbnails in the UI
+        int m_columns = 3;             ///< Number of columns in the grid
+
+        std::unique_ptr<ThreemfThumbnailExtractor> m_thumbnailExtractor; ///< Thumbnail extractor
+        std::unique_ptr<AsyncThumbnailLoader> m_asyncLoader;             ///< Async loader
     };
 
 } // namespace gladius::ui

@@ -433,6 +433,60 @@ namespace gladius
         virtual bool executeBatchOperations(const nlohmann::json & operations,
                                             bool rollbackOnError = true) = 0;
 
+        // Library operations
+
+        /// @brief List all library categories and their entries.
+        /// @param category Optional filter for a specific category.
+        /// @return JSON with categories array, each containing entries with metadata.
+        virtual nlohmann::json listLibrary(std::string const & category = "") const = 0;
+
+        /// @brief Get detailed information about a specific library entry.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with function signatures, metadata, and parameters.
+        virtual nlohmann::json getLibraryEntryInfo(std::string const & category,
+                                                   std::string const & name) const = 0;
+
+        /// @brief Create a new library entry from a math expression.
+        /// @param name Entry name (used as filename).
+        /// @param category Category subdirectory name.
+        /// @param expression Math expression defining the SDF function.
+        /// @param description Human-readable description.
+        /// @param overwrite If true, replace an existing entry with the same name.
+        /// @return JSON with creation result including path and function ID.
+        virtual nlohmann::json createLibraryEntry(std::string const & name,
+                                                  std::string const & category,
+                                                  std::string const & expression,
+                                                  std::string const & description,
+                                                  bool overwrite = false) = 0;
+
+        /// @brief Export a function from the active document to the library.
+        /// @param functionId ModelResourceID of the function to export.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @param description Human-readable description.
+        /// @param overwrite If true, replace an existing entry.
+        /// @return JSON with export result including path and tagged function IDs.
+        virtual nlohmann::json exportToLibrary(uint32_t functionId,
+                                               std::string const & category,
+                                               std::string const & name,
+                                               std::string const & description,
+                                               bool overwrite = false) = 0;
+
+        /// @brief Import a library entry's tagged functions into the active document.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with imported function IDs and names.
+        virtual nlohmann::json importLibraryEntry(std::string const & category,
+                                                  std::string const & name) = 0;
+
+        /// @brief Delete a library entry from the user library.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with deletion result (fails for shipped/read-only entries).
+        virtual nlohmann::json deleteLibraryEntry(std::string const & category,
+                                                  std::string const & name) = 0;
+
         // Error handling
         virtual std::string getLastErrorMessage() const = 0;
     };

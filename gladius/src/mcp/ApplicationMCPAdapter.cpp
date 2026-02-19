@@ -51,6 +51,7 @@ namespace gladius
         m_renderingTool = std::make_unique<mcp::tools::RenderingTool>(app);
         m_validationTool = std::make_unique<mcp::tools::ValidationTool>(app);
         m_utilityTool = std::make_unique<mcp::tools::UtilityTool>(app);
+        m_libraryTool = std::make_unique<mcp::tools::LibraryTool>(app);
     }
 
     ApplicationMCPAdapter::~ApplicationMCPAdapter() = default;
@@ -1116,4 +1117,49 @@ nlohmann::json gladius::ApplicationMCPAdapter::performAutoValidation(bool includ
     }
 
     return simplified;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Library operations — delegate to LibraryTool
+// ────────────────────────────────────────────────────────────────────────
+
+nlohmann::json gladius::ApplicationMCPAdapter::listLibrary(std::string const & category) const
+{
+    return m_libraryTool->listLibrary(category);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::getLibraryEntryInfo(std::string const & category,
+                                                                   std::string const & name) const
+{
+    return m_libraryTool->getLibraryEntryInfo(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntry(std::string const & name,
+                                                                   std::string const & category,
+                                                                   std::string const & expression,
+                                                                   std::string const & description,
+                                                                   bool overwrite)
+{
+    return m_libraryTool->createLibraryEntry(name, category, expression, description, overwrite);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t functionId,
+                                                                std::string const & category,
+                                                                std::string const & name,
+                                                                std::string const & description,
+                                                                bool overwrite)
+{
+    return m_libraryTool->exportToLibrary(functionId, category, name, description, overwrite);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::importLibraryEntry(std::string const & category,
+                                                                   std::string const & name)
+{
+    return m_libraryTool->importLibraryEntry(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::deleteLibraryEntry(std::string const & category,
+                                                                   std::string const & name)
+{
+    return m_libraryTool->deleteLibraryEntry(category, name);
 }

@@ -1822,6 +1822,10 @@ namespace gladius
             return 0;
         }
 
+        // Sync internal node graph → 3MF model so the dependency graph reflects
+        // any recent edits (e.g. new FunctionCall nodes created via MCP tools).
+        update3mfModel();
+
         // Ensure the resource dependency graph is up-to-date
         rebuildResourceDependencyGraph();
 

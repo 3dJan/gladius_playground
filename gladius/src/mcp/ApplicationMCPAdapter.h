@@ -19,6 +19,7 @@
 #include "tools/SceneHierarchyTool.h"
 #include "tools/UtilityTool.h"
 #include "tools/ValidationTool.h"
+#include "tools/LibraryTool.h"
 
 // Forward declarations for tools
 namespace gladius::mcp::tools
@@ -32,6 +33,7 @@ namespace gladius::mcp::tools
     class RenderingTool;
     class ValidationTool;
     class UtilityTool;
+    class LibraryTool;
 }
 
 namespace gladius
@@ -68,6 +70,7 @@ namespace gladius
         std::unique_ptr<mcp::tools::RenderingTool> m_renderingTool;
         std::unique_ptr<mcp::tools::ValidationTool> m_validationTool;
         std::unique_ptr<mcp::tools::UtilityTool> m_utilityTool;
+        std::unique_ptr<mcp::tools::LibraryTool> m_libraryTool;
 
         // Helper method to automatically validate after operations
         nlohmann::json performAutoValidation(bool includeOpenCL = false) const;
@@ -220,5 +223,24 @@ namespace gladius
         bool modifyLevelSet(uint32_t levelSetModelResourceId,
                             std::optional<uint32_t> functionModelResourceId,
                             std::optional<std::string> channel) override;
+
+        // Library operations
+        nlohmann::json listLibrary(std::string const & category = "") const override;
+        nlohmann::json getLibraryEntryInfo(std::string const & category,
+                                           std::string const & name) const override;
+        nlohmann::json createLibraryEntry(std::string const & name,
+                                          std::string const & category,
+                                          std::string const & expression,
+                                          std::string const & description,
+                                          bool overwrite = false) override;
+        nlohmann::json exportToLibrary(uint32_t functionId,
+                                       std::string const & category,
+                                       std::string const & name,
+                                       std::string const & description,
+                                       bool overwrite = false) override;
+        nlohmann::json importLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
+        nlohmann::json deleteLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
     };
 }
