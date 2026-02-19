@@ -312,6 +312,43 @@ namespace gladius::tests
         {
             return nlohmann::json{{"success", true}};
         }
+
+        // Library operations
+        nlohmann::json listLibrary(std::string const & /*category*/) const override
+        {
+            return nlohmann::json{{"success", true}, {"categories", nlohmann::json::array()}};
+        }
+        nlohmann::json getLibraryEntryInfo(std::string const & /*category*/,
+                                           std::string const & /*name*/) const override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json createLibraryEntry(std::string const & /*name*/,
+                                          std::string const & /*category*/,
+                                          std::string const & /*expression*/,
+                                          std::string const & /*description*/,
+                                          bool /*overwrite*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json exportToLibrary(uint32_t /*functionId*/,
+                                       std::string const & /*category*/,
+                                       std::string const & /*name*/,
+                                       std::string const & /*description*/,
+                                       bool /*overwrite*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json importLibraryEntry(std::string const & /*category*/,
+                                          std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json deleteLibraryEntry(std::string const & /*category*/,
+                                          std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
     };
 
     class JSONRPCTest : public ::testing::Test

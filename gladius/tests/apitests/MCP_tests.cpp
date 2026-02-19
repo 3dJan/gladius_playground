@@ -162,6 +162,37 @@ namespace gladius::tests
                     (override));
         MOCK_METHOD(nlohmann::json, removeUnusedNodes, (uint32_t), (override));
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));
+
+        // Library operations
+        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &), (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    getLibraryEntryInfo,
+                    (std::string const &, std::string const &),
+                    (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    createLibraryEntry,
+                    (std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    exportToLibrary,
+                    (uint32_t,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    importLibraryEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    deleteLibraryEntry,
+                    (std::string const &, std::string const &),
+                    (override));
     };
 
     class MCPServerTest : public ::testing::Test
