@@ -829,8 +829,11 @@ namespace gladius::ui
                 showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
 
-                // Render library browser independently of the graph editor visibility.
-                m_modelEditor.renderLibraryBrowser();
+                // Render library browser only when the model editor is visible.
+                if (m_modelEditor.isVisible())
+                {
+                    m_modelEditor.renderLibraryBrowser();
+                }
 
                 if (m_shortcutSettingsDialog.isVisible())
                 {
@@ -1186,9 +1189,10 @@ namespace gladius::ui
             return;
         }
 
+        // Defer editor reset until the async load inside newFromTemplate() completes.
+        // (Same deferred pattern used by loadFileDeferred().)
+        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->newFromTemplate();
-        resetEditorState();
-        m_renderWindow.centerView();
     }
 
     void MainWindow::renderWindow()

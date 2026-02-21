@@ -106,45 +106,6 @@ namespace gladius::io
         return LibraryMetadata{std::move(functionsValue), std::move(descriptionValue)};
     }
 
-    namespace
-    {
-        /// Sets a metadata entry, creating it if it doesn't exist or updating
-        /// the value if it already does.
-        ///
-        /// Avoids GetMetaDataByKey (which can throw "Referenced resource must not
-        /// be nullptr" on certain deserialized models) by iterating metadata
-        /// entries by index instead.
-        void setMetaDataValue(Lib3MF::PMetaDataGroup const & metaDataGroup,
-                              std::string const & nameSpace,
-                              std::string const & name,
-                              std::string const & value)
-        {
-            // Search for an existing entry by iterating — avoids GetMetaDataByKey
-            // which can crash on models deserialized from buffers.
-            try
-            {
-                auto const count = metaDataGroup->GetMetaDataCount();
-                for (Lib3MF_uint32 i = 0; i < count; ++i)
-                {
-                    auto meta = metaDataGroup->GetMetaData(i);
-                    if (meta && meta->GetNameSpace() == nameSpace &&
-                        meta->GetName() == name)
-                    {
-                        meta->SetValue(value);
-                        return;
-                    }
-                }
-            }
-            catch (...)
-            {
-                // Iteration failed — the metadata group may be in an invalid
-                // state. Fall through to AddMetaData as a last resort.
-            }
-
-            metaDataGroup->AddMetaData(nameSpace, name, value, "xs:string", true);
-        }
-    } // namespace
-
     void writeLibraryMetadata(Lib3MF::PModel model, LibraryMetadata const & metadata)
     {
         if (!model)
@@ -158,12 +119,28 @@ namespace gladius::io
             return;
         }
 
-        setMetaDataValue(
-          metaDataGroup, LIBRARY_METADATA_NAMESPACE, LIBRARY_FUNCTIONS_KEY, metadata.libraryFunctions);
-        setMetaDataValue(metaDataGroup,
-                         LIBRARY_METADATA_NAMESPACE,
-                         LIBRARY_DESCRIPTION_KEY,
-                         metadata.libraryDescription);
+        // Try to update existing entries first, add new ones only if not found.
+        // We iterate manually instead of using GetMetaDataByKey because that
+        // method can crash on models deserialized from certain buffers.
+        auto setOrAdd = [&](std::string const & name, std::string const & value)
+        {
+            auto const count = metaDataGroup->GetMetaDataCount();
+            for (Lib3MF_uint32 i = 0; i < count; ++i)
+            {
+                auto meta = metaDataGroup->GetMetaData(i);
+                if (meta && meta->GetNameSpace() == LIBRARY_METADATA_NAMESPACE &&
+                    meta->GetName() == name)
+                {
+                    meta->SetValue(value);
+                    return;
+                }
+            }
+            metaDataGroup->AddMetaData(
+              LIBRARY_METADATA_NAMESPACE, name, value, "xs:string", true);
+        };
+
+        setOrAdd(LIBRARY_FUNCTIONS_KEY, metadata.libraryFunctions);
+        setOrAdd(LIBRARY_DESCRIPTION_KEY, metadata.libraryDescription);
     }
 
     void removeLibraryMetadata(Lib3MF::PModel model)

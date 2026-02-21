@@ -163,6 +163,7 @@ namespace gladius
         void markFileAsChanged();
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
+        nodes::SharedAssembly getFlatAssembly() const;
 
         /**
          * @brief Get the current assembly filename

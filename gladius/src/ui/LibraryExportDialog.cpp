@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "io/3mf/LibraryMetadata.h"
+#include "io/3mf/Writer3mf.h"
 
 #include <algorithm>
 #include <cstring>
@@ -352,16 +353,13 @@ namespace gladius::ui
         {
             auto const & selectedFunc = m_functions[m_selectedFunctionIndex];
 
-            // 1. Sync internal graph → 3MF model so all edits are visible.
-            m_doc->update3mfModel();
-
-            auto sourceModel = m_doc->get3mfModel();
-
-            // 2. Stamp library metadata on the SOURCE model before serialization.
+            // 1. Stamp library metadata on the source model before serialization.
             //    We export the full model (no pruning) because lib3mf's
             //    RemoveResource breaks internal state on models with cross-function
             //    ResourceIdNode references. Selective import at merge time already
             //    prunes correctly using the metadata tags.
+            auto sourceModel = m_doc->get3mfModel();
+
             std::vector<Lib3MF_uint32> taggedIds;
             taggedIds.push_back(
               static_cast<Lib3MF_uint32>(selectedFunc.resourceId));
@@ -371,20 +369,18 @@ namespace gladius::ui
             metadata.libraryDescription = std::string(m_descriptionBuf);
             io::writeLibraryMetadata(sourceModel, metadata);
 
-            // 3. Ensure the target directory exists.
+            // 2. Ensure the target directory exists.
             auto const targetDir = m_targetPath.parent_path();
             if (!std::filesystem::exists(targetDir))
             {
                 std::filesystem::create_directories(targetDir);
             }
 
-            // 4. Write the model to disk (with metadata).
-            {
-                auto writer = sourceModel->QueryWriter("3mf");
-                writer->WriteToFile(m_targetPath.string());
-            }
+            // 3. Write the model via Writer3mf (syncs graph, renders thumbnail,
+            //    writes to disk).
+            io::saveTo3mfFile(m_targetPath, *m_doc);
 
-            // 5. Remove library metadata from the live source model
+            // 4. Remove library metadata from the live source model
             //    so it doesn't persist across regular saves.
             io::removeLibraryMetadata(sourceModel);
 

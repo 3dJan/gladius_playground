@@ -11,6 +11,7 @@
 #include "../../ExpressionToGraphConverter.h"
 #include "../../FileSystemUtils.h"
 #include "../../FunctionArgument.h"
+#include "../../compute/ComputeCore.h"
 #include "../../io/3mf/LibraryMetadata.h"
 #include "../../io/3mf/ResourceDependencyGraph.h"
 #include "../../io/3mf/Writer3mf.h"
@@ -131,9 +132,11 @@ namespace gladius::mcp::tools
         /// @param taggedFunctionId  Model resource ID of the primary library function.
         /// @param logger  Shared logger (may be nullptr).
         /// @return Number of resources removed, or 0 if nothing was pruned.
-        std::size_t pruneExportedLibraryFile(fs::path const & filePath,
-                                             Lib3MF_uint32 taggedFunctionId,
-                                             events::SharedLogger logger)
+        std::size_t pruneExportedLibraryFile(
+          fs::path const & filePath,
+          Lib3MF_uint32 taggedFunctionId,
+          std::vector<unsigned char> const & thumbnailPng,
+          events::SharedLogger logger)
         {
             try
             {
@@ -200,20 +203,23 @@ namespace gladius::mcp::tools
                     }
                 }
 
-                // Now find and remove all resources that are no longer required
-                // by any remaining build item or the tagged function itself.
-                io::ResourceDependencyGraph depGraph2(model, logger);
-                depGraph2.buildGraph();
-
-                auto unusedResources = depGraph2.findUnusedResources();
-
-                // Don't remove the tagged function or its deps even if no build item remains
+                // Remove every resource that is not required by the tagged function or its
+                // transitive dependencies. This is done directly (rather than through the
+                // build-item-driven findUnusedResources) so that pure implicit functions that
+                // are not yet attached to a level set / build item are also correctly pruned.
+                // Guard: if requiredByTaggedFunc is empty the tagged function was not found in
+                // the model — in that case skip pruning to avoid deleting everything.
                 std::vector<Lib3MF::PResource> toRemove;
-                for (auto const & res : unusedResources)
+                if (!requiredByTaggedFunc.empty())
                 {
-                    if (requiredByTaggedFunc.count(res->GetResourceID()) == 0)
+                    auto resIter = model->GetResources();
+                    while (resIter->MoveNext())
                     {
-                        toRemove.push_back(res);
+                        auto res = resIter->GetCurrent();
+                        if (res && requiredByTaggedFunc.count(res->GetResourceID()) == 0)
+                        {
+                            toRemove.push_back(res);
+                        }
                     }
                 }
 
@@ -222,9 +228,20 @@ namespace gladius::mcp::tools
                     model->RemoveResource(res.get());
                 }
 
-                if (!toRemove.empty())
+                // Embed the thumbnail into the (pruned) model if available.
+                if (!thumbnailPng.empty())
                 {
-                    // Rewrite the pruned model
+                    if (model->HasPackageThumbnailAttachment())
+                    {
+                        model->RemovePackageThumbnailAttachment();
+                    }
+                    auto thumb = model->CreatePackageThumbnailAttachment();
+                    thumb->ReadFromBuffer(thumbnailPng);
+                }
+
+                bool const needsRewrite = !toRemove.empty() || !thumbnailPng.empty();
+                if (needsRewrite)
+                {
                     auto writer = model->QueryWriter("3mf");
                     writer->WriteToFile(filePath.string());
                 }
@@ -587,6 +604,61 @@ namespace gladius::mcp::tools
 
             // Sync the internal node graph to the 3MF model
             document->update3mfModel();
+
+            // Prepare the GPU and render a thumbnail PNG for the library entry.
+            // This mirrors the sequence in Document::refreshWorker():
+            //   updateParameterRegistration → updateParameter → updateFlatAssembly
+            //   → refreshProgram → recompile → precompute SDF → bbox
+            auto logger = document->getSharedLogger();
+            std::vector<unsigned char> thumbnailPng;
+            if (auto computeCore = document->getCore())
+            {
+                try
+                {
+                    logger->addEvent(
+                      {"exportToLibrary: starting GPU prep for thumbnail",
+                       events::Severity::Info});
+
+                    // Upload parameters to GPU (must happen before compilation)
+                    document->updateParameterRegistration();
+                    document->updateParameter();
+
+                    document->updateFlatAssembly();
+                    computeCore->tryRefreshProgramProtected(document->getFlatAssembly());
+
+                    if (computeCore->prepareImageRendering())
+                    {
+                        logger->addEvent(
+                          {"exportToLibrary: GPU ready, rendering thumbnail",
+                           events::Severity::Info});
+                        auto image = computeCore->createThumbnailPng();
+                        thumbnailPng = std::move(image.data);
+                        logger->addEvent(
+                          {fmt::format("exportToLibrary: thumbnail PNG {} bytes",
+                                       thumbnailPng.size()),
+                           events::Severity::Info});
+                    }
+                    else
+                    {
+                        logger->addEvent(
+                          {"exportToLibrary: prepareImageRendering returned false",
+                           events::Severity::Warning});
+                    }
+                }
+                catch (std::exception const & e)
+                {
+                    logger->addEvent(
+                      {fmt::format("exportToLibrary: thumbnail generation failed: {}", e.what()),
+                       events::Severity::Warning});
+                }
+            }
+            else
+            {
+                logger->addEvent(
+                  {"exportToLibrary: no compute core available for thumbnail",
+                   events::Severity::Warning});
+            }
+
             auto sourceModel = document->get3mfModel();
             if (!sourceModel)
             {
@@ -647,7 +719,7 @@ namespace gladius::mcp::tools
             // its transitive dependencies, and any example build item chain.
             auto prunedCount = pruneExportedLibraryFile(
               targetPath, static_cast<Lib3MF_uint32>(functionId),
-              document->getSharedLogger());
+              thumbnailPng, logger);
 
             auto message = fmt::format(
               "Exported function {} to library entry '{}' in category '{}'",
@@ -655,6 +727,10 @@ namespace gladius::mcp::tools
             if (prunedCount > 0)
             {
                 message += fmt::format(" ({} unrelated resources removed)", prunedCount);
+            }
+            if (!thumbnailPng.empty())
+            {
+                message += " (thumbnail embedded)";
             }
 
             return {{"success", true},

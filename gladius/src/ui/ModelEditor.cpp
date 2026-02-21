@@ -1106,6 +1106,11 @@ namespace gladius::ui
     auto ModelEditor::showAndEdit() -> bool
     {
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        // Detect if the document replaced its assembly (e.g. file load, MCP operation)
+        // and re-sync before rendering the frame.
+        refreshAssembly();
+
         if (!m_currentModel || !m_assembly)
         {
             return false;

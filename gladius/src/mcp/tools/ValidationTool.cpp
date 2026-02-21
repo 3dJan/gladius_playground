@@ -144,7 +144,7 @@ namespace gladius
                     {
                         // Ensure the flattened assembly exists and kernel is generated
                         document->updateFlatAssembly();
-                        core->tryRefreshProgramProtected(document->getAssembly());
+                        core->tryRefreshProgramProtected(document->getFlatAssembly());
                         core->recompileBlockingNoLock();
                     }
                     auto logger = document->getSharedLogger();

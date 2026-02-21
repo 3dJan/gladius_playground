@@ -382,6 +382,7 @@ namespace gladius
         if (!std::filesystem::exists(templateFiletName))
         {
             newModel();
+            return;
         }
         loadNonBlocking(templateFiletName);
     }
@@ -817,6 +818,11 @@ namespace gladius
     {
 
         return m_assembly;
+    }
+
+    nodes::SharedAssembly Document::getFlatAssembly() const
+    {
+        return m_flatAssembly;
     }
 
     std::optional<std::filesystem::path> Document::getCurrentAssemblyFilename() const
