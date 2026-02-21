@@ -185,7 +185,17 @@ namespace gladius::tests
                     (override));
         MOCK_METHOD(nlohmann::json,
                     exportToLibrary,
-                    (uint32_t, std::string const &, std::string const &, std::string const &, bool),
+                    (uint32_t,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     bool,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    setLibraryMetadata,
+                    (std::vector<uint32_t> const &,
+                     std::string const &),
                     (override));
         MOCK_METHOD(nlohmann::json,
                     importLibraryEntry,
@@ -617,6 +627,7 @@ namespace gladius::tests
                                     std::string("custom"),
                                     std::string("my-shape"),
                                     std::string("A custom shape"),
+                                    false,
                                     false))
           .WillOnce(::testing::Return(mockResult));
 
@@ -649,6 +660,7 @@ namespace gladius::tests
                                     std::string("custom"),
                                     std::string("my-fn"),
                                     std::string("desc"),
+                                    false,
                                     false))
           .WillOnce(::testing::Return(mockResult));
 
@@ -678,6 +690,7 @@ namespace gladius::tests
                                     std::string("primitives"),
                                     std::string("my-fn"),
                                     std::string("desc"),
+                                    false,
                                     false))
           .WillOnce(::testing::Return(mockResult));
 

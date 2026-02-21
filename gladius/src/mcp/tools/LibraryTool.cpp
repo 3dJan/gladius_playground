@@ -570,7 +570,8 @@ namespace gladius::mcp::tools
                                                  std::string const & category,
                                                  std::string const & name,
                                                  std::string const & description,
-                                                 bool overwrite)
+                                                 bool overwrite,
+                                                 bool keepScaffold)
     {
         if (!validateActiveDocument())
         {
@@ -715,16 +716,37 @@ namespace gladius::mcp::tools
             // Remove library metadata from the live source model
             io::removeLibraryMetadata(sourceModel);
 
-            // Prune the exported file to only include the tagged function,
-            // its transitive dependencies, and any example build item chain.
-            auto prunedCount = pruneExportedLibraryFile(
-              targetPath, static_cast<Lib3MF_uint32>(functionId),
-              thumbnailPng, logger);
+            size_t prunedCount = 0;
+            if (!keepScaffold)
+            {
+                // Prune the exported file to only include the tagged function,
+                // its transitive dependencies, and any example build item chain.
+                prunedCount = pruneExportedLibraryFile(
+                  targetPath, static_cast<Lib3MF_uint32>(functionId),
+                  thumbnailPng, logger);
+            }
+            else if (!thumbnailPng.empty())
+            {
+                // When keeping scaffold, still embed the thumbnail
+                auto model = openStandaloneModel(targetPath);
+                if (model->HasPackageThumbnailAttachment())
+                {
+                    model->RemovePackageThumbnailAttachment();
+                }
+                auto thumb = model->CreatePackageThumbnailAttachment();
+                thumb->ReadFromBuffer(thumbnailPng);
+                auto writer = model->QueryWriter("3mf");
+                writer->WriteToFile(targetPath.string());
+            }
 
             auto message = fmt::format(
               "Exported function {} to library entry '{}' in category '{}'",
               functionId, name, category);
-            if (prunedCount > 0)
+            if (keepScaffold)
+            {
+                message += " (full scaffold kept)";
+            }
+            else if (prunedCount > 0)
             {
                 message += fmt::format(" ({} unrelated resources removed)", prunedCount);
             }
@@ -914,6 +936,60 @@ namespace gladius::mcp::tools
         {
             return createToolError(fmt::format("Failed to delete library entry: {}", e.what()));
         }
+    }
+
+    nlohmann::json
+    LibraryTool::setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                                    std::string const & description)
+    {
+        if (!validateActiveDocument())
+        {
+            return createToolError(
+              "No active document. Open or create a document first.",
+              {{"function_ids", nlohmann::json::array({5})},
+               {"description", "My library entry"}});
+        }
+
+        auto document = m_application->getCurrentDocument();
+        auto model = document->get3mfModel();
+        if (!model)
+        {
+            return createToolError("Failed to access 3MF model");
+        }
+
+        // Verify all function IDs exist
+        for (auto const id : functionIds)
+        {
+            bool found = false;
+            auto funcIter = model->GetFunctions();
+            while (funcIter->MoveNext())
+            {
+                if (funcIter->GetCurrentFunction()->GetModelResourceID() == id)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                return createToolError(
+                  fmt::format("Function with resource ID {} not found in document", id));
+            }
+        }
+
+        std::vector<Lib3MF_uint32> lib3mfIds(functionIds.begin(), functionIds.end());
+        io::LibraryMetadata metadata;
+        metadata.libraryFunctions = io::serializeResourceIds(lib3mfIds);
+        metadata.libraryDescription = description;
+        io::writeLibraryMetadata(model, metadata);
+
+        return {{"success", true},
+                {"function_ids", functionIds},
+                {"description", description},
+                {"message",
+                 fmt::format("Library metadata set: {} tagged function(s), description='{}'",
+                             functionIds.size(),
+                             description)}};
     }
 
     std::filesystem::path LibraryTool::resolveEntryPath(std::string const & category,

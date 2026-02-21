@@ -1147,9 +1147,17 @@ nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t function
                                                                 std::string const & category,
                                                                 std::string const & name,
                                                                 std::string const & description,
-                                                                bool overwrite)
+                                                                bool overwrite,
+                                                                bool keepScaffold)
 {
-    return m_libraryTool->exportToLibrary(functionId, category, name, description, overwrite);
+    return m_libraryTool->exportToLibrary(
+        functionId, category, name, description, overwrite, keepScaffold);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setLibraryMetadata(
+    std::vector<uint32_t> const & functionIds, std::string const & description)
+{
+    return m_libraryTool->setLibraryMetadata(functionIds, description);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::importLibraryEntry(std::string const & category,

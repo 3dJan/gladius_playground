@@ -58,12 +58,22 @@ namespace gladius::mcp::tools
         /// @param name Entry name (filename without .3mf extension).
         /// @param description Human-readable description.
         /// @param overwrite If true, replace existing entry.
+        /// @param keepScaffold If true, keep the full document scaffold
+        ///        (build items, levelset, mesh, main) so the entry renders standalone.
         /// @return JSON with export result including path and tagged IDs.
         nlohmann::json exportToLibrary(uint32_t functionId,
                                        std::string const & category,
                                        std::string const & name,
                                        std::string const & description,
-                                       bool overwrite = false);
+                                       bool overwrite = false,
+                                       bool keepScaffold = false);
+
+        /// @brief Set library metadata on the current document without exporting.
+        /// @param functionIds Resource IDs of tagged (importable) functions.
+        /// @param description Human-readable description of the library entry.
+        /// @return JSON with success status.
+        nlohmann::json setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                                          std::string const & description);
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.

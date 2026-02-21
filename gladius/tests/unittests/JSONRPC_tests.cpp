@@ -335,7 +335,14 @@ namespace gladius::tests
                                        std::string const & /*category*/,
                                        std::string const & /*name*/,
                                        std::string const & /*description*/,
-                                       bool /*overwrite*/) override
+                                       bool /*overwrite*/,
+                                       bool /*keepScaffold*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & /*functionIds*/,
+                           std::string const & /*description*/) override
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }

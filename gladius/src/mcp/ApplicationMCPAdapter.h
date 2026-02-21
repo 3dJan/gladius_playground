@@ -237,7 +237,11 @@ namespace gladius
                                        std::string const & category,
                                        std::string const & name,
                                        std::string const & description,
-                                       bool overwrite = false) override;
+                                       bool overwrite = false,
+                                       bool keepScaffold = false) override;
+        nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                           std::string const & description) override;
         nlohmann::json importLibraryEntry(std::string const & category,
                                           std::string const & name) override;
         nlohmann::json deleteLibraryEntry(std::string const & category,

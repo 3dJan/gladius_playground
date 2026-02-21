@@ -466,12 +466,23 @@ namespace gladius
         /// @param name Entry name (filename without .3mf extension).
         /// @param description Human-readable description.
         /// @param overwrite If true, replace an existing entry.
+        /// @param keepScaffold If true, keep the full document scaffold (build items,
+        ///        levelset, mesh, main) so the entry renders standalone.
         /// @return JSON with export result including path and tagged function IDs.
         virtual nlohmann::json exportToLibrary(uint32_t functionId,
                                                std::string const & category,
                                                std::string const & name,
                                                std::string const & description,
-                                               bool overwrite = false) = 0;
+                                               bool overwrite = false,
+                                               bool keepScaffold = false) = 0;
+
+        /// @brief Set library metadata (tagged functions and description) on the current document.
+        /// @param functionIds Resource IDs of tagged (importable) functions.
+        /// @param description Human-readable description of the library entry.
+        /// @return JSON with success status.
+        virtual nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                           std::string const & description) = 0;
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.

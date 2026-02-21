@@ -1217,7 +1217,26 @@ namespace gladius::mcp
                          }
                          else if (type == "string")
                          {
-                             std::string string_value = value;
+                             // Coerce non-string JSON values to string when type="string".
+                             // MCP clients may send numeric values like 19 instead of "19"
+                             // for metadata fields such as library-functions.
+                             std::string string_value;
+                             if (value.is_string())
+                             {
+                                 string_value = value.get<std::string>();
+                             }
+                             else if (value.is_number_integer())
+                             {
+                                 string_value = std::to_string(value.get<long long>());
+                             }
+                             else if (value.is_number_float())
+                             {
+                                 string_value = std::to_string(value.get<double>());
+                             }
+                             else
+                             {
+                                 string_value = value.dump();
+                             }
                              success = m_application->setStringParameter(
                                model_id, node_name, parameter_name, string_value);
                          }
@@ -1781,7 +1800,9 @@ namespace gladius::mcp
           "export_to_library",
           "Export a function from the current document to the library. The function and "
           "all its transitive dependencies are exported as a library entry with proper "
-          "metadata. The current document is preserved.",
+          "metadata. The current document is preserved. Use keep_scaffold=true to "
+          "preserve the full document structure (build items, levelset, mesh, main) so "
+          "the entry renders standalone like shipped library primitives.",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -1801,6 +1822,12 @@ namespace gladius::mcp
               {{"type", "boolean"},
                {"description",
                 "If true, overwrite an existing entry. Default: false."},
+               {"default", false}}},
+             {"keep_scaffold",
+              {{"type", "boolean"},
+               {"description",
+                "If true, keep the full document scaffold (build items, levelset, mesh, "
+                "main function) so the entry renders standalone. Default: false."},
                {"default", false}}}}},
            {"required", {"function_id", "category", "name", "description"}}},
           [this](const json & params) -> json
@@ -1820,15 +1847,17 @@ namespace gladius::mcp
                            {{"function_id", 5},
                             {"category", "primitives"},
                             {"name", "my-sphere"},
-                            {"description", "Sphere with radius 5"}}}};
+                            {"description", "Sphere with radius 5"},
+                            {"keep_scaffold", true}}}};
               }
               uint32_t functionId = params["function_id"];
               std::string category = params["category"];
               std::string name = params["name"];
               std::string description = params["description"];
               bool overwrite = params.value("overwrite", false);
+              bool keepScaffold = params.value("keep_scaffold", false);
               return m_application->exportToLibrary(
-                functionId, category, name, description, overwrite);
+                functionId, category, name, description, overwrite, keepScaffold);
           });
 
         // IMPORT LIBRARY ENTRY
@@ -1894,6 +1923,91 @@ namespace gladius::mcp
               std::string category = params["category"];
               std::string name = params["name"];
               return m_application->deleteLibraryEntry(category, name);
+          });
+
+        // CREATE CONSTANT NODES FOR MISSING PARAMETERS
+        registerTool(
+          "create_constant_nodes_for_missing_parameters",
+          "Analyse a node in a function graph and create constant-value nodes "
+          "for every input that is not yet connected. This is useful after "
+          "building a function graph to provide default values for all "
+          "unconnected inputs, making the function self-contained and ready "
+          "for export.",
+          {{"type", "object"},
+           {"properties",
+            {{"function_id",
+              {{"type", "integer"},
+               {"description",
+                "ModelResourceID of the implicit function containing the node"}}},
+             {"node_id",
+              {{"type", "integer"},
+               {"description",
+                "ID of the node whose missing inputs should get constant nodes"}}},
+             {"auto_connect",
+              {{"type", "boolean"},
+               {"description",
+                "If true (default), automatically link the new constant nodes "
+                "to the unconnected inputs"}}}}},
+           {"required", {"function_id", "node_id"}}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("function_id") || !params.contains("node_id"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required parameters: function_id and node_id"},
+                          {"usage_example",
+                           {{"function_id", 5}, {"node_id", 1}}}};
+              }
+              uint32_t functionId = params["function_id"];
+              uint32_t nodeId = params["node_id"];
+              bool autoConnect = params.value("auto_connect", true);
+              return m_application->createConstantNodesForMissingParameters(
+                functionId, nodeId, autoConnect);
+          });
+
+        // SET LIBRARY METADATA
+        registerTool(
+          "set_library_metadata",
+          "Stamp library metadata (tagged function IDs and description) onto the "
+          "current document's 3MF model. Use this before save_document / "
+          "save_document_as when you want a document to behave as a library entry "
+          "without going through export_to_library.",
+          {{"type", "object"},
+           {"properties",
+            {{"function_ids",
+              {{"type", "array"},
+               {"items", {{"type", "integer"}}},
+               {"description",
+                "Array of ModelResourceIDs of the tagged (importable) functions"}}},
+             {"description",
+              {{"type", "string"},
+               {"description",
+                "Human-readable description of the library entry"}}}}},
+           {"required", {"function_ids", "description"}}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("function_ids") || !params.contains("description"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required parameters: function_ids and description"},
+                          {"usage_example",
+                           {{"function_ids", {5}},
+                            {"description", "My library entry"}}}};
+              }
+              auto functionIds =
+                params["function_ids"].get<std::vector<uint32_t>>();
+              std::string description = params["description"];
+              return m_application->setLibraryMetadata(functionIds, description);
           });
     }
 

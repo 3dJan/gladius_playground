@@ -183,7 +183,13 @@ namespace gladius::tests
                      std::string const &,
                      std::string const &,
                      std::string const &,
+                     bool,
                      bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    setLibraryMetadata,
+                    (std::vector<uint32_t> const &,
+                     std::string const &),
                     (override));
         MOCK_METHOD(nlohmann::json,
                     importLibraryEntry,
