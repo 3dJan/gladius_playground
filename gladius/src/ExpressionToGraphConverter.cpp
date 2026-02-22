@@ -12,6 +12,7 @@
 #include <iostream>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <stack>
 #include <stdexcept>
 #include <typeindex>
@@ -25,6 +26,151 @@ namespace gladius
 
     // Track the current variable context for Begin node port resolution
     thread_local std::vector<std::string> ExpressionToGraphConverter::s_variableContextStack;
+
+    nodes::NodeId ExpressionToGraphConverter::convertSnippetToGraph(
+      std::string const & snippet,
+      nodes::Model & model,
+      ExpressionParser & parser,
+      std::vector<FunctionArgument> const & arguments,
+      FunctionOutput const & output)
+    {
+        if (snippet.empty())
+        {
+            return 0;
+        }
+
+        // Clear any previous static state (matching convertExpressionToGraph)
+        s_componentMap.clear();
+        s_vectorDecomposeNodes.clear();
+        s_beginNodeArguments.clear();
+        s_variableContextStack.clear();
+
+        // Preprocess if blocks into select function calls
+        std::regex if_regex(R"(if\s*\(\s*(.+?)\s*(<|>|<=|>=|==|!=)\s*(.+?)\s*\)\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*;\s*\}\s*else\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?\4\s*=\s*(.+?)\s*;\s*\})");
+        
+        std::string processedSnippet = snippet;
+        std::smatch match;
+        while (std::regex_search(processedSnippet, match, if_regex))
+        {
+            std::string A = match[1];
+            std::string op = match[2];
+            std::string B = match[3];
+            std::string var = match[4];
+            std::string C = match[5];
+            std::string D = match[6];
+            
+            std::string replacement;
+            if (op == "<" || op == "<=") {
+                replacement = var + " = select(" + A + ", " + B + ", " + C + ", " + D + ");";
+            } else if (op == ">" || op == ">=") {
+                replacement = var + " = select(" + B + ", " + A + ", " + C + ", " + D + ");";
+            } else if (op == "==") {
+                replacement = var + " = select(abs(" + A + " - " + B + "), 1e-6, " + C + ", " + D + ");";
+            } else if (op == "!=") {
+                replacement = var + " = select(abs(" + A + " - " + B + "), 1e-6, " + D + ", " + C + ");";
+            }
+            
+            processedSnippet = match.prefix().str() + replacement + match.suffix().str();
+        }
+
+        // Create input nodes based on arguments
+        std::map<std::string, nodes::NodeId> variableNodes;
+        if (!arguments.empty())
+        {
+            variableNodes = createArgumentNodes(arguments, model);
+            if (variableNodes.empty())
+            {
+                return 0;
+            }
+        }
+
+        // Split snippet by semicolons
+        std::vector<std::string> statements;
+        size_t start = 0;
+        size_t end = processedSnippet.find(';');
+        while (end != std::string::npos)
+        {
+            statements.push_back(processedSnippet.substr(start, end - start));
+            start = end + 1;
+            end = processedSnippet.find(';', start);
+        }
+        if (start < processedSnippet.length())
+        {
+            std::string lastStmt = processedSnippet.substr(start);
+            if (!removeWhitespace(lastStmt).empty())
+            {
+                statements.push_back(lastStmt);
+            }
+        }
+
+        std::regex assign_regex(R"(^\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*$)");
+        std::regex return_regex(R"(^\s*return\s+(.+?)\s*$)");
+
+        nodes::NodeId lastResult = 0;
+
+        for (std::string const & stmt : statements)
+        {
+            std::string cleanStmt = stmt;
+            // Remove leading/trailing whitespace
+            cleanStmt.erase(0, cleanStmt.find_first_not_of(" \t\r\n"));
+            cleanStmt.erase(cleanStmt.find_last_not_of(" \t\r\n") + 1);
+
+            if (cleanStmt.empty())
+            {
+                continue;
+            }
+
+            std::smatch stmtMatch;
+            if (std::regex_match(cleanStmt, stmtMatch, assign_regex))
+            {
+                std::string varName = stmtMatch[1];
+                std::string expr = stmtMatch[2];
+
+                nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
+                if (exprNodeId == 0)
+                {
+                    return 0; // Failed to parse expression
+                }
+
+                variableNodes[varName] = exprNodeId;
+                lastResult = exprNodeId;
+            }
+            else if (std::regex_match(cleanStmt, stmtMatch, return_regex))
+            {
+                std::string expr = stmtMatch[1];
+
+                nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
+                if (exprNodeId == 0)
+                {
+                    return 0; // Failed to parse return expression
+                }
+
+                // Validate output type and connect to End node
+                if (!validateOutputType(model, exprNodeId, output.type))
+                {
+                    return 0; // Type validation failed
+                }
+
+                if (!connectToEndNode(model, exprNodeId, output))
+                {
+                    return 0; // Failed to connect to End node
+                }
+
+                return exprNodeId;
+            }
+            else
+            {
+                // Try to parse as a single expression if it's the only statement
+                if (statements.size() == 1)
+                {
+                    return convertExpressionToGraph(cleanStmt, model, parser, arguments, output);
+                }
+                return 0; // Unrecognized statement format
+            }
+        }
+
+        return lastResult;
+    }
 
     nodes::NodeId ExpressionToGraphConverter::convertExpressionToGraph(
       std::string const & expression,
@@ -422,6 +568,9 @@ namespace gladius
 
         // Recursively build left and right nodes
         nodes::NodeId leftNodeId = parseAndBuildGraph(leftExpr, model, variableNodes);
+        // Capture the output port name immediately, before the right sub-expression
+        // can overwrite s_componentMap for the same DecomposeVector node
+        std::string leftPortName = (leftNodeId != 0) ? getOutputPortName(model, leftNodeId) : "";
         nodes::NodeId rightNodeId = parseAndBuildGraph(rightExpr, model, variableNodes);
 
         if (leftNodeId == 0 || rightNodeId == 0)
@@ -456,8 +605,6 @@ namespace gladius
         }
 
         // Connect the input nodes to the operation node
-        // Determine the correct output port names for the source nodes
-        std::string leftPortName = getOutputPortName(model, leftNodeId);
         std::string rightPortName = getOutputPortName(model, rightNodeId);
 
         bool leftConnected =
@@ -539,6 +686,8 @@ namespace gladius
             nodeTypeName = "Fract";
         else if (functionName == "clamp")
             nodeTypeName = "Clamp";
+        else if (functionName == "select")
+            nodeTypeName = "Select";
         else
         {
             // Handle binary functions
@@ -593,6 +742,7 @@ namespace gladius
             }
 
             nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
             nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
 
             if (arg1NodeId == 0 || arg2NodeId == 0)
@@ -600,7 +750,6 @@ namespace gladius
                 return 0;
             }
 
-            std::string arg1PortName = getOutputPortName(model, arg1NodeId);
             std::string arg2PortName = getOutputPortName(model, arg2NodeId);
 
             connectNodes(model, arg1NodeId, arg1PortName, functionNodeId, nodes::FieldNames::A);
@@ -614,7 +763,9 @@ namespace gladius
             }
 
             nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
             nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
+            std::string arg2PortName = (arg2NodeId != 0) ? getOutputPortName(model, arg2NodeId) : "";
             nodes::NodeId arg3NodeId = parseAndBuildGraph(arguments[2], model, variableNodes);
 
             if (arg1NodeId == 0 || arg2NodeId == 0 || arg3NodeId == 0)
@@ -622,14 +773,39 @@ namespace gladius
                 return 0;
             }
 
-            std::string arg1PortName = getOutputPortName(model, arg1NodeId);
-            std::string arg2PortName = getOutputPortName(model, arg2NodeId);
             std::string arg3PortName = getOutputPortName(model, arg3NodeId);
 
             // For clamp: clamp(value, min, max) -> A=value, Min=min, Max=max
             connectNodes(model, arg1NodeId, arg1PortName, functionNodeId, nodes::FieldNames::A);
             connectNodes(model, arg2NodeId, arg2PortName, functionNodeId, nodes::FieldNames::Min);
             connectNodes(model, arg3NodeId, arg3PortName, functionNodeId, nodes::FieldNames::Max);
+        }
+        else if (functionName == "select")
+        {
+            if (arguments.size() != 4)
+            {
+                return 0; // Wrong number of arguments
+            }
+
+            nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
+            nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
+            std::string arg2PortName = (arg2NodeId != 0) ? getOutputPortName(model, arg2NodeId) : "";
+            nodes::NodeId arg3NodeId = parseAndBuildGraph(arguments[2], model, variableNodes);
+            std::string arg3PortName = (arg3NodeId != 0) ? getOutputPortName(model, arg3NodeId) : "";
+            nodes::NodeId arg4NodeId = parseAndBuildGraph(arguments[3], model, variableNodes);
+
+            if (arg1NodeId == 0 || arg2NodeId == 0 || arg3NodeId == 0 || arg4NodeId == 0)
+            {
+                return 0;
+            }
+
+            std::string arg4PortName = getOutputPortName(model, arg4NodeId);
+
+            connectNodes(model, arg1NodeId, arg1PortName, functionNodeId, nodes::FieldNames::A);
+            connectNodes(model, arg2NodeId, arg2PortName, functionNodeId, nodes::FieldNames::B);
+            connectNodes(model, arg3NodeId, arg3PortName, functionNodeId, nodes::FieldNames::C);
+            connectNodes(model, arg4NodeId, arg4PortName, functionNodeId, nodes::FieldNames::D);
         }
         else
         {
@@ -1581,6 +1757,424 @@ namespace gladius
             extendedVariableNodes[sub.first] = sub.second;
         }
         return parseAndBuildGraph(workingExpression, model, extendedVariableNodes);
+    }
+
+    namespace
+    {
+        /// Count how many times each node is referenced as a source by other nodes' parameters.
+        std::map<nodes::NodeId, int>
+        countFanOut(nodes::Model & model)
+        {
+            std::map<nodes::NodeId, int> fanOut;
+            for (auto it = model.begin(); it != model.end(); ++it)
+            {
+                for (auto const & [paramName, param] : it->second->parameter())
+                {
+                    auto const & src = param.getConstSource();
+                    if (src.has_value())
+                    {
+                        fanOut[src->nodeId]++;
+                    }
+                }
+            }
+            return fanOut;
+        }
+
+        /// Map node type name to the snippet function/operator representation.
+        /// Returns empty string for types that need special handling (Begin, End, Constant, etc.).
+        struct BinaryOp
+        {
+            char op;
+        };
+        struct UnaryFunc
+        {
+            std::string name;
+        };
+        struct BinaryFunc
+        {
+            std::string name;
+        };
+        struct TernaryFunc
+        {
+            std::string name;
+        };
+
+        std::string nodeTypeToFunctionName(std::string const & nodeType)
+        {
+            // Unary functions
+            if (nodeType == "Sine") return "sin";
+            if (nodeType == "Cosine") return "cos";
+            if (nodeType == "Tangent") return "tan";
+            if (nodeType == "ArcSin") return "asin";
+            if (nodeType == "ArcCos") return "acos";
+            if (nodeType == "ArcTan") return "atan";
+            if (nodeType == "SinH") return "sinh";
+            if (nodeType == "CosH") return "cosh";
+            if (nodeType == "TanH") return "tanh";
+            if (nodeType == "Exp") return "exp";
+            if (nodeType == "Log") return "log";
+            if (nodeType == "Log2") return "log2";
+            if (nodeType == "Log10") return "log10";
+            if (nodeType == "Sqrt") return "sqrt";
+            if (nodeType == "Abs") return "abs";
+            if (nodeType == "Sign") return "sign";
+            if (nodeType == "Floor") return "floor";
+            if (nodeType == "Ceil") return "ceil";
+            if (nodeType == "Round") return "round";
+            if (nodeType == "Fract") return "fract";
+            if (nodeType == "Length") return "length";
+            // Binary functions
+            if (nodeType == "Pow") return "pow";
+            if (nodeType == "ArcTan2") return "atan2";
+            if (nodeType == "Fmod" || nodeType == "Mod") return "mod";
+            if (nodeType == "Min") return "min";
+            if (nodeType == "Max") return "max";
+            // Ternary
+            if (nodeType == "Clamp") return "clamp";
+            // Quaternary
+            if (nodeType == "Select") return "select";
+            return {};
+        }
+
+        bool isUnaryNodeType(std::string const & nodeType)
+        {
+            static std::set<std::string> const types = {
+              "Sine", "Cosine", "Tangent", "ArcSin", "ArcCos", "ArcTan",
+              "SinH", "CosH", "TanH", "Exp", "Log", "Log2", "Log10",
+              "Sqrt", "Abs", "Sign", "Floor", "Ceil", "Round", "Fract", "Length"};
+            return types.count(nodeType) > 0;
+        }
+
+        bool isBinaryOperatorNodeType(std::string const & nodeType)
+        {
+            return nodeType == "Addition" || nodeType == "Subtraction" ||
+                   nodeType == "Multiplication" || nodeType == "Division";
+        }
+
+        char binaryOperatorChar(std::string const & nodeType)
+        {
+            if (nodeType == "Addition") return '+';
+            if (nodeType == "Subtraction") return '-';
+            if (nodeType == "Multiplication") return '*';
+            if (nodeType == "Division") return '/';
+            return '?';
+        }
+
+        int operatorPrecedence(std::string const & nodeType)
+        {
+            if (nodeType == "Addition" || nodeType == "Subtraction") return 1;
+            if (nodeType == "Multiplication" || nodeType == "Division") return 2;
+            return 0;
+        }
+
+        /// Get the expression string for the node at the given source,
+        /// looking up nodeId and port name from a Source struct.
+        /// Returns the variable name if the node was already assigned one,
+        /// or recurses to build the inline expression.
+        std::string nodeToExpression(
+          nodes::Model & model,
+          nodes::NodeId nodeId,
+          std::string const & portName,
+          std::map<nodes::NodeId, int> const & fanOut,
+          std::map<std::string, std::string> & assignedVars,
+          std::vector<std::string> & statements,
+          int & varCounter,
+          int parentPrecedence);
+
+        /// Get the source expression for a parameter by following its link.
+        std::string sourceExpression(
+          nodes::Model & model,
+          nodes::VariantParameter const & param,
+          std::map<nodes::NodeId, int> const & fanOut,
+          std::map<std::string, std::string> & assignedVars,
+          std::vector<std::string> & statements,
+          int & varCounter,
+          int parentPrecedence)
+        {
+            auto const & src = param.getConstSource();
+            if (!src.has_value())
+            {
+                // No link: use the parameter's literal value
+                auto val = param.getValue();
+                if (auto const * f = std::get_if<float>(&val))
+                {
+                    // Format float without trailing zeros
+                    std::ostringstream oss;
+                    oss << *f;
+                    return oss.str();
+                }
+                return "0";
+            }
+            return nodeToExpression(
+              model, src->nodeId, src->shortName, fanOut, assignedVars, statements,
+              varCounter, parentPrecedence);
+        }
+
+        std::string nodeToExpression(
+          nodes::Model & model,
+          nodes::NodeId nodeId,
+          std::string const & portName,
+          std::map<nodes::NodeId, int> const & fanOut,
+          std::map<std::string, std::string> & assignedVars,
+          std::vector<std::string> & statements,
+          int & varCounter,
+          int parentPrecedence)
+        {
+            // Check if we already assigned a variable for this node+port
+            // For DecomposeVector, the port name matters (x/y/z produce different values)
+            auto nodeOpt = model.getNode(nodeId);
+            if (!nodeOpt.has_value())
+            {
+                return "0";
+            }
+            nodes::NodeBase * node = nodeOpt.value();
+            std::string const nodeType = node->name();
+
+            // For DecomposeVector nodes, include port name in the key
+            std::string cacheKey = std::to_string(nodeId);
+            if (nodeType == "DecomposeVector")
+            {
+                cacheKey += "." + portName;
+            }
+
+            auto assignedIt = assignedVars.find(cacheKey);
+            if (assignedIt != assignedVars.end())
+            {
+                return assignedIt->second;
+            }
+
+            // Begin node: return the port name (which is the argument name)
+            if (dynamic_cast<nodes::Begin const *>(node) != nullptr)
+            {
+                return portName;
+            }
+
+            // ConstantScalar: return the literal value
+            if (nodeType == "ConstantScalar")
+            {
+                auto const & params = node->parameter();
+                auto valIt = params.find(nodes::FieldNames::Value);
+                if (valIt != params.end())
+                {
+                    auto val = valIt->second.getValue();
+                    if (auto const * f = std::get_if<float>(&val))
+                    {
+                        std::ostringstream oss;
+                        oss << *f;
+                        return oss.str();
+                    }
+                }
+                return "0";
+            }
+
+            // DecomposeVector: recurse into its A input and append .component
+            if (nodeType == "DecomposeVector")
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                if (aIt != params.end())
+                {
+                    std::string vecExpr = sourceExpression(
+                      model, aIt->second, fanOut, assignedVars, statements, varCounter, 100);
+                    std::string expr = vecExpr + "." + portName;
+
+                    // If this decompose+port is used multiple times, assign a variable
+                    auto fanIt = fanOut.find(nodeId);
+                    // For decompose vectors, we count references to the node overall
+                    // but different ports are different values - check if used more than once
+                    // We'll just inline them since component access is cheap
+                    assignedVars[cacheKey] = expr;
+                    return expr;
+                }
+                return "0";
+            }
+
+            // Build expression for this node
+            std::string expr;
+
+            if (isBinaryOperatorNodeType(nodeType))
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                auto bIt = params.find(nodes::FieldNames::B);
+                if (aIt == params.end() || bIt == params.end())
+                {
+                    return "0";
+                }
+
+                int myPrec = operatorPrecedence(nodeType);
+                std::string left = sourceExpression(
+                  model, aIt->second, fanOut, assignedVars, statements, varCounter, myPrec);
+                std::string right = sourceExpression(
+                  model, bIt->second, fanOut, assignedVars, statements, varCounter, myPrec + 1);
+
+                char op = binaryOperatorChar(nodeType);
+                expr = left + " " + op + " " + right;
+
+                // Wrap in parens if our precedence is lower than parent's
+                if (myPrec < parentPrecedence)
+                {
+                    expr = "(" + expr + ")";
+                }
+            }
+            else if (isUnaryNodeType(nodeType))
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                if (aIt == params.end())
+                {
+                    return "0";
+                }
+                std::string funcName = nodeTypeToFunctionName(nodeType);
+                std::string arg = sourceExpression(
+                  model, aIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                expr = funcName + "(" + arg + ")";
+            }
+            else if (nodeType == "Pow")
+            {
+                auto const & params = node->parameter();
+                auto baseIt = params.find(nodes::FieldNames::Base);
+                auto expIt = params.find(nodes::FieldNames::Exponent);
+                if (baseIt == params.end() || expIt == params.end())
+                {
+                    return "0";
+                }
+                std::string baseExpr = sourceExpression(
+                  model, baseIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string expExpr = sourceExpression(
+                  model, expIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                expr = "pow(" + baseExpr + ", " + expExpr + ")";
+            }
+            else if (nodeType == "Select")
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                auto bIt = params.find(nodes::FieldNames::B);
+                auto cIt = params.find(nodes::FieldNames::C);
+                auto dIt = params.find(nodes::FieldNames::D);
+                if (aIt == params.end() || bIt == params.end() ||
+                    cIt == params.end() || dIt == params.end())
+                {
+                    return "0";
+                }
+                std::string a = sourceExpression(
+                  model, aIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string b = sourceExpression(
+                  model, bIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string c = sourceExpression(
+                  model, cIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string d = sourceExpression(
+                  model, dIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                expr = "select(" + a + ", " + b + ", " + c + ", " + d + ")";
+            }
+            else if (nodeType == "Clamp")
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                auto minIt = params.find(nodes::FieldNames::Min);
+                auto maxIt = params.find(nodes::FieldNames::Max);
+                if (aIt == params.end() || minIt == params.end() || maxIt == params.end())
+                {
+                    return "0";
+                }
+                std::string a = sourceExpression(
+                  model, aIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string mn = sourceExpression(
+                  model, minIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string mx = sourceExpression(
+                  model, maxIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                expr = "clamp(" + a + ", " + mn + ", " + mx + ")";
+            }
+            else if (nodeType == "Min" || nodeType == "Max" ||
+                     nodeType == "ArcTan2" || nodeType == "Fmod" || nodeType == "Mod")
+            {
+                auto const & params = node->parameter();
+                auto aIt = params.find(nodes::FieldNames::A);
+                auto bIt = params.find(nodes::FieldNames::B);
+                if (aIt == params.end() || bIt == params.end())
+                {
+                    return "0";
+                }
+                std::string funcName = nodeTypeToFunctionName(nodeType);
+                std::string a = sourceExpression(
+                  model, aIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                std::string b = sourceExpression(
+                  model, bIt->second, fanOut, assignedVars, statements, varCounter, 0);
+                expr = funcName + "(" + a + ", " + b + ")";
+            }
+            else
+            {
+                // Unknown node type: use a placeholder
+                expr = "/* unknown: " + nodeType + " */";
+            }
+
+            // If this node has fan-out > 1, assign it to a variable for reuse
+            auto fanIt = fanOut.find(nodeId);
+            int fanOutCount = (fanIt != fanOut.end()) ? fanIt->second : 0;
+            if (fanOutCount > 1)
+            {
+                std::string varName = "v" + std::to_string(varCounter++);
+                statements.push_back("float " + varName + " = " + expr);
+                assignedVars[cacheKey] = varName;
+                return varName;
+            }
+
+            assignedVars[cacheKey] = expr;
+            return expr;
+        }
+    } // anonymous namespace
+
+    std::string ExpressionToGraphConverter::convertGraphToSnippet(
+      nodes::Model & model,
+      std::vector<FunctionArgument> const & arguments,
+      FunctionOutput const & output)
+    {
+        nodes::End * endNode = model.getEndNode();
+        if (!endNode)
+        {
+            return {};
+        }
+
+        auto fanOut = countFanOut(model);
+
+        std::map<std::string, std::string> assignedVars;
+        std::vector<std::string> statements;
+        int varCounter = 0;
+
+        // Find the End node's input parameter that matches the output name
+        auto const & endParams = endNode->parameter();
+        std::string outputParamName = output.name;
+        if (outputParamName.empty())
+        {
+            // Take the first connected parameter on the End node
+            for (auto const & [name, param] : endParams)
+            {
+                if (param.getConstSource().has_value())
+                {
+                    outputParamName = name;
+                    break;
+                }
+            }
+        }
+
+        auto paramIt = endParams.find(outputParamName);
+        if (paramIt == endParams.end())
+        {
+            return {};
+        }
+
+        std::string resultExpr = sourceExpression(
+          model, paramIt->second, fanOut, assignedVars, statements, varCounter, 0);
+
+        // Build the final snippet
+        std::string snippet;
+        for (auto const & stmt : statements)
+        {
+            snippet += stmt + ";\n";
+        }
+        snippet += "return " + resultExpr + ";";
+
+        return snippet;
     }
 
 } // namespace gladius

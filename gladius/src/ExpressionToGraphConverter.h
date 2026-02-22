@@ -49,6 +49,34 @@ namespace gladius
                                  FunctionOutput const & output = {});
 
         /**
+         * @brief Convert a multi-line snippet to a node graph
+         * @param snippet The multi-line snippet string
+         * @param model The model to add nodes to
+         * @param parser The expression parser instance
+         * @param arguments Optional function arguments (for vector support)
+         * @param output Optional function output specification (name and type)
+         * @return The NodeId of the output node, or 0 if conversion failed
+         */
+        static nodes::NodeId
+        convertSnippetToGraph(std::string const & snippet,
+                              nodes::Model & model,
+                              ExpressionParser & parser,
+                              std::vector<FunctionArgument> const & arguments = {},
+                              FunctionOutput const & output = {});
+
+        /**
+         * @brief Convert a node graph back to a multi-line snippet
+         * @param model The model containing the nodes
+         * @param arguments Optional function arguments
+         * @param output Optional function output specification
+         * @return The generated snippet string
+         */
+        static std::string
+        convertGraphToSnippet(nodes::Model & model,
+                              std::vector<FunctionArgument> const & arguments = {},
+                              FunctionOutput const & output = {});
+
+        /**
          * @brief Check if an expression can be converted to a graph
          * @param expression The expression to check
          * @param parser The expression parser to use for validation
@@ -100,7 +128,7 @@ namespace gladius
                                                               nodes::Model & model);
 
         /**
-         * @brief Track DecomposeVector node component mappings
+         * @brief Track DecomposeVector node component mappings (queued per node)
          */
         static std::map<nodes::NodeId, std::string> s_componentMap;
 

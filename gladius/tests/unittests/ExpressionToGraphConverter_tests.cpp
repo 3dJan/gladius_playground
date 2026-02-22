@@ -1828,4 +1828,312 @@ namespace gladius::tests
             
         EXPECT_NE(result, 0);
     }
+
+    // =====================================================================================
+    // Snippet-to-Graph Tests
+    // =====================================================================================
+
+    class SnippetToGraphTest : public ExpressionToGraphConverterTest
+    {
+    };
+
+    TEST_F(SnippetToGraphTest, ConvertSingleAssignment_SimpleExpression_CreatesGraph)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "float y = x * 2.0;\nreturn y;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto mulCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::Multiplication>(*m_model);
+        EXPECT_GT(mulCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertMultiAssignment_ChainedVariables_CreatesGraph)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "float a = x + 1.0;\nfloat b = a * 2.0;\nreturn b;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto addCount = gladius_tests::helper::countNumberOfNodesOfType<nodes::Addition>(*m_model);
+        auto mulCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::Multiplication>(*m_model);
+        EXPECT_GT(addCount, 0);
+        EXPECT_GT(mulCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertWithVectorComponents_SnippetUsesPos_CreatesDecomposeNode)
+    {
+        std::vector<FunctionArgument> args = {{"pos", ArgumentType::Vector}};
+        std::string snippet =
+          "float d = sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);\nreturn d - 1.0;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto decomposeCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::DecomposeVector>(*m_model);
+        EXPECT_GT(decomposeCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertIfStatement_SimpleCondition_CreatesSelectNode)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet =
+          "if (x < 0.0) { float val = -1.0; } else { float val = 1.0; }\nreturn val;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto selectCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::Select>(*m_model);
+        EXPECT_GT(selectCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertSingleExpression_NoAssignment_FallsBackToExpressionParser)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "x + 1.0";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertEmpty_EmptySnippet_ReturnsZero)
+    {
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          "", *m_model, *m_parser, {}, FunctionOutput::defaultOutput());
+        EXPECT_EQ(result, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertFunctions_SnippetWithTrigFunctions_Works)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "float s = sin(x);\nfloat c = cos(x);\nreturn s + c;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto sinCount = gladius_tests::helper::countNumberOfNodesOfType<nodes::Sine>(*m_model);
+        auto cosCount = gladius_tests::helper::countNumberOfNodesOfType<nodes::Cosine>(*m_model);
+        EXPECT_GT(sinCount, 0);
+        EXPECT_GT(cosCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertSelect_ExplicitSelectCall_Works)
+    {
+        std::vector<FunctionArgument> args = {
+          {"a", ArgumentType::Scalar}, {"b", ArgumentType::Scalar}};
+        std::string snippet = "return select(a, b, 1.0, 0.0);";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto selectCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::Select>(*m_model);
+        EXPECT_GT(selectCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertClamp_SnippetWithClamp_Works)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "float c = clamp(x, 0.0, 1.0);\nreturn c;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+        auto clampCount = gladius_tests::helper::countNumberOfNodesOfType<nodes::Clamp>(*m_model);
+        EXPECT_GT(clampCount, 0);
+    }
+
+    TEST_F(SnippetToGraphTest, ConvertReassignment_VariableReusedLater_Works)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string snippet = "float a = x * 2.0;\nfloat b = a + a;\nreturn b;";
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(result, 0);
+    }
+
+    // =====================================================================================
+    // Graph-to-Snippet Tests
+    // =====================================================================================
+
+    class GraphToSnippetTest : public ExpressionToGraphConverterTest
+    {
+    };
+
+    TEST_F(GraphToSnippetTest, ConvertSimpleAddition_TwoArgs_ProducesCorrectSnippet)
+    {
+        std::vector<FunctionArgument> args = {
+          {"a", ArgumentType::Scalar}, {"b", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        ExpressionToGraphConverter::convertExpressionToGraph(
+          "a + b", *m_model, *m_parser, args, output);
+
+        std::string snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(snippet.empty());
+        EXPECT_NE(snippet.find("return"), std::string::npos) << "Snippet should contain 'return'";
+        EXPECT_NE(snippet.find("+"), std::string::npos) << "Snippet should contain '+' operator";
+    }
+
+    TEST_F(GraphToSnippetTest, ConvertSingleFunction_SineOfScalar_ProducesSnippet)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        ExpressionToGraphConverter::convertExpressionToGraph(
+          "sin(x)", *m_model, *m_parser, args, output);
+
+        std::string snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(snippet.empty());
+        EXPECT_NE(snippet.find("sin"), std::string::npos) << "Snippet should contain 'sin'";
+    }
+
+    TEST_F(GraphToSnippetTest, ConvertComplexExpression_NestedMath_ProducesSnippet)
+    {
+        std::vector<FunctionArgument> args = {
+          {"x", ArgumentType::Scalar}, {"y", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        ExpressionToGraphConverter::convertExpressionToGraph(
+          "sin(x) + cos(y) * 2.0", *m_model, *m_parser, args, output);
+
+        std::string snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(snippet.empty());
+        EXPECT_NE(snippet.find("sin"), std::string::npos);
+        EXPECT_NE(snippet.find("cos"), std::string::npos);
+    }
+
+    TEST_F(GraphToSnippetTest, ConvertVectorComponents_PosXPosY_ProducesComponentAccess)
+    {
+        std::vector<FunctionArgument> args = {{"pos", ArgumentType::Vector}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        ExpressionToGraphConverter::convertExpressionToGraph(
+          "pos.x + pos.y", *m_model, *m_parser, args, output);
+
+        std::string snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(snippet.empty()) << "Snippet: [" << snippet << "]";
+        EXPECT_NE(snippet.find("pos.x"), std::string::npos) << "Should re-generate pos.x, got: [" << snippet << "]";
+        EXPECT_NE(snippet.find("pos.y"), std::string::npos) << "Should re-generate pos.y, got: [" << snippet << "]";
+    }
+
+    TEST_F(GraphToSnippetTest, ConvertConstant_NumberOnly_ProducesConstantReturn)
+    {
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        ExpressionToGraphConverter::convertExpressionToGraph(
+          "42", *m_model, *m_parser, {}, output);
+
+        std::string snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, {}, output);
+        EXPECT_FALSE(snippet.empty());
+        EXPECT_NE(snippet.find("42"), std::string::npos) << "Should contain the constant value";
+    }
+
+    TEST_F(GraphToSnippetTest, ConvertEmptyModel_NoEndNode_ReturnsEmpty)
+    {
+        std::string snippet = ExpressionToGraphConverter::convertGraphToSnippet(*m_model);
+        EXPECT_TRUE(snippet.empty());
+    }
+
+    // =====================================================================================
+    // Round-trip Tests (Snippet -> Graph -> Snippet)
+    // =====================================================================================
+
+    class SnippetRoundTripTest : public ExpressionToGraphConverterTest
+    {
+    };
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_SimpleAddition_ProducesEquivalentSnippet)
+    {
+        std::vector<FunctionArgument> args = {
+          {"a", ArgumentType::Scalar}, {"b", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string originalSnippet = "return a + b;";
+
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          originalSnippet, *m_model, *m_parser, args, output);
+
+        std::string regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(regenerated.empty());
+        EXPECT_NE(regenerated.find("+"), std::string::npos)
+          << "Round-tripped snippet should contain '+'";
+        EXPECT_NE(regenerated.find("return"), std::string::npos)
+          << "Round-tripped snippet should contain 'return'";
+    }
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_MultiLine_PreservesSemantics)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string originalSnippet = "float a = x * 2.0;\nreturn a + 1.0;";
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          originalSnippet, *m_model, *m_parser, args, output);
+        EXPECT_NE(nodeId, 0);
+
+        std::string regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(regenerated.empty());
+        EXPECT_NE(regenerated.find("return"), std::string::npos);
+        EXPECT_NE(regenerated.find("*"), std::string::npos);
+        EXPECT_NE(regenerated.find("+"), std::string::npos);
+    }
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_WithTrigFunctions_PreservesFunctionCalls)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string originalSnippet = "return sin(x) + cos(x);";
+
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          originalSnippet, *m_model, *m_parser, args, output);
+
+        std::string regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(regenerated.empty());
+        EXPECT_NE(regenerated.find("sin"), std::string::npos);
+        EXPECT_NE(regenerated.find("cos"), std::string::npos);
+    }
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_VectorComponents_PreservesAccess)
+    {
+        std::vector<FunctionArgument> args = {
+          {"pos", ArgumentType::Vector}, {"radius", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string originalSnippet =
+          "float d = sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);\nreturn d - radius;";
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          originalSnippet, *m_model, *m_parser, args, output);
+        EXPECT_NE(nodeId, 0);
+
+        std::string regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(regenerated.empty());
+        EXPECT_NE(regenerated.find("pos"), std::string::npos);
+        EXPECT_NE(regenerated.find("sqrt"), std::string::npos);
+    }
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_SecondPass_ProducesValidGraph)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string originalSnippet = "return sin(x) * 2.0 + 1.0;";
+
+        // First pass: snippet -> graph
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          originalSnippet, *m_model, *m_parser, args, output);
+
+        // Generate snippet from graph
+        std::string regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_FALSE(regenerated.empty());
+
+        // Second pass: snippet -> graph again (using a fresh model)
+        auto model2 = std::make_unique<nodes::Model>();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          regenerated, *model2, *m_parser, args, output);
+        EXPECT_NE(nodeId, 0) << "Regenerated snippet should produce a valid graph";
+    }
+
 } // namespace gladius::tests
