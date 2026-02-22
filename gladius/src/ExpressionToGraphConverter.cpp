@@ -387,6 +387,15 @@ namespace gladius
             return parseComponentAccess(originalForm, variableNodes, model);
         }
 
+        if (cleanExpr == "pi")
+        {
+            return createConstantNode(3.14159265358979323846, model);
+        }
+        if (cleanExpr == "e")
+        {
+            return createConstantNode(2.71828182845904523536, model);
+        }
+
         // Check if it's a variable
         auto varIt = variableNodes.find(cleanExpr);
         if (varIt != variableNodes.end())

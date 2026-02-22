@@ -1805,4 +1805,27 @@ namespace gladius::tests
           << "Should find all expected constant values";
     }
 
+
+    TEST_F(ExpressionToGraphConverterTest, InvoluteGear)
+    {
+        gladius::ExpressionParser parser;
+        std::string expr = "max(max(min((sqrt(pos.x*pos.x + pos.y*pos.y) - (((D + 2.0 * (1.0 / (N / D))) / 2.0) - (2.2 / (N / D)))), max((sqrt(pos.x*pos.x + pos.y*pos.y) - ((D + 2.0 * (1.0 / (N / D))) / 2.0)), max(max((mod((atan2(pos.y, pos.x) * dir + alpha) + (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0, ((pi / (N / D)) / (D / 2.0))) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0) - (((pi / (N / D)) / (D / 2.0)) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0))))), (mod(-(atan2(pos.y, pos.x) * dir + alpha) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) + (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0, ((pi / (N / D)) / (D / 2.0))) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0) - (((pi / (N / D)) / (D / 2.0)) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))))), max(((sqrt(max(sqrt(pos.x*pos.x + pos.y*pos.y) * sqrt(pos.x*pos.x + pos.y*pos.y) - ((D * cos(psi)) / 2.0) * ((D * cos(psi)) / 2.0), 0.0)) - ((D * cos(psi)) / 2.0) * ((mod((atan2(pos.y, pos.x) * dir + alpha) + (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0, ((pi / (N / D)) / (D / 2.0))) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0) + acos(min(((D * cos(psi)) / 2.0) / max(sqrt(pos.x*pos.x + pos.y*pos.y), 0.0001), 1.0)))) - (max(0.0, ((D * cos(psi)) / 2.0) - sqrt(pos.x*pos.x + pos.y*pos.y)) * 1000000.0)), ((sqrt(max(sqrt(pos.x*pos.x + pos.y*pos.y) * sqrt(pos.x*pos.x + pos.y*pos.y) - ((D * cos(psi)) / 2.0) * ((D * cos(psi)) / 2.0), 0.0)) - ((D * cos(psi)) / 2.0) * ((mod(-(atan2(pos.y, pos.x) * dir + alpha) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) + (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0, ((pi / (N / D)) / (D / 2.0))) - (((pi / (N / D)) / (D / 2.0)) / 2.0 - 2.0 * (tan(acos(((D * cos(psi)) / 2.0) / (D / 2.0))) - acos(((D * cos(psi)) / 2.0) / (D / 2.0)))) / 2.0) + acos(min(((D * cos(psi)) / 2.0) / max(sqrt(pos.x*pos.x + pos.y*pos.y), 0.0001), 1.0)))) - (max(0.0, ((D * cos(psi)) / 2.0) - sqrt(pos.x*pos.x + pos.y*pos.y)) * 1000000.0)))))), -((sqrt(pos.x*pos.x + pos.y*pos.y) - (((D + 2.0 * (1.0 / (N / D))) / 2.0) - (2.2 / (N / D)) - 0.4)))), abs(pos.z) - height)";
+        
+        std::vector<gladius::FunctionArgument> arguments = {
+            {"pos", gladius::ArgumentType::Vector},
+            {"D", gladius::ArgumentType::Scalar},
+            {"N", gladius::ArgumentType::Scalar},
+            {"psi", gladius::ArgumentType::Scalar},
+            {"alpha", gladius::ArgumentType::Scalar},
+            {"dir", gladius::ArgumentType::Scalar},
+            {"height", gladius::ArgumentType::Scalar}
+        };
+        
+        gladius::FunctionOutput output("shape", gladius::ArgumentType::Scalar);
+        
+        auto result = gladius::ExpressionToGraphConverter::convertExpressionToGraph(
+            expr, *m_model, parser, arguments, output);
+            
+        EXPECT_NE(result, 0);
+    }
 } // namespace gladius::tests
