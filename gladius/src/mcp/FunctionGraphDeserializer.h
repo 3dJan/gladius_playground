@@ -20,8 +20,14 @@ namespace gladius
          * @brief Applies a minimal graph JSON to a Model (optionally replacing existing graph).
          *
          * Input JSON schema (minimal):
-         * - nodes: [ { id: uint, type: string, display_name?: string, position?: [x,y] } ]
+         * - nodes: [ { id: uint, type: string, display_name?: string, position?: [x,y],
+         *              values?: { paramName: value, ... } } ]
          * - links: [ { from_node_id, from_port, to_node_id, to_parameter } ]
+         *
+         * The optional "values" object sets parameter values on the node at creation
+         * time. Supports Float, Int, String, Float3 ([x,y,z] or {x,y,z}), ResourceId.
+         * For ConstantMatrix, a virtual "matrix" key accepts a flat 16-element array
+         * or a 4x4 nested array that gets distributed to m00..m33.
          *
          * Special node types:
          * - "Input"/"Begin" maps to existing model begin node

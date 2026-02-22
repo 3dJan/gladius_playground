@@ -19,6 +19,7 @@
 #include "../FunctionGraphSerializer.h"
 #include <array>
 #include <filesystem>
+#include <fmt/format.h>
 #include <nlohmann/json.hpp>
 #include <queue>
 #include <set>
@@ -1070,6 +1071,56 @@ namespace gladius
                 }
 
                 auto * node = nodeOpt.value();
+
+                // Virtual "matrix" parameter for ConstantMatrix batch-set
+                if (parameterName == "matrix" && node->name() == "ConstantMatrix")
+                {
+                    try
+                    {
+                        if (value.is_array() && value.size() == 16)
+                        {
+                            for (int i = 0; i < 4; ++i)
+                                for (int j = 0; j < 4; ++j)
+                                {
+                                    auto * p =
+                                      node->getParameter(fmt::format("m{}{}", i, j));
+                                    if (p)
+                                        p->setValue(nodes::VariantType{static_cast<float>(
+                                          value[i * 4 + j].get<double>())});
+                                }
+                        }
+                        else if (value.is_array() && value.size() == 4 && value[0].is_array())
+                        {
+                            for (int i = 0; i < 4; ++i)
+                                for (int j = 0; j < 4; ++j)
+                                {
+                                    auto * p =
+                                      node->getParameter(fmt::format("m{}{}", i, j));
+                                    if (p)
+                                        p->setValue(nodes::VariantType{
+                                          static_cast<float>(value[i][j].get<double>())});
+                                }
+                        }
+                        else
+                        {
+                            out["success"] = false;
+                            out["error"] =
+                              "Expected flat 16-element array or 4x4 nested array for matrix";
+                            return out;
+                        }
+                        out["success"] = true;
+                        out["message"] = "Set all 16 matrix elements (m00..m33)";
+                        return out;
+                    }
+                    catch (const std::exception & e)
+                    {
+                        out["success"] = false;
+                        out["error"] =
+                          std::string("Failed to set matrix value: ") + e.what();
+                        return out;
+                    }
+                }
+
                 auto * param = node->getParameter(parameterName);
                 if (!param)
                 {
@@ -2014,7 +2065,21 @@ namespace gladius
                                         if (auto const * val = std::get_if<uint32_t>(&paramValue))
                                             paramInfo["current_value"] = *val;
                                     }
-                                    // For Matrix4x4, we could add support later if needed
+                                    else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
+                                    {
+                                        if (auto const * val =
+                                              std::get_if<nodes::Matrix4x4>(&paramValue))
+                                        {
+                                            json rows = json::array();
+                                            for (int i = 0; i < 4; ++i)
+                                            {
+                                                rows.push_back(
+                                                  {(*val)[i][0], (*val)[i][1],
+                                                   (*val)[i][2], (*val)[i][3]});
+                                            }
+                                            paramInfo["current_value"] = rows;
+                                        }
+                                    }
                                 }
                                 catch (const std::exception &)
                                 {

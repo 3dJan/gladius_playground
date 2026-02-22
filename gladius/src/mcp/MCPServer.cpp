@@ -584,7 +584,10 @@ namespace gladius::mcp
 
         // FUNCTION GRAPH IMPORT (batch create)
         registerTool("set_function_graph",
-                     "Create or replace a function graph from a JSON description (nodes + links)",
+                     "Create or replace a function graph from a JSON description (nodes + links). "
+                     "Nodes may include a 'values' object to set initial parameter values inline. "
+                     "For ConstantMatrix, use a virtual 'matrix' key with a flat 16-element or "
+                     "4x4 nested array.",
                      {{"type", "object"},
                       {"properties",
                        {{"function_id",
@@ -592,7 +595,7 @@ namespace gladius::mcp
                         {"graph",
                          {{"description",
                            "Graph JSON with nodes and links. Minimal schema: { "
-                           "nodes:[{id,type,display_name?,position?}], "
+                           "nodes:[{id,type,display_name?,position?,values?:{paramName:value}}], "
                            "links:[{from_node_id,from_port,to_node_id,to_parameter}] }"}}},
                         {"replace",
                          {{"type", "boolean"},
@@ -689,7 +692,9 @@ namespace gladius::mcp
           });
 
         registerTool("set_parameter_value",
-                     "Set the value of a parameter on a node",
+                     "Set the value of a parameter on a node. For ConstantMatrix nodes, use "
+                     "parameter_name 'matrix' with a flat 16-element or 4x4 nested array to set "
+                     "all m00..m33 values at once.",
                      {{"type", "object"},
                       {"properties",
                        {{"function_id",

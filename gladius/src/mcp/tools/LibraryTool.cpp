@@ -203,10 +203,32 @@ namespace gladius::mcp::tools
                     }
                 }
 
-                // Remove every resource that is not required by the tagged function or its
-                // transitive dependencies. This is done directly (rather than through the
-                // build-item-driven findUnusedResources) so that pure implicit functions that
-                // are not yet attached to a level set / build item are also correctly pruned.
+                // Expand the required set to include resources needed by kept build items.
+                // The tagged function's deps don't include the levelset/mesh objects that
+                // *depend on* the function (reverse direction), so we must add them here.
+                {
+                    auto keptBuildItems = model->GetBuildItems();
+                    while (keptBuildItems->MoveNext())
+                    {
+                        auto bi = keptBuildItems->GetCurrent();
+                        if (!bi)
+                            continue;
+                        auto objId = bi->GetObjectResourceID();
+                        // objId is a UniqueResourceID, so use GetResourceByID directly
+                        auto objRes = model->GetResourceByID(objId);
+                        if (objRes)
+                        {
+                            requiredByTaggedFunc.insert(objRes->GetResourceID());
+                            for (auto const & dep : depGraph.getAllRequiredResources(objRes))
+                            {
+                                requiredByTaggedFunc.insert(dep->GetResourceID());
+                            }
+                        }
+                    }
+                }
+
+                // Remove every resource that is not required by the tagged function, its
+                // transitive dependencies, or the kept build items' objects.
                 // Guard: if requiredByTaggedFunc is empty the tagged function was not found in
                 // the model — in that case skip pruning to avoid deleting everything.
                 std::vector<Lib3MF::PResource> toRemove;
