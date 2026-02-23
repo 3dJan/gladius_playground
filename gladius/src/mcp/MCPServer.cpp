@@ -406,82 +406,20 @@ namespace gladius::mcp
 
             if (toolIt == m_tools.end())
             {
-                std::string msg = "Tool not found: " + toolName + "\n\nAvailable tools by domain:\n";
-
-                // Group tools by domain prefix
-                struct DomainGroup
+                // Build the tool list directly from the registered map so it is always
+                // complete regardless of which tools were compiled or registered.
+                std::vector<std::string> availableTools;
+                availableTools.reserve(m_tools.size());
+                for (auto const & [name, handler] : m_tools)
                 {
-                    std::string label;
-                    std::vector<std::string> prefixes;
-                };
-
-                std::vector<DomainGroup> const domains = {
-                  {"Library",   {"list_library", "get_library_entry_info", "create_library_entry",
-                                 "export_to_library", "import_library_entry", "delete_library_entry"}},
-                  {"Document",  {"create_document", "open_document", "save_document", "save_document_as",
-                                 "get_status", "get_3mf_structure", "validate_model",
-                                 "set_build_item_object", "set_build_item_transform",
-                                 "remove_unused_resources"}                                             },
-                  {"Graph",     {"get_function_graph", "set_function_graph", "get_node_info",
-                                 "create_node", "delete_node", "create_link", "delete_link",
-                                 "set_parameter", "set_parameter_value",
-                                 "create_function_call_node", "create_function_from_expression",
-                                 "create_function_from_snippet",
-                                 "create_levelset", "modify_levelset",
-                                 "create_image3d_function", "create_volumetric_color",
-                                 "create_volumetric_property"}                                          },
-                  {"Rendering", {"render_to_file", "render_with_camera", "generate_thumbnail",
-                                 "get_optimal_camera_position", "get_model_bounding_box"}               },
-                };
-
-                std::set<std::string> categorized;
-                for (auto const & domain : domains)
-                {
-                    std::vector<std::string> matched;
-                    for (auto const & name : domain.prefixes)
-                    {
-                        if (m_tools.count(name) > 0)
-                        {
-                            matched.push_back(name);
-                            categorized.insert(name);
-                        }
-                    }
-                    if (!matched.empty())
-                    {
-                        msg += "  " + domain.label + ": ";
-                        for (size_t i = 0; i < matched.size(); ++i)
-                        {
-                            if (i > 0)
-                            {
-                                msg += ", ";
-                            }
-                            msg += matched[i];
-                        }
-                        msg += "\n";
-                    }
+                    availableTools.push_back(name);
                 }
+                std::sort(availableTools.begin(), availableTools.end());
 
-                // Collect any uncategorized tools
-                std::vector<std::string> other;
-                for (auto const & [name, _] : m_tools)
+                std::string msg = "Tool not found: " + toolName + "\n\nAvailable tools:\n";
+                for (auto const & name : availableTools)
                 {
-                    if (categorized.count(name) == 0)
-                    {
-                        other.push_back(name);
-                    }
-                }
-                if (!other.empty())
-                {
-                    msg += "  Other: ";
-                    for (size_t i = 0; i < other.size(); ++i)
-                    {
-                        if (i > 0)
-                        {
-                            msg += ", ";
-                        }
-                        msg += other[i];
-                    }
-                    msg += "\n";
+                    msg += "  " + name + "\n";
                 }
 
                 return createErrorResponse(

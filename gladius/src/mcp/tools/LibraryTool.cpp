@@ -590,6 +590,50 @@ namespace gladius::mcp::tools
         }
     }
 
+    std::vector<unsigned char> LibraryTool::renderThumbnailPng(std::shared_ptr<Document> document) const
+    {
+        auto logger = document->getSharedLogger();
+        auto computeCore = document->getCore();
+        if (!computeCore)
+        {
+            logger->addEvent(
+              {"renderThumbnailPng: no compute core available", events::Severity::Warning});
+            return {};
+        }
+
+        try
+        {
+            logger->addEvent(
+              {"renderThumbnailPng: starting GPU prep", events::Severity::Info});
+
+            document->updateParameterRegistration();
+            document->updateParameter();
+            document->updateFlatAssembly();
+            computeCore->tryRefreshProgramProtected(document->getFlatAssembly());
+
+            if (!computeCore->prepareImageRendering())
+            {
+                logger->addEvent(
+                  {"renderThumbnailPng: prepareImageRendering returned false",
+                   events::Severity::Warning});
+                return {};
+            }
+
+            auto image = computeCore->createThumbnailPng();
+            logger->addEvent(
+              {fmt::format("renderThumbnailPng: {} bytes", image.data.size()),
+               events::Severity::Info});
+            return std::move(image.data);
+        }
+        catch (std::exception const & e)
+        {
+            logger->addEvent(
+              {fmt::format("renderThumbnailPng: failed: {}", e.what()),
+               events::Severity::Warning});
+            return {};
+        }
+    }
+
     nlohmann::json LibraryTool::exportToLibrary(uint32_t functionId,
                                                  std::string const & category,
                                                  std::string const & name,
@@ -630,59 +674,9 @@ namespace gladius::mcp::tools
             // Sync the internal node graph to the 3MF model
             document->update3mfModel();
 
-            // Prepare the GPU and render a thumbnail PNG for the library entry.
-            // This mirrors the sequence in Document::refreshWorker():
-            //   updateParameterRegistration → updateParameter → updateFlatAssembly
-            //   → refreshProgram → recompile → precompute SDF → bbox
+            // Render a thumbnail PNG for the library entry.
             auto logger = document->getSharedLogger();
-            std::vector<unsigned char> thumbnailPng;
-            if (auto computeCore = document->getCore())
-            {
-                try
-                {
-                    logger->addEvent(
-                      {"exportToLibrary: starting GPU prep for thumbnail",
-                       events::Severity::Info});
-
-                    // Upload parameters to GPU (must happen before compilation)
-                    document->updateParameterRegistration();
-                    document->updateParameter();
-
-                    document->updateFlatAssembly();
-                    computeCore->tryRefreshProgramProtected(document->getFlatAssembly());
-
-                    if (computeCore->prepareImageRendering())
-                    {
-                        logger->addEvent(
-                          {"exportToLibrary: GPU ready, rendering thumbnail",
-                           events::Severity::Info});
-                        auto image = computeCore->createThumbnailPng();
-                        thumbnailPng = std::move(image.data);
-                        logger->addEvent(
-                          {fmt::format("exportToLibrary: thumbnail PNG {} bytes",
-                                       thumbnailPng.size()),
-                           events::Severity::Info});
-                    }
-                    else
-                    {
-                        logger->addEvent(
-                          {"exportToLibrary: prepareImageRendering returned false",
-                           events::Severity::Warning});
-                    }
-                }
-                catch (std::exception const & e)
-                {
-                    logger->addEvent(
-                      {fmt::format("exportToLibrary: thumbnail generation failed: {}", e.what()),
-                       events::Severity::Warning});
-                }
-            }
-            else
-            {
-                logger->addEvent(
-                  {"exportToLibrary: no compute core available for thumbnail",
-                   events::Severity::Warning});
-            }
+            std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
 
             auto sourceModel = document->get3mfModel();
             if (!sourceModel)
@@ -1046,7 +1040,7 @@ namespace gladius::mcp::tools
     {
         std::vector<std::string> categories;
         std::unordered_set<std::string> seen;
-        auto const addCategories = [&](fs::path const & root)
+        auto const addCategories = [&categories, &seen, this](fs::path const & root)
         {
             if (!fs::exists(root))
             {
@@ -1075,7 +1069,7 @@ namespace gladius::mcp::tools
     {
         std::vector<std::string> entries;
         std::unordered_set<std::string> seen;
-        auto const addEntries = [&](fs::path const & root)
+        auto const addEntries = [&entries, &seen, &category, this](fs::path const & root)
         {
             auto const catPath = root / category;
             if (!fs::exists(catPath))

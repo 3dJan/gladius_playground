@@ -8,10 +8,15 @@
 #include "MCPToolBase.h"
 
 #include <nlohmann/json.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
-namespace gladius::mcp::tools
+namespace gladius
+{
+    class Document;
+
+namespace mcp::tools
 {
     /**
      * @brief Implements MCP library operations for browsing, creating,
@@ -104,5 +109,11 @@ namespace gladius::mcp::tools
 
         /// @brief Get list of available entries in a category.
         std::vector<std::string> getAvailableEntries(std::string const & category) const;
+
+        /// @brief Prepare the GPU and render a PNG thumbnail for the active document.
+        /// @param document Active document (must not be null).
+        /// @return Raw PNG bytes, or empty if the compute core is unavailable or rendering fails.
+        std::vector<unsigned char> renderThumbnailPng(std::shared_ptr<Document> document) const;
     };
 } // namespace gladius::mcp::tools
+} // namespace gladius

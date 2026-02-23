@@ -767,6 +767,9 @@ namespace gladius
             }
 
             nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            // Capture port name before parsing the next argument: parseAndBuildGraph may
+            // overwrite s_componentMap entries, making a deferred getOutputPortName call
+            // return the wrong component for a DecomposeVector node.
             std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
             nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
 
@@ -788,6 +791,9 @@ namespace gladius
             }
 
             nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            // Same ordering constraint as the binary case: capture each port name
+            // immediately after parsing its argument, before the next parseAndBuildGraph
+            // call can mutate s_componentMap.
             std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
             nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
             std::string arg2PortName = (arg2NodeId != 0) ? getOutputPortName(model, arg2NodeId) : "";
@@ -813,6 +819,8 @@ namespace gladius
             }
 
             nodes::NodeId arg1NodeId = parseAndBuildGraph(arguments[0], model, variableNodes);
+            // Same ordering constraint: capture each port name before the next argument
+            // is parsed so s_componentMap is not yet overwritten.
             std::string arg1PortName = (arg1NodeId != 0) ? getOutputPortName(model, arg1NodeId) : "";
             nodes::NodeId arg2NodeId = parseAndBuildGraph(arguments[1], model, variableNodes);
             std::string arg2PortName = (arg2NodeId != 0) ? getOutputPortName(model, arg2NodeId) : "";
@@ -1901,6 +1909,11 @@ namespace gladius
         /// looking up nodeId and port name from a Source struct.
         /// Returns the variable name if the node was already assigned one,
         /// or recurses to build the inline expression.
+        ///
+        /// Forward-declared because nodeToExpression and sourceExpression are
+        /// mutually recursive: nodeToExpression generates the expression for a
+        /// node; sourceExpression follows the input link from a parameter to
+        /// reach the source node.
         std::string nodeToExpression(
           nodes::Model & model,
           nodes::NodeId nodeId,
