@@ -63,6 +63,15 @@ namespace gladius::tests
                      const std::string &),
                     (override));
 
+        MOCK_METHOD((std::pair<bool, uint32_t>),
+                    createFunctionFromSnippet,
+                    (const std::string &,
+                     const std::string &,
+                     const std::string &,
+                     const std::vector<FunctionArgument> &,
+                     const std::string &),
+                    (override));
+
         MOCK_METHOD(std::string, getLastErrorMessage, (), (const, override));
 
         // New MCP interface methods
@@ -158,7 +167,7 @@ namespace gladius::tests
                     (override));
         MOCK_METHOD(nlohmann::json,
                     createConstantNodesForMissingParameters,
-                    (uint32_t, uint32_t, bool),
+                    (uint32_t, uint32_t, bool, std::vector<std::string> const &),
                     (override));
         MOCK_METHOD(nlohmann::json, removeUnusedNodes, (uint32_t), (override));
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));

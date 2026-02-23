@@ -90,6 +90,16 @@ namespace gladius::tests
             return {true, 123}; // Mock resource ID
         }
 
+        std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string &,
+                                  const std::string &,
+                                  const std::string &,
+                                  const std::vector<FunctionArgument> & = {},
+                                  const std::string & = "") override
+        {
+            return {true, 124};
+        }
+
         std::string getLastErrorMessage() const override
         {
             return "";
@@ -296,9 +306,11 @@ namespace gladius::tests
             return nlohmann::json{{"success", true}};
         }
 
-        nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                               uint32_t nodeId,
-                                                               bool autoConnect) override
+        nlohmann::json createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect,
+          std::vector<std::string> const & /*excludeParams*/) override
         {
             return nlohmann::json{{"success", true}};
         }

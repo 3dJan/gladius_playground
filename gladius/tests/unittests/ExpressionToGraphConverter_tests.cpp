@@ -901,15 +901,14 @@ namespace gladius::tests
                              "Basic sphere distance function using explicit component access",
                              true});
 
-        // Sphere SDF using length function (if available through nodes)
+        // Sphere SDF using length function
         testCases.push_back({
           "Sphere_UsingLength",
-          "length(pos) - radius", // This may fail if length() function isn't supported in
-                                  // expressions
+          "length(pos) - radius",
           posRadiusArgs(),
           scalarOutput(),
           "Sphere distance function using length function",
-          false // May not work if length() isn't in expression parser
+          true
         });
 
         // Box SDF approximation using max components
