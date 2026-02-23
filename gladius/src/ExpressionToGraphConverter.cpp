@@ -10,8 +10,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <iostream>
-#include <queue>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -29,12 +27,16 @@ namespace gladius
     // Track the current variable context for Begin node port resolution
     thread_local std::vector<std::string> ExpressionToGraphConverter::s_variableContextStack;
 
+    // Assembly context for resolving cross-function calls during snippet→graph conversion
+    thread_local nodes::Assembly * ExpressionToGraphConverter::s_assemblyContext = nullptr;
+
     nodes::NodeId ExpressionToGraphConverter::convertSnippetToGraph(
       std::string const & snippet,
       nodes::Model & model,
       ExpressionParser & parser,
       std::vector<FunctionArgument> const & arguments,
-      FunctionOutput const & output)
+      FunctionOutput const & output,
+      nodes::Assembly * assembly)
     {
         // @note if-else preprocessing only handles single-line bodies of the form:
         //   if (A op B) { var = C; } else { var = D; }
@@ -54,6 +56,7 @@ namespace gladius
         s_vectorDecomposeNodes.clear();
         s_beginNodeArguments.clear();
         s_variableContextStack.clear();
+        s_assemblyContext = assembly;
 
         // Preprocess if blocks into select function calls
         std::regex if_regex(R"(if\s*\(\s*(.+?)\s*(<|>|<=|>=|==|!=)\s*(.+?)\s*\)\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*;\s*\}\s*else\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?\4\s*=\s*(.+?)\s*;\s*\})");
@@ -90,19 +93,23 @@ namespace gladius
             processedSnippet = match.prefix().str() + replacement + match.suffix().str();
         }
 
-        // Always ensure "pos" is available as an implicit vec3 argument (spatial coordinate)
+        // Only inject implicit "pos" if the snippet references it and it wasn't already declared
         std::vector<FunctionArgument> effectiveArguments = arguments;
         bool const hasPosArg = std::any_of(arguments.begin(), arguments.end(),
           [](auto const & arg) { return arg.name == "pos"; });
         if (!hasPosArg)
         {
-            effectiveArguments.insert(
-              effectiveArguments.begin(), FunctionArgument{"pos", ArgumentType::Vector});
+            static std::regex const posWordRegex(R"(\bpos\b)");
+            if (std::regex_search(processedSnippet, posWordRegex))
+            {
+                effectiveArguments.insert(
+                  effectiveArguments.begin(), FunctionArgument{"pos", ArgumentType::Vector});
+            }
         }
 
         std::map<std::string, nodes::NodeId> variableNodes =
           createArgumentNodes(effectiveArguments, model);
-        if (variableNodes.empty())
+        if (variableNodes.empty() && !effectiveArguments.empty())
         {
             return 0;
         }
@@ -172,6 +179,18 @@ namespace gladius
                 if (!validateOutputType(model, exprNodeId, output.type))
                 {
                     return 0; // Type validation failed
+                }
+
+                // For Begin nodes: validateOutputType consumed the variable context,
+                // push it back so connectToEndNode can resolve the correct port name
+                if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
+                {
+                    auto varIt = std::find_if(variableNodes.begin(), variableNodes.end(),
+                      [exprNodeId](auto const & kv) { return kv.second == exprNodeId; });
+                    if (varIt != variableNodes.end())
+                    {
+                        s_variableContextStack.push_back(varIt->first);
+                    }
                 }
 
                 if (!connectToEndNode(model, exprNodeId, output))
@@ -543,17 +562,25 @@ namespace gladius
         // so that "-3" becomes a single ConstantScalar with value -3 rather than (-1 * 3).
         try
         {
-            // std::stod throws if the whole string is not a valid number
-            double value = std::stod(cleanExpr);
-            return createConstantNode(value, model);
+            size_t pos = 0;
+            double value = std::stod(cleanExpr, &pos);
+            if (pos == cleanExpr.length())
+            {
+                return createConstantNode(value, model);
+            }
         }
         catch (...)
         {
             // Not a pure number; continue parsing
         }
 
+        // Try to find a binary operator first (so "-1*sin(x)" splits at '*' rather than treating
+        // the leading '-' as unary minus of "1*sin(x)").
+        auto [operatorPos, operatorChar] = findMainOperator(cleanExpr);
+
         // Handle unary minus operator as a fallback (e.g., "-x", "-(x+y)")
-        if (cleanExpr.length() > 1 && cleanExpr[0] == '-')
+        // Only if no binary operator was found at the top level.
+        if (operatorPos == std::string::npos && cleanExpr.length() > 1 && cleanExpr[0] == '-')
         {
             // Only treat as unary minus if it is not immediately followed by an operator
             // (numeric literals like "-3" were already handled above).
@@ -629,9 +656,6 @@ namespace gladius
         }
 
         // Note: numeric literal case already handled earlier
-
-        // Find the main operator
-        auto [operatorPos, operatorChar] = findMainOperator(cleanExpr);
 
         if (operatorPos == std::string::npos)
         {
@@ -1009,6 +1033,171 @@ namespace gladius
                     return nodeId;
                 }
 
+                // gradient_name_N(pos) → FunctionGradient referencing model N
+                if (s_assemblyContext != nullptr &&
+                    functionName.substr(0, 9) == "gradient_")
+                {
+                    std::string innerName = functionName.substr(9);
+                    auto lastUnderscore = innerName.rfind('_');
+                    if (lastUnderscore != std::string::npos &&
+                        lastUnderscore + 1 < innerName.size())
+                    {
+                        auto suffix = innerName.substr(lastUnderscore + 1);
+                        bool allDigits = !suffix.empty() &&
+                          std::all_of(suffix.begin(), suffix.end(),
+                            [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+                        if (allDigits)
+                        {
+                            auto resourceId = static_cast<nodes::ResourceId>(std::stoul(suffix));
+                            auto referencedModel = s_assemblyContext->findModel(resourceId);
+                            if (referencedModel)
+                            {
+                                auto * fgNode = nodes::createNodeFromName(
+                                  "FunctionGradient", model);
+                                if (fgNode == nullptr)
+                                {
+                                    return 0;
+                                }
+                                auto * fg = dynamic_cast<nodes::FunctionGradient *>(fgNode);
+                                if (fg == nullptr)
+                                {
+                                    return 0;
+                                }
+
+                                // Create Resource node for the function ID
+                                auto * resourceNode = nodes::createNodeFromName("Resource", model);
+                                if (resourceNode == nullptr)
+                                {
+                                    return 0;
+                                }
+                                if (auto * param = resourceNode->getParameter(
+                                      nodes::FieldNames::ResourceId))
+                                {
+                                    param->setValue(resourceId);
+                                }
+
+                                // Connect Resource → FunctionGradient.FunctionId
+                                connectNodes(model,
+                                             resourceNode->getId(),
+                                             nodes::FieldNames::Value,
+                                             fg->getId(),
+                                             nodes::FieldNames::FunctionId);
+
+                                fg->setFunctionId(resourceId);
+                                fg->updateInputsAndOutputs(*referencedModel);
+
+                                model.registerOutputs(*fgNode);
+                                model.registerInputs(*fgNode);
+
+                                // Connect the pos argument if provided
+                                if (!arguments.empty())
+                                {
+                                    auto posNodeId = parseAndBuildGraph(
+                                      arguments[0], model, variableNodes);
+                                    if (posNodeId != 0)
+                                    {
+                                        auto posPort = getOutputPortName(model, posNodeId);
+                                        // Connect to the vector input (typically "pos")
+                                        auto vecInput = fg->getSelectedVectorInput();
+                                        if (vecInput.empty())
+                                        {
+                                            vecInput = nodes::FieldNames::Pos;
+                                        }
+                                        connectNodes(model,
+                                                     posNodeId, posPort,
+                                                     fg->getId(), vecInput);
+                                    }
+                                }
+
+                                return fg->getId();
+                            }
+                        }
+                    }
+                }
+
+                // Try cross-function call pattern: name_N(args...)
+                // where N is a ResourceId referencing another function in the assembly
+                if (s_assemblyContext != nullptr)
+                {
+                    auto lastUnderscore = functionName.rfind('_');
+                    if (lastUnderscore != std::string::npos && lastUnderscore + 1 < functionName.size())
+                    {
+                        auto suffix = functionName.substr(lastUnderscore + 1);
+                        bool allDigits = !suffix.empty() &&
+                          std::all_of(suffix.begin(), suffix.end(),
+                            [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+
+                        if (allDigits)
+                        {
+                            auto resourceId = static_cast<nodes::ResourceId>(std::stoul(suffix));
+                            auto referencedModel = s_assemblyContext->findModel(resourceId);
+                            if (referencedModel)
+                            {
+                                // Create Resource node to hold the ResourceId
+                                auto * resourceNode = nodes::createNodeFromName("Resource", model);
+                                if (resourceNode == nullptr)
+                                {
+                                    return 0;
+                                }
+                                if (auto * param = resourceNode->getParameter(nodes::FieldNames::ResourceId))
+                                {
+                                    param->setValue(resourceId);
+                                }
+
+                                // Create FunctionCall node
+                                auto * fcNode = nodes::createNodeFromName("FunctionCall", model);
+                                if (fcNode == nullptr)
+                                {
+                                    return 0;
+                                }
+                                auto * fc = dynamic_cast<nodes::FunctionCall *>(fcNode);
+                                if (fc == nullptr)
+                                {
+                                    return 0;
+                                }
+
+                                // Connect Resource.Value → FunctionCall.FunctionId
+                                connectNodes(model,
+                                             resourceNode->getId(),
+                                             nodes::FieldNames::Value,
+                                             fc->getId(),
+                                             nodes::FieldNames::FunctionId);
+
+                                // Sync argument ports from the referenced model
+                                fc->updateInputsAndOutputs(*referencedModel);
+
+                                // Re-register ports/params that were dynamically added
+                                model.registerOutputs(*fcNode);
+                                model.registerInputs(*fcNode);
+
+                                // Parse and connect arguments
+                                auto fcArgs = fc->getArguments();
+                                if (!fcArgs.empty() && !arguments.empty())
+                                {
+                                    size_t argCount = std::min(arguments.size(), fcArgs.size());
+                                    for (size_t i = 0; i < argCount; ++i)
+                                    {
+                                        auto argNodeId = parseAndBuildGraph(
+                                          arguments[i], model, variableNodes);
+                                        if (argNodeId == 0)
+                                        {
+                                            return 0;
+                                        }
+                                        auto argPort = getOutputPortName(model, argNodeId);
+                                        connectNodes(model,
+                                                     argNodeId,
+                                                     argPort,
+                                                     fc->getId(),
+                                                     fcArgs[i].first);
+                                    }
+                                }
+
+                                return fc->getId();
+                            }
+                        }
+                    }
+                }
+
                 return 0; // Unsupported function
             }
         }
@@ -1219,7 +1408,8 @@ namespace gladius
         size_t operatorPos = std::string::npos;
         char operatorChar = 0;
 
-        // Scan from right to left to handle left-associative operators correctly
+        // Scan from right to left; use strict '<' so the rightmost same-precedence
+        // operator is chosen, producing left-associative parse trees.
         for (int i = static_cast<int>(expr.length()) - 1; i >= 0; --i)
         {
             char c = expr[i];
@@ -1245,7 +1435,7 @@ namespace gladius
                     }
                 }
                 int precedence = getOperatorPrecedence(c);
-                if (precedence <= minPrecedence)
+                if (precedence < minPrecedence)
                 {
                     minPrecedence = precedence;
                     operatorPos = i;
@@ -1303,6 +1493,12 @@ namespace gladius
         if (node->findOutputPort(nodes::FieldNames::Vector))
         {
             return nodes::FieldNames::Vector;
+        }
+
+        // Check if the node has a "Shape" output port (FunctionCall nodes)
+        if (node->findOutputPort(nodes::FieldNames::Shape))
+        {
+            return nodes::FieldNames::Shape;
         }
 
         // Otherwise, assume it has a "Value" output port (constants, variables)
@@ -1403,13 +1599,23 @@ namespace gladius
         nodes::NodeBase * argNode = nodeOpt.value();
         std::string nodeTypeName = argNode->name();
 
-        // Allow component access on vector nodes (ConstantVector) or Begin nodes with vector
-        // arguments
-        bool isVector = (nodeTypeName.find("ConstantVector") != std::string::npos);
+        // Allow component access on any node with a float3 output
         bool isBeginNode =
           (nodeTypeName == "Input" || dynamic_cast<nodes::Begin *>(argNode) != nullptr);
+        bool hasVectorOutput = false;
 
-        if (!isVector && !isBeginNode)
+        if (!isBeginNode)
+        {
+            std::string outPortName = getOutputPortName(model, it->second);
+            auto * outPort = argNode->findOutputPort(outPortName);
+            if (outPort != nullptr &&
+                outPort->getTypeIndex() == std::type_index(typeid(nodes::float3)))
+            {
+                hasVectorOutput = true;
+            }
+        }
+
+        if (!hasVectorOutput && !isBeginNode)
         {
             return 0; // Component access not allowed on non-vector types
         }
@@ -1625,10 +1831,18 @@ namespace gladius
             }
 
             // If the caller explicitly expects a vector but the expression produces a scalar,
-            // treat this as an error. Otherwise allow the conversion and let downstream logic
-            // adapt the End node to the actual output type.
+            // check all output ports for a matching vector port (e.g. FunctionCall nodes
+            // may have both "shape" (scalar) and "color" (vector) outputs).
             if (expectedType == ArgumentType::Vector && actualType != ArgumentType::Vector)
             {
+                auto & outputs = node->getOutputs();
+                for (auto & [name, port] : outputs)
+                {
+                    if (port.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                    {
+                        return true; // Found a vector output port
+                    }
+                }
                 return false;
             }
 
@@ -1665,6 +1879,23 @@ namespace gladius
         if (resultPort == nullptr)
         {
             return false;
+        }
+
+        // If the expected output is Vector but the default port is Scalar,
+        // search for a Vector output port (e.g. FunctionCall "color" port).
+        if (output.type == ArgumentType::Vector &&
+            resultPort->getTypeIndex() != std::type_index(typeid(nodes::float3)))
+        {
+            auto & outputs = resultNode->getOutputs();
+            for (auto & [name, port] : outputs)
+            {
+                if (port.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                {
+                    resultPortName = name;
+                    resultPort = resultNode->findOutputPort(name);
+                    break;
+                }
+            }
         }
 
         ArgumentType actualType = ArgumentType::Scalar;
@@ -1811,11 +2042,16 @@ namespace gladius
         std::string functionPart = expression.substr(0, lastDot);
         std::string component = expression.substr(lastDot + 1); // Skip the dot
 
-        // First, parse the function call to get the vector result
+        // Try parsing the preceding part as a function call first,
+        // then fall back to general expression parsing for patterns like (expr).x
         nodes::NodeId functionResult = parseFunctionCall(functionPart, model, variableNodes);
         if (functionResult == 0)
         {
-            return 0; // Function call parsing failed
+            functionResult = parseAndBuildGraph(functionPart, model, variableNodes);
+        }
+        if (functionResult == 0)
+        {
+            return 0;
         }
 
         // Create a DecomposeVector node to extract the component
@@ -2914,18 +3150,28 @@ namespace gladius
             return {};
         }
 
+        auto const assemblyModelId = assembly.getAssemblyModelId();
+
         // Build dependency graph: for each function, collect which other functions it calls
         std::map<nodes::ResourceId, std::set<nodes::ResourceId>> deps;
         std::map<nodes::ResourceId, int> inDegree;
 
         for (auto const & [id, model] : functions)
         {
+            if (id == assemblyModelId)
+            {
+                continue;
+            }
             deps[id] = {};
             inDegree[id] = 0;
         }
 
         for (auto const & [id, model] : functions)
         {
+            if (id == assemblyModelId)
+            {
+                continue;
+            }
             for (auto & [nodeId, nodePtr] : *model)
             {
                 nodes::ResourceId calledId = 0;
@@ -2972,6 +3218,10 @@ namespace gladius
 
         for (auto const & [id, model] : functions)
         {
+            if (id == assemblyModelId)
+            {
+                continue;
+            }
             dependencyCount[id] = static_cast<int>(deps[id].size());
             for (auto calledId : deps[id])
             {
@@ -2979,32 +3229,34 @@ namespace gladius
             }
         }
 
-        std::queue<nodes::ResourceId> ready;
+        // Use a sorted set so that among functions at the same dependency level,
+        // the one with the smallest ID is always processed first (deterministic ordering).
+        std::set<nodes::ResourceId> ready;
         for (auto const & [id, count] : dependencyCount)
         {
             if (count == 0)
             {
-                ready.push(id);
+                ready.insert(id);
             }
         }
 
         std::vector<nodes::ResourceId> sorted;
         while (!ready.empty())
         {
-            auto current = ready.front();
-            ready.pop();
+            auto current = *ready.begin();
+            ready.erase(ready.begin());
             sorted.push_back(current);
 
             for (auto dependentId : dependedBy[current])
             {
                 if (--dependencyCount[dependentId] == 0)
                 {
-                    ready.push(dependentId);
+                    ready.insert(dependentId);
                 }
             }
         }
 
-        if (sorted.size() != functions.size())
+        if (sorted.size() != dependencyCount.size())
         {
             // Find cycle for error message
             std::string cycleInfo;
@@ -3034,12 +3286,67 @@ namespace gladius
             auto displayName = model->getDisplayName().value_or(model->getModelName());
             auto uniqueName = generateUniqueFunctionName(displayName, funcId);
 
+            // Detect the output type from the End node
+            auto funcOutput = FunctionOutput::defaultOutput();
+            bool returnsVec3 = false;
+            if (auto * endNode = model->getEndNode())
+            {
+                for (auto const & [name, param] : endNode->parameter())
+                {
+                    if (param.getConstSource().has_value())
+                    {
+                        funcOutput.name = name;
+                        if (param.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                        {
+                            funcOutput.type = ArgumentType::Vector;
+                            returnsVec3 = true;
+                        }
+                        break;
+                    }
+                }
+            }
+
             auto snippet =
-              convertGraphToSnippet(*model, {}, FunctionOutput::defaultOutput(), &assembly);
+              convertGraphToSnippet(*model, {}, funcOutput, &assembly);
             if (snippet.empty())
             {
                 snippet = "return 0;";
             }
+
+            // Skip functions with unsupported nodes — they cannot roundtrip
+            if (snippet.find("/* unsupported:") != std::string::npos)
+            {
+                continue;
+            }
+
+            // Build function signature from Begin node outputs
+            std::string signature = "(";
+            auto * beginNode = model->getBeginNode();
+            if (beginNode)
+            {
+                bool first = true;
+                for (auto const & [portName, port] : beginNode->getOutputs())
+                {
+                    if (!first)
+                    {
+                        signature += ", ";
+                    }
+                    first = false;
+                    if (port.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                    {
+                        signature += "vec3 " + portName;
+                    }
+                    else
+                    {
+                        signature += "float " + portName;
+                    }
+                }
+            }
+            if (signature == "(")
+            {
+                signature = "(vec3 pos";
+            }
+            signature += ")";
 
             // Indent the snippet body
             std::string indentedBody;
@@ -3055,7 +3362,8 @@ namespace gladius
                 result += "\n";
             }
             result += "// Function: " + displayName + " (ID: " + std::to_string(funcId) + ")\n";
-            result += "float " + uniqueName + "(vec3 pos) {\n";
+            std::string returnType = returnsVec3 ? "vec3" : "float";
+            result += returnType + " " + uniqueName + signature + " {\n";
             result += indentedBody;
             result += "}\n";
         }
@@ -3078,10 +3386,13 @@ namespace gladius
             std::string displayName;
             nodes::ResourceId resourceId{0};
             std::string body;
+            std::vector<FunctionArgument> args;
+            ArgumentType outputType{ArgumentType::Scalar};
         };
 
         std::vector<FunctionBlock> blocks;
         std::regex headerRegex(R"(//\s*Function:\s*(.+?)\s*\(ID:\s*(\d+)\))");
+        std::regex sigArgRegex(R"((vec3|float)\s+(\w+))");
         std::istringstream stream(program);
         std::string line;
 
@@ -3098,6 +3409,7 @@ namespace gladius
                 current.displayName = match[1].str();
                 current.resourceId =
                   static_cast<nodes::ResourceId>(std::stoul(match[2].str()));
+                current.args.clear();
                 inFunction = false;
                 braceDepth = 0;
                 bodyAccum.clear();
@@ -3110,6 +3422,41 @@ namespace gladius
                 auto bracePos = line.find('{');
                 if (bracePos != std::string::npos)
                 {
+                    // Detect return type from signature: vec3 name(...) or float name(...)
+                    auto trimmedLine = line;
+                    auto firstNonSpace = trimmedLine.find_first_not_of(" \t");
+                    if (firstNonSpace != std::string::npos)
+                    {
+                        trimmedLine = trimmedLine.substr(firstNonSpace);
+                    }
+                    if (trimmedLine.substr(0, 4) == "vec3")
+                    {
+                        current.outputType = ArgumentType::Vector;
+                    }
+
+                    // Parse arguments from signature: float name(vec3 pos, float b) {
+                    auto parenOpen = line.find('(');
+                    auto parenClose = line.find(')');
+                    if (parenOpen != std::string::npos && parenClose != std::string::npos &&
+                        parenClose > parenOpen)
+                    {
+                        auto argStr =
+                          line.substr(parenOpen + 1, parenClose - parenOpen - 1);
+                        auto argBegin =
+                          std::sregex_iterator(argStr.begin(), argStr.end(), sigArgRegex);
+                        auto argEnd = std::sregex_iterator();
+                        for (auto it = argBegin; it != argEnd; ++it)
+                        {
+                            auto type = (*it)[1].str() == "vec3" ? ArgumentType::Vector
+                                                                 : ArgumentType::Scalar;
+                            current.args.emplace_back((*it)[2].str(), type);
+                        }
+                    }
+                    if (current.args.empty())
+                    {
+                        current.args.emplace_back("pos", ArgumentType::Vector);
+                    }
+
                     inFunction = true;
                     braceDepth = 1;
                     continue;
@@ -3153,6 +3500,16 @@ namespace gladius
             throw std::runtime_error("No function blocks found in program snippet");
         }
 
+        // Remove functions with unsupported nodes — they cannot be roundtripped
+        blocks.erase(
+          std::remove_if(blocks.begin(),
+                         blocks.end(),
+                         [](FunctionBlock const & b)
+                         {
+                             return b.body.find("/* unsupported:") != std::string::npos;
+                         }),
+          blocks.end());
+
         // Collect all defined ResourceIds
         std::set<nodes::ResourceId> definedIds;
         for (auto const & block : blocks)
@@ -3169,24 +3526,30 @@ namespace gladius
         }
 
         // Second pass: parse and build each function's graph
-        std::vector<FunctionArgument> defaultArgs = {{"pos", ArgumentType::Vector}};
-        auto defaultOutput = FunctionOutput::defaultOutput();
+        size_t parseSuccessCount = 0;
+        std::string lastParseError;
 
         for (auto const & block : blocks)
         {
             auto model = assembly.findModel(block.resourceId);
             model->clear();
-            model->createBeginEndWithDefaultInAndOuts();
+            model->createBeginEnd();
+
+            FunctionOutput blockOutput;
+            blockOutput.name = FunctionOutput::defaultOutput().name;
+            blockOutput.type = block.outputType;
 
             auto nodeId = convertSnippetToGraph(
-              block.body, *model, parser, defaultArgs, defaultOutput);
+              block.body, *model, parser, block.args, blockOutput, &assembly);
 
-            if (nodeId == 0 && !block.body.empty())
+            if (nodeId == 0)
             {
-                throw std::runtime_error(
-                  "Failed to parse function body for '" + block.displayName +
-                  "' (ID: " + std::to_string(block.resourceId) + ")");
+                lastParseError = "Failed to parse function body for '" + block.displayName +
+                  "' (ID: " + std::to_string(block.resourceId) + ")";
+                continue;
             }
+
+            ++parseSuccessCount;
 
             model->updateGraphAndOrderIfNeeded();
 
@@ -3218,6 +3581,12 @@ namespace gladius
                       "' references undefined function ID " + std::to_string(calledId));
                 }
             }
+        }
+
+        // If no functions were successfully parsed, treat as a fatal error
+        if (parseSuccessCount == 0 && !blocks.empty())
+        {
+            throw std::runtime_error(lastParseError);
         }
     }
 

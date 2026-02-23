@@ -64,7 +64,8 @@ namespace gladius
                               nodes::Model & model,
                               ExpressionParser & parser,
                               std::vector<FunctionArgument> const & arguments = {},
-                              FunctionOutput const & output = {});
+                              FunctionOutput const & output = {},
+                              nodes::Assembly * assembly = nullptr);
 
         /**
          * @brief Convert a node graph back to a multi-line snippet
@@ -168,6 +169,9 @@ namespace gladius
          * @brief Track current variable context for Begin node port resolution
          */
         static thread_local std::vector<std::string> s_variableContextStack;
+
+        /// Assembly context for resolving cross-function calls during snippet→graph conversion
+        static thread_local nodes::Assembly * s_assemblyContext;
 
         /**
          * @brief Create a mathematical operation node

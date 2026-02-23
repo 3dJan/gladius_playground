@@ -1365,6 +1365,12 @@ namespace gladius::ui
 
                 // Tab bar: always show Graph + Code; show Properties only for Image3D
                 auto previousTabMode = m_currentTabMode;
+                ImGuiTabItemFlags codeTabFlags = ImGuiTabItemFlags_None;
+                if (m_forceCodeTab)
+                {
+                    codeTabFlags = ImGuiTabItemFlags_SetSelected;
+                    m_forceCodeTab = false;
+                }
                 if (ImGui::BeginTabBar("FunctionTabs"))
                 {
                     if (ImGui::BeginTabItem("Graph"))
@@ -1372,7 +1378,7 @@ namespace gladius::ui
                         m_currentTabMode = TabMode::Graph;
                         ImGui::EndTabItem();
                     }
-                    if (ImGui::BeginTabItem("Code"))
+                    if (ImGui::BeginTabItem("Code", nullptr, codeTabFlags))
                     {
                         m_currentTabMode = TabMode::Code;
                         ImGui::EndTabItem();
@@ -1409,6 +1415,7 @@ namespace gladius::ui
                     if (ImGui::Button("Stay in Code", ImVec2(120, 0)))
                     {
                         m_currentTabMode = TabMode::Code;
+                        m_forceCodeTab = true;
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::EndPopup();

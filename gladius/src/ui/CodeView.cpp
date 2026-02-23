@@ -10,6 +10,12 @@
 
 namespace gladius::ui
 {
+    namespace
+    {
+        auto const kDefaultArgs = std::vector<FunctionArgument>{{"pos", ArgumentType::Vector}};
+        auto const kDefaultOutput = FunctionOutput::defaultOutput();
+    } // namespace
+
     static int inputTextCallback(ImGuiInputTextCallbackData * data)
     {
         if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
@@ -46,7 +52,7 @@ namespace gladius::ui
         if (!dirty)
         {
             auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
-              *m_currentModel, {}, FunctionOutput::defaultOutput(), m_currentAssembly);
+              *m_currentModel, kDefaultArgs, kDefaultOutput, m_currentAssembly);
             if (snippet.empty())
             {
                 snippet = "return 0;";
@@ -116,11 +122,8 @@ namespace gladius::ui
         nodes::Model tempModel;
         tempModel.createBeginEndWithDefaultInAndOuts();
 
-        auto const args = std::vector<FunctionArgument>{{"pos", ArgumentType::Vector}};
-        auto const output = FunctionOutput::defaultOutput();
-
         auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, tempModel, parser, args, output);
+          buf.buffer, tempModel, parser, kDefaultArgs, kDefaultOutput);
 
         if (nodeId == 0)
         {
@@ -132,12 +135,12 @@ namespace gladius::ui
         m_currentModel->clear();
         m_currentModel->createBeginEndWithDefaultInAndOuts();
         ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, *m_currentModel, parser, args, output);
+          buf.buffer, *m_currentModel, parser, kDefaultArgs, kDefaultOutput);
         m_currentModel->updateGraphAndOrderIfNeeded();
 
         // Regenerate normalized snippet
         auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
-          *m_currentModel, args, output, m_currentAssembly);
+          *m_currentModel, kDefaultArgs, kDefaultOutput, m_currentAssembly);
         if (!normalized.empty())
         {
             buf.buffer = normalized;

@@ -365,6 +365,7 @@ namespace gladius::ui
         // FunctionFromImage3D UI
         FunctionFromImage3DView m_functionFromImage3DView;
         TabMode m_currentTabMode{TabMode::Graph};
+        bool m_forceCodeTab{false}; ///< Force-select Code tab on next frame ("Stay in Code")
 
         // Code view for snippet editing
         CodeView m_codeView;
