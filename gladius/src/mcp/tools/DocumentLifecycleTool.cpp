@@ -49,7 +49,8 @@ namespace gladius::mcp::tools
                 while (doc->isLoadingInProgress() &&
                        std::chrono::steady_clock::now() < deadline)
                 {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    // 50 ms keeps CPU usage low while still reacting within one frame
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 // Welcome screen is a UI concept but safe to hide regardless
                 m_application->getMainWindow().hideWelcomeScreen();

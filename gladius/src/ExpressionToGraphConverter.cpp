@@ -34,6 +34,14 @@ namespace gladius
       std::vector<FunctionArgument> const & arguments,
       FunctionOutput const & output)
     {
+        // @note if-else preprocessing only handles single-line bodies of the form:
+        //   if (A op B) { var = C; } else { var = D; }
+        // where op is one of <, <=, >, >=, ==, !=.  Multi-line blocks and complex
+        // conditions (e.g. logical &&/||) are not matched and will cause the
+        // containing statement to fall through to the assignment parser unchanged.
+        //
+        // Similarly, statement splitting is done on ';' without string/comment
+        // awareness; snippets must not contain semicolons inside string literals.
         if (snippet.empty())
         {
             return 0;
@@ -60,13 +68,20 @@ namespace gladius
             std::string D = match[6];
             
             std::string replacement;
-            if (op == "<" || op == "<=") {
+            if (op == "<" || op == "<=")
+            {
                 replacement = var + " = select(" + A + ", " + B + ", " + C + ", " + D + ");";
-            } else if (op == ">" || op == ">=") {
+            }
+            else if (op == ">" || op == ">=")
+            {
                 replacement = var + " = select(" + B + ", " + A + ", " + C + ", " + D + ");";
-            } else if (op == "==") {
+            }
+            else if (op == "==")
+            {
                 replacement = var + " = select(abs(" + A + " - " + B + "), 1e-6, " + C + ", " + D + ");";
-            } else if (op == "!=") {
+            }
+            else if (op == "!=")
+            {
                 replacement = var + " = select(abs(" + A + " - " + B + "), 1e-6, " + D + ", " + C + ");";
             }
             

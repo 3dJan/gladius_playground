@@ -25,10 +25,8 @@ namespace gladius
     {
         using nlohmann::json;
 
-        /// @brief Set parameter values on a node from a JSON "values" object.
-        /// Supports Float, Int, String, Float3, ResourceId, and a virtual "matrix"
-        /// key that distributes a 16-element or 4x4 array to ConstantMatrix m00..m33.
-        static void setNodeValues(nodes::NodeBase & node, json const & values)
+        /// @see FunctionGraphDeserializer::applyNodeValues
+        void FunctionGraphDeserializer::applyNodeValues(nodes::NodeBase & node, json const & values)
         {
             for (auto const & [paramName, paramValue] : values.items())
             {
@@ -244,7 +242,7 @@ namespace gladius
                 // Apply initial parameter values from "values" object
                 if (created && jn.contains("values") && jn["values"].is_object())
                 {
-                    setNodeValues(*created, jn["values"]);
+                    FunctionGraphDeserializer::applyNodeValues(*created, jn["values"]);
                 }
             }
 

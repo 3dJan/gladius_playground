@@ -339,19 +339,9 @@ namespace gladius
                 // Get the resource ID from the created model (now synchronized to ModelResourceID)
                 uint32_t resourceId = model.getResourceId();
 
-                // Success!
-                m_lastErrorMessage = std::string("Function '") + name +
-                                     "' created successfully with expression '" +
-                                     transformedExpression + "' and arguments [";
-                for (size_t i = 0; i < arguments.size(); ++i)
-                {
-                    if (i > 0)
-                        m_lastErrorMessage += ", ";
-                    m_lastErrorMessage +=
-                      arguments[i].name + ":" +
-                      (arguments[i].type == ArgumentType::Vector ? "vec3" : "float");
-                }
-                m_lastErrorMessage += "]";
+                // Success — clear the error field so callers don't mistake a stale message
+                // from a prior failure as belonging to this call.
+                m_lastErrorMessage.clear();
                 return {true, resourceId};
             }
             catch (const std::exception & e)
@@ -487,17 +477,7 @@ namespace gladius
                 }
 
                 uint32_t resourceId = model.getResourceId();
-                m_lastErrorMessage =
-                  "Function '" + name + "' created successfully from snippet with arguments [";
-                for (size_t i = 0; i < arguments.size(); ++i)
-                {
-                    if (i > 0)
-                        m_lastErrorMessage += ", ";
-                    m_lastErrorMessage +=
-                      arguments[i].name + ":" +
-                      (arguments[i].type == ArgumentType::Vector ? "vec3" : "float");
-                }
-                m_lastErrorMessage += "]";
+                m_lastErrorMessage.clear(); // Clear on success; meaningful only on failure.
                 return {true, resourceId};
             }
             catch (const std::exception & e)
@@ -1202,51 +1182,30 @@ namespace gladius
 
                 auto * node = nodeOpt.value();
 
-                // Virtual "matrix" parameter for ConstantMatrix batch-set
+                // Virtual "matrix" parameter for ConstantMatrix batch-set.
+                // Delegates to FunctionGraphDeserializer::applyNodeValues to avoid
+                // duplicating the matrix distribution logic.
                 if (parameterName == "matrix" && node->name() == "ConstantMatrix")
                 {
+                    bool const isFlat16 = value.is_array() && value.size() == 16;
+                    bool const is4x4 = value.is_array() && value.size() == 4 && value[0].is_array();
+                    if (!isFlat16 && !is4x4)
+                    {
+                        out["success"] = false;
+                        out["error"] = "Expected flat 16-element array or 4x4 nested array for matrix";
+                        return out;
+                    }
                     try
                     {
-                        if (value.is_array() && value.size() == 16)
-                        {
-                            for (int i = 0; i < 4; ++i)
-                                for (int j = 0; j < 4; ++j)
-                                {
-                                    auto * p =
-                                      node->getParameter(fmt::format("m{}{}", i, j));
-                                    if (p)
-                                        p->setValue(nodes::VariantType{static_cast<float>(
-                                          value[i * 4 + j].get<double>())});
-                                }
-                        }
-                        else if (value.is_array() && value.size() == 4 && value[0].is_array())
-                        {
-                            for (int i = 0; i < 4; ++i)
-                                for (int j = 0; j < 4; ++j)
-                                {
-                                    auto * p =
-                                      node->getParameter(fmt::format("m{}{}", i, j));
-                                    if (p)
-                                        p->setValue(nodes::VariantType{
-                                          static_cast<float>(value[i][j].get<double>())});
-                                }
-                        }
-                        else
-                        {
-                            out["success"] = false;
-                            out["error"] =
-                              "Expected flat 16-element array or 4x4 nested array for matrix";
-                            return out;
-                        }
+                        mcp::FunctionGraphDeserializer::applyNodeValues(*node, {{"matrix", value}});
                         out["success"] = true;
                         out["message"] = "Set all 16 matrix elements (m00..m33)";
                         return out;
                     }
-                    catch (const std::exception & e)
+                    catch (std::exception const & e)
                     {
                         out["success"] = false;
-                        out["error"] =
-                          std::string("Failed to set matrix value: ") + e.what();
+                        out["error"] = std::string("Failed to set matrix value: ") + e.what();
                         return out;
                     }
                 }

@@ -15,6 +15,11 @@ namespace gladius
         class Assembly;
     }
 
+    namespace nodes
+    {
+        class NodeBase;
+    }
+
     namespace mcp
     {
         /**
@@ -49,6 +54,18 @@ namespace gladius
                                                nlohmann::json const & graph,
                                                bool replace,
                                                nodes::Assembly * assembly = nullptr);
+
+            /**
+             * @brief Apply a JSON "values" object to a node's parameters.
+             *
+             * Supports Float, Int, String, Float3 ([x,y,z] or {x,y,z}), ResourceId.
+             * For ConstantMatrix nodes, the virtual "matrix" key accepts a flat 16-element
+             * array or a 4x4 nested array that gets distributed to m00..m33.
+             *
+             * @param node   Target node.
+             * @param values JSON object mapping parameter names to values.
+             */
+            static void applyNodeValues(nodes::NodeBase & node, nlohmann::json const & values);
         };
     } // namespace mcp
 } // namespace gladius

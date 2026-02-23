@@ -275,7 +275,9 @@ namespace gladius::mcp::tools
                 if (logger)
                 {
                     logger->addEvent(
-                      {fmt::format("Warning: Could not prune exported library file: {}", e.what()),
+                      {fmt::format("Warning: Export pruning failed for '{}': {}. "
+                                   "The library entry may contain unrelated resources.",
+                                   filePath.string(), e.what()),
                        events::Severity::Warning});
                 }
                 return 0; // Non-fatal — the file was already written with full content
@@ -1043,6 +1045,7 @@ namespace gladius::mcp::tools
     std::vector<std::string> LibraryTool::getAvailableCategories() const
     {
         std::vector<std::string> categories;
+        std::unordered_set<std::string> seen;
         auto const addCategories = [&](fs::path const & root)
         {
             if (!fs::exists(root))
@@ -1054,7 +1057,7 @@ namespace gladius::mcp::tools
                 if (entry.is_directory())
                 {
                     auto const name = entry.path().filename().string();
-                    if (std::find(categories.begin(), categories.end(), name) == categories.end())
+                    if (seen.insert(name).second)
                     {
                         categories.push_back(name);
                     }
@@ -1071,6 +1074,7 @@ namespace gladius::mcp::tools
     std::vector<std::string> LibraryTool::getAvailableEntries(std::string const & category) const
     {
         std::vector<std::string> entries;
+        std::unordered_set<std::string> seen;
         auto const addEntries = [&](fs::path const & root)
         {
             auto const catPath = root / category;
@@ -1083,7 +1087,7 @@ namespace gladius::mcp::tools
                 if (entry.is_regular_file() && entry.path().extension() == ".3mf")
                 {
                     auto const name = entry.path().stem().string();
-                    if (std::find(entries.begin(), entries.end(), name) == entries.end())
+                    if (seen.insert(name).second)
                     {
                         entries.push_back(name);
                     }
