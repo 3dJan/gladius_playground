@@ -3,6 +3,7 @@
 #include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
 #include "BeamLatticeView.h"
+#include "CodeView.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
 #include "FunctionFromImage3DView.h"
@@ -159,8 +160,9 @@ namespace gladius::ui
         /// Tab mode for FunctionFromImage3D functions
         enum class TabMode
         {
-            Graph = 0,     ///< Normal graph view
-            Properties = 1 ///< FunctionFromImage3D properties panel
+            Graph = 0,      ///< Normal graph view
+            Properties = 1, ///< FunctionFromImage3D properties panel
+            Code = 2        ///< Code view (GLSL-like snippet editor)
         };
 
       private:
@@ -363,6 +365,9 @@ namespace gladius::ui
         // FunctionFromImage3D UI
         FunctionFromImage3DView m_functionFromImage3DView;
         TabMode m_currentTabMode{TabMode::Graph};
+
+        // Code view for snippet editing
+        CodeView m_codeView;
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

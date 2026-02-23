@@ -1194,3 +1194,27 @@ nlohmann::json gladius::ApplicationMCPAdapter::deleteLibraryEntry(std::string co
 {
     return m_libraryTool->deleteLibraryEntry(category, name);
 }
+
+nlohmann::json gladius::ApplicationMCPAdapter::getFunctionSnippet(uint32_t functionId) const
+{
+    return m_functionOperationsTool->getFunctionSnippet(functionId);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setFunctionSnippet(
+  uint32_t functionId,
+  std::string const & snippet,
+  std::string const & outputType,
+  std::vector<FunctionArgument> const & arguments)
+{
+    return m_functionOperationsTool->setFunctionSnippet(functionId, snippet, outputType, arguments);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::getProgramSnippet() const
+{
+    return m_functionOperationsTool->getProgramSnippet();
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string const & snippet)
+{
+    return m_functionOperationsTool->setProgramSnippet(snippet);
+}

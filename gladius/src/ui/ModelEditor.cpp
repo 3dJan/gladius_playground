@@ -1363,37 +1363,74 @@ namespace gladius::ui
 
                 m_popupMenuFunction();
 
-                // Tab bar for FunctionFromImage3D functions
-                bool const showTabs = isFunctionFromImage3D();
-                if (showTabs)
+                // Tab bar: always show Graph + Code; show Properties only for Image3D
+                auto previousTabMode = m_currentTabMode;
+                if (ImGui::BeginTabBar("FunctionTabs"))
                 {
-                    if (ImGui::BeginTabBar("FunctionTabs"))
+                    if (ImGui::BeginTabItem("Graph"))
                     {
-                        if (ImGui::BeginTabItem("Graph"))
-                        {
-                            m_currentTabMode = TabMode::Graph;
-                            ImGui::EndTabItem();
-                        }
+                        m_currentTabMode = TabMode::Graph;
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Code"))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        ImGui::EndTabItem();
+                    }
+                    if (isFunctionFromImage3D())
+                    {
                         if (ImGui::BeginTabItem("Properties"))
                         {
                             m_currentTabMode = TabMode::Properties;
                             ImGui::EndTabItem();
                         }
-                        ImGui::EndTabBar();
                     }
+                    ImGui::EndTabBar();
                 }
-                else
+
+                // Warn about unsaved code changes when switching away from Code tab
+                if (previousTabMode == TabMode::Code && m_currentTabMode != TabMode::Code &&
+                    m_codeView.hasUnsavedChanges())
                 {
-                    m_currentTabMode = TabMode::Graph;
+                    ImGui::OpenPopup("Unsaved Code Changes");
+                }
+                if (ImGui::BeginPopupModal("Unsaved Code Changes", nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text("You have unsaved changes in the Code editor.");
+                    ImGui::Text("Discard changes and switch tabs?");
+                    ImGui::Separator();
+                    if (ImGui::Button("Discard", ImVec2(120, 0)))
+                    {
+                        m_codeView.discardChanges();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stay in Code", ImVec2(120, 0)))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
                 }
 
                 // Render Properties panel if in Properties tab
-                if (showTabs && m_currentTabMode == TabMode::Properties)
+                if (m_currentTabMode == TabMode::Properties)
                 {
                     m_functionFromImage3DView.setFunction(m_currentModel.get(),
                                                          m_assembly.get());
                     m_functionFromImage3DView.setModelEditor(this);
                     if (m_functionFromImage3DView.render())
+                    {
+                        parameterChanged = true;
+                    }
+                }
+                else if (m_currentTabMode == TabMode::Code)
+                {
+                    m_codeView.setFunction(m_currentModel->getResourceId(),
+                                           m_currentModel.get(),
+                                           m_assembly.get());
+                    if (m_codeView.render())
                     {
                         parameterChanged = true;
                     }

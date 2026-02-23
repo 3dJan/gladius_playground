@@ -271,6 +271,34 @@ namespace gladius
          */
         virtual nlohmann::json removeUnusedNodes(uint32_t functionId) = 0;
 
+        /// Get code snippet for a function. Override to provide implementation.
+        virtual nlohmann::json getFunctionSnippet(uint32_t /*functionId*/) const
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Set function graph from a code snippet. Override to provide implementation.
+        virtual nlohmann::json
+        setFunctionSnippet(uint32_t /*functionId*/,
+                           std::string const & /*snippet*/,
+                           std::string const & /*outputType*/ = "float",
+                           std::vector<FunctionArgument> const & /*arguments*/ = {})
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Get the entire program as a single code listing. Override to provide implementation.
+        virtual nlohmann::json getProgramSnippet() const
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Replace all functions from a multi-function code listing. Override to provide impl.
+        virtual nlohmann::json setProgramSnippet(std::string const & /*snippet*/)
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
         // Manufacturing validation
         virtual nlohmann::json
         validateForManufacturing(const std::vector<std::string> & functionNames = {},

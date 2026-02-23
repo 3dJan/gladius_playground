@@ -2215,5 +2215,283 @@ namespace gladius
                 return out;
             }
         }
+
+        nlohmann::json FunctionOperationsTool::getFunctionSnippet(uint32_t functionId) const
+        {
+            nlohmann::json out;
+            out["function_id"] = functionId;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto model = assembly->findModel(functionId);
+                if (!model)
+                {
+                    out["success"] = false;
+                    out["error"] = "Function not found: " + std::to_string(functionId);
+                    return out;
+                }
+
+                auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
+                  *model, {}, FunctionOutput::defaultOutput(), assembly.get());
+
+                if (snippet.empty())
+                {
+                    snippet = "return 0;";
+                }
+
+                out["success"] = true;
+                out["snippet"] = snippet;
+                if (model->getDisplayName().has_value())
+                {
+                    out["display_name"] = model->getDisplayName().value();
+                }
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while getting function snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::setFunctionSnippet(
+          uint32_t functionId,
+          std::string const & snippet,
+          std::string const & outputType,
+          std::vector<FunctionArgument> const & arguments)
+        {
+            nlohmann::json out;
+            out["function_id"] = functionId;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            if (snippet.empty())
+            {
+                out["success"] = false;
+                out["error"] = "Snippet cannot be empty";
+                return out;
+            }
+
+            // Reject unsupported-node comments
+            if (snippet.find("/* unsupported:") != std::string::npos)
+            {
+                out["success"] = false;
+                out["error"] = "Snippet contains unsupported node placeholders";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto model = assembly->findModel(functionId);
+                if (!model)
+                {
+                    out["success"] = false;
+                    out["error"] = "Function not found: " + std::to_string(functionId);
+                    return out;
+                }
+
+                FunctionOutput output;
+                output.name = "result";
+                output.type =
+                  (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                    ? ArgumentType::Vector
+                    : ArgumentType::Scalar;
+
+                // Validate by parsing into a temporary model first
+                ExpressionParser parser;
+                nodes::Model tempModel;
+                tempModel.createBeginEndWithDefaultInAndOuts();
+
+                auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                  snippet, tempModel, parser, arguments, output);
+                if (nodeId == 0)
+                {
+                    out["success"] = false;
+                    out["error"] = "Failed to parse snippet. Graph unchanged.";
+                    return out;
+                }
+
+                // Success: apply to the real model
+                model->clear();
+                model->createBeginEndWithDefaultInAndOuts();
+                ExpressionToGraphConverter::convertSnippetToGraph(
+                  snippet, *model, parser, arguments, output);
+                model->updateGraphAndOrderIfNeeded();
+
+                // Return the normalized snippet
+                auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
+                  *model, arguments, output, assembly.get());
+                out["success"] = true;
+                out["snippet"] = normalized.empty() ? snippet : normalized;
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while setting function snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::getProgramSnippet() const
+        {
+            nlohmann::json out;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto snippet =
+                  ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+
+                auto const & functions = assembly->getFunctions();
+                out["success"] = true;
+                out["snippet"] = snippet;
+                out["function_count"] = functions.size();
+            }
+            catch (std::runtime_error const & e)
+            {
+                out["success"] = false;
+                out["error"] = e.what();
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while getting program snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::setProgramSnippet(std::string const & snippet)
+        {
+            nlohmann::json out;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            if (snippet.empty())
+            {
+                out["success"] = false;
+                out["error"] = "Program snippet cannot be empty";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                ExpressionParser parser;
+                ExpressionToGraphConverter::setProgramSnippet(snippet, *assembly, parser);
+
+                // Return the normalized program
+                auto normalized =
+                  ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+                auto const & functions = assembly->getFunctions();
+                out["success"] = true;
+                out["snippet"] = normalized;
+                out["function_count"] = functions.size();
+            }
+            catch (std::runtime_error const & e)
+            {
+                out["success"] = false;
+                out["error"] = e.what();
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while setting program snippet: ") + e.what();
+            }
+
+            return out;
+        }
     }
 }

@@ -114,6 +114,22 @@ namespace gladius
               std::vector<std::string> const & excludeParams = {});
             nlohmann::json removeUnusedNodes(uint32_t functionId);
             nlohmann::json listChangeableParameters() const;
+
+            /// Get the code snippet representation of a function's graph.
+            nlohmann::json getFunctionSnippet(uint32_t functionId) const;
+
+            /// Replace a function's graph from a code snippet.
+            nlohmann::json setFunctionSnippet(
+              uint32_t functionId,
+              std::string const & snippet,
+              std::string const & outputType = "float",
+              std::vector<FunctionArgument> const & arguments = {});
+
+            /// Get the entire program as a single code listing in dependency order.
+            nlohmann::json getProgramSnippet() const;
+
+            /// Replace all functions from a multi-function code listing.
+            nlohmann::json setProgramSnippet(std::string const & snippet);
         };
     }
 }

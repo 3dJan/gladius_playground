@@ -194,6 +194,16 @@ namespace gladius
           std::vector<std::string> const & excludeParams = {}) override;
         nlohmann::json removeUnusedNodes(uint32_t functionId) override;
 
+        // Snippet operations
+        nlohmann::json getFunctionSnippet(uint32_t functionId) const override;
+        nlohmann::json setFunctionSnippet(
+          uint32_t functionId,
+          std::string const & snippet,
+          std::string const & outputType = "float",
+          std::vector<FunctionArgument> const & arguments = {}) override;
+        nlohmann::json getProgramSnippet() const override;
+        nlohmann::json setProgramSnippet(std::string const & snippet) override;
+
         // Manufacturing validation
         nlohmann::json
         validateForManufacturing(const std::vector<std::string> & functionNames = {},

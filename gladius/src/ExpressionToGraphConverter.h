@@ -15,9 +15,11 @@ namespace gladius
 
 namespace gladius::nodes
 {
+    class Assembly;
     class Model;
     class NodeBase;
     using NodeId = int;
+    using ResourceId = uint32_t;
 }
 
 namespace gladius
@@ -74,7 +76,8 @@ namespace gladius
         static std::string
         convertGraphToSnippet(nodes::Model & model,
                               std::vector<FunctionArgument> const & arguments = {},
-                              FunctionOutput const & output = {});
+                              FunctionOutput const & output = {},
+                              nodes::Assembly * assembly = nullptr);
 
         /**
          * @brief Check if an expression can be converted to a graph
@@ -83,6 +86,24 @@ namespace gladius
          * @return true if the expression can be converted to a graph
          */
         static bool canConvertToGraph(std::string const & expression, ExpressionParser & parser);
+
+        /// Generate a unique GLSL-compatible identifier from a display name and resource ID.
+        /// Sanitizes the name: replaces non-alphanumeric chars with '_', collapses consecutive '_',
+        /// prepends 'f_' if result starts with a digit, and appends '_resourceId'.
+        static std::string generateUniqueFunctionName(std::string const & displayName,
+                                                      nodes::ResourceId resourceId);
+
+        /// Convert all functions in an assembly to a single code listing.
+        /// Functions are topologically sorted by call dependencies.
+        /// Throws std::runtime_error if circular dependencies are detected.
+        static std::string convertProgramToSnippet(nodes::Assembly & assembly);
+
+        /// Parse a multi-function code listing and create/update function graphs.
+        /// Each function must be in the format produced by convertProgramToSnippet.
+        /// Throws std::runtime_error on parse errors or dangling references.
+        static void setProgramSnippet(std::string const & program,
+                                      nodes::Assembly & assembly,
+                                      ExpressionParser & parser);
 
       private:
         /**

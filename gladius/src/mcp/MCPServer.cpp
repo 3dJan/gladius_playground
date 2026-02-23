@@ -1068,6 +1068,121 @@ namespace gladius::mcp
               });
         }
 
+        // GET/SET FUNCTION SNIPPET (code view for functions)
+        {
+            json getSnippetSchema;
+            getSnippetSchema["type"] = "object";
+            getSnippetSchema["properties"] = {
+              {"function_id",
+               {{"type", "integer"}, {"description", "Resource ID of the function"}}}};
+            getSnippetSchema["required"] = json::array({"function_id"});
+
+            registerTool(
+              "get_function_snippet",
+              "Get the GLSL-like code representation of a function's node graph. "
+              "Returns a multi-line snippet with variable assignments and a return statement.",
+              getSnippetSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  return m_application->getFunctionSnippet(functionId);
+              });
+
+            json setSnippetSchema;
+            setSnippetSchema["type"] = "object";
+            json setProps;
+            setProps["function_id"] = {
+              {"type", "integer"}, {"description", "Resource ID of the function to update"}};
+            setProps["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "GLSL-like code snippet. Supports assignments, math ops, vec3(), "
+               "dot(), cross(), and return statement."}};
+            setProps["output_type"] = {
+              {"type", "string"},
+              {"description", "Output type: 'float' (default) or 'vec3'"},
+              {"default", "float"}};
+            setProps["arguments"] = {
+              {"type", "array"},
+              {"description", "Function arguments [{name, type}]"},
+              {"items",
+               {{"type", "object"},
+                {"properties",
+                 {{"name", {{"type", "string"}}}, {"type", {{"type", "string"}}}}}}}};
+            setSnippetSchema["properties"] = setProps;
+            setSnippetSchema["required"] = json::array({"function_id", "snippet"});
+
+            registerTool(
+              "set_function_snippet",
+              "Replace a function's node graph from a GLSL-like code snippet. "
+              "Parses the snippet, validates it, and replaces the graph. "
+              "Returns the normalized snippet on success.",
+              setSnippetSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  std::string snippet = params["snippet"];
+                  std::string outputType = params.value("output_type", "float");
+
+                  std::vector<FunctionArgument> arguments;
+                  if (params.contains("arguments") && params["arguments"].is_array())
+                  {
+                      for (auto const & argJson : params["arguments"])
+                      {
+                          std::string argName = argJson["name"];
+                          std::string argType = argJson["type"];
+                          ArgumentType type = (argType == "float" || argType == "scalar")
+                                                ? ArgumentType::Scalar
+                                                : ArgumentType::Vector;
+                          arguments.emplace_back(argName, type);
+                      }
+                  }
+
+                  return m_application->setFunctionSnippet(
+                    functionId, snippet, outputType, arguments);
+              });
+
+            // get_program_snippet: whole-program code listing
+            json programSnippetSchema;
+            programSnippetSchema["type"] = "object";
+            programSnippetSchema["properties"] = json::object();
+            programSnippetSchema["required"] = json::array();
+
+            registerTool(
+              "get_program_snippet",
+              "Get the entire document as a single GLSL-like code listing with all "
+              "functions in dependency order. Useful for understanding the full program.",
+              programSnippetSchema,
+              [this](json const & /*params*/) -> json
+              {
+                  return m_application->getProgramSnippet();
+              });
+
+            // set_program_snippet: replace all functions from a multi-function listing
+            json setProgramSchema;
+            setProgramSchema["type"] = "object";
+            json setProgramProps;
+            setProgramProps["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "Multi-function GLSL-like code listing. Each function block must have "
+               "a '// Function: name (ID: num)' header followed by the function body."}};
+            setProgramSchema["properties"] = setProgramProps;
+            setProgramSchema["required"] = json::array({"snippet"});
+
+            registerTool(
+              "set_program_snippet",
+              "Replace all function graphs from a multi-function GLSL-like code listing. "
+              "Each function must include a comment header with display name and ID. "
+              "Returns the normalized program on success.",
+              setProgramSchema,
+              [this](json const & params) -> json
+              {
+                  std::string snippet = params["snippet"];
+                  return m_application->setProgramSnippet(snippet);
+              });
+        }
+
         // LEVEL SETS (Convert functions to 3D geometry for 3MF)
         registerTool(
           "create_levelset",
