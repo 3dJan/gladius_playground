@@ -262,8 +262,29 @@ namespace gladius
       const std::vector<FunctionArgument> & arguments,
       const std::string & outputName)
     {
-        return m_functionOperationsTool->createFunctionFromExpression(
+        auto result = m_functionOperationsTool->createFunctionFromExpression(
           name, expression, outputType, arguments, outputName);
+        if (!result.first)
+        {
+            m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
+        }
+        return result;
+    }
+
+    std::pair<bool, uint32_t> ApplicationMCPAdapter::createFunctionFromSnippet(
+      const std::string & name,
+      const std::string & snippet,
+      const std::string & outputType,
+      const std::vector<FunctionArgument> & arguments,
+      const std::string & outputName)
+    {
+        auto result = m_functionOperationsTool->createFunctionFromSnippet(
+          name, snippet, outputType, arguments, outputName);
+        if (!result.first)
+        {
+            m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
+        }
+        return result;
     }
 
     // 3MF and implicit modeling operations
@@ -1008,12 +1029,14 @@ gladius::ApplicationMCPAdapter::createFunctionCallNode(uint32_t targetFunctionId
 }
 
 nlohmann::json
-gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                        uint32_t nodeId,
-                                                                        bool autoConnect)
+gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(
+  uint32_t functionId,
+  uint32_t nodeId,
+  bool autoConnect,
+  std::vector<std::string> const & excludeParams)
 {
     return m_functionOperationsTool->createConstantNodesForMissingParameters(
-      functionId, nodeId, autoConnect);
+      functionId, nodeId, autoConnect, excludeParams);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::removeUnusedNodes(uint32_t functionId)

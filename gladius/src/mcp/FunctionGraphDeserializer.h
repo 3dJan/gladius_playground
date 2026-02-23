@@ -12,6 +12,7 @@ namespace gladius
     namespace nodes
     {
         class Model;
+        class Assembly;
     }
 
     namespace mcp
@@ -32,16 +33,22 @@ namespace gladius
          * Special node types:
          * - "Input"/"Begin" maps to existing model begin node
          * - "Output"/"End" maps to existing model end node
+         * - "FunctionCall" creates a function call node referencing another function.
+         *   Requires values.resourceid (the ModelResourceID of the function to call)
+         *   and an assembly pointer to resolve referenced models.
          *
-         * @param model   Target model to modify
-         * @param graph   Minimal JSON graph
-         * @param replace If true (default), clear existing graph first
+         * @param model    Target model to modify
+         * @param graph    Minimal JSON graph
+         * @param replace  If true (default), clear existing graph first
+         * @param assembly Optional assembly for resolving FunctionCall references
          * @return JSON with { success: bool, id_map: { clientId -> modelNodeId }, error?: string }
          */
         struct FunctionGraphDeserializer
         {
-            static nlohmann::json
-            applyToModel(nodes::Model & model, const nlohmann::json & graph, bool replace);
+            static nlohmann::json applyToModel(nodes::Model & model,
+                                               nlohmann::json const & graph,
+                                               bool replace,
+                                               nodes::Assembly * assembly = nullptr);
         };
     } // namespace mcp
 } // namespace gladius

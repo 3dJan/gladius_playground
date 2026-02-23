@@ -73,15 +73,21 @@ namespace gladius
             processedSnippet = match.prefix().str() + replacement + match.suffix().str();
         }
 
-        // Create input nodes based on arguments
-        std::map<std::string, nodes::NodeId> variableNodes;
-        if (!arguments.empty())
+        // Always ensure "pos" is available as an implicit vec3 argument (spatial coordinate)
+        std::vector<FunctionArgument> effectiveArguments = arguments;
+        bool const hasPosArg = std::any_of(arguments.begin(), arguments.end(),
+          [](auto const & arg) { return arg.name == "pos"; });
+        if (!hasPosArg)
         {
-            variableNodes = createArgumentNodes(arguments, model);
-            if (variableNodes.empty())
-            {
-                return 0;
-            }
+            effectiveArguments.insert(
+              effectiveArguments.begin(), FunctionArgument{"pos", ArgumentType::Vector});
+        }
+
+        std::map<std::string, nodes::NodeId> variableNodes =
+          createArgumentNodes(effectiveArguments, model);
+        if (variableNodes.empty())
+        {
+            return 0;
         }
 
         // Split snippet by semicolons
@@ -684,6 +690,8 @@ namespace gladius
             nodeTypeName = "Round";
         else if (functionName == "fract")
             nodeTypeName = "Fract";
+        else if (functionName == "length")
+            nodeTypeName = "Length";
         else if (functionName == "clamp")
             nodeTypeName = "Clamp";
         else if (functionName == "select")
@@ -695,8 +703,10 @@ namespace gladius
                 nodeTypeName = "Pow";
             else if (functionName == "atan2")
                 nodeTypeName = "ArcTan2";
-            else if (functionName == "fmod" || functionName == "mod")
+            else if (functionName == "fmod")
                 nodeTypeName = "Fmod";
+            else if (functionName == "mod")
+                nodeTypeName = "Mod";
             else if (functionName == "min")
                 nodeTypeName = "Min";
             else if (functionName == "max")
@@ -860,8 +870,9 @@ namespace gladius
     bool ExpressionToGraphConverter::isSingleArgumentFunction(std::string const & functionName)
     {
         static const std::set<std::string> singleArgFunctions = {
-          "sin", "cos",  "tan",   "asin", "acos", "atan", "sinh",  "cosh", "tanh",  "exp",
-          "log", "log2", "log10", "sqrt", "abs",  "sign", "floor", "ceil", "round", "fract"};
+          "sin",  "cos",  "tan",   "asin", "acos",   "atan", "sinh",  "cosh",  "tanh",   "exp",
+          "log",  "log2", "log10", "sqrt", "abs",    "sign", "floor", "ceil",  "round",  "fract",
+          "length"};
 
         return singleArgFunctions.find(functionName) != singleArgFunctions.end();
     }
@@ -1688,12 +1699,16 @@ namespace gladius
                 nodeTypeName = "Round";
             else if (functionName == "fract")
                 nodeTypeName = "Fract";
+            else if (functionName == "length")
+                nodeTypeName = "Length";
             else if (functionName == "pow")
                 nodeTypeName = "Pow";
             else if (functionName == "atan2")
                 nodeTypeName = "ArcTan2";
-            else if (functionName == "fmod" || functionName == "mod")
+            else if (functionName == "fmod")
                 nodeTypeName = "Fmod";
+            else if (functionName == "mod")
+                nodeTypeName = "Mod";
             else if (functionName == "min")
                 nodeTypeName = "Min";
             else if (functionName == "max")

@@ -72,6 +72,14 @@ namespace gladius
                                      const std::vector<FunctionArgument> & arguments = {},
                                      const std::string & outputName = "") = 0;
 
+        /// Create a function from a multi-line snippet (assignments, if→select, return).
+        virtual std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string & name,
+                                  const std::string & snippet,
+                                  const std::string & outputType,
+                                  const std::vector<FunctionArgument> & arguments = {},
+                                  const std::string & outputName = "") = 0;
+
         // 3MF and implicit modeling operations
         virtual bool validateDocumentFor3MF() const = 0;
         virtual bool exportDocumentAs3MF(const std::string & path,
@@ -244,9 +252,11 @@ namespace gladius
          * @return JSON with creation result, including information about created constant nodes and
          * links
          */
-        virtual nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                       uint32_t nodeId,
-                                                                       bool autoConnect = true) = 0;
+        virtual nlohmann::json createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect = true,
+          std::vector<std::string> const & excludeParams = {}) = 0;
 
         /**
          * @brief Removes unused nodes from a function graph

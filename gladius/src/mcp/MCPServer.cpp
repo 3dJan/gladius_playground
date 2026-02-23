@@ -426,6 +426,7 @@ namespace gladius::mcp
                                  "create_node", "delete_node", "create_link", "delete_link",
                                  "set_parameter", "set_parameter_value",
                                  "create_function_call_node", "create_function_from_expression",
+                                 "create_function_from_snippet",
                                  "create_levelset", "modify_levelset",
                                  "create_image3d_function", "create_volumetric_color",
                                  "create_volumetric_property"}                                          },
@@ -1017,6 +1018,118 @@ namespace gladius::mcp
               });
         }
 
+        // CREATE FUNCTION FROM SNIPPET (multi-line with assignments, if→select, return)
+        {
+            json snippetSchema;
+            snippetSchema["type"] = "object";
+
+            json props;
+            props["name"] = {{"type", "string"},
+                            {"description", "Name for the new function"}};
+            props["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "Multi-line snippet. Supports: float variable assignments "
+               "(float x = expr;), if(cond) a else b → select node, "
+               "return expr; as last statement. Operators: + - * /, "
+               "functions: sin, cos, tan, asin, acos, atan, atan2, sqrt, abs, exp, log, pow, "
+               "mod, fmod, min, max, clamp. Component access: pos.x, pos.y, pos.z."}};
+            props["output_type"] = {{"type", "string"},
+                                   {"description", "Output type: 'float' (default) or 'vec3'"},
+                                   {"default", "float"}};
+
+            // Arguments (same schema as expression tool)
+            json itemsProps;
+            itemsProps["name"] = {{"type", "string"}, {"description", "Argument name"}};
+            {
+                json typeProp;
+                typeProp["type"] = "string";
+                typeProp["enum"] = json::array({"float", "vec3"});
+                typeProp["description"] = "Argument type: 'float' or 'vec3'.";
+                itemsProps["type"] = typeProp;
+            }
+            json itemsObj;
+            itemsObj["type"] = "object";
+            itemsObj["properties"] = itemsProps;
+            itemsObj["required"] = json::array({"name", "type"});
+
+            json arguments;
+            arguments["type"] = "array";
+            arguments["items"] = itemsObj;
+            arguments["description"] = "Function input arguments";
+            props["arguments"] = arguments;
+
+            snippetSchema["properties"] = props;
+            snippetSchema["required"] = json::array({"name", "snippet"});
+
+            registerTool(
+              "create_function_from_snippet",
+              "Create a volumetric function from a multi-line snippet. Unlike "
+              "create_function_from_expression (single expression only), this tool supports "
+              "multiple lines with: float variable assignments (float x = expr;), "
+              "if→select conversion (if(a<b) c else d → select node), "
+              "and a final return statement. All math operators and functions from the "
+              "expression tool are supported. Use this for complex functions that need "
+              "intermediate variables.",
+              snippetSchema,
+              [this](const json & params) -> json
+              {
+                  if (!params.contains("name"))
+                  {
+                      return {{"success", false}, {"error", "Missing required parameter: name"}};
+                  }
+                  if (!params.contains("snippet"))
+                  {
+                      return {{"success", false},
+                              {"error", "Missing required parameter: snippet"}};
+                  }
+
+                  std::string name = params["name"];
+                  std::string snippet = params["snippet"];
+                  std::string outputType = params.value("output_type", "float");
+
+                  std::vector<FunctionArgument> arguments;
+                  if (params.contains("arguments") && params["arguments"].is_array())
+                  {
+                      for (const auto & argJson : params["arguments"])
+                      {
+                          std::string argName = argJson["name"];
+                          std::string argType = argJson["type"];
+                          ArgumentType type = (argType == "float" || argType == "scalar")
+                                                ? ArgumentType::Scalar
+                                                : ArgumentType::Vector;
+                          arguments.emplace_back(argName, type);
+                      }
+                  }
+
+                  auto result = m_application->createFunctionFromSnippet(
+                    name, snippet, outputType, arguments, "");
+
+                  if (result.first)
+                  {
+                      json response = {{"success", true},
+                                       {"function_name", name},
+                                       {"snippet", snippet},
+                                       {"output_type", outputType},
+                                       {"resource_id", result.second}};
+
+                      json validationOptions = {{"compile", false}, {"max_messages", 10}};
+                      auto validation = m_application->validateModel(validationOptions);
+                      if (!validation.value("success", false))
+                      {
+                          response["validation"] = validation;
+                      }
+
+                      return response;
+                  }
+                  else
+                  {
+                      return {{"success", false},
+                              {"error", m_application->getLastErrorMessage()}};
+                  }
+              });
+        }
+
         // LEVEL SETS (Convert functions to 3D geometry for 3MF)
         registerTool(
           "create_levelset",
@@ -1437,92 +1550,116 @@ namespace gladius::mcp
         // ADVANCED RENDERING WITH CAMERA CONTROL
         registerTool(
           "render_with_camera",
-          "Render with full camera and lighting control for high-quality output",
+          "Render with full camera and lighting control for high-quality output. "
+          "Camera and render parameters can be passed flat (recommended) or nested "
+          "under camera_settings / render_settings for backward compatibility.",
           {{"type", "object"},
            {"properties",
             {{"output_path",
               {{"type", "string"}, {"description", "File path where to save the rendered image"}}},
+             // Flat camera parameters (preferred)
+             {"eye_position",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Camera position [x, y, z]"}}},
+             {"target_position",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Look-at target [x, y, z]"}}},
+             {"up_vector",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Up direction [x, y, z] (default: [0,0,1])"}}},
+             {"field_of_view",
+              {{"type", "number"},
+               {"minimum", 10.0},
+               {"maximum", 150.0},
+               {"description", "Field of view in degrees (default: 45)"}}},
+             // Flat render parameters
+             {"width",
+              {{"type", "integer"},
+               {"minimum", 64},
+               {"maximum", 8192},
+               {"description", "Image width in pixels (default: 1024)"}}},
+             {"height",
+              {{"type", "integer"},
+               {"minimum", 64},
+               {"maximum", 8192},
+               {"description", "Image height in pixels (default: 1024)"}}},
+             {"format",
+              {{"type", "string"},
+               {"enum", {"png", "jpg"}},
+               {"description", "Output format (default: png)"}}},
+             {"quality",
+              {{"type", "number"},
+               {"minimum", 0.0},
+               {"maximum", 1.0},
+               {"description", "Quality for lossy formats (default: 0.9)"}}},
+             {"background_color",
+              {{"type", "array"},
+               {"items", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+               {"minItems", 4},
+               {"maxItems", 4},
+               {"description", "Background color [r,g,b,a] (default: [0.2,0.2,0.2,1.0])"}}},
+             {"enable_shadows",
+              {{"type", "boolean"}, {"description", "Enable shadows (default: true)"}}},
+             {"enable_lighting",
+              {{"type", "boolean"}, {"description", "Enable lighting (default: true)"}}},
+             // Legacy nested objects (backward compatible)
              {"camera_settings",
-              {{"type", "object"},
-               {"description", "Camera parameters"},
-               {"properties",
-                {{"eye_position",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Camera position [x, y, z]"}}},
-                 {"target_position",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Look-at target [x, y, z]"}}},
-                 {"up_vector",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Up direction [x, y, z]"},
-                   {"default", {0, 0, 1}}}},
-                 {"field_of_view",
-                  {{"type", "number"},
-                   {"minimum", 10.0},
-                   {"maximum", 150.0},
-                   {"description", "Field of view in degrees"},
-                   {"default", 45.0}}}}},
-               {"required", {"eye_position", "target_position"}}}},
+              {{"type", "object"}, {"description", "Legacy nested camera parameters"}}},
              {"render_settings",
-              {{"type", "object"},
-               {"description", "Rendering parameters"},
-               {"properties",
-                {{"width",
-                  {{"type", "integer"},
-                   {"minimum", 64},
-                   {"maximum", 8192},
-                   {"description", "Image width in pixels"},
-                   {"default", 1024}}},
-                 {"height",
-                  {{"type", "integer"},
-                   {"minimum", 64},
-                   {"maximum", 8192},
-                   {"description", "Image height in pixels"},
-                   {"default", 1024}}},
-                 {"format",
-                  {{"type", "string"},
-                   {"enum", {"png", "jpg"}},
-                   {"description", "Output format"},
-                   {"default", "png"}}},
-                 {"quality",
-                  {{"type", "number"},
-                   {"minimum", 0.0},
-                   {"maximum", 1.0},
-                   {"description", "Quality for lossy formats"},
-                   {"default", 0.9}}},
-                 {"background_color",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
-                   {"minItems", 4},
-                   {"maxItems", 4},
-                   {"description", "Background color [r, g, b, a]"},
-                   {"default", {0.2, 0.2, 0.2, 1.0}}}},
-                 {"enable_shadows",
-                  {{"type", "boolean"}, {"description", "Enable shadows"}, {"default", true}}},
-                 {"enable_lighting",
-                  {{"type", "boolean"},
-                   {"description", "Enable lighting"},
-                   {"default", true}}}}}}}}},
-           {"required", {"output_path", "camera_settings"}}},
+              {{"type", "object"}, {"description", "Legacy nested render parameters"}}}}},
+           {"required", {"output_path"}}},
           [this](const json & params) -> json
           {
-              if (!params.contains("output_path") || !params.contains("camera_settings"))
+              if (!params.contains("output_path"))
               {
-                  return {{"success", false}, {"error", "Missing required parameters"}};
+                  return {{"success", false}, {"error", "Missing required parameter: output_path"}};
               }
 
               std::string outputPath = params["output_path"];
-              json cameraSettings = params["camera_settings"];
+
+              // Build camera_settings: flat params take precedence over nested object
+              json cameraSettings = params.value("camera_settings", json::object());
+              for (auto const & key :
+                   {"eye_position", "target_position", "up_vector", "field_of_view"})
+              {
+                  if (params.contains(key))
+                  {
+                      cameraSettings[key] = params[key];
+                  }
+              }
+
+              if (!cameraSettings.contains("eye_position") ||
+                  !cameraSettings.contains("target_position"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required camera parameters: eye_position and target_position"}};
+              }
+
+              // Build render_settings: flat params take precedence over nested object
               json renderSettings = params.value("render_settings", json::object());
+              for (auto const & key : {"width",
+                                       "height",
+                                       "format",
+                                       "quality",
+                                       "background_color",
+                                       "enable_shadows",
+                                       "enable_lighting"})
+              {
+                  if (params.contains(key))
+                  {
+                      renderSettings[key] = params[key];
+                  }
+              }
 
               bool success =
                 m_application->renderWithCamera(outputPath, cameraSettings, renderSettings);
@@ -1952,7 +2089,14 @@ namespace gladius::mcp
               {{"type", "boolean"},
                {"description",
                 "If true (default), automatically link the new constant nodes "
-                "to the unconnected inputs"}}}}},
+                "to the unconnected inputs"}}},
+             {"exclude_params",
+              {{"type", "array"},
+               {"items", {{"type", "string"}}},
+               {"description",
+                "Parameter names to skip (e.g. [\"pos\"] to avoid creating a "
+                "constant for the position input that should come from the "
+                "graph's Input node)"}}}}},
            {"required", {"function_id", "node_id"}}},
           [this](json const & params) -> json
           {
@@ -1971,8 +2115,19 @@ namespace gladius::mcp
               uint32_t functionId = params["function_id"];
               uint32_t nodeId = params["node_id"];
               bool autoConnect = params.value("auto_connect", true);
+              std::vector<std::string> excludeParams;
+              if (params.contains("exclude_params") && params["exclude_params"].is_array())
+              {
+                  for (auto const & item : params["exclude_params"])
+                  {
+                      if (item.is_string())
+                      {
+                          excludeParams.push_back(item.get<std::string>());
+                      }
+                  }
+              }
               return m_application->createConstantNodesForMissingParameters(
-                functionId, nodeId, autoConnect);
+                functionId, nodeId, autoConnect, excludeParams);
           });
 
         // SET LIBRARY METADATA

@@ -7,6 +7,7 @@
 
 #include "MCPApplicationInterface.h"
 #include <memory>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 // Include tool headers for complete type definitions
@@ -130,6 +131,13 @@ namespace gladius
                                      const std::vector<FunctionArgument> & arguments = {},
                                      const std::string & outputName = "") override;
 
+        std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string & name,
+                                  const std::string & snippet,
+                                  const std::string & outputType,
+                                  const std::vector<FunctionArgument> & arguments = {},
+                                  const std::string & outputName = "") override;
+
         // 3MF and implicit modeling operations
         bool validateDocumentFor3MF() const override;
         bool exportDocumentAs3MF(const std::string & path,
@@ -179,9 +187,11 @@ namespace gladius
         nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
                                               uint32_t referencedFunctionId,
                                               const std::string & displayName = "") override;
-        nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                               uint32_t nodeId,
-                                                               bool autoConnect = true) override;
+        nlohmann::json createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect = true,
+          std::vector<std::string> const & excludeParams = {}) override;
         nlohmann::json removeUnusedNodes(uint32_t functionId) override;
 
         // Manufacturing validation

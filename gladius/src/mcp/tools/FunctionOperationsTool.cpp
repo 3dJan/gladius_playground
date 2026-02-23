@@ -379,6 +379,135 @@ namespace gladius
             }
         }
 
+        std::pair<bool, uint32_t> FunctionOperationsTool::createFunctionFromSnippet(
+          const std::string & name,
+          const std::string & snippet,
+          const std::string & outputType,
+          const std::vector<FunctionArgument> & arguments,
+          const std::string & outputName)
+        {
+            if (!validateApplication())
+            {
+                return {false, 0};
+            }
+
+            if (name.empty())
+            {
+                m_lastErrorMessage = "Function name cannot be empty";
+                return {false, 0};
+            }
+
+            if (snippet.empty())
+            {
+                m_lastErrorMessage = "Snippet cannot be empty";
+                return {false, 0};
+            }
+
+            if (outputType != "float" && outputType != "vec3")
+            {
+                m_lastErrorMessage =
+                  "Invalid output type '" + outputType + "'. Must be 'float' or 'vec3'";
+                return {false, 0};
+            }
+
+            try
+            {
+                auto document = m_application->getCurrentDocument();
+                if (!document)
+                {
+                    m_lastErrorMessage =
+                      "No active document available. Please create or open a document first.";
+                    return {false, 0};
+                }
+
+                ExpressionParser parser;
+
+                FunctionOutput output;
+                output.name = outputName.empty() ? "shape" : outputName;
+                output.type =
+                  (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                    ? ArgumentType::Vector
+                    : ArgumentType::Scalar;
+
+                auto & model = document->createNewFunction();
+                uint32_t const newFunctionId = model.getResourceId();
+                model.setDisplayName(name);
+
+                uint32_t resultNodeId = 0;
+                try
+                {
+                    resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                      snippet, model, parser, arguments, output);
+                }
+                catch (const std::exception & e)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      std::string("Exception while converting snippet to node graph: ") + e.what() +
+                      ". The partial function was removed.";
+                    return {false, 0};
+                }
+
+                if (resultNodeId == 0)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      "Failed to convert snippet to node graph. The partial function was removed.";
+                    return {false, 0};
+                }
+
+                try
+                {
+                    document->update3mfModel();
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      "Failed to persist function to 3MF model. The partial function was removed.";
+                    return {false, 0};
+                }
+
+                uint32_t resourceId = model.getResourceId();
+                m_lastErrorMessage =
+                  "Function '" + name + "' created successfully from snippet with arguments [";
+                for (size_t i = 0; i < arguments.size(); ++i)
+                {
+                    if (i > 0)
+                        m_lastErrorMessage += ", ";
+                    m_lastErrorMessage +=
+                      arguments[i].name + ":" +
+                      (arguments[i].type == ArgumentType::Vector ? "vec3" : "float");
+                }
+                m_lastErrorMessage += "]";
+                return {true, resourceId};
+            }
+            catch (const std::exception & e)
+            {
+                m_lastErrorMessage =
+                  "Exception during snippet conversion: " + std::string(e.what());
+                return {false, 0};
+            }
+        }
+
         nlohmann::json
         FunctionOperationsTool::analyzeFunctionProperties(const std::string & functionName) const
         {
@@ -941,8 +1070,9 @@ namespace gladius
                     return json{{"success", false}, {"error", "Function (model) not found for id"}};
                 }
 
-                // Delegate to deserializer
-                json result = mcp::FunctionGraphDeserializer::applyToModel(*model, graph, replace);
+                // Delegate to deserializer (pass assembly for FunctionCall support)
+                json result = mcp::FunctionGraphDeserializer::applyToModel(
+                  *model, graph, replace, assembly.get());
                 // Preserve request context
                 result["requested_function_id"] = functionId;
                 return result;
@@ -1629,9 +1759,11 @@ namespace gladius
         }
 
         nlohmann::json
-        FunctionOperationsTool::createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                        uint32_t nodeId,
-                                                                        bool autoConnect)
+        FunctionOperationsTool::createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect,
+          std::vector<std::string> const & excludeParams)
         {
             using json = nlohmann::json;
             json out;
@@ -1692,6 +1824,12 @@ namespace gladius
                     // Check if parameter needs an input source and doesn't have one
                     if (!param.getConstSource().has_value() && param.isInputSourceRequired())
                     {
+                        // Skip excluded parameters
+                        if (std::find(excludeParams.begin(), excludeParams.end(), paramName) !=
+                            excludeParams.end())
+                        {
+                            continue;
+                        }
                         json paramInfo = createSimplifiedInputInfo(param, paramName);
                         unconnectedParams.push_back(paramInfo);
 

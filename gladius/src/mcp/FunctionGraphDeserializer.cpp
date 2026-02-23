@@ -4,6 +4,8 @@
 
 #include "FunctionGraphDeserializer.h"
 
+#include "../nodes/Assembly.h"
+#include "../nodes/DerivedNodes.h"
 #include "../nodes/Model.h"
 #include "../nodes/NodeFactory.h"
 #include "../nodes/Parameter.h"
@@ -106,7 +108,8 @@ namespace gladius
 
         json FunctionGraphDeserializer::applyToModel(nodes::Model & model,
                                                      json const & graph,
-                                                     bool replace)
+                                                     bool replace,
+                                                     nodes::Assembly * assembly)
         {
             // Validate input
             if (!graph.is_object())
@@ -161,6 +164,47 @@ namespace gladius
                 else if (type == "Output" || type == "End")
                 {
                     created = endNode;
+                    if (!displayName.empty())
+                        created->setDisplayName(displayName);
+                }
+                else if (type == "FunctionCall")
+                {
+                    // FunctionCall needs a referenced function (resourceid in values)
+                    if (!assembly)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "FunctionCall nodes require an assembly context. "
+                           "Ensure the graph is applied via set_function_graph."}};
+                    }
+
+                    ResourceId refId = 0;
+                    if (jn.contains("values") && jn["values"].contains("resourceid"))
+                    {
+                        refId = static_cast<ResourceId>(
+                          jn["values"]["resourceid"].get<long long>());
+                    }
+                    if (refId == 0)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "FunctionCall node (id=" + std::to_string(clientId) +
+                             ") requires values.resourceid"}};
+                    }
+
+                    auto refModel = assembly->findModel(refId);
+                    if (!refModel)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "Referenced function (resourceid=" + std::to_string(refId) +
+                             ") not found in assembly"}};
+                    }
+
+                    created = model.createFunctionCallNode(refId, *refModel);
                     if (!displayName.empty())
                         created->setDisplayName(displayName);
                 }
