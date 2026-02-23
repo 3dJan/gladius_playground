@@ -67,6 +67,16 @@ namespace gladius
                               FunctionOutput const & output = {},
                               nodes::Assembly * assembly = nullptr);
 
+        /// @brief Convert a multi-line snippet to a node graph with multiple outputs.
+        /// For multi-output functions, output assignments use the form `outputName = expr;`.
+        static nodes::NodeId
+        convertSnippetToGraph(std::string const & snippet,
+                              nodes::Model & model,
+                              ExpressionParser & parser,
+                              std::vector<FunctionArgument> const & arguments,
+                              std::vector<FunctionOutput> const & outputs,
+                              nodes::Assembly * assembly);
+
         /**
          * @brief Convert a node graph back to a multi-line snippet
          * @param model The model containing the nodes
@@ -79,6 +89,15 @@ namespace gladius
                               std::vector<FunctionArgument> const & arguments = {},
                               FunctionOutput const & output = {},
                               nodes::Assembly * assembly = nullptr);
+
+        /// @brief Convert a node graph back to a snippet, handling multiple outputs.
+        /// When outputs has more than one entry, each output is emitted as
+        /// `outputName = expr;` instead of a single `return` statement.
+        static std::string
+        convertGraphToSnippet(nodes::Model & model,
+                              std::vector<FunctionArgument> const & arguments,
+                              std::vector<FunctionOutput> const & outputs,
+                              nodes::Assembly * assembly);
 
         /**
          * @brief Check if an expression can be converted to a graph

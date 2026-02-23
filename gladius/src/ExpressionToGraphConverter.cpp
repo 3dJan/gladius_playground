@@ -38,6 +38,18 @@ namespace gladius
       FunctionOutput const & output,
       nodes::Assembly * assembly)
     {
+        return convertSnippetToGraph(
+          snippet, model, parser, arguments, std::vector<FunctionOutput>{output}, assembly);
+    }
+
+    nodes::NodeId ExpressionToGraphConverter::convertSnippetToGraph(
+      std::string const & snippet,
+      nodes::Model & model,
+      ExpressionParser & parser,
+      std::vector<FunctionArgument> const & arguments,
+      std::vector<FunctionOutput> const & outputs,
+      nodes::Assembly * assembly)
+    {
         // @note if-else preprocessing only handles single-line bodies of the form:
         //   if (A op B) { var = C; } else { var = D; }
         // where op is one of <, <=, >, >=, ==, !=.  Multi-line blocks and complex
@@ -136,6 +148,13 @@ namespace gladius
         std::regex assign_regex(R"(^\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*$)");
         std::regex return_regex(R"(^\s*return\s+(.+?)\s*$)");
 
+        // Build output name lookup for multi-output detection
+        std::map<std::string, FunctionOutput const *> outputNameMap;
+        for (auto const & out : outputs)
+        {
+            outputNameMap[out.name] = &out;
+        }
+
         nodes::NodeId lastResult = 0;
 
         for (std::string const & stmt : statements)
@@ -162,11 +181,45 @@ namespace gladius
                     return 0; // Failed to parse expression
                 }
 
-                variableNodes[varName] = exprNodeId;
+                // Check if this assignment targets an output
+                auto outputIt = outputNameMap.find(varName);
+                if (outputIt != outputNameMap.end())
+                {
+                    auto const & matchedOutput = *outputIt->second;
+                    if (!validateOutputType(model, exprNodeId, matchedOutput.type))
+                    {
+                        return 0;
+                    }
+
+                    if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
+                    {
+                        auto varIt = std::find_if(variableNodes.begin(), variableNodes.end(),
+                          [exprNodeId](auto const & kv) { return kv.second == exprNodeId; });
+                        if (varIt != variableNodes.end())
+                        {
+                            s_variableContextStack.push_back(varIt->first);
+                        }
+                    }
+
+                    if (!connectToEndNode(model, exprNodeId, matchedOutput))
+                    {
+                        return 0;
+                    }
+                }
+                else
+                {
+                    variableNodes[varName] = exprNodeId;
+                }
                 lastResult = exprNodeId;
             }
             else if (std::regex_match(cleanStmt, stmtMatch, return_regex))
             {
+                // 'return' is only valid for single-output snippets
+                if (outputs.empty())
+                {
+                    return 0;
+                }
+                auto const & singleOutput = outputs.front();
                 std::string expr = stmtMatch[1];
 
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
@@ -176,7 +229,7 @@ namespace gladius
                 }
 
                 // Validate output type and connect to End node
-                if (!validateOutputType(model, exprNodeId, output.type))
+                if (!validateOutputType(model, exprNodeId, singleOutput.type))
                 {
                     return 0; // Type validation failed
                 }
@@ -193,7 +246,7 @@ namespace gladius
                     }
                 }
 
-                if (!connectToEndNode(model, exprNodeId, output))
+                if (!connectToEndNode(model, exprNodeId, singleOutput))
                 {
                     return 0; // Failed to connect to End node
                 }
@@ -203,9 +256,10 @@ namespace gladius
             else
             {
                 // Try to parse as a single expression if it's the only statement
-                if (statements.size() == 1)
+                if (statements.size() == 1 && !outputs.empty())
                 {
-                    return convertExpressionToGraph(cleanStmt, model, parser, arguments, output);
+                    return convertExpressionToGraph(
+                      cleanStmt, model, parser, arguments, outputs.front());
                 }
                 return 0; // Unrecognized statement format
             }
@@ -3092,6 +3146,15 @@ namespace gladius
       FunctionOutput const & output,
       nodes::Assembly * assembly)
     {
+        return convertGraphToSnippet(model, arguments, std::vector<FunctionOutput>{output}, assembly);
+    }
+
+    std::string ExpressionToGraphConverter::convertGraphToSnippet(
+      nodes::Model & model,
+      std::vector<FunctionArgument> const & arguments,
+      std::vector<FunctionOutput> const & outputs,
+      nodes::Assembly * assembly)
+    {
         nodes::End * endNode = model.getEndNode();
         if (!endNode)
         {
@@ -3104,32 +3167,77 @@ namespace gladius
         std::vector<std::string> statements;
         int varCounter = 0;
 
-        // Find the End node's input parameter that matches the output name
         auto const & endParams = endNode->parameter();
-        std::string outputParamName = output.name;
 
-        // If the requested output name doesn't exist, fall back to the first connected parameter
-        if (outputParamName.empty() || endParams.find(outputParamName) == endParams.end())
+        // Collect the set of connected End-node parameters to emit.
+        // If the caller supplied explicit outputs, use those names (in order).
+        // Otherwise fall back to auto-detecting the first connected parameter.
+        struct OutputEntry
         {
-            outputParamName.clear();
-            for (auto const & [name, param] : endParams)
+            std::string paramName;
+        };
+        std::vector<OutputEntry> connectedOutputs;
+
+        if (outputs.size() > 1)
+        {
+            // Multi-output: use the caller-supplied names
+            for (auto const & out : outputs)
             {
-                if (param.getConstSource().has_value())
+                auto it = endParams.find(out.name);
+                if (it != endParams.end() && it->second.getConstSource().has_value())
                 {
-                    outputParamName = name;
-                    break;
+                    connectedOutputs.push_back({out.name});
                 }
             }
         }
 
-        auto paramIt = endParams.find(outputParamName);
-        if (paramIt == endParams.end())
+        if (connectedOutputs.empty())
+        {
+            // Single-output or fallback: find the best matching parameter
+            std::string outputParamName;
+            if (!outputs.empty())
+            {
+                outputParamName = outputs.front().name;
+            }
+
+            if (outputParamName.empty() || endParams.find(outputParamName) == endParams.end())
+            {
+                outputParamName.clear();
+                for (auto const & [name, param] : endParams)
+                {
+                    if (param.getConstSource().has_value())
+                    {
+                        outputParamName = name;
+                        break;
+                    }
+                }
+            }
+
+            if (outputParamName.empty())
+            {
+                return {};
+            }
+            connectedOutputs.push_back({outputParamName});
+        }
+
+        // Generate expressions for each output, sharing the variable namespace.
+        std::vector<std::pair<std::string, std::string>> outputExprs; // (paramName, expr)
+        for (auto const & entry : connectedOutputs)
+        {
+            auto paramIt = endParams.find(entry.paramName);
+            if (paramIt == endParams.end())
+            {
+                continue;
+            }
+            std::string expr = sourceExpression(
+              model, paramIt->second, fanOut, assignedVars, statements, varCounter, 0, assembly);
+            outputExprs.emplace_back(entry.paramName, expr);
+        }
+
+        if (outputExprs.empty())
         {
             return {};
         }
-
-        std::string resultExpr = sourceExpression(
-          model, paramIt->second, fanOut, assignedVars, statements, varCounter, 0, assembly);
 
         // Build the final snippet
         std::string snippet;
@@ -3137,7 +3245,26 @@ namespace gladius
         {
             snippet += stmt + ";\n";
         }
-        snippet += "return " + resultExpr + ";";
+
+        if (outputExprs.size() == 1)
+        {
+            // Single output: use return statement (backward compatible)
+            snippet += "return " + outputExprs.front().second + ";";
+        }
+        else
+        {
+            // Multiple outputs: use named assignments
+            bool first = true;
+            for (auto const & [paramName, expr] : outputExprs)
+            {
+                if (!first)
+                {
+                    snippet += "\n";
+                }
+                first = false;
+                snippet += paramName + " = " + expr + ";";
+            }
+        }
 
         return snippet;
     }
@@ -3286,28 +3413,30 @@ namespace gladius
             auto displayName = model->getDisplayName().value_or(model->getModelName());
             auto uniqueName = generateUniqueFunctionName(displayName, funcId);
 
-            // Detect the output type from the End node
-            auto funcOutput = FunctionOutput::defaultOutput();
-            bool returnsVec3 = false;
+            // Detect all connected outputs from the End node
+            std::vector<FunctionOutput> funcOutputs;
             if (auto * endNode = model->getEndNode())
             {
                 for (auto const & [name, param] : endNode->parameter())
                 {
                     if (param.getConstSource().has_value())
                     {
-                        funcOutput.name = name;
-                        if (param.getTypeIndex() == std::type_index(typeid(nodes::float3)))
-                        {
-                            funcOutput.type = ArgumentType::Vector;
-                            returnsVec3 = true;
-                        }
-                        break;
+                        FunctionOutput out;
+                        out.name = name;
+                        out.type = (param.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                                     ? ArgumentType::Vector
+                                     : ArgumentType::Scalar;
+                        funcOutputs.push_back(out);
                     }
                 }
             }
+            if (funcOutputs.empty())
+            {
+                funcOutputs.push_back(FunctionOutput::defaultOutput());
+            }
 
             auto snippet =
-              convertGraphToSnippet(*model, {}, funcOutput, &assembly);
+              convertGraphToSnippet(*model, {}, funcOutputs, &assembly);
             if (snippet.empty())
             {
                 snippet = "return 0;";
@@ -3362,7 +3491,29 @@ namespace gladius
                 result += "\n";
             }
             result += "// Function: " + displayName + " (ID: " + std::to_string(funcId) + ")\n";
-            std::string returnType = returnsVec3 ? "vec3" : "float";
+            std::string returnType;
+            if (funcOutputs.size() == 1)
+            {
+                returnType =
+                  (funcOutputs.front().type == ArgumentType::Vector) ? "vec3" : "float";
+            }
+            else
+            {
+                // Multi-output: (float shape, vec3 color)
+                returnType = "(";
+                bool first = true;
+                for (auto const & out : funcOutputs)
+                {
+                    if (!first)
+                    {
+                        returnType += ", ";
+                    }
+                    first = false;
+                    returnType +=
+                      (out.type == ArgumentType::Vector ? "vec3 " : "float ") + out.name;
+                }
+                returnType += ")";
+            }
             result += returnType + " " + uniqueName + signature + " {\n";
             result += indentedBody;
             result += "}\n";
@@ -3387,7 +3538,7 @@ namespace gladius
             nodes::ResourceId resourceId{0};
             std::string body;
             std::vector<FunctionArgument> args;
-            ArgumentType outputType{ArgumentType::Scalar};
+            std::vector<FunctionOutput> outputs;
         };
 
         std::vector<FunctionBlock> blocks;
@@ -3422,16 +3573,46 @@ namespace gladius
                 auto bracePos = line.find('{');
                 if (bracePos != std::string::npos)
                 {
-                    // Detect return type from signature: vec3 name(...) or float name(...)
+                    // Detect return type from signature line
                     auto trimmedLine = line;
                     auto firstNonSpace = trimmedLine.find_first_not_of(" \t");
                     if (firstNonSpace != std::string::npos)
                     {
                         trimmedLine = trimmedLine.substr(firstNonSpace);
                     }
-                    if (trimmedLine.substr(0, 4) == "vec3")
+
+                    if (trimmedLine.front() == '(')
                     {
-                        current.outputType = ArgumentType::Vector;
+                        // Multi-return type: (float shape, vec3 color) funcName(...)
+                        auto closeParen = trimmedLine.find(')');
+                        if (closeParen != std::string::npos)
+                        {
+                            auto retStr = trimmedLine.substr(1, closeParen - 1);
+                            std::regex retArgRegex(R"((vec3|float)\s+(\w+))");
+                            auto retBegin = std::sregex_iterator(
+                              retStr.begin(), retStr.end(), retArgRegex);
+                            auto retEnd = std::sregex_iterator();
+                            for (auto it = retBegin; it != retEnd; ++it)
+                            {
+                                FunctionOutput out;
+                                out.type = (*it)[1].str() == "vec3"
+                                             ? ArgumentType::Vector
+                                             : ArgumentType::Scalar;
+                                out.name = (*it)[2].str();
+                                current.outputs.push_back(out);
+                            }
+                        }
+                    }
+                    else if (trimmedLine.substr(0, 4) == "vec3")
+                    {
+                        FunctionOutput out;
+                        out.type = ArgumentType::Vector;
+                        out.name = FunctionOutput::defaultOutput().name;
+                        current.outputs.push_back(out);
+                    }
+                    else
+                    {
+                        current.outputs.push_back(FunctionOutput::defaultOutput());
                     }
 
                     // Parse arguments from signature: float name(vec3 pos, float b) {
@@ -3535,12 +3716,8 @@ namespace gladius
             model->clear();
             model->createBeginEnd();
 
-            FunctionOutput blockOutput;
-            blockOutput.name = FunctionOutput::defaultOutput().name;
-            blockOutput.type = block.outputType;
-
             auto nodeId = convertSnippetToGraph(
-              block.body, *model, parser, block.args, blockOutput, &assembly);
+              block.body, *model, parser, block.args, block.outputs, &assembly);
 
             if (nodeId == 0)
             {

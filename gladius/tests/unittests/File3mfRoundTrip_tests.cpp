@@ -104,6 +104,39 @@ namespace gladius_tests
             return FunctionOutput::defaultOutput();
         }
 
+        /// Determine all connected function outputs from the End node.
+        static std::vector<FunctionOutput> extractOutputs(nodes::Model & model)
+        {
+            std::vector<FunctionOutput> outputs;
+            auto * endNode = model.getEndNode();
+            if (!endNode)
+            {
+                return {FunctionOutput::defaultOutput()};
+            }
+
+            auto const & params = endNode->parameter();
+            for (auto const & [name, param] : params)
+            {
+                if (param.getConstSource().has_value())
+                {
+                    auto typeIdx = param.getConstSource()->type;
+                    if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                    {
+                        outputs.emplace_back(name, ArgumentType::Vector);
+                    }
+                    else
+                    {
+                        outputs.emplace_back(name, ArgumentType::Scalar);
+                    }
+                }
+            }
+            if (outputs.empty())
+            {
+                outputs.push_back(FunctionOutput::defaultOutput());
+            }
+            return outputs;
+        }
+
         /// Check whether a snippet contains unsupported node comments that
         /// cannot be parsed back, making roundtrip inherently impossible.
         static bool containsUnsupportedNodes(std::string const & snippet)
@@ -118,11 +151,11 @@ namespace gladius_tests
                                      nodes::Assembly & assembly)
         {
             auto args = extractArguments(model);
-            auto output = extractOutput(model);
+            auto outputs = extractOutputs(model);
 
             // Step 1: graph → snippet
             auto snippet1 = ExpressionToGraphConverter::convertGraphToSnippet(
-              model, args, output, &assembly);
+              model, args, outputs, &assembly);
 
             if (snippet1.empty())
             {
@@ -150,7 +183,7 @@ namespace gladius_tests
 
             ExpressionParser parser;
             auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-              snippet1, *rebuiltModel, parser, args, output, &tempAssembly);
+              snippet1, *rebuiltModel, parser, args, outputs, &tempAssembly);
 
             if (nodeId == 0)
             {
@@ -162,7 +195,7 @@ namespace gladius_tests
 
             // Step 3: new graph → snippet again
             auto snippet2 = ExpressionToGraphConverter::convertGraphToSnippet(
-              *rebuiltModel, args, output, &tempAssembly);
+              *rebuiltModel, args, outputs, &tempAssembly);
 
             // The original graph (from 3MF) may have higher fanout than the rebuilt graph
             // (e.g. UI-created connections), causing extra intermediate variables in snippet1.
@@ -182,13 +215,13 @@ namespace gladius_tests
 
                 ExpressionParser parser2;
                 auto nodeId2 = ExpressionToGraphConverter::convertSnippetToGraph(
-                  snippet2, *rebuiltModel2, parser2, args, output, &tempAssembly2);
+                  snippet2, *rebuiltModel2, parser2, args, outputs, &tempAssembly2);
                 ASSERT_NE(nodeId2, 0u) << "Idempotence check: convertSnippetToGraph failed for:\n"
                                        << snippet2;
 
                 rebuiltModel2->updateGraphAndOrderIfNeeded();
                 auto snippet3 = ExpressionToGraphConverter::convertGraphToSnippet(
-                  *rebuiltModel2, args, output, &tempAssembly2);
+                  *rebuiltModel2, args, outputs, &tempAssembly2);
 
                 if (snippet2 != snippet3)
                 {
@@ -204,14 +237,14 @@ namespace gladius_tests
 
                     ExpressionParser parser3;
                     auto nodeId3 = ExpressionToGraphConverter::convertSnippetToGraph(
-                      snippet3, *rebuiltModel3, parser3, args, output, &tempAssembly3);
+                      snippet3, *rebuiltModel3, parser3, args, outputs, &tempAssembly3);
                     ASSERT_NE(nodeId3, 0u)
                       << "Second idempotence check: convertSnippetToGraph failed for:\n"
                       << snippet3;
 
                     rebuiltModel3->updateGraphAndOrderIfNeeded();
                     auto snippet4 = ExpressionToGraphConverter::convertGraphToSnippet(
-                      *rebuiltModel3, args, output, &tempAssembly3);
+                      *rebuiltModel3, args, outputs, &tempAssembly3);
 
                     EXPECT_EQ(snippet3, snippet4)
                       << "Idempotence failure (after settling) for function '"
