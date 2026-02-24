@@ -123,7 +123,7 @@ namespace gladius::ui
         tempModel.createBeginEndWithDefaultInAndOuts();
 
         auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, tempModel, parser, kDefaultArgs, kDefaultOutput);
+          buf.buffer, tempModel, parser, kDefaultArgs, kDefaultOutput, m_currentAssembly);
 
         if (nodeId == 0)
         {
@@ -135,7 +135,7 @@ namespace gladius::ui
         m_currentModel->clear();
         m_currentModel->createBeginEndWithDefaultInAndOuts();
         ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, *m_currentModel, parser, kDefaultArgs, kDefaultOutput);
+          buf.buffer, *m_currentModel, parser, kDefaultArgs, kDefaultOutput, m_currentAssembly);
         m_currentModel->updateGraphAndOrderIfNeeded();
 
         // Regenerate normalized snippet

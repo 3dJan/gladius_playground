@@ -1976,8 +1976,17 @@ namespace gladius
             model.addFunctionOutput(output.name, parameter);
         }
 
-        // Connect the result node to the End node's input parameter
-        return connectNodes(model, resultNodeId, resultPortName, endNode->getId(), output.name);
+        // Connect the result node to the End node's input parameter.
+        // Use skipCheck=true because during multi-output graph construction,
+        // other End parameters may not be connected yet, causing updateTypes()
+        // to fail even though the individual link is valid.
+        nodes::Port * outPort = resultNode->findOutputPort(resultPortName);
+        nodes::VariantParameter * inParam = endNode->getParameter(output.name);
+        if (!outPort || !inParam)
+        {
+            return false;
+        }
+        return model.addLink(outPort->getId(), inParam->getId(), /*skipCheck=*/true);
     }
 
     bool
