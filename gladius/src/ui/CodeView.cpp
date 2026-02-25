@@ -5,6 +5,8 @@
 #include "../FunctionArgument.h"
 #include "../nodes/Assembly.h"
 #include "../nodes/Model.h"
+#include "../nodes/NodeBase.h"
+#include "../nodes/Parameter.h"
 
 #include <imgui.h>
 
@@ -12,8 +14,87 @@ namespace gladius::ui
 {
     namespace
     {
-        auto const kDefaultArgs = std::vector<FunctionArgument>{{"pos", ArgumentType::Vector}};
-        auto const kDefaultOutput = FunctionOutput::defaultOutput();
+        /// Extract function arguments from the Begin node's output ports.
+        std::vector<FunctionArgument> extractArguments(nodes::Model & model)
+        {
+            std::vector<FunctionArgument> args;
+            auto * beginNode = model.getBeginNode();
+            if (beginNode)
+            {
+                for (auto const & [portName, port] : beginNode->getOutputs())
+                {
+                    if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                    {
+                        args.emplace_back(portName, ArgumentType::Vector);
+                    }
+                    else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                    {
+                        args.emplace_back(portName, ArgumentType::Scalar);
+                    }
+                }
+            }
+            if (args.empty())
+            {
+                args.emplace_back("pos", ArgumentType::Vector);
+            }
+            return args;
+        }
+
+        /// Extract all connected function outputs from the End node.
+        std::vector<FunctionOutput> extractOutputs(nodes::Model & model)
+        {
+            std::vector<FunctionOutput> outputs;
+            auto * endNode = model.getEndNode();
+            if (endNode)
+            {
+                for (auto const & [name, param] : endNode->parameter())
+                {
+                    if (param.getConstSource().has_value())
+                    {
+                        auto typeIdx = param.getConstSource()->type;
+                        if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                        {
+                            outputs.emplace_back(name, ArgumentType::Vector);
+                        }
+                        else
+                        {
+                            outputs.emplace_back(name, ArgumentType::Scalar);
+                        }
+                    }
+                }
+            }
+            if (outputs.empty())
+            {
+                outputs.push_back(FunctionOutput::defaultOutput());
+            }
+            return outputs;
+        }
+
+        /// Extract all function outputs from the End node (connected or not).
+        std::vector<FunctionOutput> extractAllOutputs(nodes::Model & model)
+        {
+            std::vector<FunctionOutput> outputs;
+            auto * endNode = model.getEndNode();
+            if (endNode)
+            {
+                for (auto const & [name, param] : endNode->parameter())
+                {
+                    if (param.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                    {
+                        outputs.emplace_back(name, ArgumentType::Vector);
+                    }
+                    else
+                    {
+                        outputs.emplace_back(name, ArgumentType::Scalar);
+                    }
+                }
+            }
+            if (outputs.empty())
+            {
+                outputs.push_back(FunctionOutput::defaultOutput());
+            }
+            return outputs;
+        }
     } // namespace
 
     static int inputTextCallback(ImGuiInputTextCallbackData * data)
@@ -51,8 +132,10 @@ namespace gladius::ui
         bool const dirty = (buf.generated && buf.buffer != buf.syncedText);
         if (!dirty)
         {
+            auto args = extractArguments(*m_currentModel);
+            auto outputs = extractOutputs(*m_currentModel);
             auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
-              *m_currentModel, kDefaultArgs, kDefaultOutput, m_currentAssembly);
+              *m_currentModel, args, outputs, m_currentAssembly);
             if (snippet.empty())
             {
                 snippet = "return 0;";
@@ -117,13 +200,18 @@ namespace gladius::ui
             return false;
         }
 
-        // Parse the snippet into a new graph
+        // Extract the actual function arguments and outputs from the current model
+        // BEFORE clearing it, so we preserve the original function signature.
+        auto args = extractArguments(*m_currentModel);
+        auto outputs = extractAllOutputs(*m_currentModel);
+
+        // Parse the snippet into a temporary graph to validate it
         ExpressionParser parser;
         nodes::Model tempModel;
-        tempModel.createBeginEndWithDefaultInAndOuts();
+        tempModel.createBeginEnd();
 
         auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, tempModel, parser, kDefaultArgs, kDefaultOutput, m_currentAssembly);
+          buf.buffer, tempModel, parser, args, outputs, m_currentAssembly);
 
         if (nodeId == 0)
         {
@@ -133,14 +221,14 @@ namespace gladius::ui
 
         // Success: replace the current model's graph
         m_currentModel->clear();
-        m_currentModel->createBeginEndWithDefaultInAndOuts();
+        m_currentModel->createBeginEnd();
         ExpressionToGraphConverter::convertSnippetToGraph(
-          buf.buffer, *m_currentModel, parser, kDefaultArgs, kDefaultOutput, m_currentAssembly);
+          buf.buffer, *m_currentModel, parser, args, outputs, m_currentAssembly);
         m_currentModel->updateGraphAndOrderIfNeeded();
 
         // Regenerate normalized snippet
         auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
-          *m_currentModel, kDefaultArgs, kDefaultOutput, m_currentAssembly);
+          *m_currentModel, args, extractOutputs(*m_currentModel), m_currentAssembly);
         if (!normalized.empty())
         {
             buf.buffer = normalized;

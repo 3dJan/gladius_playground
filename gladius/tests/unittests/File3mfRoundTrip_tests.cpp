@@ -179,7 +179,7 @@ namespace gladius_tests
             ASSERT_TRUE(rebuiltModel) << "Failed to find model after addModelIfNotExisting";
 
             rebuiltModel->clear();
-            rebuiltModel->createBeginEndWithDefaultInAndOuts();
+            rebuiltModel->createBeginEnd();
 
             ExpressionParser parser;
             auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
@@ -192,6 +192,15 @@ namespace gladius_tests
             }
 
             rebuiltModel->updateGraphAndOrderIfNeeded();
+
+            // Verify rebuilt End node has no orphan outputs from defaults.
+            // Only connected outputs (matching 'outputs') should be present.
+            auto rebuiltOutputs = extractOutputs(*rebuiltModel);
+            EXPECT_EQ(rebuiltOutputs.size(), outputs.size())
+              << "Rebuilt End node output count mismatch for function '"
+              << displayName << "' (ID: " << funcId << ")\n"
+              << "Expected " << outputs.size() << " connected outputs, got "
+              << rebuiltOutputs.size();
 
             // Step 3: new graph → snippet again
             auto snippet2 = ExpressionToGraphConverter::convertGraphToSnippet(
@@ -211,7 +220,7 @@ namespace gladius_tests
                 ASSERT_TRUE(rebuiltModel2) << "Failed to find model for idempotence check";
 
                 rebuiltModel2->clear();
-                rebuiltModel2->createBeginEndWithDefaultInAndOuts();
+                rebuiltModel2->createBeginEnd();
 
                 ExpressionParser parser2;
                 auto nodeId2 = ExpressionToGraphConverter::convertSnippetToGraph(
@@ -233,7 +242,7 @@ namespace gladius_tests
                       << "Failed to find model for second idempotence check";
 
                     rebuiltModel3->clear();
-                    rebuiltModel3->createBeginEndWithDefaultInAndOuts();
+                    rebuiltModel3->createBeginEnd();
 
                     ExpressionParser parser3;
                     auto nodeId3 = ExpressionToGraphConverter::convertSnippetToGraph(

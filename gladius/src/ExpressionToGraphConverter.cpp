@@ -534,6 +534,32 @@ namespace gladius
         return 0;
     }
 
+    nodes::NodeId
+    ExpressionToGraphConverter::createConstantVectorNode(double x,
+                                                        double y,
+                                                        double z,
+                                                        nodes::Model & model)
+    {
+        nodes::NodeBase * node = nodes::createNodeFromName("ConstantVector", model);
+        if (node)
+        {
+            if (auto * px = node->getParameter(nodes::FieldNames::X))
+            {
+                px->setValue(static_cast<float>(x));
+            }
+            if (auto * py = node->getParameter(nodes::FieldNames::Y))
+            {
+                py->setValue(static_cast<float>(y));
+            }
+            if (auto * pz = node->getParameter(nodes::FieldNames::Z))
+            {
+                pz->setValue(static_cast<float>(z));
+            }
+            return node->getId();
+        }
+        return 0;
+    }
+
     bool ExpressionToGraphConverter::connectNodes(nodes::Model & model,
                                                   nodes::NodeId fromNodeId,
                                                   std::string const & fromPortName,
@@ -870,6 +896,24 @@ namespace gladius
                 {
                     if (arguments.size() == 3)
                     {
+                        // If all three arguments are numeric literals, use a single
+                        // ConstantVector node instead of ComposeVector + 3 ConstantScalar.
+                        try
+                        {
+                            size_t px = 0, py = 0, pz = 0;
+                            double xv = std::stod(arguments[0], &px);
+                            double yv = std::stod(arguments[1], &py);
+                            double zv = std::stod(arguments[2], &pz);
+                            if (px == arguments[0].size() && py == arguments[1].size() &&
+                                pz == arguments[2].size())
+                            {
+                                return createConstantVectorNode(xv, yv, zv, model);
+                            }
+                        }
+                        catch (...)
+                        {
+                        }
+
                         nodes::NodeId nodeId =
                           createMathOperationNode("ComposeVector", model);
                         if (nodeId == 0)
@@ -898,6 +942,20 @@ namespace gladius
                     }
                     else if (arguments.size() == 1)
                     {
+                        // If the single arg is a numeric literal, use ConstantVector
+                        try
+                        {
+                            size_t ps = 0;
+                            double sv = std::stod(arguments[0], &ps);
+                            if (ps == arguments[0].size())
+                            {
+                                return createConstantVectorNode(sv, sv, sv, model);
+                            }
+                        }
+                        catch (...)
+                        {
+                        }
+
                         nodes::NodeId nodeId =
                           createMathOperationNode("VectorFromScalar", model);
                         if (nodeId == 0)

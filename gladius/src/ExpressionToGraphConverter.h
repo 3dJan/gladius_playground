@@ -209,6 +209,10 @@ namespace gladius
          */
         static nodes::NodeId createConstantNode(double value, nodes::Model & model);
 
+        /// Create a ConstantVector node with the given x/y/z values.
+        static nodes::NodeId
+        createConstantVectorNode(double x, double y, double z, nodes::Model & model);
+
         /**
          * @brief Connect two nodes via their ports
          * @param model The model containing the nodes
