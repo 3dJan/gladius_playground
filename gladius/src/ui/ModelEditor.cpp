@@ -465,12 +465,6 @@ namespace gladius::ui
             m_showAddModel = true;
         }
 
-        ImGui::SameLine();
-        if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CALCULATOR "\tExpression")))
-        {
-            showExpressionDialog();
-        }
-
         ImGui::Unindent();
 
         for (auto & model : m_assembly->getFunctions())
