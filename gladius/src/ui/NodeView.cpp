@@ -1373,15 +1373,6 @@ namespace gladius::ui
         }
         ImGui::PopID();
 
-        auto & columnWidths = getOrCreateColumnWidths(baseNode.getId());
-        // Add padding to all columns of this node
-        for (auto & columnWidth : columnWidths)
-        {
-            if (columnWidth > 0.f)
-            {
-                columnWidth += 10.f * m_uiScale;
-            }
-        }
     }
 
     std::string sourceName(Model & nodes, PortId portId)
@@ -1962,12 +1953,13 @@ namespace gladius::ui
         }
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
+        float const padding = 10.f * m_uiScale;
         constexpr float minWidth = 170.f;
-        // sum of all column widths
+        // sum of all column widths (with per-column padding)
         float tableWidth = 0.f;
         for (auto width : columnWidths)
         {
-            tableWidth += width;
+            tableWidth += (width > 0.f) ? (width + padding) : 0.f;
         }
 
         float const fillSpace = std::max(0.f, minWidth - tableWidth - 20.f * m_uiScale);
@@ -1981,13 +1973,15 @@ namespace gladius::ui
                               ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn(
-              "Inputs", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + columnWidths[2]);
+              "Inputs", ImGuiTableColumnFlags_WidthFixed,
+              columnWidths[1] + columnWidths[2] + padding);
             if (needsFillSpace)
             {
                 ImGui::TableSetupColumn("Seperation", ImGuiTableColumnFlags_WidthFixed, fillSpace);
             }
             ImGui::TableSetupColumn(
-              "Outputs", ImGuiTableColumnFlags_WidthFixed, columnWidths[6] + columnWidths[7]);
+              "Outputs", ImGuiTableColumnFlags_WidthFixed,
+              columnWidths[6] + columnWidths[7] + padding);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -2295,6 +2289,11 @@ namespace gladius::ui
     bool NodeView::columnWidthsAreInitialized() const
     {
         return !m_columnWidths.empty();
+    }
+
+    void NodeView::clearColumnWidths()
+    {
+        m_columnWidths.clear();
     }
 
     nodes::NodeBase * NodeView::findNodeById(nodes::NodeId nodeId) const

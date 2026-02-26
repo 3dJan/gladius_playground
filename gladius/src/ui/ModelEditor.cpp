@@ -1434,6 +1434,7 @@ namespace gladius::ui
                     if (m_codeView.render())
                     {
                         parameterChanged = true;
+                        m_nodeViewVisitor.clearColumnWidths();
                     }
                 }
                 else

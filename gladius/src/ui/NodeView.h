@@ -76,6 +76,9 @@ namespace gladius::ui
 
         bool columnWidthsAreInitialized() const;
 
+        /// @brief Clear cached column widths (call after graph rebuild from code sync)
+        void clearColumnWidths();
+
         /**
          * @brief Updates the node group mapping based on current model
          */
