@@ -700,4 +700,116 @@ namespace gladius::tests
         EXPECT_TRUE(payload.contains("success"));
         EXPECT_TRUE(payload["success"].get<bool>());
     }
+
+    // =====================================================================================
+    // T027: Deprecated tool (create_node) still functions correctly
+    // =====================================================================================
+
+    TEST_F(JSONRPCTest, DeprecatedTool_CreateNode_StillFunctions)
+    {
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 10},
+                        {"method", "tools/call"},
+                        {"params",
+                         {{"name", "create_node"},
+                          {"arguments",
+                           {{"function_id", 42},
+                            {"node_type", "Addition"}}}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        auto content = response["result"]["content"][0]["text"].get<std::string>();
+        auto payload = json::parse(content);
+        EXPECT_TRUE(payload.contains("success"));
+        EXPECT_TRUE(payload["success"].get<bool>());
+    }
+
+    // =====================================================================================
+    // T028: Deprecated tool responses include deprecated: true field
+    // =====================================================================================
+
+    TEST_F(JSONRPCTest, DeprecatedTool_CreateNode_IncludesDeprecatedField)
+    {
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 11},
+                        {"method", "tools/call"},
+                        {"params",
+                         {{"name", "create_node"},
+                          {"arguments",
+                           {{"function_id", 42},
+                            {"node_type", "Addition"}}}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        auto content = response["result"]["content"][0]["text"].get<std::string>();
+        auto payload = json::parse(content);
+        EXPECT_TRUE(payload.contains("deprecated"));
+        EXPECT_TRUE(payload["deprecated"].get<bool>());
+        EXPECT_TRUE(payload.contains("deprecation_notice"));
+    }
+
+    TEST_F(JSONRPCTest, DeprecatedTool_GetFunctionGraph_IncludesDeprecatedField)
+    {
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 12},
+                        {"method", "tools/call"},
+                        {"params",
+                         {{"name", "get_function_graph"},
+                          {"arguments", {{"function_id", 42}}}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        auto content = response["result"]["content"][0]["text"].get<std::string>();
+        auto payload = json::parse(content);
+        EXPECT_TRUE(payload.contains("deprecated"));
+        EXPECT_TRUE(payload["deprecated"].get<bool>());
+        EXPECT_TRUE(payload.contains("deprecation_notice"));
+    }
+
+    TEST_F(JSONRPCTest, DeprecatedTool_SetFunctionGraph_IncludesDeprecatedField)
+    {
+        json minimalGraph = {{"nodes", json::array()}, {"links", json::array()}};
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 13},
+                        {"method", "tools/call"},
+                        {"params",
+                         {{"name", "set_function_graph"},
+                          {"arguments", {{"function_id", 42}, {"graph", minimalGraph}}}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        auto content = response["result"]["content"][0]["text"].get<std::string>();
+        auto payload = json::parse(content);
+        EXPECT_TRUE(payload.contains("deprecated"));
+        EXPECT_TRUE(payload["deprecated"].get<bool>());
+    }
+
+    TEST_F(JSONRPCTest, DeprecatedTool_Description_HasDeprecatedPrefix)
+    {
+        json request = {{"jsonrpc", "2.0"}, {"id", 14}, {"method", "tools/list"}};
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        auto tools = response["result"]["tools"];
+
+        // Check that deprecated tools have [DEPRECATED] in their descriptions
+        for (auto const & tool : tools)
+        {
+            auto name = tool["name"].get<std::string>();
+            if (name == "get_function_graph" || name == "set_function_graph" ||
+                name == "create_node" || name == "delete_node" ||
+                name == "set_parameter_value" || name == "create_link" ||
+                name == "delete_link" || name == "create_function_call_node" ||
+                name == "create_constant_nodes_for_missing_parameters")
+            {
+                auto desc = tool["description"].get<std::string>();
+                EXPECT_EQ(desc.substr(0, 12), "[DEPRECATED:")
+                  << "Tool " << name << " should have [DEPRECATED:] prefix in description";
+            }
+        }
+    }
 }
