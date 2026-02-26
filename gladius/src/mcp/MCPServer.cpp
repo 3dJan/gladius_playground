@@ -498,7 +498,7 @@ namespace gladius::mcp
         // FUNCTION GRAPH INTROSPECTION
         registerTool(
           "get_function_graph",
-          "Get the node graph of a function (model) as JSON for introspection/visualization",
+          "[DEPRECATED: Use get_function_snippet instead] Get the node graph of a function (model) as JSON for introspection/visualization",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -518,12 +518,15 @@ namespace gladius::mcp
                   return {{"success", false}, {"error", "Missing required parameter: function_id"}};
               }
               uint32_t function_id = params["function_id"];
-              return m_application->getFunctionGraph(function_id);
+              auto result = m_application->getFunctionGraph(function_id);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use get_function_snippet instead for code-based function access.";
+              return result;
           });
 
         // FUNCTION GRAPH IMPORT (batch create)
         registerTool("set_function_graph",
-                     "Create or replace a function graph from a JSON description (nodes + links). "
+                     "[DEPRECATED: Use set_function_snippet instead] Create or replace a function graph from a JSON description (nodes + links). "
                      "Nodes may include a 'values' object to set initial parameter values inline. "
                      "For ConstantMatrix, use a virtual 'matrix' key with a flat 16-element or "
                      "4x4 nested array.",
@@ -552,8 +555,11 @@ namespace gladius::mcp
                          }
                          uint32_t function_id = params["function_id"];
                          bool replace = params.value("replace", true);
-                         return m_application->setFunctionGraph(
+                         auto result = m_application->setFunctionGraph(
                            function_id, params["graph"], replace);
+                         result["deprecated"] = true;
+                         result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+                         return result;
                      });
 
         // FUNCTION GRAPH MANIPULATION
@@ -587,7 +593,7 @@ namespace gladius::mcp
 
         registerTool(
           "create_node",
-          "Create a new node in a function graph",
+          "[DEPRECATED: Use set_function_snippet instead] Create a new node in a function graph",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -607,12 +613,15 @@ namespace gladius::mcp
               std::string node_type = params["node_type"];
               std::string display_name = params.value("display_name", "");
               uint32_t node_id = params.value("node_id", 0);
-              return m_application->createNode(function_id, node_type, display_name, node_id);
+              auto result = m_application->createNode(function_id, node_type, display_name, node_id);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+              return result;
           });
 
         registerTool(
           "delete_node",
-          "Delete a node from a function graph",
+          "[DEPRECATED: Use set_function_snippet instead] Delete a node from a function graph",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -627,11 +636,14 @@ namespace gladius::mcp
               }
               uint32_t function_id = params["function_id"];
               uint32_t node_id = params["node_id"];
-              return m_application->deleteNode(function_id, node_id);
+              auto result = m_application->deleteNode(function_id, node_id);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+              return result;
           });
 
         registerTool("set_parameter_value",
-                     "Set the value of a parameter on a node. For ConstantMatrix nodes, use "
+                     "[DEPRECATED: Use set_function_snippet instead] Set the value of a parameter on a node. For ConstantMatrix nodes, use "
                      "parameter_name 'matrix' with a flat 16-element or 4x4 nested array to set "
                      "all m00..m33 values at once.",
                      {{"type", "object"},
@@ -653,13 +665,16 @@ namespace gladius::mcp
                          uint32_t node_id = params["node_id"];
                          std::string parameter_name = params["parameter_name"];
                          json value = params["value"];
-                         return m_application->setParameterValue(
+                         auto result = m_application->setParameterValue(
                            function_id, node_id, parameter_name, value);
+                         result["deprecated"] = true;
+                         result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+                         return result;
                      });
 
         registerTool(
           "create_link",
-          "Create a link between two nodes in a function graph",
+          "[DEPRECATED: Use set_function_snippet instead] Create a link between two nodes in a function graph",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -686,16 +701,19 @@ namespace gladius::mcp
               std::string source_port_name = params["source_port_name"];
               uint32_t target_node_id = params["target_node_id"];
               std::string target_parameter_name = params["target_parameter_name"];
-              return m_application->createLink(function_id,
+              auto result = m_application->createLink(function_id,
                                                source_node_id,
                                                source_port_name,
                                                target_node_id,
                                                target_parameter_name);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+              return result;
           });
 
         registerTool(
           "delete_link",
-          "Delete a link from a function graph",
+          "[DEPRECATED: Use set_function_snippet instead] Delete a link from a function graph",
           {{"type", "object"},
            {"properties",
             {{"function_id",
@@ -713,12 +731,15 @@ namespace gladius::mcp
               uint32_t function_id = params["function_id"];
               uint32_t target_node_id = params["target_node_id"];
               std::string target_parameter_name = params["target_parameter_name"];
-              return m_application->deleteLink(function_id, target_node_id, target_parameter_name);
+              auto result = m_application->deleteLink(function_id, target_node_id, target_parameter_name);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+              return result;
           });
 
         registerTool(
           "create_function_call_node",
-          "Creates a function call node with a resource node for the function reference. This "
+          "[DEPRECATED: Use create_function_from_snippet instead] Creates a function call node with a resource node for the function reference. This "
           "is a specialized node creation method that: 1) Creates a Resource node with the "
           "referenced function ID, 2) Creates a FunctionCall node, 3) Connects the Resource "
           "node's output to the FunctionCall's FunctionId input, 4) Updates the FunctionCall "
@@ -744,8 +765,11 @@ namespace gladius::mcp
               uint32_t target_function_id = params["target_function_id"];
               uint32_t referenced_function_id = params["referenced_function_id"];
               std::string display_name = params.value("display_name", "");
-              return m_application->createFunctionCallNode(
+              auto result = m_application->createFunctionCallNode(
                 target_function_id, referenced_function_id, display_name);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use create_function_from_snippet instead for code-based function creation.";
+              return result;
           });
 
         // DOCUMENT MANAGEMENT (3MF FILES)
@@ -2123,7 +2147,7 @@ namespace gladius::mcp
         // CREATE CONSTANT NODES FOR MISSING PARAMETERS
         registerTool(
           "create_constant_nodes_for_missing_parameters",
-          "Analyse a node in a function graph and create constant-value nodes "
+          "[DEPRECATED: Use set_function_snippet instead] Analyse a node in a function graph and create constant-value nodes "
           "for every input that is not yet connected. This is useful after "
           "building a function graph to provide default values for all "
           "unconnected inputs, making the function self-contained and ready "
@@ -2179,8 +2203,11 @@ namespace gladius::mcp
                       }
                   }
               }
-              return m_application->createConstantNodesForMissingParameters(
+              auto result = m_application->createConstantNodesForMissingParameters(
                 functionId, nodeId, autoConnect, excludeParams);
+              result["deprecated"] = true;
+              result["deprecation_notice"] = "This tool is deprecated. Use set_function_snippet instead for code-based function editing.";
+              return result;
           });
 
         // SET LIBRARY METADATA

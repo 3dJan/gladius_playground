@@ -400,6 +400,17 @@ namespace gladius
                 return {false, 0};
             }
 
+            // Validate argument names against reserved keywords
+            for (auto const & arg : arguments)
+            {
+                if (ArgumentUtils::isReservedKeyword(arg.name))
+                {
+                    m_lastErrorMessage =
+                      "Invalid argument name '" + arg.name + "': reserved keyword";
+                    return {false, 0};
+                }
+            }
+
             try
             {
                 auto document = m_application->getCurrentDocument();
@@ -2346,6 +2357,17 @@ namespace gladius
                 return out;
             }
 
+            // Validate argument names against reserved keywords
+            for (auto const & arg : arguments)
+            {
+                if (ArgumentUtils::isReservedKeyword(arg.name))
+                {
+                    out["success"] = false;
+                    out["error"] = "Invalid argument name '" + arg.name + "': reserved keyword";
+                    return out;
+                }
+            }
+
             auto document = m_application->getCurrentDocument();
             if (!document)
             {
@@ -2459,9 +2481,55 @@ namespace gladius
                   ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
 
                 auto const & functions = assembly->getFunctions();
+
+                // Resolve build items → function resource IDs (root functions)
+                std::set<nodes::ResourceId> rootFunctionIds;
+                auto model3mf = document->get3mfModel();
+                if (model3mf)
+                {
+                    try
+                    {
+                        auto buildIt = model3mf->GetBuildItems();
+                        while (buildIt->MoveNext())
+                        {
+                            auto item = buildIt->GetCurrent();
+                            auto obj = item->GetObjectResource();
+                            if (!obj)
+                            {
+                                continue;
+                            }
+                            if (auto * levelSet =
+                                  dynamic_cast<Lib3MF::CLevelSet *>(obj.get()))
+                            {
+                                auto func = levelSet->GetFunction();
+                                if (func)
+                                {
+                                    rootFunctionIds.insert(
+                                      func->GetModelResourceID());
+                                }
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Ignore build item resolution errors
+                    }
+                }
+
+                // Post-process snippet to add [root] annotations
+                snippet = ExpressionToGraphConverter::annotateRootFunctions(
+                  snippet, rootFunctionIds);
+
+                nlohmann::json rootArray = nlohmann::json::array();
+                for (auto id : rootFunctionIds)
+                {
+                    rootArray.push_back(id);
+                }
+
                 out["success"] = true;
                 out["snippet"] = snippet;
                 out["function_count"] = functions.size();
+                out["root_functions"] = rootArray;
             }
             catch (std::runtime_error const & e)
             {

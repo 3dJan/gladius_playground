@@ -121,6 +121,12 @@ namespace gladius
         /// Throws std::runtime_error if circular dependencies are detected.
         static std::string convertProgramToSnippet(nodes::Assembly & assembly);
 
+        /// Annotate a program snippet with [root] markers for root functions.
+        /// Inserts " [root]" after "// Function: name (ID: N)" headers for
+        /// functions whose resource IDs appear in rootFunctionIds.
+        static std::string annotateRootFunctions(std::string const & snippet,
+                                                 std::set<nodes::ResourceId> const & rootFunctionIds);
+
         /// Parse a multi-function code listing and create/update function graphs.
         /// Each function must be in the format produced by convertProgramToSnippet.
         /// Throws std::runtime_error on parse errors or dangling references.

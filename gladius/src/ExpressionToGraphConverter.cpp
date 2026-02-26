@@ -17,8 +17,23 @@
 #include <stdexcept>
 #include <typeindex>
 
+#include <fast_float/fast_float.h>
+
 namespace gladius
 {
+    /// Try to parse the entire string as a double without throwing exceptions.
+    /// Returns true and sets `value` if the full string is a valid number.
+    static bool tryParseDouble(std::string const & str, double & value)
+    {
+        if (str.empty())
+        {
+            return false;
+        }
+        auto const * first = str.data();
+        auto const * last = first + str.size();
+        auto [ptr, ec] = fast_float::from_chars(first, last, value);
+        return ec == std::errc{} && ptr == last;
+    }
     /// Extract the ResourceId from a node parameter that is linked to a resource-holding node.
     /// Returns 0 if the parameter isn't found, has no source, or the source doesn't carry a
     /// ResourceId.
@@ -716,18 +731,12 @@ namespace gladius
         // If the entire expression is a number (including a leading negative sign),
         // create a constant node directly. This must happen BEFORE generic unary minus handling
         // so that "-3" becomes a single ConstantScalar with value -3 rather than (-1 * 3).
-        try
         {
-            size_t pos = 0;
-            double value = std::stod(cleanExpr, &pos);
-            if (pos == cleanExpr.length())
+            double value = 0.0;
+            if (tryParseDouble(cleanExpr, value))
             {
                 return createConstantNode(value, model);
             }
-        }
-        catch (...)
-        {
-            // Not a pure number; continue parsing
         }
 
         // Try to find a binary operator first (so "-1*sin(x)" splits at '*' rather than treating
@@ -974,20 +983,12 @@ namespace gladius
                     {
                         // If all three arguments are numeric literals, use a single
                         // ConstantVector node instead of ComposeVector + 3 ConstantScalar.
-                        try
+                        double xv = 0.0, yv = 0.0, zv = 0.0;
+                        if (tryParseDouble(arguments[0], xv) &&
+                            tryParseDouble(arguments[1], yv) &&
+                            tryParseDouble(arguments[2], zv))
                         {
-                            size_t px = 0, py = 0, pz = 0;
-                            double xv = std::stod(arguments[0], &px);
-                            double yv = std::stod(arguments[1], &py);
-                            double zv = std::stod(arguments[2], &pz);
-                            if (px == arguments[0].size() && py == arguments[1].size() &&
-                                pz == arguments[2].size())
-                            {
-                                return createConstantVectorNode(xv, yv, zv, model);
-                            }
-                        }
-                        catch (...)
-                        {
+                            return createConstantVectorNode(xv, yv, zv, model);
                         }
 
                         nodes::NodeId nodeId =
@@ -1019,17 +1020,10 @@ namespace gladius
                     else if (arguments.size() == 1)
                     {
                         // If the single arg is a numeric literal, use ConstantVector
-                        try
+                        double sv = 0.0;
+                        if (tryParseDouble(arguments[0], sv))
                         {
-                            size_t ps = 0;
-                            double sv = std::stod(arguments[0], &ps);
-                            if (ps == arguments[0].size())
-                            {
-                                return createConstantVectorNode(sv, sv, sv, model);
-                            }
-                        }
-                        catch (...)
-                        {
+                            return createConstantVectorNode(sv, sv, sv, model);
                         }
 
                         nodes::NodeId nodeId =
@@ -3469,6 +3463,29 @@ namespace gladius
             result += "}\n";
         }
 
+        return result;
+    }
+
+    std::string ExpressionToGraphConverter::annotateRootFunctions(
+      std::string const & snippet,
+      std::set<nodes::ResourceId> const & rootFunctionIds)
+    {
+        if (rootFunctionIds.empty())
+        {
+            return snippet;
+        }
+
+        std::string result = snippet;
+        for (auto rootId : rootFunctionIds)
+        {
+            auto marker = "(ID: " + std::to_string(rootId) + ")";
+            auto pos = result.find(marker);
+            if (pos != std::string::npos)
+            {
+                auto insertPos = pos + marker.size();
+                result.insert(insertPos, " [root]");
+            }
+        }
         return result;
     }
 
