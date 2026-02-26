@@ -37,7 +37,7 @@ namespace gladius::tests
         std::pair<bool, std::string> setFunctionSnippet(std::string const & snippet)
         {
             // Reject unsupported comments
-            if (snippet.find("/* unsupported:") != std::string::npos)
+            if (snippet.find(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) != std::string::npos)
             {
                 return {false, "Snippet contains unsupported node placeholders"};
             }

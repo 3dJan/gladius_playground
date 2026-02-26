@@ -2268,6 +2268,42 @@ namespace gladius
                 {
                     out["display_name"] = model->getDisplayName().value();
                 }
+
+                // Report function arguments from Begin node outputs
+                auto * beginNode = model->getBeginNode();
+                if (beginNode != nullptr)
+                {
+                    nlohmann::json argsJson = nlohmann::json::array();
+                    for (auto const & [portName, port] : beginNode->getOutputs())
+                    {
+                        std::string typeName =
+                          (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3) ? "vec3"
+                                                                                     : "float";
+                        argsJson.push_back({{"name", portName}, {"type", typeName}});
+                    }
+                    out["arguments"] = argsJson;
+                }
+
+                // Report output type from End node parameters
+                auto * endNode = model->getEndNode();
+                if (endNode != nullptr)
+                {
+                    auto const & params = endNode->constParameter();
+                    auto shapeIt = params.find(nodes::FieldNames::Shape);
+                    if (shapeIt != params.end())
+                    {
+                        auto const & src = shapeIt->second.getConstSource();
+                        if (src.has_value() &&
+                            src->type == nodes::ParameterTypeIndex::Float3)
+                        {
+                            out["output_type"] = "vec3";
+                        }
+                        else
+                        {
+                            out["output_type"] = "float";
+                        }
+                    }
+                }
             }
             catch (std::exception const & e)
             {
@@ -2303,7 +2339,7 @@ namespace gladius
             }
 
             // Reject unsupported-node comments
-            if (snippet.find("/* unsupported:") != std::string::npos)
+            if (snippet.find(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) != std::string::npos)
             {
                 out["success"] = false;
                 out["error"] = "Snippet contains unsupported node placeholders";
@@ -2349,7 +2385,7 @@ namespace gladius
                 tempModel.createBeginEndWithDefaultInAndOuts();
 
                 auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-                  snippet, tempModel, parser, arguments, output);
+                  snippet, tempModel, parser, arguments, output, assembly.get());
                 if (nodeId == 0)
                 {
                     out["success"] = false;
@@ -2357,11 +2393,21 @@ namespace gladius
                     return out;
                 }
 
-                // Success: apply to the real model
-                model->clear();
-                model->createBeginEndWithDefaultInAndOuts();
-                ExpressionToGraphConverter::convertSnippetToGraph(
-                  snippet, *model, parser, arguments, output);
+                // Success: move validated graph into the real model, preserving identity
+                auto savedName = model->getModelName();
+                auto savedDisplayName = model->getDisplayName();
+                auto savedResourceId = model->getResourceId();
+                auto savedManaged = model->isManaged();
+
+                *model = std::move(tempModel);
+
+                model->setModelName(savedName);
+                if (savedDisplayName.has_value())
+                {
+                    model->setDisplayName(*savedDisplayName);
+                }
+                model->setResourceId(savedResourceId);
+                model->setManaged(savedManaged);
                 model->updateGraphAndOrderIfNeeded();
 
                 // Return the normalized snippet

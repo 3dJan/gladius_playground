@@ -192,7 +192,7 @@ namespace gladius::ui
         m_lastError.clear();
 
         // T046: Detect unsupported-node comments before parsing
-        if (buf.buffer.find("/* unsupported:") != std::string::npos)
+        if (buf.buffer.find(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) != std::string::npos)
         {
             m_lastError =
               "Cannot sync: code contains unsupported node placeholders "

@@ -164,7 +164,7 @@ namespace gladius::tests
         // Actually, the safest approach is to directly test the output format:
         // When nodeToExpression encounters an unknown type, it emits /* unsupported: TYPE */
         // We can verify this pattern exists in the converter by checking the fallback.
-        std::string const pattern = "/* unsupported: ";
+        std::string const pattern = ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER;
         std::string const testComment = pattern + "SomeUnknownNode */";
         EXPECT_NE(testComment.find(pattern), std::string::npos);
         EXPECT_NE(testComment.find("*/"), std::string::npos);
@@ -207,7 +207,7 @@ namespace gladius::tests
     TEST(UnsupportedCommentDetection, UnsupportedPattern_IsDetectable)
     {
         std::string const code = "return /* unsupported: ComposeMatrixFromColumns */ + pos.x;";
-        std::string const pattern = "/* unsupported:";
+        std::string const pattern = ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER;
         EXPECT_NE(code.find(pattern), std::string::npos)
           << "Code with unsupported comments should be detectable";
     }

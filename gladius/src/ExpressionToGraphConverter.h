@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "FunctionArgument.h"
+#include "nodes/nodesfwd.h"
 
 namespace gladius
 {
@@ -34,6 +35,8 @@ namespace gladius
     class ExpressionToGraphConverter
     {
       public:
+        /// Marker prefix embedded in generated snippets for node types that cannot be converted
+        static constexpr char const * UNSUPPORTED_NODE_MARKER = "/* unsupported:";
         /**
          * @brief Convert a mathematical expression to a node graph
          * @param expression The mathematical expression string
@@ -191,6 +194,15 @@ namespace gladius
 
         /// Assembly context for resolving cross-function calls during snippet→graph conversion
         static thread_local nodes::Assembly * s_assemblyContext;
+
+        /// Create a binary math-operation node, parse two arguments, and connect them.
+        static nodes::NodeId createTwoInputNode(
+          std::string const & nodeTypeName,
+          std::vector<std::string> const & args,
+          nodes::Model & model,
+          std::map<std::string, nodes::NodeId> const & variableNodes,
+          std::string const & inputA = nodes::FieldNames::A,
+          std::string const & inputB = nodes::FieldNames::B);
 
         /**
          * @brief Create a mathematical operation node

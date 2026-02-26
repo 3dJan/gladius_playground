@@ -141,7 +141,7 @@ namespace gladius_tests
         /// cannot be parsed back, making roundtrip inherently impossible.
         static bool containsUnsupportedNodes(std::string const & snippet)
         {
-            return snippet.find("/* unsupported:") != std::string::npos;
+            return snippet.find(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) != std::string::npos;
         }
 
         /// Convert graph→snippet for a single function, rebuild graph from the snippet,

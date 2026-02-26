@@ -19,6 +19,43 @@
 
 namespace gladius
 {
+    /// Extract the ResourceId from a node parameter that is linked to a resource-holding node.
+    /// Returns 0 if the parameter isn't found, has no source, or the source doesn't carry a
+    /// ResourceId.
+    static nodes::ResourceId extractLinkedResourceId(
+      nodes::NodeBase const & node,
+      std::string const & fieldName,
+      nodes::Model const & model)
+    {
+        auto const & params = node.constParameter();
+        auto it = params.find(fieldName);
+        if (it == params.end())
+        {
+            return 0;
+        }
+        auto const & src = it->second.getConstSource();
+        if (!src.has_value())
+        {
+            return 0;
+        }
+        auto srcNode = model.getNode(src->nodeId);
+        if (!srcNode.has_value())
+        {
+            return 0;
+        }
+        auto resParam = (*srcNode)->parameter().find(nodes::FieldNames::ResourceId);
+        if (resParam == (*srcNode)->parameter().end())
+        {
+            return 0;
+        }
+        auto val = resParam->second.getValue();
+        if (auto const * rid = std::get_if<nodes::ResourceId>(&val))
+        {
+            return *rid;
+        }
+        return 0;
+    }
+
     // Static member definitions
     std::map<nodes::NodeId, std::string> ExpressionToGraphConverter::s_componentMap;
     std::map<std::string, nodes::NodeId> ExpressionToGraphConverter::s_vectorDecomposeNodes;
@@ -29,6 +66,36 @@ namespace gladius
 
     // Assembly context for resolving cross-function calls during snippet→graph conversion
     thread_local nodes::Assembly * ExpressionToGraphConverter::s_assemblyContext = nullptr;
+
+    nodes::NodeId ExpressionToGraphConverter::createTwoInputNode(
+      std::string const & nodeTypeName,
+      std::vector<std::string> const & args,
+      nodes::Model & model,
+      std::map<std::string, nodes::NodeId> const & variableNodes,
+      std::string const & inputA,
+      std::string const & inputB)
+    {
+        if (args.size() != 2)
+        {
+            return 0;
+        }
+        nodes::NodeId nodeId = createMathOperationNode(nodeTypeName, model);
+        if (nodeId == 0)
+        {
+            return 0;
+        }
+        nodes::NodeId aId = parseAndBuildGraph(args[0], model, variableNodes);
+        std::string aPort = (aId != 0) ? getOutputPortName(model, aId) : "";
+        nodes::NodeId bId = parseAndBuildGraph(args[1], model, variableNodes);
+        if (aId == 0 || bId == 0)
+        {
+            return 0;
+        }
+        std::string bPort = getOutputPortName(model, bId);
+        connectNodes(model, aId, aPort, nodeId, inputA);
+        connectNodes(model, bId, bPort, nodeId, inputB);
+        return nodeId;
+    }
 
     nodes::NodeId ExpressionToGraphConverter::convertSnippetToGraph(
       std::string const & snippet,
@@ -69,6 +136,15 @@ namespace gladius
         s_beginNodeArguments.clear();
         s_variableContextStack.clear();
         s_assemblyContext = assembly;
+
+        // RAII guard: reset thread-local assembly context on scope exit (normal or exception)
+        struct AssemblyContextGuard
+        {
+            ~AssemblyContextGuard()
+            {
+                s_assemblyContext = nullptr;
+            }
+        } assemblyGuard;
 
         // Preprocess if blocks into select function calls
         std::regex if_regex(R"(if\s*\(\s*(.+?)\s*(<|>|<=|>=|==|!=)\s*(.+?)\s*\)\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*;\s*\}\s*else\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?\4\s*=\s*(.+?)\s*;\s*\})");
@@ -979,59 +1055,13 @@ namespace gladius
                 // dot(a, b) → DotProduct
                 if (functionName == "dot")
                 {
-                    if (arguments.size() != 2)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId nodeId =
-                      createMathOperationNode("DotProduct", model);
-                    if (nodeId == 0)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId aId =
-                      parseAndBuildGraph(arguments[0], model, variableNodes);
-                    std::string aPort =
-                      (aId != 0) ? getOutputPortName(model, aId) : "";
-                    nodes::NodeId bId =
-                      parseAndBuildGraph(arguments[1], model, variableNodes);
-                    if (aId == 0 || bId == 0)
-                    {
-                        return 0;
-                    }
-                    std::string bPort = getOutputPortName(model, bId);
-                    connectNodes(model, aId, aPort, nodeId, nodes::FieldNames::A);
-                    connectNodes(model, bId, bPort, nodeId, nodes::FieldNames::B);
-                    return nodeId;
+                    return createTwoInputNode("DotProduct", arguments, model, variableNodes);
                 }
 
                 // cross(a, b) → CrossProduct
                 if (functionName == "cross")
                 {
-                    if (arguments.size() != 2)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId nodeId =
-                      createMathOperationNode("CrossProduct", model);
-                    if (nodeId == 0)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId aId =
-                      parseAndBuildGraph(arguments[0], model, variableNodes);
-                    std::string aPort =
-                      (aId != 0) ? getOutputPortName(model, aId) : "";
-                    nodes::NodeId bId =
-                      parseAndBuildGraph(arguments[1], model, variableNodes);
-                    if (aId == 0 || bId == 0)
-                    {
-                        return 0;
-                    }
-                    std::string bPort = getOutputPortName(model, bId);
-                    connectNodes(model, aId, aPort, nodeId, nodes::FieldNames::A);
-                    connectNodes(model, bId, bPort, nodeId, nodes::FieldNames::B);
-                    return nodeId;
+                    return createTwoInputNode("CrossProduct", arguments, model, variableNodes);
                 }
 
                 // transpose(m) → Transpose
@@ -1087,62 +1117,15 @@ namespace gladius
                 // matmul(m, v) → MatrixVectorMultiplication
                 if (functionName == "matmul")
                 {
-                    if (arguments.size() != 2)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId nodeId =
-                      createMathOperationNode("MatrixVectorMultiplication", model);
-                    if (nodeId == 0)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId aId =
-                      parseAndBuildGraph(arguments[0], model, variableNodes);
-                    std::string aPort =
-                      (aId != 0) ? getOutputPortName(model, aId) : "";
-                    nodes::NodeId bId =
-                      parseAndBuildGraph(arguments[1], model, variableNodes);
-                    if (aId == 0 || bId == 0)
-                    {
-                        return 0;
-                    }
-                    std::string bPort = getOutputPortName(model, bId);
-                    connectNodes(model, aId, aPort, nodeId, nodes::FieldNames::A);
-                    connectNodes(model, bId, bPort, nodeId, nodes::FieldNames::B);
-                    return nodeId;
+                    return createTwoInputNode(
+                      "MatrixVectorMultiplication", arguments, model, variableNodes);
                 }
 
                 // transform(pos, mat) → Transformation
                 if (functionName == "transform")
                 {
-                    if (arguments.size() != 2)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId nodeId =
-                      createMathOperationNode("Transformation", model);
-                    if (nodeId == 0)
-                    {
-                        return 0;
-                    }
-                    nodes::NodeId posId =
-                      parseAndBuildGraph(arguments[0], model, variableNodes);
-                    std::string posPort =
-                      (posId != 0) ? getOutputPortName(model, posId) : "";
-                    nodes::NodeId matId =
-                      parseAndBuildGraph(arguments[1], model, variableNodes);
-                    if (posId == 0 || matId == 0)
-                    {
-                        return 0;
-                    }
-                    std::string matPort = getOutputPortName(model, matId);
-                    connectNodes(
-                      model, posId, posPort, nodeId, nodes::FieldNames::Pos);
-                    connectNodes(
-                      model, matId, matPort, nodeId,
-                      nodes::FieldNames::Transformation);
-                    return nodeId;
+                    return createTwoInputNode("Transformation", arguments, model, variableNodes,
+                      nodes::FieldNames::Pos, nodes::FieldNames::Transformation);
                 }
 
                 // gradient_name_N(pos) → FunctionGradient referencing model N
@@ -2977,7 +2960,7 @@ namespace gladius
                 }
                 else
                 {
-                    expr = "/* unsupported: FunctionCall */";
+                    expr = std::string(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) + " FunctionCall */";
                 }
             }
             // T013: FunctionGradient → gradient_functionName_id(pos)
@@ -3006,121 +2989,31 @@ namespace gladius
                 }
                 else
                 {
-                    expr = "/* unsupported: FunctionGradient */";
+                    expr = std::string(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) + " FunctionGradient */";
                 }
             }
             // T014: Resource-backed SDF nodes
             else if (nodeType == "SignedDistanceToMesh")
             {
-                auto const & params = node->parameter();
-                auto meshIt = params.find(nodes::FieldNames::Mesh);
-                nodes::ResourceId resId = 0;
-                if (meshIt != params.end())
-                {
-                    auto const & src = meshIt->second.getConstSource();
-                    if (src.has_value())
-                    {
-                        auto srcNode = model.getNode(src->nodeId);
-                        if (srcNode.has_value())
-                        {
-                            auto resParam = (*srcNode)->parameter().find(
-                              nodes::FieldNames::ResourceId);
-                            if (resParam != (*srcNode)->parameter().end())
-                            {
-                                auto val = resParam->second.getValue();
-                                if (auto const * rid = std::get_if<nodes::ResourceId>(&val))
-                                {
-                                    resId = *rid;
-                                }
-                            }
-                        }
-                    }
-                }
+                auto resId = extractLinkedResourceId(*node, nodes::FieldNames::Mesh, model);
                 expr = "sdfMesh_" + std::to_string(resId) + "(pos)";
             }
             else if (nodeType == "UnsignedDistanceToMesh")
             {
-                auto const & params = node->parameter();
-                auto meshIt = params.find(nodes::FieldNames::Mesh);
-                nodes::ResourceId resId = 0;
-                if (meshIt != params.end())
-                {
-                    auto const & src = meshIt->second.getConstSource();
-                    if (src.has_value())
-                    {
-                        auto srcNode = model.getNode(src->nodeId);
-                        if (srcNode.has_value())
-                        {
-                            auto resParam = (*srcNode)->parameter().find(
-                              nodes::FieldNames::ResourceId);
-                            if (resParam != (*srcNode)->parameter().end())
-                            {
-                                auto val = resParam->second.getValue();
-                                if (auto const * rid = std::get_if<nodes::ResourceId>(&val))
-                                {
-                                    resId = *rid;
-                                }
-                            }
-                        }
-                    }
-                }
+                auto resId = extractLinkedResourceId(*node, nodes::FieldNames::Mesh, model);
                 expr = "udfMesh_" + std::to_string(resId) + "(pos)";
             }
             else if (nodeType == "SignedDistanceToBeamLattice")
             {
-                auto const & params = node->parameter();
-                auto blIt = params.find(nodes::FieldNames::BeamLattice);
-                nodes::ResourceId resId = 0;
-                if (blIt != params.end())
-                {
-                    auto const & src = blIt->second.getConstSource();
-                    if (src.has_value())
-                    {
-                        auto srcNode = model.getNode(src->nodeId);
-                        if (srcNode.has_value())
-                        {
-                            auto resParam = (*srcNode)->parameter().find(
-                              nodes::FieldNames::ResourceId);
-                            if (resParam != (*srcNode)->parameter().end())
-                            {
-                                auto val = resParam->second.getValue();
-                                if (auto const * rid = std::get_if<nodes::ResourceId>(&val))
-                                {
-                                    resId = *rid;
-                                }
-                            }
-                        }
-                    }
-                }
+                auto resId =
+                  extractLinkedResourceId(*node, nodes::FieldNames::BeamLattice, model);
                 expr = "sdfBeamLattice_" + std::to_string(resId) + "(pos)";
             }
             // T015: ImageSampler → sampleImage3D_id(pos)
             else if (nodeType == "ImageSampler")
             {
-                auto const & params = node->parameter();
-                auto resIt = params.find(nodes::FieldNames::ResourceId);
-                nodes::ResourceId resId = 0;
-                if (resIt != params.end())
-                {
-                    auto const & src = resIt->second.getConstSource();
-                    if (src.has_value())
-                    {
-                        auto srcNode = model.getNode(src->nodeId);
-                        if (srcNode.has_value())
-                        {
-                            auto resParam = (*srcNode)->parameter().find(
-                              nodes::FieldNames::ResourceId);
-                            if (resParam != (*srcNode)->parameter().end())
-                            {
-                                auto val = resParam->second.getValue();
-                                if (auto const * rid = std::get_if<nodes::ResourceId>(&val))
-                                {
-                                    resId = *rid;
-                                }
-                            }
-                        }
-                    }
-                }
+                auto resId =
+                  extractLinkedResourceId(*node, nodes::FieldNames::ResourceId, model);
                 expr = "sampleImage3D_" + std::to_string(resId) + "(pos)";
             }
             // T016: Transformation → transform(pos, matrix)
@@ -3167,7 +3060,7 @@ namespace gladius
                 }
                 else
                 {
-                    expr = "/* unsupported: NormalizeDistanceField */";
+                    expr = std::string(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) + " NormalizeDistanceField */";
                 }
             }
             // Resource node: should not appear as an expression target, skip
@@ -3188,7 +3081,7 @@ namespace gladius
             else
             {
                 // Unknown node type: use a placeholder
-                expr = "/* unsupported: " + nodeType + " */";
+                expr = std::string(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) + " " + nodeType + " */";
             }
 
             // If this node has fan-out > 1, assign it to a variable for reuse
@@ -3348,7 +3241,6 @@ namespace gladius
 
         // Build dependency graph: for each function, collect which other functions it calls
         std::map<nodes::ResourceId, std::set<nodes::ResourceId>> deps;
-        std::map<nodes::ResourceId, int> inDegree;
 
         for (auto const & [id, model] : functions)
         {
@@ -3357,7 +3249,6 @@ namespace gladius
                 continue;
             }
             deps[id] = {};
-            inDegree[id] = 0;
         }
 
         for (auto const & [id, model] : functions)
@@ -3388,23 +3279,15 @@ namespace gladius
 
                 if (calledId != 0 && functions.count(calledId) > 0 && calledId != id)
                 {
-                    if (deps[id].insert(calledId).second)
-                    {
-                        ++inDegree[calledId];
-                    }
+                    deps[id].insert(calledId);
                 }
             }
         }
 
-        // Kahn's algorithm for topological sort (leaves first = dependencies before dependents)
-        // We want called functions to appear BEFORE callers in the output.
-        // inDegree here counts how many functions CALL this function.
-        // We want functions with inDegree 0 (not called by anyone) to be processed LAST.
-        // Actually, let's reverse: build "dependency" edges as caller->callee,
-        // then sort so callees come first.
-        // Re-interpret: depOf[fn] = set of functions that fn depends on (calls).
-        // We want: if fn calls callee, callee appears before fn.
-        // Standard topo sort: edges from callee -> caller (callee must come first).
+        // Topological sort: callees before callers.
+        // deps[fn] = set of functions that fn calls (depends on).
+        // dependencyCount[fn] = how many unprocessed deps fn has.
+        // dependedBy[fn] = list of functions that depend on fn.
 
         std::map<nodes::ResourceId, int> dependencyCount; // how many deps each fn has
         std::map<nodes::ResourceId, std::vector<nodes::ResourceId>>
@@ -3510,7 +3393,7 @@ namespace gladius
             }
 
             // Skip functions with unsupported nodes — they cannot roundtrip
-            if (snippet.find("/* unsupported:") != std::string::npos)
+            if (snippet.find(UNSUPPORTED_NODE_MARKER) != std::string::npos)
             {
                 continue;
             }
@@ -3754,7 +3637,7 @@ namespace gladius
                          blocks.end(),
                          [](FunctionBlock const & b)
                          {
-                             return b.body.find("/* unsupported:") != std::string::npos;
+                             return b.body.find(UNSUPPORTED_NODE_MARKER) != std::string::npos;
                          }),
           blocks.end());
 
