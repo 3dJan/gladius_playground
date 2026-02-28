@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -33,6 +34,50 @@ namespace gladius
         auto const * last = first + str.size();
         auto [ptr, ec] = fast_float::from_chars(first, last, value);
         return ec == std::errc{} && ptr == last;
+    }
+
+    /// Format a float value as a string without scientific notation.
+    /// Recognizes well-known constants (pi, e) and uses their names instead.
+    static std::string formatFloat(float value)
+    {
+        // Recognize well-known mathematical constants
+        constexpr float PI_F = 3.141592653589793238462643383279502884F;
+        constexpr float E_F = 2.718281828459045235360287471352662498F;
+        if (value == PI_F)
+        {
+            return "pi";
+        }
+        if (value == E_F)
+        {
+            return "e";
+        }
+
+        std::ostringstream oss;
+        oss << std::setprecision(9) << std::defaultfloat << value;
+        std::string result = oss.str();
+
+        // If the stream chose scientific notation, switch to fixed
+        if (result.find('e') != std::string::npos || result.find('E') != std::string::npos)
+        {
+            oss.str("");
+            oss.clear();
+            oss << std::setprecision(9) << std::fixed << value;
+            result = oss.str();
+            // Remove trailing zeros after decimal point
+            if (result.find('.') != std::string::npos)
+            {
+                auto lastNonZero = result.find_last_not_of('0');
+                if (lastNonZero != std::string::npos && result[lastNonZero] == '.')
+                {
+                    result.erase(lastNonZero + 1); // keep at least "N."
+                }
+                else if (lastNonZero != std::string::npos)
+                {
+                    result.erase(lastNonZero + 1);
+                }
+            }
+        }
+        return result;
     }
     /// Extract the ResourceId from a node parameter that is linked to a resource-holding node.
     /// Returns 0 if the parameter isn't found, has no source, or the source doesn't carry a
@@ -1509,6 +1554,17 @@ namespace gladius
                 depth--;
             else if (depth == 0 && isOperator(c))
             {
+                // Skip +/- that are part of scientific notation (e.g. 1e+06, 2.5e-3)
+                if ((c == '+' || c == '-') && i > 0 &&
+                    (expr[i - 1] == 'e' || expr[i - 1] == 'E'))
+                {
+                    // Verify there's a digit before the 'e'/'E'
+                    if (i >= 2 && std::isdigit(static_cast<unsigned char>(expr[i - 2])))
+                    {
+                        continue;
+                    }
+                }
+
                 // Skip unary minus occurrences (e.g., at the beginning or after another
                 // operator/paren)
                 if (c == '-')
@@ -2558,10 +2614,7 @@ namespace gladius
                 auto val = param.getValue();
                 if (auto const * f = std::get_if<float>(&val))
                 {
-                    // Format float without trailing zeros
-                    std::ostringstream oss;
-                    oss << *f;
-                    return oss.str();
+                    return formatFloat(*f);
                 }
                 return "0";
             }
@@ -2620,9 +2673,7 @@ namespace gladius
                     auto val = valIt->second.getValue();
                     if (auto const * f = std::get_if<float>(&val))
                     {
-                        std::ostringstream oss;
-                        oss << *f;
-                        return oss.str();
+                        return formatFloat(*f);
                     }
                 }
                 return "0";
@@ -2788,9 +2839,8 @@ namespace gladius
                 if (constVec)
                 {
                     auto val = constVec->getValue();
-                    std::ostringstream oss;
-                    oss << "vec3(" << val.x << ", " << val.y << ", " << val.z << ")";
-                    expr = oss.str();
+                    expr = "vec3(" + formatFloat(val.x) + ", " + formatFloat(val.y) +
+                           ", " + formatFloat(val.z) + ")";
                 }
                 else
                 {
@@ -2848,21 +2898,20 @@ namespace gladius
                 if (constMat)
                 {
                     auto mat = constMat->getValue();
-                    std::ostringstream oss;
-                    oss << "mat4(";
+                    std::string matStr = "mat4(";
                     for (int i = 0; i < 4; ++i)
                     {
                         for (int j = 0; j < 4; ++j)
                         {
                             if (i > 0 || j > 0)
                             {
-                                oss << ", ";
+                                matStr += ", ";
                             }
-                            oss << mat[i][j];
+                            matStr += formatFloat(mat[i][j]);
                         }
                     }
-                    oss << ")";
-                    expr = oss.str();
+                    matStr += ")";
+                    expr = matStr;
                 }
                 else
                 {
@@ -3680,11 +3729,44 @@ namespace gladius
         for (auto const & block : blocks)
         {
             auto model = assembly.findModel(block.resourceId);
+
+            // If the parsed block only has default output names ("result"),
+            // preserve the existing model's output names (e.g. "shape") so
+            // that references like levelset channels keep working.
+            auto effectiveOutputs = block.outputs;
+            bool const hasOnlyDefaultNames = std::all_of(
+              effectiveOutputs.begin(),
+              effectiveOutputs.end(),
+              [](auto const & out) { return out.name == FunctionOutput::defaultOutput().name; });
+            if (hasOnlyDefaultNames)
+            {
+                std::vector<FunctionOutput> existingOutputs;
+                if (auto * endNode = model->getEndNode())
+                {
+                    for (auto const & [name, param] : endNode->constParameter())
+                    {
+                        if (param.getConstSource().has_value())
+                        {
+                            auto typeIdx = param.getConstSource()->type;
+                            existingOutputs.emplace_back(
+                              name,
+                              typeIdx == nodes::ParameterTypeIndex::Float3
+                                ? ArgumentType::Vector
+                                : ArgumentType::Scalar);
+                        }
+                    }
+                }
+                if (!existingOutputs.empty())
+                {
+                    effectiveOutputs = existingOutputs;
+                }
+            }
+
             model->clear();
             model->createBeginEnd();
 
             auto nodeId = convertSnippetToGraph(
-              block.body, *model, parser, block.args, block.outputs, &assembly);
+              block.body, *model, parser, block.args, effectiveOutputs, &assembly);
 
             if (nodeId == 0)
             {

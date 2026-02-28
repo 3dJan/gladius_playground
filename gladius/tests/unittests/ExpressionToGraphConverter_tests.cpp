@@ -1950,6 +1950,54 @@ namespace gladius::tests
         EXPECT_NE(result, 0);
     }
 
+    TEST_F(SnippetToGraphTest, InvoluteGear_EngineeringParams_CreatesGraph)
+    {
+        // Standard involute spur gear with ISO 21771 parameter names:
+        //   m      = module (fundamental size parameter, mm)
+        //   z      = number of teeth
+        //   alpha  = pressure angle (radians, typically 20° = 0.349066)
+        //   height = face width / gear thickness (mm)
+        std::vector<FunctionArgument> args = {
+          {"pos", ArgumentType::Vector},
+          {"m", ArgumentType::Scalar},
+          {"z", ArgumentType::Scalar},
+          {"alpha", ArgumentType::Scalar},
+          {"height", ArgumentType::Scalar}};
+
+        // Readable involute gear SDF using intermediate variables
+        std::string snippet =
+          "float r = sqrt(pos.x * pos.x + pos.y * pos.y);\n"
+          "float d = m * z;\n"
+          "float rb = d * cos(alpha) / 2.0;\n"
+          "float ra = d / 2.0 + m;\n"
+          "float rf = d / 2.0 - 1.25 * m;\n"
+          "float angularPitch = 2.0 * pi / z;\n"
+          "float invAlpha = tan(alpha) - alpha;\n"
+          "float toothHalfAngle = pi / (2.0 * z) + invAlpha;\n"
+          "float theta = atan2(pos.y, pos.x);\n"
+          "float thetaMod = mod(theta + toothHalfAngle, angularPitch) - toothHalfAngle;\n"
+          "float thetaModNeg = mod(-theta + toothHalfAngle, angularPitch) - toothHalfAngle;\n"
+          "float involR = sqrt(max(r * r - rb * rb, 0.0));\n"
+          "float invPhi = acos(min(rb / max(r, 0.0001), 1.0));\n"
+          "float flankLeft = involR - rb * (thetaMod + invPhi);\n"
+          "float flankRight = involR - rb * (thetaModNeg + invPhi);\n"
+          "float belowBase = max(0.0, rb - r) * 1000000.0;\n"
+          "float flanks = max(flankLeft - belowBase, flankRight - belowBase);\n"
+          "float tipClip = r - ra;\n"
+          "float toothAngleLimit = angularPitch - toothHalfAngle;\n"
+          "float gapLeft = thetaMod - toothAngleLimit;\n"
+          "float gapRight = thetaModNeg - toothAngleLimit;\n"
+          "float toothProfile = max(tipClip, max(flanks, max(gapLeft, gapRight)));\n"
+          "float rootCircle = r - rf;\n"
+          "float gear2d = min(toothProfile, -(rootCircle - 0.4 * m));\n"
+          "float zInside = abs(pos.z) - height;\n"
+          "return max(gear2d, zInside);\n";
+
+        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, FunctionOutput("shape", ArgumentType::Scalar));
+        EXPECT_NE(result, 0) << "Involute gear snippet should produce a valid node graph";
+    }
+
     // =====================================================================================
     // Graph-to-Snippet Tests
     // =====================================================================================
@@ -2133,6 +2181,132 @@ namespace gladius::tests
         auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
           regenerated, *model2, *m_parser, args, output);
         EXPECT_NE(nodeId, 0) << "Regenerated snippet should produce a valid graph";
+    }
+
+    // =====================================================================================
+    // Scientific notation: expressions with values that would serialize to 1e+06 etc.
+    // =====================================================================================
+
+    TEST_F(ExpressionToGraphConverterTest,
+           ParseScientificNotation_PositiveExponent_CreatesConstant)
+    {
+        // "1e+06" or "1e6" should parse as 1000000
+        std::string const expr = "1e+06";
+        auto resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
+          expr, *m_model, *m_parser, {}, FunctionOutput::defaultOutput());
+        EXPECT_NE(resultNodeId, 0) << "1e+06 should parse as a valid constant";
+    }
+
+    TEST_F(ExpressionToGraphConverterTest,
+           ParseScientificNotation_NegativeExponent_CreatesConstant)
+    {
+        std::string const expr = "1e-06";
+        auto resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
+          expr, *m_model, *m_parser, {}, FunctionOutput::defaultOutput());
+        EXPECT_NE(resultNodeId, 0) << "1e-06 should parse as a valid constant";
+    }
+
+    TEST_F(ExpressionToGraphConverterTest,
+           ParseScientificNotation_InExpression_DoesNotSplitAtPlus)
+    {
+        // "x + 1e+06" must not split at the '+' inside "1e+06"
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string const expr = "x + 1e+06";
+        auto resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
+          expr, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(resultNodeId, 0) << "Expression with scientific notation should parse correctly";
+
+        auto addCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::Addition>(*m_model);
+        EXPECT_EQ(addCount, 1) << "Should have exactly one addition node";
+    }
+
+    TEST_F(ExpressionToGraphConverterTest,
+           ParseScientificNotation_InMultiplication_Parses)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        std::string const expr = "x * 1e+06 + 1e-03";
+        auto resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
+          expr, *m_model, *m_parser, args, FunctionOutput::defaultOutput());
+        EXPECT_NE(resultNodeId, 0) << "Complex expression with scientific notation should parse";
+    }
+
+    // =====================================================================================
+    // Float formatting: graph->snippet should not produce scientific notation
+    // =====================================================================================
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_LargeConstant_NoScientificNotation)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string snippet = "return x + 1000000;";
+
+        m_model->createBeginEndWithDefaultInAndOuts();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, output);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        auto regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_EQ(regenerated.find("e+"), std::string::npos)
+          << "Snippet should not contain scientific notation: " << regenerated;
+        EXPECT_EQ(regenerated.find("e-"), std::string::npos)
+          << "Snippet should not contain scientific notation: " << regenerated;
+
+        // Must be parseable again
+        auto model2 = std::make_unique<nodes::Model>();
+        model2->createBeginEndWithDefaultInAndOuts();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          regenerated, *model2, *m_parser, args, output);
+        EXPECT_NE(nodeId, 0) << "Regenerated snippet must be parseable";
+    }
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_SmallConstant_NoScientificNotation)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string snippet = "return x * 0.000001;";
+
+        m_model->createBeginEndWithDefaultInAndOuts();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, output);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        auto regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_EQ(regenerated.find("e+"), std::string::npos)
+          << "Snippet should not contain scientific notation: " << regenerated;
+        EXPECT_EQ(regenerated.find("e-"), std::string::npos)
+          << "Snippet should not contain scientific notation: " << regenerated;
+
+        auto model2 = std::make_unique<nodes::Model>();
+        model2->createBeginEndWithDefaultInAndOuts();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          regenerated, *model2, *m_parser, args, output);
+        EXPECT_NE(nodeId, 0) << "Regenerated snippet must be parseable";
+    }
+
+    // =====================================================================================
+    // Pi constant preservation: graph->snippet should output 'pi' not '3.14159'
+    // =====================================================================================
+
+    TEST_F(SnippetRoundTripTest, RoundTrip_PiConstant_PreservedAsName)
+    {
+        std::vector<FunctionArgument> args = {{"x", ArgumentType::Scalar}};
+        FunctionOutput output = FunctionOutput::defaultOutput();
+        std::string snippet = "return x * pi;";
+
+        m_model->createBeginEndWithDefaultInAndOuts();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          snippet, *m_model, *m_parser, args, output);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        auto regenerated =
+          ExpressionToGraphConverter::convertGraphToSnippet(*m_model, args, output);
+        EXPECT_NE(regenerated.find("pi"), std::string::npos)
+          << "Snippet should contain 'pi' not a numeric literal: " << regenerated;
+        EXPECT_EQ(regenerated.find("3.14159"), std::string::npos)
+          << "Snippet should not contain '3.14159', should use 'pi': " << regenerated;
     }
 
 } // namespace gladius::tests

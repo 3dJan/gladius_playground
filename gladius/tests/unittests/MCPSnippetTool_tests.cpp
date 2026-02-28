@@ -699,6 +699,60 @@ namespace gladius::tests
     }
 
     // =====================================================================================
+    // T020: set_program_snippet preserves functions not included in the snippet
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_OmittedFunction_IsPreserved)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // Create three functions: A, B, C
+        std::string fullProgram =
+          "// Function: funcA (ID: 10)\n"
+          "float funcA_10(vec3 pos) {\n"
+          "  return pos.x;\n"
+          "}\n"
+          "\n"
+          "// Function: funcB (ID: 20)\n"
+          "float funcB_20(vec3 pos) {\n"
+          "  return pos.y;\n"
+          "}\n"
+          "\n"
+          "// Function: funcC (ID: 30)\n"
+          "float funcC_30(vec3 pos) {\n"
+          "  return pos.z;\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(fullProgram, assembly, parser);
+
+        // Now set only A and C, omitting B
+        std::string partialProgram =
+          "// Function: funcA (ID: 10)\n"
+          "float funcA_10(vec3 pos) {\n"
+          "  return pos.x * 2;\n"
+          "}\n"
+          "\n"
+          "// Function: funcC (ID: 30)\n"
+          "float funcC_30(vec3 pos) {\n"
+          "  return pos.z * 2;\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(partialProgram, assembly, parser);
+
+        // B should still exist and be unchanged
+        auto modelB = assembly.findModel(20);
+        ASSERT_NE(modelB, nullptr) << "Function B (ID:20) should still exist";
+
+        auto snippetB = ExpressionToGraphConverter::convertGraphToSnippet(
+          *modelB, m_args, m_output);
+        EXPECT_NE(snippetB.find("return"), std::string::npos)
+          << "Function B should still have a meaningful body, got: " << snippetB;
+        EXPECT_EQ(snippetB.find("return 0;"), std::string::npos)
+          << "Function B should NOT be zeroed out, got: " << snippetB;
+    }
+
+    // =====================================================================================
     // T018: get_program_snippet snippet text includes [root] annotation on function headers
     // =====================================================================================
 
@@ -757,6 +811,219 @@ namespace gladius::tests
         // Should be unchanged
         EXPECT_EQ(annotated, snippet);
         EXPECT_EQ(annotated.find("[root]"), std::string::npos);
+    }
+
+    // =====================================================================================
+    // setFunctionSnippet preserves arbitrary output names (e.g. "shape")
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, SetFunctionSnippet_PreservesOutputName_Shape)
+    {
+        // Setup: create a model using "shape" output (as created by createFunctionFromSnippet)
+        FunctionOutput shapeOutput("shape", ArgumentType::Scalar);
+
+        m_model->createBeginEndWithDefaultInAndOuts();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          "return pos.x;", *m_model, *m_parser, m_args, shapeOutput);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        // Verify initial state: End node has "shape" connected
+        auto * endNode = m_model->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        auto const & params = endNode->constParameter();
+        auto shapeIt = params.find("shape");
+        ASSERT_NE(shapeIt, params.end());
+        EXPECT_TRUE(shapeIt->second.getConstSource().has_value());
+
+        // Now simulate setFunctionSnippet by extracting connected outputs from existing model
+        std::vector<FunctionOutput> outputs;
+        for (auto const & [name, param] : endNode->constParameter())
+        {
+            if (param.getConstSource().has_value())
+            {
+                auto typeIdx = param.getConstSource()->type;
+                if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                {
+                    outputs.emplace_back(name, ArgumentType::Vector);
+                }
+                else
+                {
+                    outputs.emplace_back(name, ArgumentType::Scalar);
+                }
+            }
+        }
+        ASSERT_FALSE(outputs.empty());
+
+        // Parse new snippet into temp model, then apply
+        nodes::Model tempModel;
+        tempModel.createBeginEnd();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return pos.y * 2;", tempModel, *m_parser, m_args, outputs, nullptr);
+        ASSERT_NE(nodeId, 0u);
+
+        *m_model = std::move(tempModel);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        // Verify: End node still has "shape" connected (not "result")
+        endNode = m_model->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        auto const & newParams = endNode->constParameter();
+
+        auto newShapeIt = newParams.find("shape");
+        EXPECT_NE(newShapeIt, newParams.end());
+        if (newShapeIt != newParams.end())
+        {
+            EXPECT_TRUE(newShapeIt->second.getConstSource().has_value())
+              << "Output 'shape' should be connected after set_function_snippet";
+        }
+
+        // "result" should NOT be present or at least not connected
+        auto resultIt = newParams.find("result");
+        if (resultIt != newParams.end())
+        {
+            EXPECT_FALSE(resultIt->second.getConstSource().has_value())
+              << "Output 'result' should not be connected (we should use 'shape')";
+        }
+    }
+
+    TEST_F(MCPSnippetToolTest, SetFunctionSnippet_PreservesArguments_WhenNotExplicit)
+    {
+        // Setup: create model with custom arguments
+        std::vector<FunctionArgument> customArgs = {
+          {"pos", ArgumentType::Vector},
+          {"radius", ArgumentType::Scalar}
+        };
+        FunctionOutput shapeOutput("shape", ArgumentType::Scalar);
+
+        m_model->createBeginEndWithDefaultInAndOuts();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          "return sqrt(pos.x * pos.x + pos.y * pos.y) - radius;",
+          *m_model, *m_parser, customArgs, shapeOutput);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        // Extract args from Begin node (simulating what setFunctionSnippet should do)
+        std::vector<FunctionArgument> extractedArgs;
+        auto * beginNode = m_model->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+        for (auto const & [portName, port] : beginNode->getOutputs())
+        {
+            if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+            {
+                extractedArgs.emplace_back(portName, ArgumentType::Vector);
+            }
+            else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+            {
+                extractedArgs.emplace_back(portName, ArgumentType::Scalar);
+            }
+        }
+
+        // Should have found pos(vec3) and radius(float)
+        ASSERT_EQ(extractedArgs.size(), 2u);
+        bool hasPos = false;
+        bool hasRadius = false;
+        for (auto const & arg : extractedArgs)
+        {
+            if (arg.name == "pos") hasPos = true;
+            if (arg.name == "radius") hasRadius = true;
+        }
+        EXPECT_TRUE(hasPos);
+        EXPECT_TRUE(hasRadius);
+    }
+
+    TEST_F(MCPSnippetToolTest, GetFunctionSnippet_ExtractsArbitraryOutputName)
+    {
+        // Create a model with a non-standard output name "distance"
+        FunctionOutput distanceOutput("distance", ArgumentType::Scalar);
+
+        m_model->createBeginEnd();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return pos.x;", *m_model, *m_parser, m_args, distanceOutput);
+        ASSERT_NE(nodeId, 0u);
+        m_model->updateGraphAndOrderIfNeeded();
+
+        // Extract connected outputs from End node (simulating getFunctionSnippet)
+        std::vector<FunctionOutput> outputs;
+        auto * endNode = m_model->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        for (auto const & [name, param] : endNode->constParameter())
+        {
+            if (param.getConstSource().has_value())
+            {
+                auto typeIdx = param.getConstSource()->type;
+                if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                {
+                    outputs.emplace_back(name, ArgumentType::Vector);
+                }
+                else
+                {
+                    outputs.emplace_back(name, ArgumentType::Scalar);
+                }
+            }
+        }
+
+        // Should find "distance", not "shape" or "result"
+        ASSERT_EQ(outputs.size(), 1u);
+        EXPECT_EQ(outputs.front().name, "distance");
+        EXPECT_EQ(outputs.front().type, ArgumentType::Scalar);
+
+        // Convert to snippet using extracted outputs instead of defaultOutput()
+        auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
+          *m_model, m_args, outputs, nullptr);
+        EXPECT_FALSE(snippet.empty());
+        EXPECT_NE(snippet.find("return"), std::string::npos);
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_PreservesExistingOutputNames)
+    {
+        // Create an assembly with a function that has "shape" as its output
+        nodes::Assembly assembly;
+        assembly.addModelIfNotExisting(42);
+        auto model = assembly.findModel(42);
+        ASSERT_NE(model, nullptr);
+        model->setDisplayName("MyFunc");
+
+        FunctionOutput shapeOutput("shape", ArgumentType::Scalar);
+        model->createBeginEnd();
+        ExpressionToGraphConverter::convertSnippetToGraph(
+          "return pos.x;", *model, *m_parser, m_args, shapeOutput);
+        model->updateGraphAndOrderIfNeeded();
+
+        // Verify initial state
+        auto * endNode = model->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        {
+            auto shapeIt = endNode->constParameter().find("shape");
+            ASSERT_NE(shapeIt, endNode->constParameter().end());
+            EXPECT_TRUE(shapeIt->second.getConstSource().has_value());
+        }
+
+        // Now run setProgramSnippet with a program that uses plain "float" return
+        // (which would normally default to "result")
+        std::string program =
+          "// Function: MyFunc (ID: 42)\n"
+          "float MyFunc_42(vec3 pos) {\n"
+          "  return pos.y;\n"
+          "}\n";
+
+        ExpressionParser parser;
+        ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser);
+
+        // After setProgramSnippet, the output should still be "shape" (not "result")
+        auto updatedModel = assembly.findModel(42);
+        ASSERT_NE(updatedModel, nullptr);
+
+        auto * updatedEnd = updatedModel->getEndNode();
+        ASSERT_NE(updatedEnd, nullptr);
+
+        auto const & params = updatedEnd->constParameter();
+        auto shapeIt = params.find("shape");
+        EXPECT_NE(shapeIt, params.end())
+          << "Output 'shape' should be preserved after setProgramSnippet roundtrip";
+        if (shapeIt != params.end())
+        {
+            EXPECT_TRUE(shapeIt->second.getConstSource().has_value())
+              << "Output 'shape' should still be connected";
+        }
     }
 
 } // namespace gladius::tests

@@ -134,7 +134,10 @@ namespace gladius::tests
         }
 
         // New 3MF Resource creation methods
-        std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) override
+        std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> /*minPoint*/ = {-10.f, -10.f, -10.f},
+          std::array<float, 3> /*maxPoint*/ = {10.f, 10.f, 10.f}) override
         {
             return {true, functionId + 1000}; // Mock level set ID
         }
@@ -340,6 +343,17 @@ namespace gladius::tests
                                           std::string const & /*expression*/,
                                           std::string const & /*description*/,
                                           bool /*overwrite*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json
+        createLibraryEntryFromSnippet(std::string const & /*name*/,
+                                      std::string const & /*category*/,
+                                      std::string const & /*snippet*/,
+                                      std::string const & /*description*/,
+                                      std::vector<FunctionArgument> const & /*arguments*/,
+                                      std::string const & /*outputType*/,
+                                      bool /*overwrite*/) override
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }

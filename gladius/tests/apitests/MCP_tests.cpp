@@ -79,7 +79,10 @@ namespace gladius::tests
         MOCK_METHOD(bool, exportDocumentAs3MF, (const std::string &, bool), (const, override));
 
         // New 3MF Resource creation methods
-        MOCK_METHOD((std::pair<bool, uint32_t>), createLevelSet, (uint32_t), (override));
+        MOCK_METHOD((std::pair<bool, uint32_t>),
+                    createLevelSet,
+                    (uint32_t, Float3Array, Float3Array),
+                    (override));
         MOCK_METHOD((std::pair<bool, uint32_t>),
                     createImage3DFunction,
                     (const std::string &, const std::string &, float, float),
@@ -183,6 +186,16 @@ namespace gladius::tests
                     (std::string const &,
                      std::string const &,
                      std::string const &,
+                     std::string const &,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    createLibraryEntryFromSnippet,
+                    (std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::vector<FunctionArgument> const &,
                      std::string const &,
                      bool),
                     (override));

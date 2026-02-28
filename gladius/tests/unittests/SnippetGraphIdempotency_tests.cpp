@@ -570,7 +570,12 @@ namespace gladius::tests
         IdempotencyTestCase{"BoxApprox",         "return max(max(abs(pos.x) - 1.0, abs(pos.y) - 1.0), abs(pos.z) - 1.0);", {{"pos", ArgumentType::Vector}}},
         IdempotencyTestCase{"SineWave",          "return pos.y - sin(pos.x * 3.14);",   {{"pos", ArgumentType::Vector}}},
         IdempotencyTestCase{"MultiAssign",       "float a = x * 2.0;\nreturn a + 1.0;", {{"x", ArgumentType::Scalar}}},
-        IdempotencyTestCase{"ChainedAssign",     "float a = x + 1.0;\nfloat b = a * 2.0;\nreturn b;", {{"x", ArgumentType::Scalar}}}
+        IdempotencyTestCase{"ChainedAssign",     "float a = x + 1.0;\nfloat b = a * 2.0;\nreturn b;", {{"x", ArgumentType::Scalar}}},
+        IdempotencyTestCase{"ScientificNotPos",  "return x + 1000000;",                 {{"x", ArgumentType::Scalar}}},
+        IdempotencyTestCase{"ScientificNotNeg",  "return x * 0.000001;",                {{"x", ArgumentType::Scalar}}},
+        IdempotencyTestCase{"LargeConstMul",     "return x * 1000000 + 0.001;",         {{"x", ArgumentType::Scalar}}},
+        IdempotencyTestCase{"PiConstant",        "return x * pi;",                      {{"x", ArgumentType::Scalar}}},
+        IdempotencyTestCase{"PiInExpr",          "return sin(x * pi / 180);",           {{"x", ArgumentType::Scalar}}}
       ),
       [](::testing::TestParamInfo<IdempotencyTestCase> const & info)
       { return info.param.name; });
