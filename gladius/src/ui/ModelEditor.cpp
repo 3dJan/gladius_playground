@@ -897,6 +897,8 @@ namespace gladius::ui
     {
         // Mark the editor to re-apply node positions and refresh view on next frame
         m_nodePositionsNeedUpdate = true;
+        m_pendingCenterViewFrames = 0;
+        m_pendingCenterViewRequest = false;
         m_dirty = true;
         // Defer selection clearing until an editor is active to avoid calling NodeEditor APIs out
         // of context
@@ -906,7 +908,7 @@ namespace gladius::ui
         // but only once per function to preserve user edits.
         if (m_currentModel)
         {
-            m_pendingAutoLayout = !m_currentModel->hasBeenLayouted();
+            m_pendingAutoLayout = m_currentModel->needsAutoLayout();
         }
         else
         {
@@ -1157,6 +1159,18 @@ namespace gladius::ui
                                                                        "\tCenter View")))
                     {
                         ed::NavigateToContent();
+                    }
+                    if (m_pendingCenterViewRequest)
+                    {
+                        if (m_pendingCenterViewFrames > 0)
+                        {
+                            --m_pendingCenterViewFrames;
+                        }
+                        else
+                        {
+                            ed::NavigateToContent();
+                            m_pendingCenterViewRequest = false;
+                        }
                     }
 
                     // Block Undo/Redo/Copy/Paste during export
@@ -1467,26 +1481,25 @@ namespace gladius::ui
                 m_nodeViewVisitor.setExportState(m_exportState);
                 if (m_currentModel)
                 {
-                    m_nodeWidthsInitialized = m_nodeViewVisitor.columnWidthsAreInitialized();
+                    // Perform pending initial auto-layout BEFORE visitNodes so
+                    // that nodes are rendered at their layouted positions on
+                    // this very frame. This ensures ed::End() computes correct
+                    // node bounds immediately, which NavigateToContent relies on.
+                    if (m_pendingAutoLayout)
+                    {
+                        m_pendingAutoLayout = false;
+                        autoLayout();
+
+                        // Keep m_nodePositionsNeedUpdate=true so that
+                        // applyNodePositions() (after ed::End) can reliably
+                        // push the layouted NodeBase::screenPos values into the
+                        // node editor context on first visit.
+                    }
+
                     m_currentModel->visitNodes(m_nodeViewVisitor);
 
                     // Update node groups after nodes are rendered and positioned
                     m_nodeViewVisitor.updateNodeGroups();
-
-                    // Perform pending initial auto-layout after nodes are first rendered,
-                    // so widths/metrics are available to the layout engine.
-                    if (m_pendingAutoLayout && m_nodeWidthsInitialized)
-                    {
-                        m_pendingAutoLayout = false;
-                        autoLayout();
-                    }
-
-                    // Center view AFTER autolayout completes for first-time visits
-                    if (m_pendingCenterView)
-                    {
-                        m_pendingCenterView = false;
-                        ed::NavigateToContent();
-                    }
 
                 }
                 onCreateNode();
@@ -1593,13 +1606,16 @@ namespace gladius::ui
 
                 m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
 
-                if (m_nodePositionsNeedUpdate)
+                if (m_currentTabMode == TabMode::Graph)
                 {
-                    applyNodePositions();
-                }
-                else
-                {
-                    readBackNodePositions();
+                    if (m_nodePositionsNeedUpdate)
+                    {
+                        applyNodePositions();
+                    }
+                    else
+                    {
+                        readBackNodePositions();
+                    }
                 }
             }
 
@@ -1873,13 +1889,40 @@ namespace gladius::ui
         m_assembly = std::move(assembly);
         m_currentModel = m_assembly->assemblyModel();
 
-        // if there are other models, we switch to the first one
-        if (m_assembly->getFunctions().size() > 1)
+        // Try to show the function referenced by the first build item's levelset.
+        // The assembly model contains FunctionCall nodes whose functionId points to the
+        // user-defined functions used by each build item.
+        auto const & assemblyModel = m_assembly->assemblyModel();
+        nodes::SharedModel initialModel;
+        if (assemblyModel)
         {
-            // find first function that is not the assembly model
+            for (auto const & [nodeId, node] : *assemblyModel)
+            {
+                if (auto const * fc = dynamic_cast<nodes::FunctionCall const *>(node.get()))
+                {
+                    auto const funcId = fc->getFunctionId();
+                    if (funcId != 0)
+                    {
+                        initialModel = m_assembly->findModel(funcId);
+                    }
+                    if (initialModel)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (initialModel)
+        {
+            m_currentModel = initialModel;
+        }
+        else if (m_assembly->getFunctions().size() > 1)
+        {
+            // Fallback: pick the first function that is not the assembly model
             for (auto & [id, model] : m_assembly->getFunctions())
             {
-                if (model->getResourceId() != m_assembly->assemblyModel()->getResourceId())
+                if (model->getResourceId() != assemblyModel->getResourceId())
                 {
                     m_currentModel = model;
                     break;
@@ -2279,11 +2322,6 @@ namespace gladius::ui
             return;
         }
 
-        // if (!m_nodeWidthsInitialized)
-        // {
-        //     return;
-        // }
-
         createUndoRestorePoint("Autolayout");
 
         // Use the dedicated layout engine for all layout operations
@@ -2373,8 +2411,10 @@ namespace gladius::ui
                 auto const targetPos = node.second->screenPos();
                 ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
             }
-            // Defer NavigateToContent until after autolayout completes
-            m_pendingCenterView = true;
+            // Schedule first-visit centering through the same path as the
+            // manual toolbar action, with a small deterministic frame delay.
+            m_pendingCenterViewRequest = true;
+            m_pendingCenterViewFrames = 2;
             m_visitedFunctions.insert(funcId);
         }
     }

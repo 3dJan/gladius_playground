@@ -236,7 +236,8 @@ namespace gladius::ui
         bool m_visible = false;
         std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
         std::set<nodes::ResourceId> m_visitedFunctions;  ///< Track first-time visits for NavigateToContent
-        bool m_pendingCenterView = false;  ///< Defer NavigateToContent to after autolayout
+        int m_pendingCenterViewFrames = 0;  ///< Frame countdown before requesting center view
+        bool m_pendingCenterViewRequest = false; ///< Execute via same path as toolbar Center View
         bool m_dirty{true};
         bool m_parameterDirty{false};
         bool m_primitiveDataDirty{false};
@@ -244,7 +245,6 @@ namespace gladius::ui
         bool m_pendingPasteRequest{false};
         float m_nodeDistance = 50.f;
         float m_scale = 0.5f;
-        bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};
         bool m_showAddModel{false};
 

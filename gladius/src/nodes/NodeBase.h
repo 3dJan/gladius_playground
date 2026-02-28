@@ -175,6 +175,11 @@ namespace gladius::nodes
             return m_screenPos;
         }
 
+        [[nodiscard]] auto screenPos() const -> float2 const &
+        {
+            return m_screenPos;
+        }
+
         [[nodiscard]] auto getCategory() const -> Category
         {
             return m_category;

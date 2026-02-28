@@ -865,6 +865,42 @@ namespace gladius::nodes
         return m_nodesHaveBeenLayouted;
     }
 
+    bool Model::needsAutoLayout() const
+    {
+        if (m_nodesHaveBeenLayouted)
+        {
+            return false;
+        }
+
+        // Fewer than 3 nodes means only Begin/End — nothing to layout.
+        if (m_nodes.size() < 3)
+        {
+            return false;
+        }
+
+        // Check whether all non-Begin/End nodes share the same position.
+        // This catches the typical case where nodes are created at (0,0).
+        std::optional<float2> referencePos;
+        for (auto const & [id, node] : m_nodes)
+        {
+            if (!node || node.get() == m_beginNode || node.get() == m_endNode)
+            {
+                continue;
+            }
+            auto const & pos = node->screenPos();
+            if (!referencePos)
+            {
+                referencePos = pos;
+                continue;
+            }
+            if (pos.x != referencePos->x || pos.y != referencePos->y)
+            {
+                return false;
+            }
+        }
+        return referencePos.has_value();
+    }
+
     void Model::setIsValid(bool isValid)
     {
         m_isValid = isValid;

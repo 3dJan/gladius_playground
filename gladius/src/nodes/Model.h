@@ -245,6 +245,10 @@ namespace gladius::nodes
         void markAsLayouted();
         [[nodiscard]] bool hasBeenLayouted() const;
 
+        /// Returns true when the model has non-trivial nodes whose positions are
+        /// all identical (typically 0,0), indicating that no layout has been applied.
+        [[nodiscard]] bool needsAutoLayout() const;
+
         void setIsValid(bool isValid);
 
         /**
