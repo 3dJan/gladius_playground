@@ -1026,4 +1026,189 @@ namespace gladius::tests
         }
     }
 
+    // =====================================================================================
+    // Vec3-returning cross-function call used as argument to another function call
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_Vec3CrossFunctionCallAsArgument_ConnectsCorrectly)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // twist_1 returns vec3, box_4 takes vec3 pos, main calls box_4(size, twist_1(pos, 0.1))
+        std::string program =
+          "// Function: twist (ID: 1)\n"
+          "vec3 twist_1(vec3 pos, float twist_rate) {\n"
+          "  float angle = pos.z * twist_rate;\n"
+          "  float c = cos(angle);\n"
+          "  float s = sin(angle);\n"
+          "  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n"
+          "}\n"
+          "\n"
+          "// Function: box (ID: 4)\n"
+          "float box_4(vec3 b, vec3 pos) {\n"
+          "  float v0 = abs(pos) - vec3(0.5, 0.5, 0.5) * b;\n"
+          "  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return box_4(vec3(30, 30, 60), twist_1(pos, 0.1));\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser);
+
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr) << "main function (ID 3) should exist";
+
+        // The main function's snippet should contain the twist call, not just "0"
+        auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
+          *mainModel, m_args, m_output, &assembly);
+        EXPECT_NE(snippet.find("twist_1"), std::string::npos)
+          << "main should reference twist_1, got: " << snippet;
+        EXPECT_EQ(snippet.find("return 0"), std::string::npos)
+          << "main should NOT be 'return 0', got: " << snippet;
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_Vec3CrossCall_WithPreExistingFunctions)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // Pre-populate assembly with functions at IDs 1,3,4,5 (simulating existing document)
+        assembly.addModelIfNotExisting(1);
+        auto preModel1 = assembly.findModel(1);
+        preModel1->setDisplayName("honeycomb");
+        preModel1->createBeginEnd();
+        // Add a scalar output named "shape" to mimic existing honeycomb
+        {
+            std::vector<FunctionArgument> preArgs = {{"pos", ArgumentType::Vector}};
+            FunctionOutput preOut{"shape", ArgumentType::Scalar};
+            ExpressionToGraphConverter::convertSnippetToGraph(
+              "return 1.0;", *preModel1, parser, preArgs, preOut);
+        }
+
+        assembly.addModelIfNotExisting(3);
+        auto preModel3 = assembly.findModel(3);
+        preModel3->setDisplayName("main");
+        preModel3->createBeginEnd();
+
+        assembly.addModelIfNotExisting(4);
+        auto preModel4 = assembly.findModel(4);
+        preModel4->setDisplayName("box");
+        preModel4->createBeginEnd();
+
+        assembly.addModelIfNotExisting(5);
+        auto preModel5 = assembly.findModel(5);
+        preModel5->setDisplayName("sphere");
+        preModel5->createBeginEnd();
+
+        // Now apply the program snippet with twist at ID 1 (replacing honeycomb)
+        std::string program =
+          "// Function: twist (ID: 1)\n"
+          "vec3 twist_1(vec3 pos, float twist_rate) {\n"
+          "  float angle = pos.z * twist_rate;\n"
+          "  float c = cos(angle);\n"
+          "  float s = sin(angle);\n"
+          "  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n"
+          "}\n"
+          "\n"
+          "// Function: box (ID: 4)\n"
+          "float box_4(vec3 b, vec3 pos) {\n"
+          "  float v0 = abs(pos) - vec3(0.5, 0.5, 0.5) * b;\n"
+          "  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return box_4(vec3(30, 30, 60), twist_1(pos, 0.1));\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser);
+
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+
+        auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
+          *mainModel, m_args, m_output, &assembly);
+        EXPECT_NE(snippet.find("twist_1"), std::string::npos)
+          << "main should reference twist_1 (with pre-existing functions), got: " << snippet;
+        EXPECT_EQ(snippet.find("return 0"), std::string::npos)
+          << "main should NOT be 'return 0' (with pre-existing functions), got: " << snippet;
+    }
+
+    // =====================================================================================
+    // setProgramSnippet: replacing scalar function with vec3 function at same ID
+    // must not preserve the old scalar output type
+    // =====================================================================================
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_Vec3ReplacesScalar_OutputTypePreserved)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // Pre-populate: model at ID 1 is "honeycomb" with scalar output "shape"
+        assembly.addModelIfNotExisting(1);
+        auto preModel = assembly.findModel(1);
+        preModel->setDisplayName("honeycomb");
+        preModel->createBeginEnd();
+        {
+            std::vector<FunctionArgument> preArgs = {{"pos", ArgumentType::Vector}};
+            FunctionOutput preOut{"shape", ArgumentType::Scalar};
+            ExpressionToGraphConverter::convertSnippetToGraph(
+              "return 1.0;", *preModel, parser, preArgs, preOut);
+            preModel->updateGraphAndOrderIfNeeded();
+        }
+
+        // Pre-populate: model at ID 3 is "main" (empty)
+        assembly.addModelIfNotExisting(3);
+        auto preMain = assembly.findModel(3);
+        preMain->setDisplayName("main");
+        preMain->createBeginEnd();
+
+        // Apply snippet: twist at ID 1 now returns vec3, main calls it
+        std::string program =
+          "// Function: twist (ID: 1)\n"
+          "vec3 twist_1(vec3 pos, float twist_rate) {\n"
+          "  float angle = pos.z * twist_rate;\n"
+          "  float c = cos(angle);\n"
+          "  float s = sin(angle);\n"
+          "  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return length(twist_1(pos, 0.1)) - 10.0;\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser);
+
+        // Verify twist (ID 1) has vec3 output, not scalar
+        auto twistModel = assembly.findModel(1);
+        ASSERT_NE(twistModel, nullptr);
+        auto * endNode = twistModel->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+
+        bool hasVec3Output = false;
+        for (auto const & [name, param] : endNode->constParameter())
+        {
+            if (param.getConstSource().has_value())
+            {
+                hasVec3Output =
+                  param.getConstSource()->type == nodes::ParameterTypeIndex::Float3;
+            }
+        }
+        EXPECT_TRUE(hasVec3Output)
+          << "twist (ID 1) should have a vec3 output after replacing scalar honeycomb";
+
+        // Verify main (ID 3) correctly references twist_1
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+        auto mainSnippet = ExpressionToGraphConverter::convertGraphToSnippet(
+          *mainModel, m_args, m_output, &assembly);
+        EXPECT_NE(mainSnippet.find("twist_1"), std::string::npos)
+          << "main should reference twist_1, got: " << mainSnippet;
+        EXPECT_EQ(mainSnippet.find("return 0"), std::string::npos)
+          << "main should NOT be 'return 0', got: " << mainSnippet;
+    }
+
 } // namespace gladius::tests

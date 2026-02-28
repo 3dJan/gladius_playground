@@ -3733,6 +3733,8 @@ namespace gladius
             // If the parsed block only has default output names ("result"),
             // preserve the existing model's output names (e.g. "shape") so
             // that references like levelset channels keep working.
+            // Only preserve when output count and types match to avoid
+            // silently changing a vec3 function to scalar (or vice versa).
             auto effectiveOutputs = block.outputs;
             bool const hasOnlyDefaultNames = std::all_of(
               effectiveOutputs.begin(),
@@ -3756,7 +3758,14 @@ namespace gladius
                         }
                     }
                 }
-                if (!existingOutputs.empty())
+                bool const typesMatch =
+                  existingOutputs.size() == effectiveOutputs.size() &&
+                  std::equal(
+                    existingOutputs.begin(),
+                    existingOutputs.end(),
+                    effectiveOutputs.begin(),
+                    [](auto const & a, auto const & b) { return a.type == b.type; });
+                if (!existingOutputs.empty() && typesMatch)
                 {
                     effectiveOutputs = existingOutputs;
                 }
