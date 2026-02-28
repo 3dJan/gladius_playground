@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -86,7 +87,10 @@ namespace gladius
                                          bool includeImplicitFunctions = true) const = 0;
 
         // 3MF Resource creation methods (return success flag and resource ID)
-        virtual std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) = 0;
+        virtual std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> minPoint = {-10.f, -10.f, -10.f},
+          std::array<float, 3> maxPoint = {10.f, 10.f, 10.f}) = 0;
         virtual std::pair<bool, uint32_t> createImage3DFunction(const std::string & name,
                                                                 const std::string & imagePath,
                                                                 float valueScale = 1.0f,
@@ -497,6 +501,16 @@ namespace gladius
                                                   std::string const & expression,
                                                   std::string const & description,
                                                   bool overwrite = false) = 0;
+
+        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
+        virtual nlohmann::json
+        createLibraryEntryFromSnippet(std::string const & name,
+                                      std::string const & category,
+                                      std::string const & snippet,
+                                      std::string const & description,
+                                      std::vector<FunctionArgument> const & arguments,
+                                      std::string const & outputType = "float",
+                                      bool overwrite = false) = 0;
 
         /// @brief Export a function from the active document to the library.
         /// @param functionId ModelResourceID of the function to export.

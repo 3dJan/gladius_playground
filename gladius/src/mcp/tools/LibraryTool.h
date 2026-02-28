@@ -7,6 +7,8 @@
 
 #include "MCPToolBase.h"
 
+#include "../../FunctionArgument.h"
+
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <string>
@@ -56,6 +58,24 @@ namespace mcp::tools
                                           std::string const & expression,
                                           std::string const & description,
                                           bool overwrite = false);
+
+        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
+        /// @param name Entry name (used as filename).
+        /// @param category Category subdirectory name.
+        /// @param snippet Multi-line GLSL-like snippet defining the SDF function.
+        /// @param description Human-readable description.
+        /// @param arguments Custom function arguments (name + type pairs).
+        /// @param outputType Output type: "float" (default) or "vec3".
+        /// @param overwrite If true, replace existing entry.
+        /// @return JSON with creation result including path and function ID.
+        nlohmann::json createLibraryEntryFromSnippet(
+            std::string const & name,
+            std::string const & category,
+            std::string const & snippet,
+            std::string const & description,
+            std::vector<FunctionArgument> const & arguments,
+            std::string const & outputType = "float",
+            bool overwrite = false);
 
         /// @brief Export a function from the active document to the library.
         /// @param functionId ModelResourceID of the function to export.

@@ -955,7 +955,8 @@ namespace gladius::mcp
                                        {"function_name", name},
                                        {"expression", expression},
                                        {"output_type", outputType},
-                                       {"resource_id", result.second}};
+                                       {"resource_id", result.second},
+                                       {"function_id", result.second}};
 
                       // Add automatic validation after function creation
                       json validationOptions = {{"compile", false}, {"max_messages", 10}};
@@ -1073,7 +1074,8 @@ namespace gladius::mcp
                                        {"function_name", name},
                                        {"snippet", snippet},
                                        {"output_type", outputType},
-                                       {"resource_id", result.second}};
+                                       {"resource_id", result.second},
+                                       {"function_id", result.second}};
 
                       json validationOptions = {{"compile", false}, {"max_messages", 10}};
                       auto validation = m_application->validateModel(validationOptions);
@@ -1211,16 +1213,49 @@ namespace gladius::mcp
         registerTool(
           "create_levelset",
           "Create a level set from a volumetric function - converts function to 3D geometry for "
-          "3MF",
+          "3MF. The bounding box defines the evaluation domain for the SDF function.",
           {{"type", "object"},
            {"properties",
             {{"function_id",
-              {{"type", "integer"}, {"description", "Resource ID of the volumetric function"}}}}},
+              {{"type", "integer"}, {"description", "Resource ID of the volumetric function"}}},
+             {"min_point",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description",
+                "Minimum corner [x,y,z] of the bounding box (default: [-10,-10,-10])"}}},
+             {"max_point",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description",
+                "Maximum corner [x,y,z] of the bounding box (default: [10,10,10])"}}}
+            }},
            {"required", {"function_id"}}},
           [this](const json & params) -> json
           {
               uint32_t function_id = params["function_id"];
-              auto result = m_application->createLevelSet(function_id);
+              std::array<float, 3> minPoint = {-10.f, -10.f, -10.f};
+              std::array<float, 3> maxPoint = {10.f, 10.f, 10.f};
+              if (params.contains("min_point") && params["min_point"].is_array() &&
+                  params["min_point"].size() == 3)
+              {
+                  for (int i = 0; i < 3; ++i)
+                  {
+                      minPoint[i] = params["min_point"][i].get<float>();
+                  }
+              }
+              if (params.contains("max_point") && params["max_point"].is_array() &&
+                  params["max_point"].size() == 3)
+              {
+                  for (int i = 0; i < 3; ++i)
+                  {
+                      maxPoint[i] = params["max_point"][i].get<float>();
+                  }
+              }
+              auto result = m_application->createLevelSet(function_id, minPoint, maxPoint);
 
               if (result.first)
               {
@@ -1941,11 +1976,14 @@ namespace gladius::mcp
         // CREATE LIBRARY ENTRY
         registerTool(
           "create_library_entry",
-          "Create a new library entry from a math expression. Creates a 3MF file with "
-          "the specified function, library metadata, and saves it to the user library "
-          "directory. Expression syntax: variables x,y,z; operators + - * /; functions "
-          "sin, cos, tan, sqrt, abs, exp, log, pow; constants pi and e. Use pow(a,b) "
-          "instead of ^ operator.",
+          "Create a new library entry from a GLSL-like snippet (or simple expression). "
+          "Creates a 3MF file with the specified function, library metadata, and saves "
+          "it to the user library directory. The 'snippet' field accepts multi-line code "
+          "with float assignments, if/else, and return statements. For backward "
+          "compatibility, 'expression' is also accepted (single-line, x/y/z auto-"
+          "detected). Supported: operators + - * /; functions sin, cos, tan, acos, "
+          "asin, atan, atan2, sqrt, abs, exp, log, pow, mod, min, max, clamp, mix, "
+          "step, smoothstep, length, dot, cross, normalize; constants pi, e.",
           {{"type", "object"},
            {"properties",
             {{"name",
@@ -1957,11 +1995,34 @@ namespace gladius::mcp
               {{"type", "string"},
                {"description",
                 "Library category (subdirectory name, created if needed)"}}},
+             {"snippet",
+              {{"type", "string"},
+               {"description",
+                "GLSL-like code defining the SDF function. Supports multi-line "
+                "assignments (float x = expr;), if/else, and return. Example: "
+                "'float r = length(pos);\nreturn r - radius;'"}}},
              {"expression",
               {{"type", "string"},
                {"description",
-                "Math expression defining the SDF function. Example: "
-                "'sin(x*2*pi/10) + sin(y*2*pi/10) + sin(z*2*pi/10)'"}}},
+                "Deprecated: use 'snippet' instead. Single-line math expression "
+                "with x,y,z auto-detection. Example: 'sqrt(x*x+y*y+z*z)-5'"}}},
+             {"arguments",
+              {{"type", "array"},
+               {"description",
+                "Function input arguments. Each has 'name' and 'type' "
+                "(float or vec3). If omitted and snippet uses pos.x/pos.y/pos.z, "
+                "a pos:vec3 argument is auto-inferred."},
+               {"items",
+                {{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}}},
+                   {"type",
+                    {{"type", "string"},
+                     {"enum", {"float", "vec3"}}}}}}}}}},
+             {"output_type",
+              {{"type", "string"},
+               {"description", "Output type: 'float' (default) or 'vec3'."},
+               {"default", "float"}}},
              {"description",
               {{"type", "string"},
                {"description", "Human-readable description of the function"}}},
@@ -1971,21 +2032,31 @@ namespace gladius::mcp
                 "If true, overwrite an existing entry with the same name. "
                 "Default: false."},
                {"default", false}}}}},
-           {"required", {"name", "category", "expression", "description"}}},
+           {"required", {"name", "category", "description"}}},
           [this](const json & params) -> json
           {
               if (!m_application)
               {
                   return {{"success", false}, {"error", "No application available"}};
               }
+
               auto missing = std::vector<std::string>{};
-              for (auto const & key : {"name", "category", "expression", "description"})
+              for (auto const & key : {"name", "category", "description"})
               {
                   if (!params.contains(key))
                   {
                       missing.emplace_back(key);
                   }
               }
+
+              bool hasSnippet = params.contains("snippet");
+              bool hasExpression = params.contains("expression");
+
+              if (!hasSnippet && !hasExpression)
+              {
+                  missing.emplace_back("snippet");
+              }
+
               if (!missing.empty())
               {
                   std::string missingList;
@@ -2000,18 +2071,49 @@ namespace gladius::mcp
                   return {{"success", false},
                           {"error", "Missing required parameters: " + missingList},
                           {"usage_example",
-                           {{"name", "my-sphere"},
-                            {"category", "primitives"},
-                            {"expression", "sqrt(x*x + y*y + z*z) - 5"},
-                            {"description", "Sphere with radius 5"}}}};
+                           {{"name", "spur-gear"},
+                            {"category", "mechanical"},
+                            {"snippet",
+                             "float r = length(pos);\nreturn r - radius;"},
+                            {"arguments",
+                             {{{"name", "pos"}, {"type", "vec3"}},
+                              {{"name", "radius"}, {"type", "float"}}}},
+                            {"description", "Sphere with given radius"}}}};
               }
+
               std::string name = params["name"];
               std::string category = params["category"];
-              std::string expression = params["expression"];
               std::string description = params["description"];
               bool overwrite = params.value("overwrite", false);
-              return m_application->createLibraryEntry(
-                name, category, expression, description, overwrite);
+
+              // 'expression' is a legacy alias: auto-detects x,y,z → pos
+              if (hasExpression && !hasSnippet)
+              {
+                  std::string expression = params["expression"];
+                  return m_application->createLibraryEntry(
+                    name, category, expression, description, overwrite);
+              }
+
+              std::string snippet = params["snippet"];
+              std::string outputType = params.value("output_type", "float");
+
+              std::vector<FunctionArgument> arguments;
+              if (params.contains("arguments") && params["arguments"].is_array())
+              {
+                  for (auto const & argJson : params["arguments"])
+                  {
+                      std::string argName = argJson["name"];
+                      std::string argType = argJson["type"];
+                      ArgumentType type =
+                        (argType == "float" || argType == "scalar")
+                          ? ArgumentType::Scalar
+                          : ArgumentType::Vector;
+                      arguments.emplace_back(argName, type);
+                  }
+              }
+
+              return m_application->createLibraryEntryFromSnippet(
+                name, category, snippet, description, arguments, outputType, overwrite);
           });
 
         // EXPORT TO LIBRARY

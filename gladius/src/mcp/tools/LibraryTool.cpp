@@ -468,19 +468,52 @@ namespace gladius::mcp::tools
                                                     std::string const & description,
                                                     bool overwrite)
     {
-        if (name.empty() || category.empty() || expression.empty())
+        // Legacy path: auto-detect x,y,z and transform to pos.x, pos.y, pos.z
+        ExpressionParser parser;
+        std::vector<FunctionArgument> arguments;
+        std::string snippet = expression;
+
+        if (parser.parseExpression(expression))
+        {
+            auto variables = parser.getVariables();
+            bool usesXYZ = std::any_of(variables.begin(), variables.end(),
+                                       [](auto const & v)
+                                       { return v == "x" || v == "y" || v == "z"; });
+            if (usesXYZ)
+            {
+                arguments.emplace_back("pos", ArgumentType::Vector);
+                snippet = transformVariablesToComponentAccess(expression);
+            }
+        }
+
+        return createLibraryEntryFromSnippet(
+          name, category, snippet, description, arguments, "float", overwrite);
+    }
+
+    nlohmann::json LibraryTool::createLibraryEntryFromSnippet(
+        std::string const & name,
+        std::string const & category,
+        std::string const & snippet,
+        std::string const & description,
+        std::vector<FunctionArgument> const & arguments,
+        std::string const & outputType,
+        bool overwrite)
+    {
+        if (name.empty() || category.empty() || snippet.empty())
         {
             return createToolError(
-              "Name, category, and expression are required",
-              {{"name", "my-sphere"},
-               {"category", "primitives"},
-               {"expression", "sqrt(x*x + y*y + z*z) - 5"},
-               {"description", "Sphere with radius 5"}});
+              "Name, category, and snippet are required",
+              {{"name", "spur-gear"},
+               {"category", "mechanical"},
+               {"snippet", "float r = sqrt(pos.x*pos.x + pos.y*pos.y);\nreturn r - radius;"},
+               {"arguments",
+                {{{"name", "pos"}, {"type", "vec3"}},
+                 {{"name", "radius"}, {"type", "float"}}}},
+               {"description", "Example parametric shape"}});
         }
 
         auto const targetPath = getUserLibraryDir() / category / (name + ".3mf");
 
-        // Check for existing file unless overwrite is requested
         if (fs::exists(targetPath) && !overwrite)
         {
             return createToolError(
@@ -488,71 +521,34 @@ namespace gladius::mcp::tools
               {{"name", name}, {"category", category}, {"overwrite", true}});
         }
 
-        // Parse the expression
-        ExpressionParser parser;
-        if (!parser.parseExpression(expression))
-        {
-            return createToolError(
-              fmt::format("Expression parsing failed: {}", parser.getLastError()),
-              {{"name", "my-sphere"},
-               {"category", "primitives"},
-               {"expression", "sqrt(x*x + y*y + z*z) - 5"},
-               {"description", "Sphere with radius 5"}},
-              {{"supported_syntax",
-                {{"variables", "x, y, z"},
-                 {"operators", "+, -, *, /"},
-                 {"functions", "sin, cos, sqrt, abs, min, max, pow"}}}});
-        }
-
         try
         {
-            // Auto-detect x,y,z and transform to pos.x, pos.y, pos.z
-            auto variables = parser.getVariables();
-            std::vector<FunctionArgument> arguments;
-            std::string transformedExpression = expression;
+            ExpressionParser parser;
 
-            bool usesXYZ = std::any_of(variables.begin(), variables.end(),
-                                       [](auto const & v)
-                                       { return v == "x" || v == "y" || v == "z"; });
+            FunctionOutput output;
+            output.name = "shape";
+            output.type =
+              (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                ? ArgumentType::Vector
+                : ArgumentType::Scalar;
 
-            if (usesXYZ)
-            {
-                arguments.emplace_back("pos", ArgumentType::Vector);
-                transformedExpression = transformVariablesToComponentAccess(expression);
-            }
-            else
-            {
-                for (auto const & variable : variables)
-                {
-                    arguments.emplace_back(variable, ArgumentType::Scalar);
-                }
-            }
-
-            FunctionOutput output("shape", ArgumentType::Scalar);
-
-            // Create a nodes::Model, convert expression to graph, and save as 3MF
             nodes::Model tempModel;
             tempModel.setDisplayName(name);
             tempModel.createBeginEnd();
 
-            auto resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
-              transformedExpression, tempModel, parser, arguments, output);
+            auto resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+              snippet, tempModel, parser, arguments, output);
 
             if (resultNodeId == 0)
             {
-                return createToolError("Failed to convert expression to node graph");
+                return createToolError("Failed to convert snippet to node graph");
             }
 
-            // Ensure target directory exists
             fs::create_directories(targetPath.parent_path());
-
-            // Save the function to a 3MF file
             io::saveFunctionTo3mfFile(targetPath, tempModel);
 
-            // Reopen the saved file to stamp library metadata
             auto model3mf = openStandaloneModel(targetPath);
 
-            // Find the function's ModelResourceID
             auto funcIter = model3mf->GetFunctions();
             Lib3MF_uint32 funcModelResId = 0;
             if (funcIter->MoveNext())
@@ -568,7 +564,8 @@ namespace gladius::mcp::tools
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(targetPath.string());
 
-            std::string msg = fmt::format("Created library entry '{}' in category '{}'", name, category);
+            std::string msg =
+              fmt::format("Created library entry '{}' in category '{}'", name, category);
             if (overwrite)
             {
                 msg += " (overwritten)";
@@ -583,10 +580,10 @@ namespace gladius::mcp::tools
         }
         catch (std::exception const & e)
         {
-            // Clean up partial file on failure
             std::error_code ec;
             fs::remove(targetPath, ec);
-            return createToolError(fmt::format("Failed to create library entry: {}", e.what()));
+            return createToolError(
+              fmt::format("Failed to create library entry: {}", e.what()));
         }
     }
 

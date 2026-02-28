@@ -2265,8 +2265,52 @@ namespace gladius
                     return out;
                 }
 
+                // Extract actual arguments from Begin node
+                std::vector<FunctionArgument> args;
+                auto * beginNode = model->getBeginNode();
+                if (beginNode != nullptr)
+                {
+                    for (auto const & [portName, port] : beginNode->getOutputs())
+                    {
+                        if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                        {
+                            args.emplace_back(portName, ArgumentType::Vector);
+                        }
+                        else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                        {
+                            args.emplace_back(portName, ArgumentType::Scalar);
+                        }
+                    }
+                }
+
+                // Extract actual connected outputs from End node
+                std::vector<FunctionOutput> outputs;
+                auto * endNode = model->getEndNode();
+                if (endNode != nullptr)
+                {
+                    for (auto const & [name, param] : endNode->constParameter())
+                    {
+                        if (param.getConstSource().has_value())
+                        {
+                            auto typeIdx = param.getConstSource()->type;
+                            if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                            {
+                                outputs.emplace_back(name, ArgumentType::Vector);
+                            }
+                            else
+                            {
+                                outputs.emplace_back(name, ArgumentType::Scalar);
+                            }
+                        }
+                    }
+                }
+                if (outputs.empty())
+                {
+                    outputs.push_back(FunctionOutput::defaultOutput());
+                }
+
                 auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
-                  *model, {}, FunctionOutput::defaultOutput(), assembly.get());
+                  *model, args, outputs, assembly.get());
 
                 if (snippet.empty())
                 {
@@ -2280,39 +2324,33 @@ namespace gladius
                     out["display_name"] = model->getDisplayName().value();
                 }
 
-                // Report function arguments from Begin node outputs
-                auto * beginNode = model->getBeginNode();
-                if (beginNode != nullptr)
+                // Report function arguments
                 {
                     nlohmann::json argsJson = nlohmann::json::array();
-                    for (auto const & [portName, port] : beginNode->getOutputs())
+                    for (auto const & arg : args)
                     {
                         std::string typeName =
-                          (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3) ? "vec3"
-                                                                                     : "float";
-                        argsJson.push_back({{"name", portName}, {"type", typeName}});
+                          (arg.type == ArgumentType::Vector) ? "vec3" : "float";
+                        argsJson.push_back({{"name", arg.name}, {"type", typeName}});
                     }
                     out["arguments"] = argsJson;
                 }
 
-                // Report output type from End node parameters
-                auto * endNode = model->getEndNode();
-                if (endNode != nullptr)
+                // Report all connected outputs
                 {
-                    auto const & params = endNode->constParameter();
-                    auto shapeIt = params.find(nodes::FieldNames::Shape);
-                    if (shapeIt != params.end())
+                    nlohmann::json outputsJson = nlohmann::json::array();
+                    for (auto const & output : outputs)
                     {
-                        auto const & src = shapeIt->second.getConstSource();
-                        if (src.has_value() &&
-                            src->type == nodes::ParameterTypeIndex::Float3)
-                        {
-                            out["output_type"] = "vec3";
-                        }
-                        else
-                        {
-                            out["output_type"] = "float";
-                        }
+                        std::string typeName =
+                          (output.type == ArgumentType::Vector) ? "vec3" : "float";
+                        outputsJson.push_back({{"name", output.name}, {"type", typeName}});
+                    }
+                    out["outputs"] = outputsJson;
+                    // Backward compatibility: report first output type
+                    if (!outputs.empty())
+                    {
+                        out["output_type"] =
+                          (outputs.front().type == ArgumentType::Vector) ? "vec3" : "float";
                     }
                 }
             }
@@ -2394,20 +2432,67 @@ namespace gladius
                     return out;
                 }
 
-                FunctionOutput output;
-                output.name = "result";
-                output.type =
-                  (outputType == "vec3" || outputType == "vector" || outputType == "float3")
-                    ? ArgumentType::Vector
-                    : ArgumentType::Scalar;
+                // Extract existing connected outputs from the model's End node so we
+                // preserve arbitrary output names (e.g. "shape", "color", custom names).
+                std::vector<FunctionOutput> outputs;
+                auto * existingEnd = model->getEndNode();
+                if (existingEnd)
+                {
+                    for (auto const & [name, param] : existingEnd->constParameter())
+                    {
+                        if (param.getConstSource().has_value())
+                        {
+                            auto typeIdx = param.getConstSource()->type;
+                            if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                            {
+                                outputs.emplace_back(name, ArgumentType::Vector);
+                            }
+                            else
+                            {
+                                outputs.emplace_back(name, ArgumentType::Scalar);
+                            }
+                        }
+                    }
+                }
+                if (outputs.empty())
+                {
+                    FunctionOutput output;
+                    output.name = "shape";
+                    output.type =
+                      (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                        ? ArgumentType::Vector
+                        : ArgumentType::Scalar;
+                    outputs.push_back(output);
+                }
+
+                // Extract existing arguments from the model's Begin node if none provided
+                std::vector<FunctionArgument> effectiveArgs = arguments;
+                if (effectiveArgs.empty())
+                {
+                    auto * existingBegin = model->getBeginNode();
+                    if (existingBegin)
+                    {
+                        for (auto const & [portName, port] : existingBegin->getOutputs())
+                        {
+                            if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                            {
+                                effectiveArgs.emplace_back(portName, ArgumentType::Vector);
+                            }
+                            else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                            {
+                                effectiveArgs.emplace_back(portName, ArgumentType::Scalar);
+                            }
+                        }
+                    }
+                }
 
                 // Validate by parsing into a temporary model first
                 ExpressionParser parser;
                 nodes::Model tempModel;
-                tempModel.createBeginEndWithDefaultInAndOuts();
+                tempModel.createBeginEnd();
 
                 auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-                  snippet, tempModel, parser, arguments, output, assembly.get());
+                  snippet, tempModel, parser, effectiveArgs, outputs, assembly.get());
                 if (nodeId == 0)
                 {
                     out["success"] = false;
@@ -2432,9 +2517,12 @@ namespace gladius
                 model->setManaged(savedManaged);
                 model->updateGraphAndOrderIfNeeded();
 
+                // Sync changes to 3MF model so flattening/compilation works
+                document->update3mfModel();
+
                 // Return the normalized snippet
                 auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
-                  *model, arguments, output, assembly.get());
+                  *model, effectiveArgs, outputs, assembly.get());
                 out["success"] = true;
                 out["snippet"] = normalized.empty() ? snippet : normalized;
             }
@@ -2584,6 +2672,9 @@ namespace gladius
 
                 ExpressionParser parser;
                 ExpressionToGraphConverter::setProgramSnippet(snippet, *assembly, parser);
+
+                // Sync changes to 3MF model so flattening/compilation works
+                document->update3mfModel();
 
                 // Return the normalized program
                 auto normalized =

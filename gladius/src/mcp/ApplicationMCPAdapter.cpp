@@ -925,9 +925,12 @@ namespace gladius
     }
 
     // 3MF Resource creation methods implementation
-    std::pair<bool, uint32_t> ApplicationMCPAdapter::createLevelSet(uint32_t functionId)
+    std::pair<bool, uint32_t> ApplicationMCPAdapter::createLevelSet(
+      uint32_t functionId,
+      std::array<float, 3> minPoint,
+      std::array<float, 3> maxPoint)
     {
-        return m_resourceManagementTool->createLevelSet(functionId);
+        return m_resourceManagementTool->createLevelSet(functionId, minPoint, maxPoint);
     }
 
     std::pair<bool, uint32_t>
@@ -1164,6 +1167,19 @@ nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntry(std::string co
                                                                    bool overwrite)
 {
     return m_libraryTool->createLibraryEntry(name, category, expression, description, overwrite);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntryFromSnippet(
+    std::string const & name,
+    std::string const & category,
+    std::string const & snippet,
+    std::string const & description,
+    std::vector<FunctionArgument> const & arguments,
+    std::string const & outputType,
+    bool overwrite)
+{
+    return m_libraryTool->createLibraryEntryFromSnippet(
+      name, category, snippet, description, arguments, outputType, overwrite);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t functionId,
