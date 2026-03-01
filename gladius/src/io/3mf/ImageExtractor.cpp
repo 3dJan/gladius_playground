@@ -194,6 +194,12 @@ namespace gladius::io
                   fmt::format("Error decoding PNG {}: {}", filename.string(), error));
             }
 
+            auto const pngHeaderInfo = lodepng::getPNGHeaderInfo(fileContents);
+            if (images.empty())
+            {
+                m_pngInfo = pngHeaderInfo;
+            }
+
             Image img{std::move(image), width, height};
             img.swapXYData();
             img.setFormat(PixelFormat::RGBA_8BIT);

@@ -319,4 +319,149 @@ namespace gladius::tests
           << "Should contain sphere_20, got:\n" << result;
     }
 
+    // =====================================================================================
+    // mat4 support: parsing, arguments, return types, and roundtrip
+    // =====================================================================================
+
+    TEST_F(GraphToSnippetNewNodeTest, Mat4Constructor_16Literals_CreatesConstantMatrix)
+    {
+        m_model->createBeginEndWithDefaultInAndOuts();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);",
+          *m_model, *m_parser, posArgs(), scalarOutput());
+        EXPECT_NE(nodeId, 0) << "Parsing mat4(16 floats) should succeed";
+    }
+
+    TEST_F(GraphToSnippetNewNodeTest, Mat4Constructor_RoundTrip_ProducesMat4)
+    {
+        FunctionOutput matOutput("result", ArgumentType::Matrix);
+        auto result = roundTripSnippet(
+          "return mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);",
+          posArgs(), matOutput);
+        EXPECT_FALSE(result.empty()) << "Round-trip should succeed";
+        EXPECT_NE(result.find("mat4("), std::string::npos)
+          << "Should contain mat4(), got: [" << result << "]";
+    }
+
+    TEST_F(GraphToSnippetNewNodeTest, Mat4Argument_ParsedInSignature_CreatesBeginNodeParam)
+    {
+        std::vector<FunctionArgument> args = {{"m", ArgumentType::Matrix}};
+        m_model->createBeginEndWithDefaultInAndOuts();
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return transpose(m);", *m_model, *m_parser, args,
+          FunctionOutput("result", ArgumentType::Matrix));
+        EXPECT_NE(nodeId, 0) << "Parsing with mat4 argument should succeed";
+    }
+
+    TEST_F(GraphToSnippetNewNodeTest, Mat4Argument_RoundTrip_PreservesType)
+    {
+        std::vector<FunctionArgument> args = {{"m", ArgumentType::Matrix}};
+        FunctionOutput matOutput("result", ArgumentType::Matrix);
+        auto result = roundTripSnippet("return transpose(m);", args, matOutput);
+        EXPECT_FALSE(result.empty()) << "Round-trip should succeed";
+        EXPECT_NE(result.find("transpose("), std::string::npos)
+          << "Should contain transpose(), got: [" << result << "]";
+    }
+
+    class Mat4ProgramRoundTripTest : public ::testing::Test
+    {
+      protected:
+        void SetUp() override
+        {
+            m_assembly = std::make_unique<nodes::Assembly>();
+        }
+
+        void addMatrixFunction(nodes::ResourceId id,
+                               std::string const & displayName,
+                               std::string const & body,
+                               std::vector<FunctionArgument> const & args,
+                               std::vector<FunctionOutput> const & outputs)
+        {
+            m_assembly->addModelIfNotExisting(id);
+            auto model = m_assembly->findModel(id);
+            model->setDisplayName(displayName);
+            model->createBeginEnd();
+
+            ExpressionParser parser;
+            ExpressionToGraphConverter::convertSnippetToGraph(
+              body, *model, parser, args, outputs, nullptr);
+            model->updateGraphAndOrderIfNeeded();
+        }
+
+        std::unique_ptr<nodes::Assembly> m_assembly;
+    };
+
+    TEST_F(Mat4ProgramRoundTripTest, Mat4ReturnType_ProgramSnippet_ShowsMat4InSignature)
+    {
+        addMatrixFunction(
+          10, "identity", "return mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);",
+          {{"pos", ArgumentType::Vector}},
+          {FunctionOutput("result", ArgumentType::Matrix)});
+
+        auto program = ExpressionToGraphConverter::convertProgramToSnippet(*m_assembly);
+        ASSERT_FALSE(program.empty());
+        EXPECT_NE(program.find("mat4 identity_10"), std::string::npos)
+          << "Return type should be mat4, got:\n" << program;
+    }
+
+    TEST_F(Mat4ProgramRoundTripTest, Mat4Argument_ProgramSnippet_ShowsMat4InSignature)
+    {
+        addMatrixFunction(
+          10, "transposeFunc", "return transpose(m);",
+          {{"m", ArgumentType::Matrix}},
+          {FunctionOutput("result", ArgumentType::Matrix)});
+
+        auto program = ExpressionToGraphConverter::convertProgramToSnippet(*m_assembly);
+        ASSERT_FALSE(program.empty());
+        EXPECT_NE(program.find("mat4 m"), std::string::npos)
+          << "Argument type should be mat4, got:\n" << program;
+    }
+
+    TEST_F(Mat4ProgramRoundTripTest, Mat4Function_ProgramRoundTrip_IsIdempotent)
+    {
+        addMatrixFunction(
+          10, "identity", "return mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);",
+          {{"pos", ArgumentType::Vector}},
+          {FunctionOutput("result", ArgumentType::Matrix)});
+
+        auto program = ExpressionToGraphConverter::convertProgramToSnippet(*m_assembly);
+        ASSERT_FALSE(program.empty());
+
+        nodes::Assembly rebuilt;
+        rebuilt.addModelIfNotExisting(10);
+        rebuilt.findModel(10)->setDisplayName("identity");
+        ExpressionParser parser;
+        ASSERT_NO_THROW(
+          ExpressionToGraphConverter::setProgramSnippet(program, rebuilt, parser));
+
+        auto program2 = ExpressionToGraphConverter::convertProgramToSnippet(rebuilt);
+        EXPECT_EQ(program, program2)
+          << "mat4 program roundtrip should be idempotent.\n"
+          << "  Original:\n" << program << "\n"
+          << "  Rebuilt:\n" << program2;
+    }
+
+    TEST_F(Mat4ProgramRoundTripTest, Mat4ArgParsing_SetProgramSnippet_ParsesMat4Type)
+    {
+        // Manually construct a program snippet with mat4 argument
+        std::string program =
+          "// Function: transposeFunc (ID: 10)\n"
+          "mat4 transposeFunc_10(mat4 m) {\n"
+          "  return transpose(m);\n"
+          "}\n";
+
+        nodes::Assembly rebuilt;
+        rebuilt.addModelIfNotExisting(10);
+        rebuilt.findModel(10)->setDisplayName("transposeFunc");
+        ExpressionParser parser;
+        ASSERT_NO_THROW(
+          ExpressionToGraphConverter::setProgramSnippet(program, rebuilt, parser));
+
+        auto program2 = ExpressionToGraphConverter::convertProgramToSnippet(rebuilt);
+        EXPECT_NE(program2.find("mat4 m"), std::string::npos)
+          << "Should preserve mat4 argument type, got:\n" << program2;
+        EXPECT_NE(program2.find("mat4 transposeFunc_10"), std::string::npos)
+          << "Should preserve mat4 return type, got:\n" << program2;
+    }
+
 } // namespace gladius::tests

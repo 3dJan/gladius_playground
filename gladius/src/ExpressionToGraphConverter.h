@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
@@ -194,6 +195,13 @@ namespace gladius
         static std::map<std::string, ArgumentType> s_beginNodeArguments;
 
         /**
+         * @brief Maps snippet identifiers (in_argName) to actual Begin node port names (argName).
+         * Used to translate in_-prefixed variable references back to the real argument name
+         * during snippet→graph conversion when resolving Begin node output ports.
+         */
+        static std::map<std::string, std::string> s_argSnippetToPortName;
+
+        /**
          * @brief Track current variable context for Begin node port resolution
          */
         static thread_local std::vector<std::string> s_variableContextStack;
@@ -230,6 +238,10 @@ namespace gladius
         /// Create a ConstantVector node with the given x/y/z values.
         static nodes::NodeId
         createConstantVectorNode(double x, double y, double z, nodes::Model & model);
+
+        /// Create a ConstantMatrix node with the given 16 values (row-major m00..m33).
+        static nodes::NodeId createConstantMatrixNode(
+          std::array<double, 16> const & values, nodes::Model & model);
 
         /**
          * @brief Connect two nodes via their ports

@@ -11,7 +11,8 @@ namespace gladius
     enum class ArgumentType
     {
         Scalar, // float
-        Vector  // float3 (x, y, z)
+        Vector, // float3 (x, y, z)
+        Matrix  // mat4 (4x4 matrix)
     };
 
     /**
