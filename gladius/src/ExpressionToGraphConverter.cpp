@@ -40,14 +40,16 @@ namespace gladius
     /// Recognizes well-known constants (pi, e) and uses their names instead.
     static std::string formatFloat(float value)
     {
-        // Recognize well-known mathematical constants
+        // Recognize well-known mathematical constants using a small epsilon to
+        // tolerate the 1-ULP difference that can arise from float storage round-trips.
         constexpr float PI_F = 3.141592653589793238462643383279502884F;
         constexpr float E_F = 2.718281828459045235360287471352662498F;
-        if (value == PI_F)
+        constexpr float CONSTANT_EPSILON = 1e-6f;
+        if (std::abs(value - PI_F) < CONSTANT_EPSILON)
         {
             return "pi";
         }
-        if (value == E_F)
+        if (std::abs(value - E_F) < CONSTANT_EPSILON)
         {
             return "e";
         }
@@ -63,15 +65,11 @@ namespace gladius
             oss.clear();
             oss << std::setprecision(9) << std::fixed << value;
             result = oss.str();
-            // Remove trailing zeros after decimal point
+            // Remove trailing zeros; the decimal point itself is retained (e.g. "3.").
             if (result.find('.') != std::string::npos)
             {
                 auto lastNonZero = result.find_last_not_of('0');
-                if (lastNonZero != std::string::npos && result[lastNonZero] == '.')
-                {
-                    result.erase(lastNonZero + 1); // keep at least "N."
-                }
-                else if (lastNonZero != std::string::npos)
+                if (lastNonZero != std::string::npos)
                 {
                     result.erase(lastNonZero + 1);
                 }
@@ -120,7 +118,7 @@ namespace gladius
     std::map<nodes::NodeId, std::string> ExpressionToGraphConverter::s_componentMap;
     std::map<std::string, nodes::NodeId> ExpressionToGraphConverter::s_vectorDecomposeNodes;
     std::map<std::string, ArgumentType> ExpressionToGraphConverter::s_beginNodeArguments;
-    std::map<std::string, std::string> ExpressionToGraphConverter::s_argSnippetToPortName;
+    thread_local std::map<std::string, std::string> ExpressionToGraphConverter::s_argSnippetToPortName;
 
     // Track the current variable context for Begin node port resolution
     thread_local std::vector<std::string> ExpressionToGraphConverter::s_variableContextStack;
@@ -3549,9 +3547,9 @@ namespace gladius
         }
 
         // Build dependency graph from snippet text.
-        // Matches emitted function-call tokens of the form: identifier_digits( 
+        // Matches emitted function-call tokens of the form: identifier_digits(
         std::map<nodes::ResourceId, std::set<nodes::ResourceId>> deps;
-        std::regex const funcCallRegex(R"(\b[a-zA-Z_]\w*_(\d+)\()");
+        static std::regex const funcCallRegex(R"(\b[a-zA-Z_]\w*_(\d+)\()");
 
         for (auto const & [id, info] : snippetCache)
         {

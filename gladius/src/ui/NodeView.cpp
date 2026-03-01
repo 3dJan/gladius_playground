@@ -2194,36 +2194,35 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
-                // Bootstrap widths from output content so long user-defined names are
-                // visible even before a stable two-pass cache has converged.
-                if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
+        // Bootstrap widths from output content so long user-defined names are
+        // visible even before a stable two-pass cache has converged.
+        if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
+        {
+            auto const & style = ImGui::GetStyle();
+            float maxOutputLabelWidth = 0.f;
+
+            for (auto & output : node.getOutputs())
+            {
+                if (!output.second.isVisible())
                 {
-                        auto const & style = ImGui::GetStyle();
-                        float maxOutputLabelWidth = 0.f;
-
-                        for (auto & output : node.getOutputs())
-                        {
-                                if (!output.second.isVisible())
-                                {
-                                        continue;
-                                }
-
-                                maxOutputLabelWidth =
-                                    std::max(maxOutputLabelWidth, ImGui::CalcTextSize(output.first.c_str()).x);
-
-                                float const typeLabelWidth =
-                                    ImGui::CalcTextSize(typeToString(output.second.getTypeIndex()).c_str()).x *
-                                    0.5f;
-                                maxOutputLabelWidth = std::max(maxOutputLabelWidth, typeLabelWidth);
-                        }
-
-                        float const pinGlyphWidth =
-                            ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
-                            style.FramePadding.x * 2.0f;
-
-                        columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
-                        columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
+                    continue;
                 }
+
+                maxOutputLabelWidth =
+                  std::max(maxOutputLabelWidth, ImGui::CalcTextSize(output.first.c_str()).x);
+
+                float const typeLabelWidth =
+                  ImGui::CalcTextSize(typeToString(output.second.getTypeIndex()).c_str()).x * 0.5f;
+                maxOutputLabelWidth = std::max(maxOutputLabelWidth, typeLabelWidth);
+            }
+
+            float const pinGlyphWidth =
+              ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
+              style.FramePadding.x * 2.0f;
+
+            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
+            columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
+        }
 
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         if (ImGui::BeginTable("outputs",

@@ -199,7 +199,7 @@ namespace gladius
          * Used to translate in_-prefixed variable references back to the real argument name
          * during snippet→graph conversion when resolving Begin node output ports.
          */
-        static std::map<std::string, std::string> s_argSnippetToPortName;
+        static thread_local std::map<std::string, std::string> s_argSnippetToPortName;
 
         /**
          * @brief Track current variable context for Begin node port resolution

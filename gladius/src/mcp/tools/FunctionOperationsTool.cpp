@@ -2443,14 +2443,12 @@ namespace gladius
                         if (param.getConstSource().has_value())
                         {
                             auto typeIdx = param.getConstSource()->type;
+                            ArgumentType argType = ArgumentType::Scalar;
                             if (typeIdx == nodes::ParameterTypeIndex::Float3)
-                            {
-                                outputs.emplace_back(name, ArgumentType::Vector);
-                            }
-                            else
-                            {
-                                outputs.emplace_back(name, ArgumentType::Scalar);
-                            }
+                                argType = ArgumentType::Vector;
+                            else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
+                                argType = ArgumentType::Matrix;
+                            outputs.emplace_back(name, argType);
                         }
                     }
                 }

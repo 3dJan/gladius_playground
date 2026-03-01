@@ -893,6 +893,8 @@ namespace gladius::nodes
                 referencePos = pos;
                 continue;
             }
+            // Exact equality is intentional: positions are either the literal default
+            // (0, 0) assigned at construction or values explicitly set by the node editor.
             if (pos.x != referencePos->x || pos.y != referencePos->y)
             {
                 return false;
