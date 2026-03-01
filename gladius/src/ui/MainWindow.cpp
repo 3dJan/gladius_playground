@@ -2473,7 +2473,7 @@ namespace gladius::ui
         if (m_parameterDirty)
         {
             m_doc->updateParameter();
-            m_renderWindow.invalidateViewDuetoModelUpdate();
+            m_renderWindow.invalidateViewDueToParameterChange();
             m_parameterDirty = false;
         }
         updateContours();

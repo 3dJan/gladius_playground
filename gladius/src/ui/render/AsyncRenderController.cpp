@@ -261,24 +261,24 @@ namespace gladius::ui::async_rendering
     auto AsyncRenderController::workerLoop(std::shared_ptr<ControllerState> state)
       -> coro::task<void>
     {
-        ZoneScopedN("workerLoop");
-        DebugText("WorkerStarting", 14);
+        // NOTE: No ZoneScoped / DebugText / ZoneScopedN in the outer coroutine scope here.
+        // This coroutine crosses thread boundaries via co_await pop() (push() resumes the consumer
+        // inline on the caller's thread) and co_await waitForEvent() (resumes on the OpenCL
+        // callback thread). Tracy zones must begin and end on the same OS thread — any zone that
+        // spans a co_await that changes threads will corrupt Tracy's per-thread zone stack.
+        // Inner ZoneScopedN blocks (inside the job executors, which don't cross co_await) are fine.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
 #endif
 
         if (!state)
         {
-            DebugText("NoState", 7);
             co_return;
         }
 
         auto * data = &state->data;
 
-        DebugText("SchedulingToPool", 16);
         co_await data->workerPool->schedule();
-
-        DebugText("Scheduled", 9);
 
         {
             std::lock_guard<std::mutex> guard(data->lifecycleMutex);
@@ -286,11 +286,8 @@ namespace gladius::ui::async_rendering
             data->lifecycleCv.notify_all();
         }
 
-        DebugText("EnteringMainLoop", 16);
-
         while (!data->shutdownRequested.load(std::memory_order_acquire))
         {
-            ZoneScopedN("WorkerLoop_Iteration");
             auto jobResult = co_await data->jobQueue.pop();
             if (!jobResult.has_value())
             {
@@ -303,6 +300,11 @@ namespace gladius::ui::async_rendering
             }
 
             RenderJob const & job = jobResult.value();
+
+            // Re-schedule to the thread pool before executing the job.
+            // coro::queue::push() resumes the waiting consumer inline on the caller's thread
+            // (the UI thread). Without this, the entire job runs on the UI thread, blocking it.
+            co_await data->workerPool->schedule();
 
             auto cancellationCheck = [data, jobEpoch = job.epoch]() -> bool
             {

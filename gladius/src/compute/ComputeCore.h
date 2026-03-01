@@ -602,6 +602,16 @@ namespace gladius
 
         void resetBoundingBox();
 
+        /// Mark the bounding box as stale (parameter changed) without clearing it.
+        /// The cached bbox will be reused with extra margin until recomputed.
+        void markBoundingBoxStale();
+
+        /// Check if the bounding box is stale (parameter changed since last bbox computation)
+        [[nodiscard]] bool isBoundingBoxStale() const;
+
+        /// Clear the stale flag and reset the bounding box so it will be fully recomputed
+        void recomputeStaleBoundingBox();
+
         BitmapLayer generateDownSkinMap(float z_mm, Vector2 pixelSize_mm);
         BitmapLayer generateUpSkinMap(float z_mm, Vector2 pixelSize_mm);
 
@@ -708,6 +718,7 @@ namespace gladius
         cl_float m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
+        std::atomic<bool> m_boundingBoxStale{false};
         bool m_isComputationTimeLoggingEnabled = false;
 
         RequiredCapabilities m_capabilities = RequiredCapabilities::OpenGLInterop;

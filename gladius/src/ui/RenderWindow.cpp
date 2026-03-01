@@ -714,6 +714,27 @@ namespace gladius::ui
         }
     }
 
+    void RenderWindow::invalidateViewDueToParameterChange()
+    {
+        // Lightweight invalidation for parameter changes (e.g. slider drags).
+        // Preserves the cached bounding box and marks it stale instead of clearing it.
+        // This avoids a full GPU bbox recomputation (~325ms) on every parameter tick.
+        m_core->setSdfValid(false);
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+
+        invalidateView();
+
+        m_preComputedSdfDirty = true;
+        m_parameterDirty = true;
+        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
+        m_lowResFeedbackPending.store(true, std::memory_order_release);
+        m_modelModifiedSinceLastCenter = true;
+
+        // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin
+        m_core->markBoundingBoxStale();
+        m_lastParameterChangeTime = std::chrono::steady_clock::now();
+    }
+
     void RenderWindow::renderScene(RenderWindowState & state)
     {
 
@@ -1464,6 +1485,18 @@ namespace gladius::ui
                 scheduleAsyncBboxUpdate();
             }
 
+            // Debounce: recompute stale bounding box after slider drag stops
+            if (m_core->isBoundingBoxStale() && !bboxJobActive && !sdfJobActive)
+            {
+                auto const now = std::chrono::steady_clock::now();
+                if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
+                {
+                    m_core->recomputeStaleBoundingBox();
+                    m_preComputedSdfDirty = true;
+                    m_asyncBboxUpdatePending.store(true, std::memory_order_release);
+                }
+            }
+
             if (lowResPending)
             {
                 // Delay progressive rendering until low-res feedback is presented
@@ -1918,15 +1951,13 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
+        // co_await waitForEvent() resumes on the OpenCL callback thread, so the zone destructor
+        // would fire on a different thread than where it was created.
+        // Use the inner ZoneScopedN blocks (which don't cross co_await) for profiling.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
 #endif
-
-        ZoneValue(job.startLine);
-        ZoneValue(job.stepSize);
-        ZoneValue(job.epoch);
 
         auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
         auto const & commandQueue =
@@ -1944,14 +1975,12 @@ namespace gladius::ui
 
         if (cancellationRequested())
         {
-            ZoneText("CancelledEarly", 14);
             result.cancelled = true;
             co_return result;
         }
 
         if (!job.enableHighQuality)
         {
-            ZoneText("HQDisabled", 10);
             result.cancelled = true;
             co_return result;
         }
@@ -1992,7 +2021,6 @@ namespace gladius::ui
 
             if (writeBuffer->image)
             {
-                ZoneScopedN("CopyLowResPreviewAsBase");
                 if (auto const resultImage = m_core->getResultImage())
                 {
                     cl::Event previewCopyEvent{};
@@ -2043,8 +2071,6 @@ namespace gladius::ui
             }
             else
             {
-                ZoneScopedN("RenderSceneComputeOnly");
-
                 if (writeBuffer != nullptr && writeBuffer->image)
                 {
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
@@ -2070,7 +2096,6 @@ namespace gladius::ui
 
                     if (advanced && !result.cancelled)
                     {
-                        ZoneScopedN("CopyToResultImageForDisplay");
                         if (auto const resultImage = m_core->getResultImage())
                         {
                             cl::Event copyBackEvent{};
@@ -2532,8 +2557,8 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncSdfPrecomputation", strlen("AsyncSdfPrecomputation"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
+        // co_await waitForEvent() resumes on the OpenCL callback thread.
 
         using namespace async_rendering;
 
@@ -2624,8 +2649,7 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncParameterUpdate", strlen("AsyncParameterUpdate"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
 
         using namespace async_rendering;
 
@@ -2726,8 +2750,7 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncPreviewJob", strlen("AsyncPreviewJob"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncPreviewWorker");
 #endif
@@ -2766,7 +2789,6 @@ namespace gladius::ui
             auto lowResImage = m_core->getLowResPreviewImage();
             if (!lowResImage)
             {
-                ZoneText("NoLowResImage", 13);
                 result.cancelled = true;
                 m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                 co_return result;
@@ -2779,7 +2801,6 @@ namespace gladius::ui
             if (!renderEvent())
             {
                 // Empty event means precondition failed (e.g., program not valid)
-                ZoneText("RenderFailed", 12);
                 result.cancelled = true;
                 m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                 co_return result;
@@ -2806,7 +2827,6 @@ namespace gladius::ui
                     else if (status < 0)
                     {
                         // Error status
-                        ZoneText("EventError", 10);
                         result.cancelled = true;
                         m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                         co_return result;
@@ -2817,7 +2837,6 @@ namespace gladius::ui
                         auto const elapsed = std::chrono::steady_clock::now() - pollStart;
                         if (elapsed > timeout)
                         {
-                            ZoneText("Timeout", 7);
                             result.cancelled = true;
                             m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                             co_return result;
@@ -2875,7 +2894,6 @@ namespace gladius::ui
         // Store the result for UI thread polling
         m_asyncController->setLatestPreviewResult(previewMeta);
 
-        ZoneText("PreviewComplete", 15);
         co_return result;
     }
 
