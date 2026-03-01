@@ -1098,14 +1098,11 @@ namespace gladius::ui
               {
                   refreshModel();
               }
-              // For parameter-only changes, just invalidate the view
-              // The m_parameterDirty flag is already set above, and updateModel() will
-              // handle it using the fast updateParameter() path
-              else if (parameterModifiedByModelEditor)
-              {
-                  // Just trigger a view update - updateModel() will handle the parameter update
-                  m_renderWindow.invalidateView();
-              }
+              // For parameter-only changes, m_parameterDirty is already set above.
+              // updateModel() will handle it using the fast updateParameter() path
+              // and call invalidateViewDueToParameterChange() which bumps the epoch.
+              // Do NOT call invalidateView() here — it would bump the epoch a second
+              // time, causing in-flight SDF results to be discarded as outdated.
 
               // Only clear the modified flags when no compile request is
               // pending.  If refreshModel() was skipped because a

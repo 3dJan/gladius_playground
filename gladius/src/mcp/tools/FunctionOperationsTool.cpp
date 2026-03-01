@@ -5,6 +5,7 @@
 
 #include "FunctionOperationsTool.h"
 #include "../../Application.h"
+#include "../../EventLogger.h"
 #include "../../Document.h"
 #include "../../ExpressionParser.h"
 #include "../../ExpressionToGraphConverter.h"
@@ -2579,6 +2580,10 @@ namespace gladius
                         while (buildIt->MoveNext())
                         {
                             auto item = buildIt->GetCurrent();
+                            if (!item)
+                            {
+                                continue;
+                            }
                             auto obj = item->GetObjectResource();
                             if (!obj)
                             {
@@ -2596,9 +2601,11 @@ namespace gladius
                             }
                         }
                     }
-                    catch (...)
+                    catch (std::exception const & e)
                     {
-                        // Ignore build item resolution errors
+                        m_application->getGlobalLogger()->logWarning(
+                          std::string("getProgramSnippet: build item resolution error: ") +
+                          e.what());
                     }
                 }
 

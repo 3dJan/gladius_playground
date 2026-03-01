@@ -9,11 +9,11 @@
 #include "nodes/types.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
-#include <iomanip>
+#include <charconv>
 #include <regex>
 #include <set>
-#include <sstream>
 #include <stack>
 #include <stdexcept>
 #include <typeindex>
@@ -54,24 +54,33 @@ namespace gladius
             return "e";
         }
 
-        std::ostringstream oss;
-        oss << std::setprecision(9) << std::defaultfloat << value;
-        std::string result = oss.str();
+        // Use std::to_chars for locale-independent, allocation-free formatting.
+        // 9 significant digits are enough to round-trip a 32-bit float.
+        std::array<char, 64> buf{};
+        auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value);
+        if (ec != std::errc{})
+        {
+            return "0";
+        }
+        std::string result(buf.data(), ptr);
 
-        // If the stream chose scientific notation, switch to fixed
+        // std::to_chars may produce scientific notation; convert to fixed if so.
         if (result.find('e') != std::string::npos || result.find('E') != std::string::npos)
         {
-            oss.str("");
-            oss.clear();
-            oss << std::setprecision(9) << std::fixed << value;
-            result = oss.str();
-            // Remove trailing zeros; the decimal point itself is retained (e.g. "3.").
-            if (result.find('.') != std::string::npos)
+            std::array<char, 64> fixBuf{};
+            auto [fPtr, fEc] =
+              std::to_chars(fixBuf.data(), fixBuf.data() + fixBuf.size(), value, std::chars_format::fixed);
+            if (fEc == std::errc{})
             {
-                auto lastNonZero = result.find_last_not_of('0');
-                if (lastNonZero != std::string::npos)
+                result.assign(fixBuf.data(), fPtr);
+                // Remove trailing zeros; the decimal point itself is retained (e.g. "3.").
+                if (result.find('.') != std::string::npos)
                 {
-                    result.erase(lastNonZero + 1);
+                    auto lastNonZero = result.find_last_not_of('0');
+                    if (lastNonZero != std::string::npos)
+                    {
+                        result.erase(lastNonZero + 1);
+                    }
                 }
             }
         }

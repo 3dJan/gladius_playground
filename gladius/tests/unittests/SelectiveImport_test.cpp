@@ -218,7 +218,10 @@ namespace gladius_tests
         std::unordered_set<Lib3MF_uint32> closure = {ids.funcA_modelId, ids.funcB_modelId};
 
         // Act
-        io::pruneModelForSelectiveImport(model, closure);
+        bool const result = io::pruneModelForSelectiveImport(model, closure);
+
+        // Assert — build items should be removed
+        EXPECT_TRUE(result) << "Pruning should succeed";
 
         // Assert — build items should be removed
         auto buildItems = model->GetBuildItems();
@@ -246,7 +249,8 @@ namespace gladius_tests
         auto taggedIds = io::parseResourceIds(metadata->libraryFunctions);
         auto closure = io::computeSelectiveImportClosure(source, taggedIds, m_logger);
         ASSERT_TRUE(closure.has_value());
-        io::pruneModelForSelectiveImport(source, *closure);
+        bool const pruneResult = io::pruneModelForSelectiveImport(source, *closure);
+        EXPECT_TRUE(pruneResult) << "Pruning should succeed";
         target->MergeFromModel(source.get());
 
         // Assert — target should have ExistingFunc + LibFuncA + LibFuncB (3 functions)
@@ -318,7 +322,8 @@ namespace gladius_tests
         auto taggedIds = io::parseResourceIds(metadata->libraryFunctions);
         auto closure = io::computeSelectiveImportClosure(source, taggedIds, m_logger);
         ASSERT_TRUE(closure.has_value());
-        io::pruneModelForSelectiveImport(source, *closure);
+        bool const pruneResult = io::pruneModelForSelectiveImport(source, *closure);
+        EXPECT_TRUE(pruneResult) << "Pruning should succeed";
         target->MergeFromModel(source.get());
 
         // Assert — target should have A, B, C (all tagged + deps)

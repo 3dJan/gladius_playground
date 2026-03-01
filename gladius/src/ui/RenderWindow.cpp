@@ -220,6 +220,7 @@ namespace gladius::ui
         m_asyncJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
+        m_asyncBboxJobInFlight.store(false, std::memory_order_release);
         
         // Invalidate distance init buffer on epoch change - camera/scene changed (FR-005)
         if (m_core)
@@ -653,8 +654,8 @@ namespace gladius::ui
 
         invalidateView();
         
-        m_preComputedSdfDirty = true;
-        m_parameterDirty = true;
+        m_preComputedSdfDirty.store(true, std::memory_order_release);
+        m_parameterDirty.store(true, std::memory_order_release);
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_lowResFeedbackPending.store(true, std::memory_order_release);
 
@@ -686,8 +687,8 @@ namespace gladius::ui
 
         invalidateView();
 
-        m_preComputedSdfDirty = true;
-        m_parameterDirty = true;
+        m_preComputedSdfDirty.store(true, std::memory_order_release);
+        m_parameterDirty.store(true, std::memory_order_release);
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_lowResFeedbackPending.store(true, std::memory_order_release);
         m_modelModifiedSinceLastCenter = true;
@@ -1459,8 +1460,13 @@ namespace gladius::ui
                 m_asyncController->enqueueJob(sdfJob);
             }
 
-            // Schedule bbox update if pending and no bbox job in flight
-            if (bboxPending && !bboxJobActive)
+            // Schedule bbox update if pending and no bbox/SDF job is currently in flight.
+            // We check sdfJobActive (captured at frame start, before new SDF scheduling)
+            // rather than sdfDirty to avoid permanently blocking bbox when SDF keeps
+            // failing (e.g., updateBBox() returns false because bbox was reset).
+            // When SDF succeeds it computes bbox as a side effect, so bboxPending
+            // is cleared in processAsyncResults to avoid redundant jobs.
+            if (bboxPending && !bboxJobActive && !sdfJobActive)
             {
                 scheduleAsyncBboxUpdate();
             }
@@ -1556,7 +1562,15 @@ namespace gladius::ui
                 }
             }
 
-            invalidateView();
+            // Camera-only change from centering — don't bump epoch.
+            // SDF/bbox jobs are not camera-dependent and must not be cancelled.
+            m_dirty = true;
+            state.isMoving = true;
+            state.currentLine = 0;
+            state.renderingStepSize = kInitialProgressiveStepSize;
+            state.isRendering = false;
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lastLowResRenderTime = std::chrono::system_clock::now();
         }
 
         if (state.isMoving && m_preComputedSdfDirty)
@@ -1765,6 +1779,10 @@ namespace gladius::ui
                 {
                     m_preComputedSdfDirty.store(false, std::memory_order_release);
                     m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                    // SDF computation already updated bbox (via updateBBox() in
+                    // precomputeSdfAsync and commitSdfSuccess). Clear pending bbox
+                    // to avoid scheduling a redundant bbox job.
+                    m_asyncBboxUpdatePending.store(false, std::memory_order_release);
                 }
                 continue;
             }
@@ -2583,9 +2601,17 @@ namespace gladius::ui
 
             if (!sdfEvent())
             {
-                // Failed to launch (preconditions not met) - but don't invalidate the old SDF
-                // so preview can continue with stale data
-                result.cancelled = true;
+                // Empty event: either SDF is already valid or preconditions failed.
+                // If SDF is valid, report success so sdfDirty gets cleared.
+                // Otherwise treat as cancellation.
+                if (m_core->isSdfValid())
+                {
+                    result.precomputedSdfUpdated = true;
+                }
+                else
+                {
+                    result.cancelled = true;
+                }
                 co_return result;
             }
 

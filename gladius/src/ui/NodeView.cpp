@@ -55,6 +55,31 @@ namespace gladius::ui
         return it->first;
     }
 
+    /// Measure the maximum label width among visible ports in a port map.
+    /// Ports whose \p isVisible() returns false are skipped. When \p skipResourceId
+    /// is true, ports with type index == ResourceId are also skipped.
+    template <typename PortMap>
+    static float measureMaxPortLabelWidth(PortMap & ports, bool skipResourceId)
+    {
+        float maxWidth = 0.f;
+        for (auto & [name, port] : ports)
+        {
+            if (!port.isVisible())
+            {
+                continue;
+            }
+            if (skipResourceId && port.getTypeIndex() == ParameterTypeIndex::ResourceId)
+            {
+                continue;
+            }
+            maxWidth = std::max(maxWidth, ImGui::CalcTextSize(name.c_str()).x);
+            float const typeLabelWidth =
+              ImGui::CalcTextSize(typeToString(port.getTypeIndex()).c_str()).x * 0.5f;
+            maxWidth = std::max(maxWidth, typeLabelWidth);
+        }
+        return maxWidth;
+    }
+
     NodeView::NodeView()
     {
         m_nodeTypeToColor = createNodeTypeToColors();
@@ -271,8 +296,15 @@ namespace gladius::ui
         return m_modelChanged;
     }
 
+    void NodeView::clearPerFrameFlags()
+    {
+        m_parameterChanged = false;
+        m_modelChanged = false;
+    }
+
     void NodeView::setAssembly(nodes::SharedAssembly assembly)
     {
+        // Same shared_ptr instance — assembly object unchanged, skip full reset.
         if (m_assembly == assembly)
         {
             if (m_modelEditor)
@@ -2031,30 +2063,8 @@ namespace gladius::ui
         {
             auto const & style = ImGui::GetStyle();
             float const pinButtonWidth = ImGui::GetFontSize() * 1.5f + style.FramePadding.x * 2.0f;
-            float maxInputLabelWidth = 0.f;
-
-            for (auto & parameter : node.parameter())
-            {
-                if (!parameter.second.isVisible())
-                {
-                    continue;
-                }
-
-                if (!m_resoureIdNodesVisible &&
-                    parameter.second.getTypeIndex() == ParameterTypeIndex::ResourceId)
-                {
-                    continue;
-                }
-
-                maxInputLabelWidth =
-                  std::max(maxInputLabelWidth,
-                           ImGui::CalcTextSize(parameter.first.c_str()).x);
-
-                float const typeLabelWidth =
-                  ImGui::CalcTextSize(typeToString(parameter.second.getTypeIndex()).c_str()).x *
-                  0.5f;
-                maxInputLabelWidth = std::max(maxInputLabelWidth, typeLabelWidth);
-            }
+            float const maxInputLabelWidth =
+              measureMaxPortLabelWidth(node.parameter(), !m_resoureIdNodesVisible);
 
             columnWidths[1] = std::max(columnWidths[1], pinButtonWidth);
             columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
@@ -2199,22 +2209,8 @@ namespace gladius::ui
         if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
         {
             auto const & style = ImGui::GetStyle();
-            float maxOutputLabelWidth = 0.f;
-
-            for (auto & output : node.getOutputs())
-            {
-                if (!output.second.isVisible())
-                {
-                    continue;
-                }
-
-                maxOutputLabelWidth =
-                  std::max(maxOutputLabelWidth, ImGui::CalcTextSize(output.first.c_str()).x);
-
-                float const typeLabelWidth =
-                  ImGui::CalcTextSize(typeToString(output.second.getTypeIndex()).c_str()).x * 0.5f;
-                maxOutputLabelWidth = std::max(maxOutputLabelWidth, typeLabelWidth);
-            }
+            float const maxOutputLabelWidth =
+              measureMaxPortLabelWidth(node.getOutputs(), false);
 
             float const pinGlyphWidth =
               ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
@@ -2799,11 +2795,6 @@ namespace gladius::ui
         return {};
     }
 
-    void NodeView::handleGroupMovement()
-    {
-        // Group movement is now handled entirely by handleGroupDragging(),
-        // since groups are drawn as overlays rather than node-editor nodes.
-    }
     void NodeView::handleGroupDragging()
     {
         if (m_nodeGroups.empty())

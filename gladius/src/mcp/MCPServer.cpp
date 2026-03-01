@@ -1700,6 +1700,7 @@ namespace gladius::mcp
         registerTool(
           "create_library_entry",
           "Create a new library entry from a GLSL-like snippet (or simple expression). "
+          "Either 'snippet' or 'expression' (deprecated, single-line) must be provided. "
           "Creates a 3MF file with the specified function, library metadata, and saves "
           "it to the user library directory. The 'snippet' field accepts multi-line code "
           "with float assignments, if/else, and return statements. For backward "

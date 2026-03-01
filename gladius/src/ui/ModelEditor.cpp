@@ -1521,9 +1521,6 @@ namespace gladius::ui
                     }
                 }
 
-                // Handle group movement - detect when nodes are moved and move their group members
-                m_nodeViewVisitor.handleGroupMovement();
-
                 // Handle group dragging via header/border areas - must be called before rendering
                 m_nodeViewVisitor.handleGroupDragging();
 
@@ -1605,6 +1602,12 @@ namespace gladius::ui
                 }
 
                 m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
+
+                // Clear per-frame flags so they don't persist into the next frame.
+                // Without this, a single parameter change causes showAndEdit() to
+                // return true every subsequent frame, continuously bumping the async
+                // epoch and preventing HQ progressive rendering from ever starting.
+                m_nodeViewVisitor.clearPerFrameFlags();
 
                 if (m_currentTabMode == TabMode::Graph)
                 {
