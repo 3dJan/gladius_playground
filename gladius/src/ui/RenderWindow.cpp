@@ -263,48 +263,10 @@ namespace gladius::ui
             return;
         }
 
-        // Try to acquire compute token non-blocking
-        auto token = m_core->requestComputeToken();
-        bool const hasComputeToken = token.has_value();
-
-        // If we don't have the compute token, we can still display existing buffers
-        // This keeps the UI responsive during parameter changes
-        if (!hasComputeToken)
-        {
-            // Check if we have async preview content to display
-            bool hasAsyncContent = false;
-            std::shared_ptr<GLImageBuffer> displayImage;
-
-            if (m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
-            {
-                auto * frontBuf = m_asyncController->frontBuffer();
-                if (frontBuf && frontBuf->image)
-                {
-                    displayImage = frontBuf->image;
-                    hasAsyncContent = true;
-                }
-            }
-
-            // Fallback to result image if available
-            if (!hasAsyncContent)
-            {
-                displayImage = m_core->getResultImage();
-                hasAsyncContent = displayImage != nullptr;
-            }
-
-            if (hasAsyncContent && displayImage)
-            {
-                // Show existing content without blocking - no busy indicator needed
-                renderExistingFrame(displayImage);
-                return;
-            }
-
-            // No content available - show busy overlay
-            renderBusyOverlay();
-            return;
-        }
-
-        // Execute rendering logic FIRST - this processes async results and promotes buffers
+        // Execute rendering logic FIRST - this processes async results and promotes buffers.
+        // Do NOT gate this on the compute token: processAsyncResults() and
+        // processAsyncPreviewResults() must run every frame to consume completed async
+        // jobs. Rendering functions that need the GPU acquire the token internally.
         render(m_renderWindowState);
 
         // THEN get the image to display - will see newly promoted front buffer
@@ -1204,8 +1166,26 @@ namespace gladius::ui
             state.isRendering = false;
             state.renderQualityWhileMoving = 0.1f;
 
-            invalidateViewDuetoModelUpdate();
+            // Only invalidate ONCE when compilation starts, not every frame.
+            // Repeated invalidation bumps the epoch on every frame, cancelling
+            // all in-flight work and preventing the pipeline from ever making
+            // progress once compilation finishes.
+            if (!m_compilationInvalidated)
+            {
+                invalidateViewDuetoModelUpdate();
+                m_compilationInvalidated = true;
+            }
             return;
+        }
+
+        // Post-compilation transition: re-invalidate once to set up fresh pipeline state
+        // (bbox pending, SDF dirty, low-res feedback pending) now that the compiled
+        // program is ready. This replaces the old pattern of invalidating every frame
+        // during compilation, which spammed epoch increments.
+        if (m_compilationInvalidated)
+        {
+            m_compilationInvalidated = false;
+            invalidateViewDuetoModelUpdate();
         }
 
         // Lazy initialization: only initialize async rendering once renderer is ready
@@ -1485,15 +1465,17 @@ namespace gladius::ui
                 scheduleAsyncBboxUpdate();
             }
 
-            // Debounce: recompute stale bounding box after slider drag stops
+            // Debounce: recompute stale bounding box after slider drag stops.
+            // recomputeStaleBoundingBox() clears the cached bbox so the next SDF job
+            // does a full bbox recompute with the current parameters.
             if (m_core->isBoundingBoxStale() && !bboxJobActive && !sdfJobActive)
             {
                 auto const now = std::chrono::steady_clock::now();
                 if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
                 {
                     m_core->recomputeStaleBoundingBox();
+                    m_core->setSdfValid(false);
                     m_preComputedSdfDirty = true;
-                    m_asyncBboxUpdatePending.store(true, std::memory_order_release);
                 }
             }
 
@@ -1776,6 +1758,15 @@ namespace gladius::ui
                     m_asyncSdfJobInFlight.store(false, std::memory_order_release);
                     m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
                 }
+                // Handle SDF completion: clear dirty flag and trigger preview refresh.
+                // Must continue here so cancelled SDF results don't fall through to the
+                // generic cancelled handler, which would clear HQ progressive render state.
+                if (result.precomputedSdfUpdated && !isOutdated)
+                {
+                    m_preComputedSdfDirty.store(false, std::memory_order_release);
+                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                }
+                continue;
             }
 
             // Handle bbox update results
@@ -1796,17 +1787,7 @@ namespace gladius::ui
                 continue;
             }
 
-            if (result.precomputedSdfUpdated)
-            {
-                // If the update is already outdated, keep dirty=true so we schedule a new SDF job
-                // for the current parameters.
-                if (!isOutdated)
-                {
-                    m_preComputedSdfDirty.store(false, std::memory_order_release);
-                    // SDF is now valid - trigger a low-res preview render to show the updated model
-                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-                }
-            }
+            // From here on, only HQ progressive render results are processed.
 
             if (result.cancelled)
             {

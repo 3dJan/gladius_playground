@@ -303,6 +303,7 @@ namespace gladius::ui
         std::atomic<bool> m_lowResFeedbackPending{false};
         std::atomic<uint64_t> m_lastLowResPreviewEpoch{0};
         bool m_asyncInitialized{false};
+        bool m_compilationInvalidated{false};
 
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};

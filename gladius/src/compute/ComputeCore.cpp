@@ -1665,17 +1665,20 @@ namespace gladius
 
         glFinish();
 
-        // Only render if precomputed SDF is available. When SDF is invalid (e.g., after parameter
-        // change), we keep the previous preview visible until async SDF precomputation completes.
-        if (!m_precompSdfIsValid)
+        // Use precomputed SDF when available for fast rendering, fall back to full model
+        // evaluation otherwise (slower but ensures the preview always updates)
+        if (m_precompSdfIsValid)
         {
-            LOG_LOCATION;
-            return;
+            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
-
-        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
+        else
+        {
+            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        }
 
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,
