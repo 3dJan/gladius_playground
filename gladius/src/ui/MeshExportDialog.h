@@ -4,10 +4,12 @@
 #include "FileDialogService.h"
 #include "io/3mf/FaceColorSampler.h"
 #include "ColorToThicknessDialog.h"
+#include "io/CancellationToken.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/MeshExporter3mf.h"
+#include "io/ShellExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 
 #include <cstddef>
@@ -83,6 +85,7 @@ namespace gladius::ui
         vdb::MeshExporter3mf m_layeredExporter3mf;
         io::DualContouringStlExporter m_dualExporter;
         io::ManifoldDualContouringStlExporter m_manifoldExporter;
+        io::ShellExporter m_shellExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
         Document const * m_document = nullptr;
@@ -135,6 +138,7 @@ namespace gladius::ui
         io::ColorMode m_colorMode = io::ColorMode::PerFace; ///< Color export mode
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
+        bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
 
         ColorToThicknessDialog m_colorToThicknessDialog;
 
@@ -148,5 +152,8 @@ namespace gladius::ui
         std::future<PaletteDeriveResult> m_paletteFuture;
         std::atomic<bool> m_paletteDeriveInProgress{false};
         bool m_paletteHandlerBound{false};
+
+        // Cooperative cancellation token for async export
+        io::CancellationToken m_cancellationToken;
     };
 } // namespace gladius::ui

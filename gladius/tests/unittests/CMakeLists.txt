@@ -79,6 +79,9 @@ file(COPY "../../components/licenses" DESTINATION ".")
 file(MAKE_DIRECTORY "examples")
 file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 
+# Copy example implicit models used by library export tests
+file(COPY "../../examples/implicit/RadialRadiator.3mf" DESTINATION "testdata/")
+
 # Use gtest_discover_tests for automatic test discovery with 'unit' label
 # DISCOVERY_MODE POST_BUILD allows set_tests_properties to work after discovery
 gtest_discover_tests(${BINARY}

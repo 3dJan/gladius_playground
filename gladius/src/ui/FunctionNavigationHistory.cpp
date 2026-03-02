@@ -4,7 +4,8 @@ namespace gladius::ui
 {
 
     bool FunctionNavigationHistory::recordNavigation(nodes::ResourceId currentId,
-                                                     nodes::ResourceId targetId)
+                                                     nodes::ResourceId targetId,
+                                                     nodes::NodeId sourceNode)
     {
         // Don't record if target is same as current (no-op)
         if (currentId == targetId)
@@ -24,14 +25,21 @@ namespace gladius::ui
             m_history.erase(m_history.begin() + static_cast<long>(m_index + 1u), m_history.end());
         }
 
-        // If history is empty, seed with current
+        // If history is empty, seed with current (no anchor for initial entry)
         if (m_history.empty() && currentId != 0u)
         {
-            m_history.push_back(currentId);
+            m_history.push_back({currentId, 0});
         }
 
-        // Push new target and advance index
-        m_history.push_back(targetId);
+        // Update the current entry's anchor node if we have a source node
+        // This marks "where we came from" so we can center on it when returning
+        if (!m_history.empty() && sourceNode != 0)
+        {
+            m_history[m_index].anchorNode = sourceNode;
+        }
+
+        // Push new target (anchor will be set when navigating away from it)
+        m_history.push_back({targetId, 0});
         m_index = m_history.size() - 1u;
 
         return true;
@@ -47,21 +55,21 @@ namespace gladius::ui
         return !m_history.empty() && (m_index + 1u) < m_history.size();
     }
 
-    nodes::ResourceId FunctionNavigationHistory::goBack()
+    NavigationHistoryEntry FunctionNavigationHistory::goBack()
     {
         if (!canGoBack())
         {
-            return 0;
+            return {0, 0};
         }
         m_index -= 1u;
         return m_history[m_index];
     }
 
-    nodes::ResourceId FunctionNavigationHistory::goForward()
+    NavigationHistoryEntry FunctionNavigationHistory::goForward()
     {
         if (!canGoForward())
         {
-            return 0;
+            return {0, 0};
         }
         m_index += 1u;
         return m_history[m_index];
@@ -73,7 +81,7 @@ namespace gladius::ui
         m_index = 0u;
         if (initialId != 0u)
         {
-            m_history.push_back(initialId);
+            m_history.push_back({initialId, 0});
         }
     }
 

@@ -3,11 +3,15 @@
 #include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
 #include "BeamLatticeView.h"
+#include "CodeView.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
+#include "FunctionFromImage3DView.h"
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
+#include "LibraryDragPayload.h"
 #include "NodeClipboard.h"
+#include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
@@ -88,9 +92,12 @@ namespace gladius::ui
         void setLibraryVisibility(bool visible);
         [[nodiscard]] bool isLibraryVisible() const;
         void refreshLibraryDirectories();
+        void renderLibraryBrowser();
 
         /// Focus management for keyboard-driven workflow
         void requestNodeFocus(nodes::NodeId nodeId);
+        /// Focus node and switch to its function if different from current
+        void requestNodeFocus(nodes::NodeId nodeId, nodes::ResourceId modelId);
         [[nodiscard]] bool shouldFocusNode(nodes::NodeId nodeId) const;
         void clearNodeFocus();
 
@@ -120,8 +127,10 @@ namespace gladius::ui
         /**
          * @brief Navigate to a function and record the navigation in history.
          *        Use this instead of switchToFunction() for user-triggered navigation.
+         * @param functionId The ResourceId of the function to navigate to
+         * @param sourceNodeId Optional: the node that triggered navigation (for view restoration)
          */
-        bool navigateToFunction(nodes::ResourceId functionId);
+        bool navigateToFunction(nodes::ResourceId functionId, nodes::NodeId sourceNodeId = 0);
 
         // Navigation history controls
         bool canGoBack() const;
@@ -134,6 +143,27 @@ namespace gladius::ui
          * @return true if the model editor is being hovered
          */
         bool isHovered() const;
+
+        /**
+         * @brief Check if the current model is a FunctionFromImage3D
+         * @return true if the model contains an ImageSampler node
+         */
+        bool isFunctionFromImage3D() const;
+
+        /**
+         * @brief Refresh the assembly from the current document.
+         *        Call this after external modifications to the assembly (e.g., creating functions
+         *        via ResourceView).
+         */
+        void refreshAssembly();
+
+        /// Tab mode for FunctionFromImage3D functions
+        enum class TabMode
+        {
+            Graph = 0,      ///< Normal graph view
+            Properties = 1, ///< FunctionFromImage3D properties panel
+            Code = 2        ///< Code view (GLSL-like snippet editor)
+        };
 
       private:
         // Extraction helper
@@ -179,6 +209,15 @@ namespace gladius::ui
         void showDeleteUnusedResourcesDialog();
         void validate();
 
+        /// @brief Handle drag-and-drop from the library browser onto the node editor canvas.
+        void handleLibraryDrop();
+
+        /// @brief Create a FunctionCall node at the current cursor position.
+        /// @param functionId The resource ID of the function to call.
+        /// @param sourceModel The model providing inputs/outputs for the FunctionCall.
+        void createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
+                                            nodes::SharedModel const & sourceModel);
+
         void undo();
         void redo();
 
@@ -188,16 +227,24 @@ namespace gladius::ui
         void pushNodeColor(nodes::NodeBase & node);
         void popNodeColor(nodes::NodeBase & node);
 
+        /// Returns the editor context for the given function, creating one if needed.
+        ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
+
+        /// Returns the editor context for the current model, or nullptr if no model is set.
+        ed::EditorContext * getCurrentEditorContext();
+
         bool m_visible = false;
-        ed::EditorContext * m_editorContext{};
+        std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
+        std::set<nodes::ResourceId> m_visitedFunctions;  ///< Track first-time visits for NavigateToContent
+        int m_pendingCenterViewFrames = 0;  ///< Frame countdown before requesting center view
+        bool m_pendingCenterViewRequest = false; ///< Execute via same path as toolbar Center View
         bool m_dirty{true};
         bool m_parameterDirty{false};
         bool m_primitiveDataDirty{false};
         bool m_nodePositionsNeedUpdate{false};
         bool m_pendingPasteRequest{false};
-        float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
+        float m_nodeDistance = 50.f;
         float m_scale = 0.5f;
-        bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};
         bool m_showAddModel{false};
 
@@ -275,6 +322,7 @@ namespace gladius::ui
         BeamLatticeView m_beamLatticeView;
 
         Outline m_outline;
+        ValidationOverlay m_validationOverlay;
 
         NodeTypeToColor m_nodeTypeToColor;
         float m_uiScale = 1.0f;
@@ -313,6 +361,14 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};
+
+        // FunctionFromImage3D UI
+        FunctionFromImage3DView m_functionFromImage3DView;
+        TabMode m_currentTabMode{TabMode::Graph};
+        bool m_forceCodeTab{false}; ///< Force-select Code tab on next frame ("Stay in Code")
+
+        // Code view for snippet editing
+        CodeView m_codeView;
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

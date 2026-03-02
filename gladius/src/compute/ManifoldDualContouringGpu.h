@@ -12,8 +12,10 @@
 #include <Eigen/Geometry>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -77,6 +79,16 @@ namespace gladius::compute
         
         // Legacy compatibility
         bool enableSimplification{false};           ///< DEPRECATED: Use simplificationMethod instead
+        
+        // Surface-aligned thickness field for shell generation (variable thickness per point)
+        // When enabled, uses a precomputed 3D thickness field instead of constant isoValue.
+        // The thickness field maps each point to its offset from the model surface.
+        bool useThicknessField{false};              ///< Enable thickness field-based surface extraction
+        std::vector<float> outerThicknessField{};   ///< 3D grid of outer boundary thickness values
+        std::vector<float> innerThicknessField{};   ///< 3D grid of inner boundary thickness values (empty for innermost)
+        int thicknessFieldResolution{0};            ///< Resolution of the 3D thickness grid (N³)
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity(); ///< Transform from world to grid coords
+        bool isInnermostLayer{false};               ///< If true, no inner boundary (solid to center)
     };
 
     struct ManifoldDualContouringMesh
@@ -86,13 +98,32 @@ namespace gladius::compute
         std::vector<std::uint32_t> indices;
     };
 
+    /// Progress callback for mesh generation
+    /// @param progress Normalized progress value in [0.0, 1.0]
+    /// @param phaseName Human-readable name of the current phase
+    using MeshGenerationProgressCallback = std::function<void(float progress, std::string_view phaseName)>;
+
+    /// Cancellation check callback
+    /// @return true if the operation should be cancelled
+    using CancellationCheckCallback = std::function<bool()>;
+
     class ManifoldDualContouringGpu
     {
       public:
         explicit ManifoldDualContouringGpu(ComputeCore & core);
+        ~ManifoldDualContouringGpu();
 
-        void setConfig(ManifoldDualContouringConfig config);
+        void setConfig(ManifoldDualContouringConfig const& config);
+        void setConfig(ManifoldDualContouringConfig&& config);
         void generateMesh();
+
+        /// Set progress callback for mesh generation phases
+        /// @param callback Function to receive progress updates (0.0-1.0) and phase name
+        void setMeshGenerationProgressCallback(MeshGenerationProgressCallback callback);
+
+        /// Set cancellation check callback
+        /// @param callback Function that returns true if the operation should be cancelled
+        void setCancellationCheckCallback(CancellationCheckCallback callback);
 
         [[nodiscard]] ManifoldDualContouringMesh const & getMesh() const
         {
@@ -104,9 +135,9 @@ namespace gladius::compute
                 ManifoldDualContouringProgram * m_program{nullptr}; // Not owned - managed by ProgramManager
 
                 // Cached bounds for current octree build
-                Eigen::Vector3f m_cachedBboxMin{Eigen::Vector3f::Zero()};
-                Eigen::Vector3f m_cachedBboxMax{Eigen::Vector3f::Zero()};
-                Eigen::Vector3f m_cachedBboxSize{Eigen::Vector3f::Zero()};
+                Eigen::Vector3f m_cachedBboxMin = Eigen::Vector3f::Zero();
+                Eigen::Vector3f m_cachedBboxMax = Eigen::Vector3f::Zero();
+                Eigen::Vector3f m_cachedBboxSize = Eigen::Vector3f::Zero();
                 std::optional<BoundingBox> m_cachedBoundingBox;
                 std::uint32_t m_octreeDepth{0U};
                 std::uint32_t m_gridResolution{1U};
@@ -118,6 +149,10 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> m_countBuffer;
         std::unique_ptr<cl::Buffer> m_offsetBuffer;
         std::unique_ptr<cl::Buffer> m_edgeComponentBuffer;
+        
+        // Thickness field buffers for surface-aligned shell generation
+        std::unique_ptr<cl::Buffer> m_outerThicknessFieldBuffer;
+        std::unique_ptr<cl::Buffer> m_innerThicknessFieldBuffer;
 
             // CPU copies for topology reconstruction
             std::vector<OctreeNode> m_cpuOctreeNodes;
@@ -129,8 +164,19 @@ namespace gladius::compute
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
+        MeshGenerationProgressCallback m_meshGenerationProgressCallback{nullptr};
+        CancellationCheckCallback m_cancellationCheckCallback{nullptr};
         std::size_t m_lastVertexCount{0U};
         std::size_t m_octreeNodeCount{0U};
+
+        /// Check if the operation should be cancelled
+        /// @return true if cancelled, false otherwise
+        [[nodiscard]] bool isCancelled() const;
+
+        /// Report progress to the callback if set
+        /// @param progress Normalized progress value in [0.0, 1.0]
+        /// @param phaseName Human-readable name of the current phase
+        void reportProgress(float progress, std::string_view phaseName);
 
         void loadKernels();
         void constructOctree();

@@ -13,6 +13,7 @@
 #include "ExportState.h"
 #include "FileDialogService.h"
 #include "GLView.h"
+#include "LibraryExportDialog.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
 #include "ModelEditor.h"
@@ -172,10 +173,14 @@ namespace gladius::ui
         void meshExportDialog();
         void cliExportDialog();
         void showExitPopUp();
+        void showExportInProgressWarning();
         void showSaveBeforeFileOperationPopUp();
         void logViewer();
         void renderStatusBar();
         void renderComputeErrorModal();
+
+        /// Renders a fullscreen semi-transparent overlay when export is in progress
+        void renderExportOverlay();
 
         void refreshModel();
 
@@ -247,6 +252,7 @@ namespace gladius::ui
         bool m_isSlicePreviewVisible{false};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
+        bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;
 
@@ -257,6 +263,7 @@ namespace gladius::ui
         bool m_showAuthoringTools{true};
         MeshExportDialog m_meshExporterDialog;
         CliExportDialog m_cliExportDialog;
+        LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
         RenderWindow m_renderWindow;

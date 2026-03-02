@@ -21,6 +21,7 @@ namespace gladius::nodes
 
 namespace gladius::ui
 {
+    class ExportState;
     class ModelEditor;
 
     std::string typeToString(std::type_index typeIndex);
@@ -55,8 +56,13 @@ namespace gladius::ui
 
         void setModelEditor(ModelEditor * editor);
 
+        /// @brief Set the export state for blocking input during export
+        /// @param state Pointer to ExportState (may be nullptr)
+        void setExportState(ExportState * state);
+
         [[nodiscard]] auto haveParameterChanged() const -> bool;
         [[nodiscard]] auto hasModelChanged() const -> bool;
+        void clearPerFrameFlags();
 
         void setAssembly(nodes::SharedAssembly assembly);
         void reset();
@@ -70,6 +76,9 @@ namespace gladius::ui
         [[nodiscard]] float getUiScale() const;
 
         bool columnWidthsAreInitialized() const;
+
+        /// @brief Clear cached column widths (call after graph rebuild from code sync)
+        void clearColumnWidths();
 
         /**
          * @brief Updates the node group mapping based on current model
@@ -115,13 +124,6 @@ namespace gladius::ui
          * @return Vector of node IDs in the same group, or empty vector if not in a group
          */
         std::vector<nodes::NodeId> getNodesInSameGroup(nodes::NodeId nodeId) const;
-
-        /**
-         * @brief Handles group movement when a group node is moved
-         * Called during the editor update loop to detect group node movement and synchronize all
-         * nodes in the group
-         */
-        void handleGroupMovement();
 
         /**
          * @brief Handles group dragging via header/border areas
@@ -258,6 +260,7 @@ namespace gladius::ui
         nodes::SharedModel m_currentModel;
 
         ModelEditor * m_modelEditor{nullptr};
+        ExportState * m_exportState{nullptr};
         bool m_showContextMenu{false};
 
         bool m_showLinkAssignmentMenu{false};

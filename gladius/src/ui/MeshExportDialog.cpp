@@ -225,6 +225,10 @@ namespace gladius::ui
         {
             m_manifoldExporter.finalize();
         }
+        else if (m_activeExporter == &m_shellExporter)
+        {
+            m_shellExporter.finalize();
+        }
         else
         {
             BaseExportDialog::finalizeExport();
@@ -236,23 +240,16 @@ namespace gladius::ui
 
     void MeshExportDialog::onExportCancelled()
     {
-        if (m_activeExporter == &m_layeredExporter)
+        // Signal cancellation to the export worker - don't block!
+        // The export loop will check isCancellationRequested() and exit early.
+        // Cleanup happens when the export finishes (via finalizeExport/resetState).
+        m_cancellationToken.requestCancellation();
+        
+        // Update ExportState to show "Cancelling..." phase in UI
+        if (m_exportState != nullptr)
         {
-            m_layeredExporter.finalize();
+            m_exportState->requestCancellation();
         }
-        else if (m_activeExporter == &m_layeredExporter3mf)
-        {
-            m_layeredExporter3mf.finalize();
-        }
-        else if (m_activeExporter == &m_dualExporter)
-        {
-            m_dualExporter.finalize();
-        }
-        else if (m_activeExporter == &m_manifoldExporter)
-        {
-            m_manifoldExporter.finalize();
-        }
-        resetState();
     }
 
     void MeshExportDialog::onExportCompleted()
@@ -298,6 +295,11 @@ namespace gladius::ui
                     failed = m_manifoldExporter.hasError();
                     failureMessage = m_manifoldExporter.errorMessage();
                 }
+                else if (finishedExporter == &m_shellExporter)
+                {
+                    failed = m_shellExporter.hasError();
+                    failureMessage = m_shellExporter.errorMessage();
+                }
 
                 try
                 {
@@ -337,7 +339,39 @@ namespace gladius::ui
                     }
                 }
 
-                if (failed)
+                // Check if export was cancelled - treat as distinct from failure
+                bool const wasCancelled = m_cancellationToken.isCancelled();
+
+                if (wasCancelled)
+                {
+                    // Export was cancelled by user - show cancellation message
+                    m_exportInProgress = false;
+                    m_exportCompleted = false;
+                    m_statusMessage = "Export cancelled";
+                    m_statusIsError = false;
+                    m_errorMessage.clear();
+                    if (m_exportState != nullptr)
+                    {
+                        m_exportState->endExport();
+                    }
+                    // Clean up any partial output file
+                    if (!m_targetFile.empty())
+                    {
+                        std::error_code ec;
+                        if (std::filesystem::exists(m_targetFile, ec))
+                        {
+                            std::filesystem::remove(m_targetFile, ec);
+                            if (ec)
+                            {
+                                // Log warning but don't fail - the cancel itself succeeded
+                                std::cerr << "Warning: Failed to delete partial export file: "
+                                          << m_targetFile.string() << " (" << ec.message() << ")"
+                                          << std::endl;
+                            }
+                        }
+                    }
+                }
+                else if (failed)
                 {
                     m_exportInProgress = false;
                     m_exportCompleted = false;
@@ -368,10 +402,20 @@ namespace gladius::ui
                 
                 ImGui::Spacing();
                 
-                if (ImGui::Button("Cancel Export"))
+                // Check if cancellation is already requested
+                bool const isCancelling = m_cancellationToken.isCancelled();
+                
+                if (isCancelling)
+                {
+                    // Show disabled "Cancelling..." button when cancellation is in progress
+                    ImGui::BeginDisabled(true);
+                    ImGui::Button("Cancelling...");
+                    ImGui::EndDisabled();
+                }
+                else if (ImGui::Button("Cancel Export"))
                 {
                     onExportCancelled();
-                    m_statusMessage = "Export cancelled";
+                    m_statusMessage = "Cancelling export...";
                     m_statusIsError = false;
                 }
                 
@@ -846,6 +890,20 @@ namespace gladius::ui
                 ImGui::TextDisabled("One build item per shell with solid colors.");
                 ImGui::EndDisabled();
 
+                // Surface color sampling option (nested under shell export)
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::Indent();
+                ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                {
+                        ImGui::SetTooltip(
+                            "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                            "This fixes color accuracy for projected images and textures.\n"
+                            "Recommended for HueForge-style multi-color prints.");
+                }
+                ImGui::Unindent();
+                ImGui::EndDisabled();
+
                 ImGui::Indent();
                 if (lutReady)
                 {
@@ -1119,28 +1177,7 @@ namespace gladius::ui
             throw std::runtime_error("No precomputed LUTs available for shell export");
         }
 
-        core.updateBBox();
-
-        // Derive a per-layer thickness solution using LUTs when available; fallback to min thickness
-        io::ThicknessSolution solution(stack.size());
-        for (std::size_t i = 0; i < solution.thicknesses.size(); ++i)
-        {
-            float thickness = m_colorToThicknessDialog.getConstraints().minThickness;
-            if (i < precomputedLuts.size() && !precomputedLuts[i].empty())
-            {
-                int const res = std::max(2, lutResolution);
-                std::size_t const idx =
-                  (static_cast<std::size_t>(res - 1) * static_cast<std::size_t>(res) +
-                   static_cast<std::size_t>(res - 1)) * static_cast<std::size_t>(res) +
-                  static_cast<std::size_t>(res - 1);
-                if (idx < precomputedLuts[i].size())
-                {
-                    thickness = precomputedLuts[i][idx];
-                }
-            }
-            solution.thicknesses[i] = thickness;
-        }
-
+        // Build MDC options from current settings
         io::ManifoldDualContouringOptions options{};
         options.qualityPreset = m_manifoldQualityPreset;
         options.applyPreset();
@@ -1171,74 +1208,30 @@ namespace gladius::ui
         options.simplificationQemWeight = std::max(0.0F,
           1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
 
+        // Build shell export config
+        io::ShellExportConfig config;
+        config.filamentStack = std::move(stack);
+        config.precomputedLuts = precomputedLuts;
+        config.lutResolution = lutResolution;
+        config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
+        config.mdcOptions = std::move(options);
+        config.useSurfaceColorSampling = m_useSurfaceColorSampling;
+
+        // Reset cancellation token for the new export
+        m_cancellationToken.reset();
+
+        // Configure and start async shell export
+        m_shellExporter.setConfig(std::move(config));
+        m_shellExporter.setDocument(m_document);
+        m_shellExporter.setCancellationToken(&m_cancellationToken);
+        m_shellExporter.beginExport(m_targetFile, core);
+        m_activeExporter = &m_shellExporter;
+
+        // Enable progress tracking and UI lock
         m_exportInProgress = true;
         if (m_exportState != nullptr)
         {
             m_exportState->beginExport("3MF shell export");
-        }
-
-        io::ShellGenerator generator(core, *const_cast<Document*>(m_document));
-        auto shells = generator.generateShells(
-            stack,
-            solution,
-            options,
-            lutResolution,
-            m_colorToThicknessDialog.getConstraints(),
-            &precomputedLuts);
-
-        if (shells.empty())
-        {
-            throw std::runtime_error("Shell generation produced no meshes");
-        }
-
-        ComputeContext * context = core.getComputeContext().get();
-
-        // Build vector of (mesh, name, material color)
-        std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> meshesWithColors;
-        meshesWithColors.reserve(shells.size());
-
-        for (auto const & shell : shells)
-        {
-            auto mesh = std::make_shared<Mesh>(*context);
-
-            for (std::size_t idx = 0; idx + 2 < shell.indices.size(); idx += 3)
-            {
-                auto const i0 = shell.indices[idx + 0];
-                auto const i1 = shell.indices[idx + 1];
-                auto const i2 = shell.indices[idx + 2];
-
-                if (i0 >= shell.vertices.size() || i1 >= shell.vertices.size() || i2 >= shell.vertices.size())
-                {
-                    continue;
-                }
-
-                mesh->addFace(shell.vertices[i0], shell.vertices[i1], shell.vertices[i2]);
-            }
-
-            mesh->write();
-            std::string const name = fmt::format("Shell_L{}_{}", shell.layerIndex, shell.filamentName);
-
-            // Lookup material color from stack
-            Eigen::Vector3f color{1.0F, 1.0F, 1.0F};
-            if (static_cast<std::size_t>(shell.layerIndex) < stack.size())
-            {
-                color = stack[static_cast<std::size_t>(shell.layerIndex)].reflectanceColor;
-            }
-
-            meshesWithColors.emplace_back(std::move(mesh), name, color);
-        }
-
-        io::MeshWriter3mf writer(nullptr);
-        writer.exportMeshesWithMaterialColors(m_targetFile, meshesWithColors, m_document, true);
-
-        m_exportInProgress = false;
-        m_exportCompleted = true;
-        m_statusMessage = "Exported shell meshes to 3MF";
-        m_statusIsError = false;
-
-        if (m_exportState != nullptr)
-        {
-            m_exportState->endExport();
         }
     }
 
@@ -1387,6 +1380,13 @@ namespace gladius::ui
         }
         default:
             throw std::runtime_error("Unsupported surface extraction method");
+        }
+
+        // Reset cancellation token for the new export and pass it to the exporter
+        m_cancellationToken.reset();
+        if (m_activeExporter != nullptr)
+        {
+            m_activeExporter->setCancellationToken(&m_cancellationToken);
         }
 
         m_exportInProgress = true;

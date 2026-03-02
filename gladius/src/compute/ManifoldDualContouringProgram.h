@@ -109,6 +109,69 @@ namespace gladius::compute
             Primitives const & primitives,
             float isoValue);
         
+        /// Build octree with thickness field (variable offset per point)
+        /// Uses precomputed thickness field instead of constant isoValue
+        void constructOctreeWithThicknessField(
+            std::unique_ptr<cl::Buffer> & octreeBuffer,
+            std::size_t & nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            std::uint32_t initialDepth,
+            std::uint32_t maxDepth,
+            Primitives const & primitives,
+            cl::Buffer const & outerThicknessField,
+            cl::Buffer const & innerThicknessField,
+            int thicknessFieldResolution,
+            Eigen::Matrix4f const & worldToThicknessField,
+            bool isInnermostLayer);
+        
+        /// Count vertices with thickness field
+        void countVerticesWithThicknessField(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer & countBuffer,
+            std::size_t nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            Primitives const & primitives,
+            cl::Buffer const & outerThicknessField,
+            cl::Buffer const & innerThicknessField,
+            int thicknessFieldResolution,
+            Eigen::Matrix4f const & worldToThicknessField,
+            bool isInnermostLayer,
+            float gradientEpsilon);
+        
+        /// Generate vertices with thickness field
+        void generateVerticesWithThicknessField(
+            cl::Buffer const & octreeBuffer,
+            cl::Buffer const & offsetBuffer,
+            cl::Buffer & vertexBuffer,
+            cl::Buffer & edgeComponentBuffer,
+            std::size_t nodeCount,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            Primitives const & primitives,
+            cl::Buffer const & outerThicknessField,
+            cl::Buffer const & innerThicknessField,
+            int thicknessFieldResolution,
+            Eigen::Matrix4f const & worldToThicknessField,
+            bool isInnermostLayer,
+            float gradientEpsilon);
+        
+        /// Add halo nodes with thickness field
+        void addHaloNodesWithThicknessField(
+            std::unique_ptr<cl::Buffer> & octreeBuffer,
+            std::size_t & nodeCount,
+            std::uint32_t maxCoord,
+            std::uint8_t depth,
+            Eigen::Vector3f const & bboxMin,
+            Eigen::Vector3f const & bboxMax,
+            Primitives const & primitives,
+            cl::Buffer const & outerThicknessField,
+            cl::Buffer const & innerThicknessField,
+            int thicknessFieldResolution,
+            Eigen::Matrix4f const & worldToThicknessField,
+            bool isInnermostLayer);
+        
         /// Diagnostic counters for boundary hole analysis (all 12 edges)
         struct DiagnosticCounters
         {

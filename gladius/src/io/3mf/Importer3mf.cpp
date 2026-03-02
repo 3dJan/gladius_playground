@@ -389,6 +389,11 @@ namespace gladius::io
             auto res = resourceIterator->GetCurrent();
             Lib3MF_uint32 resourceId = res->GetUniqueResourceID();
 
+            auto implicitFuncCheck = dynamic_cast<Lib3MF::CImplicitFunction *>(res.get());
+            if (implicitFuncCheck)
+            {
+            }
+
             // Skip if this resource is in our duplicates list
             if (duplicateIds.find(resourceId) != duplicateIds.end())
             {
@@ -488,7 +493,9 @@ namespace gladius::io
 
         auto & assembly = *doc.getAssembly();
 
-        if (assembly.findModel(func->GetModelResourceID()))
+        auto const modelResId = func->GetModelResourceID();
+        auto existingModel = assembly.findModel(modelResId);
+        if (existingModel)
         {
             return;
         }
@@ -598,9 +605,9 @@ namespace gladius::io
 
         connectOutputs(*model, *model->getEndNode(), *func);
 
-        model->setLogger(doc.getSharedLogger());
-
-        model->updateTypes();
+        // Don't set logger or call updateTypes() during import - validation runs after loading
+        // completes and will update types properly. Setting the logger here causes validation
+        // errors to be logged for the temporarily incomplete graph.
     }
 
     void Importer3mf::connectNode(Lib3MF::CImplicitNode & node3mf,
@@ -633,13 +640,7 @@ namespace gladius::io
 
             if (!parameter)
             {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent({fmt::format("Failed to find parameter {} in node {}",
-                                                         parameterName,
-                                                         node3mf.GetIdentifier()),
-                                             events::Severity::Error});
-                }
+                // Skip silently - validation will catch missing parameters after load
                 continue;
             }
 
@@ -777,6 +778,13 @@ namespace gladius::io
             }
             auto resourceId = resource->GetModelResourceID();
             resourceNode->setResourceId(resourceId);
+            
+            // Mark resourceid parameter as not requiring input connection - value is set directly
+            auto * param = resourceNode->getParameter(nodes::FieldNames::ResourceId);
+            if (param)
+            {
+                param->setInputSourceRequired(false);
+            }
         }
 
         if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::FunctionGradient)
@@ -832,40 +840,17 @@ namespace gladius::io
                 auto parameter = endNode.getParameter(parameterName);
                 if (!parameter)
                 {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not find parameter {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
+                    // Skip silently - validation will catch missing parameters after load
                     continue;
                 }
 
                 auto sourcePort = resolveInput(model, output);
                 if (sourcePort)
                 {
-                    if (!model.addLink(sourcePort->getId(), parameter->getId()))
-                    {
-                        if (m_eventLogger)
-                        {
-                            m_eventLogger->addEvent({fmt::format("Could not add link from {} to {}",
-                                                                 sourcePort->getUniqueName(),
-                                                                 parameterName),
-                                                     events::Severity::Warning});
-                        }
-                    }
+                    // Silently ignore link failures - validation will catch these after load
+                    (void) model.addLink(sourcePort->getId(), parameter->getId());
                 }
-                else
-                {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not resolve input for {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
-                }
+                // Skip silently if source port not found - validation will catch these after load
             }
         }
     }
@@ -892,11 +877,7 @@ namespace gladius::io
             auto sourceNodeIter = idToNode.find(sourceNodeName);
             if (sourceNodeIter == idToNode.end())
             {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent({fmt::format("Node not found: {}\n", sourceNodeName),
-                                             events::Severity::Error});
-                }
+                // Skip silently - validation will catch missing nodes after load
                 return nullptr;
             }
             sourceNode = sourceNodeIter->second;
@@ -940,23 +921,7 @@ namespace gladius::io
                 }
             }
 
-            if (m_eventLogger)
-            {
-                std::string suggestion;
-                if (!outputs.empty())
-                {
-                    suggestion = outputs.begin()->first;
-                }
-                m_eventLogger->addEvent(
-                  {fmt::format("Resolving {} failed. Port of node {} not found: {}{}",
-                               refName,
-                               sourceNodeName,
-                               sourcePortName,
-                               suggestion.empty() ? std::string{}
-                                                  : fmt::format(". Did you mean {}?", suggestion)),
-                   events::Severity::Error});
-            }
-
+            // Skip silently - validation will catch missing ports after load
             return nullptr;
         }
         return &sourcePortIter->second;
@@ -1996,6 +1961,40 @@ namespace gladius::io
         loadBuildItems(model, doc);
     }
 
+    /// Remove attachments from sourceModel whose paths already exist in targetModel.
+    /// This prevents "Duplicate Attachment Path" errors from MergeFromModel when
+    /// the same library file is imported more than once.
+    static void removeDuplicateAttachments(Lib3MF::PModel const & sourceModel,
+                                           Lib3MF::PModel const & targetModel)
+    {
+        // Collect existing attachment paths from the target model
+        std::set<std::string> targetPaths;
+        auto const targetCount = targetModel->GetAttachmentCount();
+        for (Lib3MF_uint32 i = 0; i < targetCount; ++i)
+        {
+            targetPaths.insert(targetModel->GetAttachment(i)->GetPath());
+        }
+
+        // Remove source attachments whose path already exists in the target.
+        // Iterate in reverse because RemoveAttachment can shift indices.
+        auto sourceCount = sourceModel->GetAttachmentCount();
+        for (auto i = static_cast<int64_t>(sourceCount) - 1; i >= 0; --i)
+        {
+            auto attachment = sourceModel->GetAttachment(static_cast<Lib3MF_uint32>(i));
+            if (targetPaths.count(attachment->GetPath()) > 0)
+            {
+                sourceModel->RemoveAttachment(attachment.get());
+            }
+        }
+
+        // Also remove the source's package thumbnail if the target already has one
+        if (sourceModel->HasPackageThumbnailAttachment() &&
+            targetModel->HasPackageThumbnailAttachment())
+        {
+            sourceModel->RemovePackageThumbnailAttachment();
+        }
+    }
+
     void Importer3mf::merge(std::filesystem::path const & filename, Document & doc)
     {
         ProfileFunction auto targetModel = doc.get3mfModel();
@@ -2034,13 +2033,38 @@ namespace gladius::io
 
         try
         {
-            // backup the list of function ids
+            // NOTE: Selective import pruning is intentionally disabled here.
+            // Library files carry gladius:library-functions metadata that identifies
+            // which functions to import, but pruning the source model before merge
+            // requires lib3mf's RemoveResource, which corrupts internal state on
+            // models with cross-function ResourceIdNode references.
+            // The metadata is still used by the drag-and-drop handler
+            // (ModelEditor::handleLibraryDrop) to identify which function to
+            // create a FunctionCall node for.
 
+            // backup the list of function ids
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions
             auto implicitFunctions = collectImplicitFunctions(targetModel);
 
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: {} existing functions, {} existing implicit functions",
+                               functionResourceIds.size(),
+                               implicitFunctions.size()),
+                   events::Severity::Info});
+            }
+
+            removeDuplicateAttachments(modelToMergeFrom, targetModel);
             targetModel->MergeFromModel(modelToMergeFrom.get());
+
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: MergeFromModel succeeded for {}", filename.string()),
+                   events::Severity::Info});
+            }
 
             // now find all duplicated functions
             size_t numDuplicatesPrevious = 0;
@@ -2058,32 +2082,30 @@ namespace gladius::io
 
             } while (numDuplicatesPrevious != numDuplicatesCurrent);
 
-            // remove the duplicates from the model
-            for (auto const & duplicate : duplicates)
+            // NOTE: We intentionally do NOT call RemoveResource on duplicate functions.
+            // lib3mf's RemoveResource corrupts internal state on models with
+            // cross-function ResourceIdNode references. The duplicates are already
+            // harmless: references have been redirected by replaceDuplicatedFunctionReferences,
+            // and loadImplicitFunctionsFiltered skips loading them into the Document.
+
+            if (m_eventLogger)
             {
-                // log
-                m_eventLogger->addEvent({fmt::format("Removed resource from model3mf: {}",
-                                                     duplicate.duplicateFunction->GetResourceID()),
-                                         events::Severity::Info});
-                // targetModel->RemoveResource(duplicate.duplicateFunction.get());
-                auto const & resource =
-                  targetModel->GetResourceByID(duplicate.duplicateFunction->GetUniqueResourceID());
-                if (!resource)
-                {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Resource {} not found in model3mf",
-                                       duplicate.duplicateFunction->GetUniqueResourceID()),
-                           events::Severity::Error});
-                    }
-                    continue;
-                }
-                targetModel->RemoveResource(resource);
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: {} duplicates found, loading functions...",
+                               duplicates.size()),
+                   events::Severity::Info});
             }
 
             loadImageStacks(filename, targetModel, doc);
             loadImplicitFunctionsFiltered(targetModel, doc, duplicates);
+
+            if (m_eventLogger)
+            {
+                auto const funcCount = doc.getAssembly()->getFunctions().size();
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: complete, assembly now has {} functions", funcCount),
+                   events::Severity::Info});
+            }
 
             doc.rebuildResourceDependencyGraph();
         }

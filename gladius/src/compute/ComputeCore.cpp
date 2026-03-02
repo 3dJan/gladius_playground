@@ -62,6 +62,7 @@ namespace gladius
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
         m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
         m_programs.reset();
         setSliceHeight(0.f);
     }
@@ -192,7 +193,7 @@ namespace gladius
             lock(m_computeMutex, std::adopt_lock);
         if (isAutoUpdateBoundingBoxEnabled())
         {
-            resetBoundingBox();
+            markBoundingBoxStale();
         }
 
         auto & paramBuf = getResourceContext()->getParameterBuffer();
@@ -351,6 +352,16 @@ namespace gladius
         return m_autoUpdateBoundingBox;
     }
 
+    bool ComputeCore::isSdfComputationInProgress() const noexcept
+    {
+        return m_sdfComputationInProgress.load();
+    }
+
+    bool ComputeCore::isBoundingBoxComputationInProgress() const noexcept
+    {
+        return m_boundingBoxComputationInProgress.load();
+    }
+
     ProgramManager & ComputeCore::getProgramManager()
     {
         return m_programs;
@@ -503,8 +514,11 @@ namespace gladius
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
 
+        m_boundingBoxComputationInProgress.store(true);
+
         if (m_boundingBox && isBoundingBoxMeaningful(*m_boundingBox))
         {
+            m_boundingBoxComputationInProgress.store(false);
             return true;
         }
 
@@ -521,6 +535,7 @@ namespace gladius
             {
             }
             LOG_LOCATION
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -539,6 +554,7 @@ namespace gladius
             {
             }
             LOG_LOCATION
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -565,6 +581,7 @@ namespace gladius
                 logMsg("updateBoundingBoxFast: Failed to get ComputeContext diagnostics");
             }
 
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
 
@@ -591,6 +608,7 @@ namespace gladius
                        "queue.finish() failure");
             }
 
+            m_boundingBoxComputationInProgress.store(false);
             return false;
         }
         m_resources->getConvexHullVertices().read();
@@ -640,6 +658,7 @@ namespace gladius
             m_boundingBox = BoundingBox{{0.f, 0.f, 0.f, 0.f}, {400.f, 400.f, 400.f, 0.f}};
         }
         LOG_LOCATION;
+        m_boundingBoxComputationInProgress.store(false);
         return true;
     }
 
@@ -674,6 +693,27 @@ namespace gladius
     void ComputeCore::resetBoundingBox()
     {
         m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
+    }
+
+    void ComputeCore::markBoundingBoxStale()
+    {
+        m_boundingBoxStale.store(true, std::memory_order_release);
+    }
+
+    bool ComputeCore::isBoundingBoxStale() const
+    {
+        return m_boundingBoxStale.load(std::memory_order_acquire);
+    }
+
+    void ComputeCore::recomputeStaleBoundingBox()
+    {
+        if (!m_boundingBoxStale.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
     }
 
     BitmapLayer ComputeCore::generateDownSkinMap(float z_mm, Vector2 pixelSize_mm)
@@ -842,6 +882,11 @@ namespace gladius
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgress() const
     {
         return m_programs.isAnyCompilationInProgress();
+    }
+
+    [[nodiscard]] bool ComputeCore::isAnyCompilationInProgressNonBlocking() const noexcept
+    {
+        return m_programs.isAnyCompilationInProgressNonBlocking();
     }
 
     bool ComputeCore::updateBBox()
@@ -1089,6 +1134,8 @@ namespace gladius
     {
         ProfileFunction;
 
+        m_sdfComputationInProgress.store(true);
+
         // No mutex lock for async operation - caller must ensure thread safety
         // Validate preconditions
         if (!m_programs.getSlicerState().isModelUpToDate())
@@ -1099,6 +1146,7 @@ namespace gladius
             if (!m_programs.getSlicerState().isModelUpToDate())
             {
                 logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after recompilation");
+                m_sdfComputationInProgress.store(false);
                 return cl::Event{};
             }
             else
@@ -1115,6 +1163,7 @@ namespace gladius
             if (!m_programs.getSlicerProgram()->isValid())
             {
                 logMsg("ComputeCore::precomputeSdfAsync: slicer program remained invalid");
+                m_sdfComputationInProgress.store(false);
                 return cl::Event{};
             }
             else
@@ -1126,6 +1175,7 @@ namespace gladius
         if (m_precompSdfIsValid)
         {
             logMsg("ComputeCore::precomputeSdfAsync: SDF already valid, skipping");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
@@ -1133,12 +1183,14 @@ namespace gladius
         if (!updateBBox())
         {
             logMsg("ComputeCore::precomputeSdfAsync: updateBBox failed");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
         if (!m_boundingBox.has_value())
         {
             logMsg("ComputeCore::precomputeSdfAsync: no bounding box available, skipping");
+            m_sdfComputationInProgress.store(false);
             return cl::Event{};
         }
 
@@ -1153,8 +1205,18 @@ namespace gladius
           bbox.max.z));
 
         // Expand bounding box with margin
-        auto const margin = 10.f;
+        // When bbox is stale (parameter changed but not yet recomputed), use a larger
+        // proportional margin to provide headroom for parameter-induced geometry changes
         auto sdfBBox = m_boundingBox.value();
+        float margin = 10.f;
+        if (m_boundingBoxStale.load(std::memory_order_acquire))
+        {
+            auto const dx = bbox.max.x - bbox.min.x;
+            auto const dy = bbox.max.y - bbox.min.y;
+            auto const dz = bbox.max.z - bbox.min.z;
+            auto const diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+            margin = std::max(20.f, 0.15f * diagonal);
+        }
         sdfBBox.min.x -= margin;
         sdfBBox.min.y -= margin;
         sdfBBox.min.z -= margin;
@@ -1603,17 +1665,20 @@ namespace gladius
 
         glFinish();
 
-        // Only render if precomputed SDF is available. When SDF is invalid (e.g., after parameter
-        // change), we keep the previous preview visible until async SDF precomputation completes.
-        if (!m_precompSdfIsValid)
+        // Use precomputed SDF when available for fast rendering, fall back to full model
+        // evaluation otherwise (slower but ensures the preview always updates)
+        if (m_precompSdfIsValid)
         {
-            LOG_LOCATION;
-            return;
+            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
-
-        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
+        else
+        {
+            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        }
 
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,
@@ -1886,6 +1951,7 @@ namespace gladius
     void ComputeCore::setSdfValid(bool valid)
     {
         m_precompSdfIsValid = valid;
+        m_sdfComputationInProgress.store(false);
     }
 
     bool ComputeCore::isSdfValid() const

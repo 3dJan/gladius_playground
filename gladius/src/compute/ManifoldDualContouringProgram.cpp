@@ -569,4 +569,212 @@ namespace gladius::compute
 
         return result;
     }
+
+    void ManifoldDualContouringProgram::constructOctreeWithThicknessField(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t & nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        std::uint32_t initialDepth,
+        std::uint32_t maxDepth,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        std::vector<OctreeNode> rootNodes(1);
+        rootNodes[0].mortonCode = 0;
+        rootNodes[0].edgeMask = 0xFFF;
+        rootNodes[0].internalMask = 0;
+        rootNodes[0].depth = 0;
+        std::memset(rootNodes[0].padding, 0, sizeof(rootNodes[0].padding));
+
+        auto currentBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            rootNodes.size() * sizeof(OctreeNode),
+            rootNodes.data());
+
+        std::size_t currentNodeCount = 1;
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        // Pack matrix as float16 (row-major)
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        for (std::uint32_t depth = 0; depth < maxDepth; ++depth)
+        {
+            std::size_t maxChildren = currentNodeCount * 8;
+
+            auto nextBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                maxChildren * sizeof(OctreeNode));
+
+            auto countBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                sizeof(int));
+
+            int zero = 0;
+            m_ComputeContext->GetQueue().enqueueWriteBuffer(*countBuffer, CL_TRUE, 0, sizeof(int), &zero);
+
+            cl::NDRange global(currentNodeCount);
+
+            m_programFront->run("construct_octree_level_with_thickness",
+                               cl::NullRange,
+                               global,
+                               *currentBuffer,
+                               *nextBuffer,
+                               *countBuffer,
+                               static_cast<int>(currentNodeCount),
+                               clBboxMin,
+                               clBboxMax,
+                               depth,
+                               maxDepth,
+                               initialDepth,
+                               PAYLOAD_ARGUMENTS,
+                               outerThicknessField,
+                               innerThicknessField,
+                               thicknessFieldResolution,
+                               clWorldToGrid,
+                               static_cast<int>(isInnermostLayer ? 1 : 0));
+
+            m_ComputeContext->GetQueue().enqueueReadBuffer(*countBuffer, CL_TRUE, 0, sizeof(int), &currentNodeCount);
+
+            if (currentNodeCount == 0)
+            {
+                break;
+            }
+
+            currentBuffer = std::move(nextBuffer);
+        }
+
+        octreeBuffer = std::move(currentBuffer);
+        nodeCount = currentNodeCount;
+    }
+
+    void ManifoldDualContouringProgram::countVerticesWithThicknessField(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer & countBuffer,
+        std::size_t nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer,
+        float gradientEpsilon)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("count_vertices_with_thickness",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           countBuffer,
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           outerThicknessField,
+                           innerThicknessField,
+                           thicknessFieldResolution,
+                           clWorldToGrid,
+                           static_cast<int>(isInnermostLayer ? 1 : 0),
+                           gradientEpsilon);
+    }
+
+    void ManifoldDualContouringProgram::generateVerticesWithThicknessField(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer const & offsetBuffer,
+        cl::Buffer & vertexBuffer,
+        cl::Buffer & edgeComponentBuffer,
+        std::size_t nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer,
+        float gradientEpsilon)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("emit_vertices_with_thickness",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           offsetBuffer,
+                           vertexBuffer,
+                           edgeComponentBuffer,
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           outerThicknessField,
+                           innerThicknessField,
+                           thicknessFieldResolution,
+                           clWorldToGrid,
+                           static_cast<int>(isInnermostLayer ? 1 : 0),
+                           gradientEpsilon);
+    }
+
+    void ManifoldDualContouringProgram::addHaloNodesWithThicknessField(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t & nodeCount,
+        std::uint32_t maxCoord,
+        std::uint8_t depth,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer)
+    {
+        // For now, use the standard halo node generation with isoValue=0
+        // The halo nodes just need to exist for watertight quad emission;
+        // their exact positions will be computed with thickness in emit_vertices_with_thickness.
+        addHaloNodes(octreeBuffer, nodeCount, maxCoord, depth, bboxMin, bboxMax, primitives, 0.0F);
+    }
 }

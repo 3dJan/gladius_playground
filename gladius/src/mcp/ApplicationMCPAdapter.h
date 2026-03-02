@@ -7,6 +7,7 @@
 
 #include "MCPApplicationInterface.h"
 #include <memory>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 // Include tool headers for complete type definitions
@@ -19,6 +20,7 @@
 #include "tools/SceneHierarchyTool.h"
 #include "tools/UtilityTool.h"
 #include "tools/ValidationTool.h"
+#include "tools/LibraryTool.h"
 
 // Forward declarations for tools
 namespace gladius::mcp::tools
@@ -32,6 +34,7 @@ namespace gladius::mcp::tools
     class RenderingTool;
     class ValidationTool;
     class UtilityTool;
+    class LibraryTool;
 }
 
 namespace gladius
@@ -68,6 +71,7 @@ namespace gladius
         std::unique_ptr<mcp::tools::RenderingTool> m_renderingTool;
         std::unique_ptr<mcp::tools::ValidationTool> m_validationTool;
         std::unique_ptr<mcp::tools::UtilityTool> m_utilityTool;
+        std::unique_ptr<mcp::tools::LibraryTool> m_libraryTool;
 
         // Helper method to automatically validate after operations
         nlohmann::json performAutoValidation(bool includeOpenCL = false) const;
@@ -127,13 +131,23 @@ namespace gladius
                                      const std::vector<FunctionArgument> & arguments = {},
                                      const std::string & outputName = "") override;
 
+        std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string & name,
+                                  const std::string & snippet,
+                                  const std::string & outputType,
+                                  const std::vector<FunctionArgument> & arguments = {},
+                                  const std::string & outputName = "") override;
+
         // 3MF and implicit modeling operations
         bool validateDocumentFor3MF() const override;
         bool exportDocumentAs3MF(const std::string & path,
                                  bool includeImplicitFunctions = true) const override;
 
         // 3MF Resource creation methods (return success flag and resource ID)
-        std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) override;
+        std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> minPoint = {-10.f, -10.f, -10.f},
+          std::array<float, 3> maxPoint = {10.f, 10.f, 10.f}) override;
         std::pair<bool, uint32_t> createImage3DFunction(const std::string & name,
                                                         const std::string & imagePath,
                                                         float valueScale = 1.0f,
@@ -176,10 +190,22 @@ namespace gladius
         nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
                                               uint32_t referencedFunctionId,
                                               const std::string & displayName = "") override;
-        nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                               uint32_t nodeId,
-                                                               bool autoConnect = true) override;
+        nlohmann::json createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect = true,
+          std::vector<std::string> const & excludeParams = {}) override;
         nlohmann::json removeUnusedNodes(uint32_t functionId) override;
+
+        // Snippet operations
+        nlohmann::json getFunctionSnippet(uint32_t functionId) const override;
+        nlohmann::json setFunctionSnippet(
+          uint32_t functionId,
+          std::string const & snippet,
+          std::string const & outputType = "float",
+          std::vector<FunctionArgument> const & arguments = {}) override;
+        nlohmann::json getProgramSnippet() const override;
+        nlohmann::json setProgramSnippet(std::string const & snippet) override;
 
         // Manufacturing validation
         nlohmann::json
@@ -220,5 +246,36 @@ namespace gladius
         bool modifyLevelSet(uint32_t levelSetModelResourceId,
                             std::optional<uint32_t> functionModelResourceId,
                             std::optional<std::string> channel) override;
+
+        // Library operations
+        nlohmann::json listLibrary(std::string const & category = "") const override;
+        nlohmann::json getLibraryEntryInfo(std::string const & category,
+                                           std::string const & name) const override;
+        nlohmann::json createLibraryEntry(std::string const & name,
+                                          std::string const & category,
+                                          std::string const & expression,
+                                          std::string const & description,
+                                          bool overwrite = false) override;
+        nlohmann::json
+        createLibraryEntryFromSnippet(std::string const & name,
+                                      std::string const & category,
+                                      std::string const & snippet,
+                                      std::string const & description,
+                                      std::vector<FunctionArgument> const & arguments,
+                                      std::string const & outputType = "float",
+                                      bool overwrite = false) override;
+        nlohmann::json exportToLibrary(uint32_t functionId,
+                                       std::string const & category,
+                                       std::string const & name,
+                                       std::string const & description,
+                                       bool overwrite = false,
+                                       bool keepScaffold = false) override;
+        nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                           std::string const & description) override;
+        nlohmann::json importLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
+        nlohmann::json deleteLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
     };
 }

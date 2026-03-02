@@ -7,10 +7,11 @@
 ///
 /// @see MeshBVH.h for the BVH builder
 /// @see VdbResource.h for the similar pattern used with OpenVDB grids
+/// @see MeshResourceBase.h for the common mesh resource interface
 
 #include "MeshBVH.h"
+#include "MeshResourceBase.h"
 #include "MeshVoxelGridManager.h"
-#include "ResourceManager.h"
 
 #include <span>
 
@@ -20,7 +21,7 @@ namespace gladius
     /// @details Follows the ResourceBase pattern (same as VdbResource).
     ///          Serializes BVH nodes, triangles, and vertex normals to PrimitiveBuffer
     ///          for GPU access via OpenCL kernels.
-    class SpatialMeshResource : public ResourceBase
+    class SpatialMeshResource : public MeshResourceBase
     {
       public:
         /// Construct from pre-built spatial data
@@ -39,19 +40,37 @@ namespace gladius
         ~SpatialMeshResource() = default;
 
         /// Get the spatial mesh data
-        SpatialMeshData const & getData() const
+        [[nodiscard]] SpatialMeshData const & getData() const
         {
             return m_data;
         }
 
-        /// Get the mesh bounding box
-        BoundingBox const & getBoundingBox() const
+        // MeshResourceBase interface
+        [[nodiscard]] BoundingBox getBoundingBox() const override
         {
             return m_data.boundingBox;
         }
 
-        /// Get triangle count
-        size_t getTriangleCount() const
+        [[nodiscard]] size_t getTriangleCount() const override
+        {
+            return m_data.originalTriangleCount;
+        }
+
+        [[nodiscard]] std::string getMeshTypeName() const override
+        {
+            return "SpatialMesh (BVH)";
+        }
+
+        /// Get the mesh bounding box (deprecated - use getBoundingBox())
+        [[deprecated("Use getBoundingBox() instead")]]
+        BoundingBox const & getBoundingBox_DEPRECATED() const
+        {
+            return m_data.boundingBox;
+        }
+
+        /// Get triangle count (deprecated - use getTriangleCount())
+        [[deprecated("Use getTriangleCount() instead")]]
+        size_t getTriangleCount_DEPRECATED() const
         {
             return m_data.originalTriangleCount;
         }

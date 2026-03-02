@@ -10,13 +10,19 @@
 - After loading switch to the function referenced by the levelset of the first build item that has one 
 
 
-## Mesh Exoport
-- Manifold Dual Contouring needs to generate watertight meshes
-- Progress indication for mesh export and async mesh generation
+## Mesh Export
+- Manifold Dual Contouring needs to generate watertight meshes when exporting the color shells (it works well without colors)
+
+- Ensure that the model cannot be edited while exporting
+
 - Simplify mesh export settings UI
 - Color mapping also with openvdb mesh export
 - Simplify the Color Export settings UI
-- Visualize color mapping graphically instead of a table
+    - Visualize color mapping graphically instead of a table
+    - Color Distribution Heat map: Input vs Output 
+
+## Direct STL Import
+When no model is loaded and stl file is dropped into the window, open a special template, where we add the mesh and create a levelset from it automatically (mesh to distance node, to make it eas to add something like a gyroid)
 
 ## Improve 3mf library browser
 - Remove duplicated functions after merging a 3mf file from the library

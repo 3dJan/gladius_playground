@@ -104,6 +104,9 @@ namespace gladius::ui
                         it->info->hasThumbnail = true;
                         it->info->thumbnailLoaded = true;
                         it->info->loadState = ThumbnailLoadState::DecodedPending;
+                        it->info->hasLibraryMetadata = result.hasLibraryMetadata;
+                        it->info->description = std::move(result.description);
+                        it->info->libraryFunctionNames = std::move(result.libraryFunctionNames);
                     }
                     else if (it->info)
                     {
@@ -116,6 +119,9 @@ namespace gladius::ui
                         {
                             it->info->fileInfo.addMetadata(key, value);
                         }
+                        it->info->hasLibraryMetadata = result.hasLibraryMetadata;
+                        it->info->description = std::move(result.description);
+                        it->info->libraryFunctionNames = std::move(result.libraryFunctionNames);
                         it->info->loadState = ThumbnailLoadState::Failed;
                         it->info->hasThumbnail = false;
                         it->info->thumbnailLoaded = true;

@@ -4,6 +4,7 @@
 #include "3mf/MeshWriter3mf.h"
 #include "MeshExporter.h"
 #include "MeshExporter3mf.h"
+#include "WindingRepair.h"
 
 #include "ComputeContext.h"
 #include "ComputeCore.h"
@@ -46,6 +47,7 @@ namespace gladius::io
             return Vector3{value.x(), value.y(), value.z()};
         }
 
+        // EdgeKey and EdgeKeyHash kept for the 3MF face-color export path
         struct EdgeKey
         {
             std::uint32_t a{0U};
@@ -64,241 +66,6 @@ namespace gladius::io
                 return (static_cast<std::size_t>(key.a) << 32U) ^ static_cast<std::size_t>(key.b);
             }
         };
-
-        struct EdgeRef
-        {
-            std::uint32_t a{0U};
-            std::uint32_t b{0U};
-            std::uint32_t triId{0U};
-            std::uint8_t dir{0U}; // 0: min->max, 1: max->min
-        };
-
-        [[nodiscard]] double computeSignedVolume(
-          std::vector<Eigen::Vector3f> const & positions,
-          std::vector<std::uint32_t> const & indices)
-        {
-            if (indices.size() < 3U)
-            {
-                return 0.0;
-            }
-
-            double volume6 = 0.0;
-            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
-            {
-                std::size_t const ia = static_cast<std::size_t>(indices[i + 0U]);
-                std::size_t const ib = static_cast<std::size_t>(indices[i + 1U]);
-                std::size_t const ic = static_cast<std::size_t>(indices[i + 2U]);
-                if (ia >= positions.size() || ib >= positions.size() || ic >= positions.size())
-                {
-                    continue;
-                }
-
-                Eigen::Vector3d const a = positions[ia].cast<double>();
-                Eigen::Vector3d const b = positions[ib].cast<double>();
-                Eigen::Vector3d const c = positions[ic].cast<double>();
-                volume6 += a.dot(b.cross(c));
-            }
-            return volume6 / 6.0;
-        }
-
-        struct WindingRepairStats
-        {
-            std::size_t triangleCount{0U};
-            std::size_t adjacencyConstraints{0U};
-            std::size_t components{0U};
-            std::size_t flippedTriangles{0U};
-            bool hadInconsistency{false};
-            bool flippedGlobalOrientation{false};
-        };
-
-        /// Ensures local winding consistency across shared edges by flipping triangles.
-        ///
-        /// This targets the class of defects where the mesh is topologically closed in an
-        /// *undirected* sense (each edge has exactly two incident triangles) but triangles
-        /// have inconsistent orientation, causing oriented-edge conflicts that many slicers
-        /// may report as "open" or "broken" edges.
-        [[nodiscard]] WindingRepairStats repairTriangleWindingConsistency(
-          std::vector<Eigen::Vector3f> const & positions,
-          std::vector<std::uint32_t> & indices)
-        {
-            WindingRepairStats stats;
-            if (indices.size() < 3U || (indices.size() % 3U) != 0U)
-            {
-                return stats;
-            }
-
-            std::size_t const triCount = indices.size() / 3U;
-            stats.triangleCount = triCount;
-
-            std::vector<EdgeRef> edgeRefs;
-            edgeRefs.reserve(triCount * 3U);
-
-            for (std::size_t triId = 0U; triId < triCount; ++triId)
-            {
-                std::uint32_t const i0 = indices[triId * 3U + 0U];
-                std::uint32_t const i1 = indices[triId * 3U + 1U];
-                std::uint32_t const i2 = indices[triId * 3U + 2U];
-                if (i0 == i1 || i1 == i2 || i2 == i0)
-                {
-                    continue;
-                }
-
-                auto pushEdge = [&edgeRefs, triId](std::uint32_t from, std::uint32_t to)
-                {
-                    if (from == to)
-                    {
-                        return;
-                    }
-
-                    std::uint32_t const lo = std::min(from, to);
-                    std::uint32_t const hi = std::max(from, to);
-                    std::uint8_t const dir = (from == lo) ? 0U : 1U;
-                    edgeRefs.push_back(EdgeRef{lo, hi, static_cast<std::uint32_t>(triId), dir});
-                };
-
-                pushEdge(i0, i1);
-                pushEdge(i1, i2);
-                pushEdge(i2, i0);
-            }
-
-            if (edgeRefs.empty())
-            {
-                return stats;
-            }
-
-            std::sort(edgeRefs.begin(),
-                      edgeRefs.end(),
-                      [](EdgeRef const & lhs, EdgeRef const & rhs)
-                      {
-                          if (lhs.a != rhs.a)
-                          {
-                              return lhs.a < rhs.a;
-                          }
-                          if (lhs.b != rhs.b)
-                          {
-                              return lhs.b < rhs.b;
-                          }
-                          return lhs.triId < rhs.triId;
-                      });
-
-            std::vector<std::array<std::uint32_t, 3>> neighbors(triCount, {
-              std::numeric_limits<std::uint32_t>::max(),
-              std::numeric_limits<std::uint32_t>::max(),
-              std::numeric_limits<std::uint32_t>::max()});
-            std::vector<std::array<std::uint8_t, 3>> neighborXor(triCount, {0U, 0U, 0U});
-            std::vector<std::uint8_t> degree(triCount, 0U);
-
-            auto addConstraint = [&neighbors, &neighborXor, &degree](std::uint32_t from,
-                                                                     std::uint32_t to,
-                                                                     std::uint8_t requiredXor)
-            {
-                std::uint8_t & d = degree[from];
-                if (d >= 3U)
-                {
-                    return;
-                }
-                neighbors[from][d] = to;
-                neighborXor[from][d] = requiredXor;
-                ++d;
-            };
-
-            // Build triangle adjacency with XOR constraints.
-            std::size_t idx = 0U;
-            while (idx < edgeRefs.size())
-            {
-                std::size_t const start = idx;
-                std::uint32_t const a = edgeRefs[idx].a;
-                std::uint32_t const b = edgeRefs[idx].b;
-                while (idx < edgeRefs.size() && edgeRefs[idx].a == a && edgeRefs[idx].b == b)
-                {
-                    ++idx;
-                }
-                std::size_t const count = idx - start;
-                if (count != 2U)
-                {
-                    continue;
-                }
-
-                EdgeRef const & e0 = edgeRefs[start + 0U];
-                EdgeRef const & e1 = edgeRefs[start + 1U];
-                if (e0.triId == e1.triId)
-                {
-                    continue;
-                }
-
-                std::uint8_t const requiredXor = (e0.dir == e1.dir) ? 1U : 0U;
-                addConstraint(e0.triId, e1.triId, requiredXor);
-                addConstraint(e1.triId, e0.triId, requiredXor);
-                ++stats.adjacencyConstraints;
-            }
-
-            // Assign flips per connected component.
-            std::vector<std::int8_t> flip(triCount, static_cast<std::int8_t>(-1));
-            std::queue<std::uint32_t> queue;
-
-            for (std::uint32_t t = 0U; t < static_cast<std::uint32_t>(triCount); ++t)
-            {
-                if (degree[t] == 0U || flip[t] != static_cast<std::int8_t>(-1))
-                {
-                    continue;
-                }
-
-                ++stats.components;
-                flip[t] = 0;
-                queue.push(t);
-
-                while (!queue.empty())
-                {
-                    std::uint32_t const cur = queue.front();
-                    queue.pop();
-
-                    std::uint8_t const d = degree[cur];
-                    for (std::uint8_t n = 0U; n < d; ++n)
-                    {
-                        std::uint32_t const other = neighbors[cur][n];
-                        if (other == std::numeric_limits<std::uint32_t>::max())
-                        {
-                            continue;
-                        }
-
-                        std::uint8_t const requiredXor = neighborXor[cur][n];
-                        std::int8_t const desired = static_cast<std::int8_t>(flip[cur] ^ requiredXor);
-                        if (flip[other] == static_cast<std::int8_t>(-1))
-                        {
-                            flip[other] = desired;
-                            queue.push(other);
-                        }
-                        else if (flip[other] != desired)
-                        {
-                            stats.hadInconsistency = true;
-                        }
-                    }
-                }
-            }
-
-            // Apply flips.
-            for (std::size_t triId = 0U; triId < triCount; ++triId)
-            {
-                if (flip[triId] == 1)
-                {
-                    std::swap(indices[triId * 3U + 1U], indices[triId * 3U + 2U]);
-                    ++stats.flippedTriangles;
-                }
-            }
-
-            // Optional: enforce outward global orientation (positive signed volume) when possible.
-            double const volume = computeSignedVolume(positions, indices);
-            if (volume < 0.0)
-            {
-                for (std::size_t triId = 0U; triId < triCount; ++triId)
-                {
-                    std::swap(indices[triId * 3U + 1U], indices[triId * 3U + 2U]);
-                }
-                stats.flippedGlobalOrientation = true;
-            }
-
-            return stats;
-        }
     }
 
     ManifoldDualContouringStlExporter::ManifoldDualContouringStlExporter() = default;
@@ -448,7 +215,14 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
-        m_progress = 0.25;
+        // Check for cancellation after bbox computation
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
+        m_progress = 0.05;
 
         compute::ManifoldDualContouringGpu gpuPipeline(generator);
         compute::ManifoldDualContouringConfig config{};
@@ -487,8 +261,32 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
-        gpuPipeline.setConfig(config);
+        gpuPipeline.setConfig(std::move(config));
+        
+        // Wire progress callback to update exporter's atomic progress
+        // Mesh generation phase spans 5-80% of total export progress
+        gpuPipeline.setMeshGenerationProgressCallback(
+            [this](float meshProgress, std::string_view /*phaseName*/) {
+                // Map mesh generation progress (0.0-1.0) to exporter progress (0.05-0.80)
+                // This gives mesh generation 75% of the total export progress
+                double const exportProgress = 0.05 + static_cast<double>(meshProgress) * 0.75;
+                m_progress.store(exportProgress, std::memory_order_relaxed);
+            });
+        
+        // Wire cancellation callback so the GPU pipeline can check frequently
+        gpuPipeline.setCancellationCheckCallback(
+            [this]() -> bool {
+                return isCancellationRequested();
+            });
+        
         gpuPipeline.generateMesh();
+
+        // Check for cancellation after mesh generation (most expensive step)
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
 
         auto const & mesh = gpuPipeline.getMesh();
         if (mesh.indices.empty())
@@ -496,7 +294,15 @@ namespace gladius::io
             throw std::runtime_error("Manifold dual contouring produced an empty mesh");
         }
 
-        m_progress = 0.7;
+        m_progress = 0.80;
+
+        // Check for cancellation before file write
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
         writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals);
 
         if (m_logger)
@@ -512,7 +318,7 @@ namespace gladius::io
       ComputeCore & generator,
       std::vector<Eigen::Vector3f> const & positions,
       std::vector<std::uint32_t> const & indices,
-      std::vector<Eigen::Vector3f> const & normals) const
+      std::vector<Eigen::Vector3f> const & normals)
     {
         if (indices.size() % 3U != 0U)
         {
@@ -529,6 +335,8 @@ namespace gladius::io
         {
             throw std::runtime_error("Compute context unavailable for mesh export");
         }
+
+        m_progress.store(0.82, std::memory_order_relaxed);
 
         // Repair winding inconsistencies on the indexed mesh before converting to triangle soup.
         // This prevents slicers from interpreting an otherwise watertight mesh as broken.
@@ -610,6 +418,8 @@ namespace gladius::io
             
             if (m_exportWithColors)
             {
+                m_progress.store(0.85, std::memory_order_relaxed);
+                
                 // Build faces array from indices
                 std::size_t const numFaces = repairedIndices.size() / 3;
                 std::vector<std::array<std::uint32_t, 3>> facesForSampling;
@@ -630,7 +440,9 @@ namespace gladius::io
                         auto vertexColors = FaceColorSampler::sampleVertexColors(
                             positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
                         
+                        m_progress.store(0.90, std::memory_order_relaxed);
                         writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
+                        m_progress.store(1.0, std::memory_order_relaxed);
                         
                         if (m_logger)
                         {
@@ -644,7 +456,9 @@ namespace gladius::io
                         auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
                             positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
                         
+                        m_progress.store(0.90, std::memory_order_relaxed);
                         writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                        m_progress.store(1.0, std::memory_order_relaxed);
                         
                         if (m_logger)
                         {
@@ -663,17 +477,23 @@ namespace gladius::io
                           {"Color sampling unavailable, exporting without colors",
                            events::Severity::Warning});
                     }
+                    m_progress.store(0.90, std::memory_order_relaxed);
                     writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+                    m_progress.store(1.0, std::memory_order_relaxed);
                 }
             }
             else
             {
+                m_progress.store(0.90, std::memory_order_relaxed);
                 writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
+                m_progress.store(1.0, std::memory_order_relaxed);
             }
         }
         else
         {
+            m_progress.store(0.90, std::memory_order_relaxed);
             vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+            m_progress.store(1.0, std::memory_order_relaxed);
         }
     }
 }

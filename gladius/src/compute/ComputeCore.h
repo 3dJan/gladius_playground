@@ -21,6 +21,7 @@
 #include <compute/ProgramManager.h>
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -572,6 +573,10 @@ namespace gladius
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
+        /// Non-blocking check for compilation progress using atomic flags only.
+        /// Safe to call from any thread without risk of blocking on mutex.
+        [[nodiscard]] bool isAnyCompilationInProgressNonBlocking() const noexcept;
+
         bool updateBBox();
         void updateBBoxOrThrow();
 
@@ -596,6 +601,16 @@ namespace gladius
         [[nodiscard]] bool isCompilationInProgress() const;
 
         void resetBoundingBox();
+
+        /// Mark the bounding box as stale (parameter changed) without clearing it.
+        /// The cached bbox will be reused with extra margin until recomputed.
+        void markBoundingBoxStale();
+
+        /// Check if the bounding box is stale (parameter changed since last bbox computation)
+        [[nodiscard]] bool isBoundingBoxStale() const;
+
+        /// Clear the stale flag and reset the bounding box so it will be fully recomputed
+        void recomputeStaleBoundingBox();
 
         BitmapLayer generateDownSkinMap(float z_mm, Vector2 pixelSize_mm);
         BitmapLayer generateUpSkinMap(float z_mm, Vector2 pixelSize_mm);
@@ -653,6 +668,14 @@ namespace gladius
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
 
+        /// @brief Check if SDF precomputation is currently in progress
+        /// @return True if SDF computation is running asynchronously
+        [[nodiscard]] bool isSdfComputationInProgress() const noexcept;
+
+        /// @brief Check if bounding box computation is currently in progress
+        /// @return True if bounding box calculation is running
+        [[nodiscard]] bool isBoundingBoxComputationInProgress() const noexcept;
+
         /// Get the program manager for direct access to specialized programs
         [[nodiscard]] ProgramManager & getProgramManager();
         [[nodiscard]] ProgramManager const & getProgramManager() const;
@@ -695,6 +718,7 @@ namespace gladius
         cl_float m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
+        std::atomic<bool> m_boundingBoxStale{false};
         bool m_isComputationTimeLoggingEnabled = false;
 
         RequiredCapabilities m_capabilities = RequiredCapabilities::OpenGLInterop;
@@ -709,6 +733,12 @@ namespace gladius
         size_t m_preCompSdfSize = 256u;
 
         bool m_autoUpdateBoundingBox = true;
+
+        /// @brief Tracks whether SDF precomputation is currently running
+        std::atomic<bool> m_sdfComputationInProgress{false};
+
+        /// @brief Tracks whether bounding box computation is currently running
+        std::atomic<bool> m_boundingBoxComputationInProgress{false};
 
         /// @brief Tracks whether the distance init buffer contains valid data
         /// @note Invalidated on parameter changes, camera changes, or resolution changes

@@ -28,6 +28,9 @@ namespace gladius
 
         void waitForCompilation() const;
 
+        /// Request shutdown of any ongoing compilation
+        void requestShutdown();
+
         void dumpSource(std::filesystem::path const & path) const;
 
         // Binary caching support

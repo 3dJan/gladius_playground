@@ -834,7 +834,7 @@ namespace gladius::io
     void saveFunctionTo3mfFile(std::filesystem::path const & filename,
                                gladius::nodes::Model & function)
     {
-        Writer3mf writer{{}};
+        Writer3mf writer{std::make_shared<events::Logger>()};
         writer.saveFunction(filename, function);
     }
 

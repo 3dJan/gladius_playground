@@ -167,14 +167,17 @@ namespace gladius::io
         throw std::runtime_error("Error: unsupported PNG bit depth");
     }
 
-    ImageStack ImageExtractor::loadImageStack(FileList const & filenames)
+    ImageStack ImageExtractor::loadImageStack(FileList const & filenames,
+                                               FileLoaderType fileLoaderType)
     {
         ImageStack images;
         images.reserve(filenames.size());
 
         for (const auto & filename : filenames)
         {
-            auto const fileContents = loadFileFromArchive(filename);
+            auto const fileContents = fileLoaderType == FileLoaderType::Archive
+                                        ? loadFileFromArchive(filename)
+                                        : loadFileFromFilesystem(filename);
             if (fileContents.empty())
             {
                 continue;
@@ -182,6 +185,8 @@ namespace gladius::io
 
             std::vector<unsigned char> image;
             unsigned int width, height;
+            // Always decode to RGBA for consistent handling of all PNG formats
+            // (including indexed/palette which lodepng converts automatically)
             unsigned const int error = lodepng::decode(image, width, height, fileContents);
             if (error)
             {
@@ -189,11 +194,16 @@ namespace gladius::io
                   fmt::format("Error decoding PNG {}: {}", filename.string(), error));
             }
 
+            auto const pngHeaderInfo = lodepng::getPNGHeaderInfo(fileContents);
+            if (images.empty())
+            {
+                m_pngInfo = pngHeaderInfo;
+            }
+
             Image img{std::move(image), width, height};
             img.swapXYData();
-            m_pngInfo = lodepng::getPNGHeaderInfo(fileContents);
-            img.setFormat(fromPngColorType(m_pngInfo.color));
-            img.setBitDepth(m_pngInfo.color.bitdepth);
+            img.setFormat(PixelFormat::RGBA_8BIT);
+            img.setBitDepth(8);
             images.emplace_back(std::move(img));
         }
 
@@ -326,6 +336,19 @@ namespace gladius::io
     PixelFormat ImageExtractor::determinePixelFormat(std::filesystem::path const & filename) const
     {
         auto const fileContents = loadFileFromArchive(filename);
+        if (fileContents.empty())
+        {
+            throw std::runtime_error("Error: empty file contents");
+        }
+
+        auto const pngInfo = lodepng::getPNGHeaderInfo(fileContents);
+        return fromPngColorType(pngInfo.color);
+    }
+
+    PixelFormat
+    ImageExtractor::determinePixelFormatFromFile(std::filesystem::path const & filename) const
+    {
+        auto const fileContents = loadFileFromFilesystem(filename);
         if (fileContents.empty())
         {
             throw std::runtime_error("Error: empty file contents");

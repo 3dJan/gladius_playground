@@ -6,7 +6,9 @@
 #include "DocumentLifecycleTool.h"
 #include "../../Application.h"
 #include "../../Document.h"
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 namespace gladius::mcp::tools
 {
@@ -39,6 +41,17 @@ namespace gladius::mcp::tools
                     return false;
                 }
                 doc->newFromTemplate();
+                // newFromTemplate() starts an async background load. Wait for it to finish
+                // before returning so that subsequent MCP calls see the fully-initialised
+                // document and 3MF model and don't race with the background thread.
+                constexpr auto k_timeout = std::chrono::minutes(5);
+                auto const deadline = std::chrono::steady_clock::now() + k_timeout;
+                while (doc->isLoadingInProgress() &&
+                       std::chrono::steady_clock::now() < deadline)
+                {
+                    // 50 ms keeps CPU usage low while still reacting within one frame
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
                 // Welcome screen is a UI concept but safe to hide regardless
                 m_application->getMainWindow().hideWelcomeScreen();
                 return true;

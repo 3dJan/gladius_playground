@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
@@ -7,6 +8,7 @@
 #include <vector>
 
 #include "FunctionArgument.h"
+#include "nodes/nodesfwd.h"
 
 namespace gladius
 {
@@ -15,9 +17,11 @@ namespace gladius
 
 namespace gladius::nodes
 {
+    class Assembly;
     class Model;
     class NodeBase;
     using NodeId = int;
+    using ResourceId = uint32_t;
 }
 
 namespace gladius
@@ -32,6 +36,8 @@ namespace gladius
     class ExpressionToGraphConverter
     {
       public:
+        /// Marker prefix embedded in generated snippets for node types that cannot be converted
+        static constexpr char const * UNSUPPORTED_NODE_MARKER = "/* unsupported:";
         /**
          * @brief Convert a mathematical expression to a node graph
          * @param expression The mathematical expression string
@@ -49,12 +55,85 @@ namespace gladius
                                  FunctionOutput const & output = {});
 
         /**
+         * @brief Convert a multi-line snippet to a node graph
+         * @param snippet The multi-line snippet string
+         * @param model The model to add nodes to
+         * @param parser The expression parser instance
+         * @param arguments Optional function arguments (for vector support)
+         * @param output Optional function output specification (name and type)
+         * @return The NodeId of the output node, or 0 if conversion failed
+         */
+        static nodes::NodeId
+        convertSnippetToGraph(std::string const & snippet,
+                              nodes::Model & model,
+                              ExpressionParser & parser,
+                              std::vector<FunctionArgument> const & arguments = {},
+                              FunctionOutput const & output = {},
+                              nodes::Assembly * assembly = nullptr);
+
+        /// @brief Convert a multi-line snippet to a node graph with multiple outputs.
+        /// For multi-output functions, output assignments use the form `outputName = expr;`.
+        static nodes::NodeId
+        convertSnippetToGraph(std::string const & snippet,
+                              nodes::Model & model,
+                              ExpressionParser & parser,
+                              std::vector<FunctionArgument> const & arguments,
+                              std::vector<FunctionOutput> const & outputs,
+                              nodes::Assembly * assembly);
+
+        /**
+         * @brief Convert a node graph back to a multi-line snippet
+         * @param model The model containing the nodes
+         * @param arguments Optional function arguments
+         * @param output Optional function output specification
+         * @return The generated snippet string
+         */
+        static std::string
+        convertGraphToSnippet(nodes::Model & model,
+                              std::vector<FunctionArgument> const & arguments = {},
+                              FunctionOutput const & output = {},
+                              nodes::Assembly * assembly = nullptr);
+
+        /// @brief Convert a node graph back to a snippet, handling multiple outputs.
+        /// When outputs has more than one entry, each output is emitted as
+        /// `outputName = expr;` instead of a single `return` statement.
+        static std::string
+        convertGraphToSnippet(nodes::Model & model,
+                              std::vector<FunctionArgument> const & arguments,
+                              std::vector<FunctionOutput> const & outputs,
+                              nodes::Assembly * assembly);
+
+        /**
          * @brief Check if an expression can be converted to a graph
          * @param expression The expression to check
          * @param parser The expression parser to use for validation
          * @return true if the expression can be converted to a graph
          */
         static bool canConvertToGraph(std::string const & expression, ExpressionParser & parser);
+
+        /// Generate a unique GLSL-compatible identifier from a display name and resource ID.
+        /// Sanitizes the name: replaces non-alphanumeric chars with '_', collapses consecutive '_',
+        /// prepends 'f_' if result starts with a digit, and appends '_resourceId'.
+        static std::string generateUniqueFunctionName(std::string const & displayName,
+                                                      nodes::ResourceId resourceId);
+
+        /// Convert all functions in an assembly to a single code listing.
+        /// Functions are topologically sorted by call dependencies.
+        /// Throws std::runtime_error if circular dependencies are detected.
+        static std::string convertProgramToSnippet(nodes::Assembly & assembly);
+
+        /// Annotate a program snippet with [root] markers for root functions.
+        /// Inserts " [root]" after "// Function: name (ID: N)" headers for
+        /// functions whose resource IDs appear in rootFunctionIds.
+        static std::string annotateRootFunctions(std::string const & snippet,
+                                                 std::set<nodes::ResourceId> const & rootFunctionIds);
+
+        /// Parse a multi-function code listing and create/update function graphs.
+        /// Each function must be in the format produced by convertProgramToSnippet.
+        /// Throws std::runtime_error on parse errors or dangling references.
+        static void setProgramSnippet(std::string const & program,
+                                      nodes::Assembly & assembly,
+                                      ExpressionParser & parser);
 
       private:
         /**
@@ -100,7 +179,7 @@ namespace gladius
                                                               nodes::Model & model);
 
         /**
-         * @brief Track DecomposeVector node component mappings
+         * @brief Track DecomposeVector node component mappings (queued per node)
          */
         static std::map<nodes::NodeId, std::string> s_componentMap;
 
@@ -116,9 +195,28 @@ namespace gladius
         static std::map<std::string, ArgumentType> s_beginNodeArguments;
 
         /**
+         * @brief Maps snippet identifiers (in_argName) to actual Begin node port names (argName).
+         * Used to translate in_-prefixed variable references back to the real argument name
+         * during snippet→graph conversion when resolving Begin node output ports.
+         */
+        static thread_local std::map<std::string, std::string> s_argSnippetToPortName;
+
+        /**
          * @brief Track current variable context for Begin node port resolution
          */
         static thread_local std::vector<std::string> s_variableContextStack;
+
+        /// Assembly context for resolving cross-function calls during snippet→graph conversion
+        static thread_local nodes::Assembly * s_assemblyContext;
+
+        /// Create a binary math-operation node, parse two arguments, and connect them.
+        static nodes::NodeId createTwoInputNode(
+          std::string const & nodeTypeName,
+          std::vector<std::string> const & args,
+          nodes::Model & model,
+          std::map<std::string, nodes::NodeId> const & variableNodes,
+          std::string const & inputA = nodes::FieldNames::A,
+          std::string const & inputB = nodes::FieldNames::B);
 
         /**
          * @brief Create a mathematical operation node
@@ -136,6 +234,14 @@ namespace gladius
          * @return The NodeId of the created node, or 0 if creation failed
          */
         static nodes::NodeId createConstantNode(double value, nodes::Model & model);
+
+        /// Create a ConstantVector node with the given x/y/z values.
+        static nodes::NodeId
+        createConstantVectorNode(double x, double y, double z, nodes::Model & model);
+
+        /// Create a ConstantMatrix node with the given 16 values (row-major m00..m33).
+        static nodes::NodeId createConstantMatrixNode(
+          std::array<double, 16> const & values, nodes::Model & model);
 
         /**
          * @brief Connect two nodes via their ports

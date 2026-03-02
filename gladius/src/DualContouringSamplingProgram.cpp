@@ -316,4 +316,280 @@ namespace gladius
                                                        outValues.size() * sizeof(cl_float),
                                                        outValues.data());
     }
+
+    void DualContouringSamplingProgram::sampleCornersShellVolume(
+      std::vector<Eigen::Vector3f> const & positions,
+      std::vector<float> & outValues,
+      Primitives const & primitives,
+      std::vector<float> const & outerLUT,
+      std::vector<float> const & innerLUT,
+      int lutResolution,
+      bool isInnermostLayer)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outValues.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outValues.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer valueBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              outValues.size() * sizeof(cl_float));
+
+        cl::Buffer outerLutBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  outerLUT.size() * sizeof(float),
+                                  const_cast<float*>(outerLUT.data()));
+
+        // For innermost layer, we still need a valid buffer but it won't be read
+        cl::Buffer innerLutBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  innerLUT.size() * sizeof(float),
+                                  const_cast<float*>(innerLUT.data()));
+
+        cl_int const innermostFlag = isInnermostLayer ? 1 : 0;
+
+        // Run kernel
+        m_programFront->run("sampleCornersShellVolume",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           valueBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS,
+                           outerLutBuffer,
+                           innerLutBuffer,
+                           lutResolution,
+                           innermostFlag);
+
+        // Read results
+        m_ComputeContext->GetQueue().enqueueReadBuffer(valueBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       outValues.size() * sizeof(cl_float),
+                                                       outValues.data());
+    }
+
+    void DualContouringSamplingProgram::sampleCornersWithThicknessField(
+      std::vector<Eigen::Vector3f> const & positions,
+      std::vector<float> & outValues,
+      Primitives const & primitives,
+      std::vector<float> const & outerField,
+      std::vector<float> const & innerField,
+      int fieldResolution,
+      Eigen::Matrix4f const & worldToField,
+      bool isInnermostLayer)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outValues.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outValues.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer valueBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              outValues.size() * sizeof(cl_float));
+
+        cl::Buffer outerFieldBuffer(m_ComputeContext->GetContext(),
+                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    outerField.size() * sizeof(float),
+                                    const_cast<float*>(outerField.data()));
+
+        // For innermost layer, inner field is empty but we need a valid buffer
+        std::vector<float> const& innerFieldData = innerField.empty() ? outerField : innerField;
+        cl::Buffer innerFieldBuffer(m_ComputeContext->GetContext(),
+                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    innerFieldData.size() * sizeof(float),
+                                    const_cast<float*>(innerFieldData.data()));
+
+        // Convert worldToField matrix to cl_float16 (row-major)
+        cl_float16 clWorldToField;
+        for (int row = 0; row < 4; ++row)
+        {
+            for (int col = 0; col < 4; ++col)
+            {
+                clWorldToField.s[row * 4 + col] = worldToField(row, col);
+            }
+        }
+
+        cl_int const innermostFlag = isInnermostLayer ? 1 : 0;
+
+        // Run kernel
+        m_programFront->run("sampleCornersShellVolumeWithField",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           valueBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS,
+                           outerFieldBuffer,
+                           innerFieldBuffer,
+                           fieldResolution,
+                           clWorldToField,
+                           innermostFlag);
+
+        // Read results
+        m_ComputeContext->GetQueue().enqueueReadBuffer(valueBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       outValues.size() * sizeof(cl_float),
+                                                       outValues.data());
+    }
+
+    void DualContouringSamplingProgram::sampleHermiteWithThicknessField(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<float> & outValues,
+        std::vector<Eigen::Vector3f> & outGradients,
+        Primitives const & primitives,
+        std::vector<float> const & outerField,
+        std::vector<float> const & innerField,
+        int fieldResolution,
+        Eigen::Matrix4f const & worldToField,
+        bool isInnermostLayer,
+        float gradientEpsilon)
+    {
+        ensureCompiled();
+
+        if (positions.empty())
+        {
+            outValues.clear();
+            outGradients.clear();
+            return;
+        }
+
+        swapProgramsIfNeeded();
+
+        // Prepare input buffer (convert to cl_float4)
+        std::vector<cl_float4> clPositions;
+        clPositions.reserve(positions.size());
+        for (auto const & pos : positions)
+        {
+            clPositions.push_back({pos.x(), pos.y(), pos.z(), 0.0F});
+        }
+
+        outValues.resize(positions.size());
+        outGradients.resize(positions.size());
+
+        auto const count = static_cast<cl_uint>(positions.size());
+
+        // Create OpenCL buffers
+        cl::Buffer positionBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  clPositions.size() * sizeof(cl_float4),
+                                  clPositions.data());
+
+        cl::Buffer valueBuffer(m_ComputeContext->GetContext(),
+                              CL_MEM_WRITE_ONLY,
+                              outValues.size() * sizeof(cl_float));
+
+        cl::Buffer gradientBuffer(m_ComputeContext->GetContext(),
+                                  CL_MEM_WRITE_ONLY,
+                                  outGradients.size() * sizeof(cl_float4));
+
+        cl::Buffer outerFieldBuffer(m_ComputeContext->GetContext(),
+                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    outerField.size() * sizeof(float),
+                                    const_cast<float*>(outerField.data()));
+
+        // For innermost layer, inner field is empty but we need a valid buffer
+        std::vector<float> const& innerFieldData = innerField.empty() ? outerField : innerField;
+        cl::Buffer innerFieldBuffer(m_ComputeContext->GetContext(),
+                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    innerFieldData.size() * sizeof(float),
+                                    const_cast<float*>(innerFieldData.data()));
+
+        // Convert worldToField matrix to cl_float16 (row-major)
+        cl_float16 clWorldToField;
+        for (int row = 0; row < 4; ++row)
+        {
+            for (int col = 0; col < 4; ++col)
+            {
+                clWorldToField.s[row * 4 + col] = worldToField(row, col);
+            }
+        }
+
+        cl_int const innermostFlag = isInnermostLayer ? 1 : 0;
+
+        // Run kernel
+        m_programFront->run("sampleHermiteShellVolumeWithField",
+                           cl::NullRange,
+                           cl::NDRange(count),
+                           positionBuffer,
+                           valueBuffer,
+                           gradientBuffer,
+                           count,
+                           PAYLOAD_ARGUMENTS,
+                           outerFieldBuffer,
+                           innerFieldBuffer,
+                           fieldResolution,
+                           clWorldToField,
+                           innermostFlag,
+                           gradientEpsilon);
+
+        // Read results
+        m_ComputeContext->GetQueue().enqueueReadBuffer(valueBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       outValues.size() * sizeof(cl_float),
+                                                       outValues.data());
+
+        std::vector<cl_float4> clGradients(outGradients.size());
+        m_ComputeContext->GetQueue().enqueueReadBuffer(gradientBuffer,
+                                                       CL_TRUE,
+                                                       0,
+                                                       clGradients.size() * sizeof(cl_float4),
+                                                       clGradients.data());
+
+        // Convert gradients from cl_float4 to Eigen::Vector3f
+        for (std::size_t i = 0U; i < outGradients.size(); ++i)
+        {
+            outGradients[i] = Eigen::Vector3f(clGradients[i].s[0],
+                                              clGradients[i].s[1],
+                                              clGradients[i].s[2]);
+        }
+    }
 }

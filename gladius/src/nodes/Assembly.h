@@ -4,6 +4,7 @@
 #include "nodesfwd.h"
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -33,6 +34,13 @@ namespace gladius::nodes
                                 nameOfTheModelToAdd)
         {
         }
+    };
+
+    /// Result of findImportedFunction().
+    struct FunctionMatch
+    {
+        ResourceId id{0};
+        SharedModel model;
     };
 
     class Assembly
@@ -83,6 +91,16 @@ namespace gladius::nodes
         }
 
         SharedModel findModel(ResourceId id);
+
+        /// @brief Find the best matching function after merging a library file.
+        /// Prefers newly imported functions whose display name matches the target.
+        /// @param targetName Display name to match (empty = pick first new function).
+        /// @param existingIds Function IDs present before the merge.
+        /// @param excludeModel Model to exclude from matching (e.g. the current model).
+        [[nodiscard]] FunctionMatch findImportedFunction(
+            std::string const & targetName,
+            std::set<ResourceId> const & existingIds,
+            SharedModel const & excludeModel) const;
 
         void updateInputsAndOutputs();
 

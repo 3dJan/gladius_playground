@@ -54,7 +54,7 @@ namespace gladius
         for (auto const & image : m_stack)
         {
             auto const & data = image.getData();
-            if (data.size() != m_width * m_height * 4)
+            if (data.size() != m_width * m_height * m_numChannels)
             {
                 throw std::runtime_error(
                   fmt::format("ImageStackOCLBuffer::initializeFromImageStack: image data size of "
@@ -79,7 +79,7 @@ namespace gladius
             {
                 for (size_t x = 0; x < m_width; ++x)
                 {
-                    auto const index = ((y - 1) * m_width + x) * 4;
+                    auto const index = ((y - 1) * m_width + x) * m_numChannels;
 
                     auto const & r = data[index];
                     m_payloadData.data.push_back(r / 255.f);

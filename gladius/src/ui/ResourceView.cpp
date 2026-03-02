@@ -1,11 +1,15 @@
 #include "ResourceView.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h"
+#include "nodes/Builder.h"
 
 #include "FileChooser.h"
 #include "ImageStackResource.h"
-#include "MeshResource.h"
+#include "ImageStackView.h"
+#include "MeshResourceBase.h"
+#include "ModelEditor.h"
 #include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "Widgets.h"
 
 #include "imgui.h"
@@ -227,8 +231,11 @@ namespace gladius::ui
                 {
                     continue;
                 }
-                auto const * mesh = dynamic_cast<MeshResource const *>(res.get());
-                if (!mesh)
+                
+                // Check for any mesh resource type (base class covers all)
+                auto const * meshResource = dynamic_cast<MeshResourceBase const *>(res.get());
+                
+                if (!meshResource)
                 {
                     continue;
                 }
@@ -238,33 +245,38 @@ namespace gladius::ui
                 ImGui::BeginGroup();
                 if (ImGui::TreeNodeEx(name.c_str(), baseFlags))
                 {
-                    auto const & meshData = mesh->getMesh();
-
                     if (ImGui::BeginTable(
                           "MeshData", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
                     {
+                        // Display mesh statistics using base class interface
+                        auto const bbox = meshResource->getBoundingBox();
+                        
                         ImGui::TableNextColumn();
-                        ImGui::TextUnformatted("Faces");
+                        ImGui::TextUnformatted("Type");
                         ImGui::TableNextColumn();
-                        ImGui::TextUnformatted(fmt::format("{}", meshData.polygonCount()).c_str());
+                        ImGui::TextUnformatted(meshResource->getMeshTypeName().c_str());
+
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted("Triangles");
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(fmt::format("{}", meshResource->getTriangleCount()).c_str());
 
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Min");
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(fmt::format("({}, {}, {})",
-                                                           meshData.getMin().x,
-                                                           meshData.getMin().y,
-                                                           meshData.getMin().z)
+                                                           bbox.min.x,
+                                                           bbox.min.y,
+                                                           bbox.min.z)
                                                  .c_str());
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Max");
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(fmt::format("({}, {}, {})",
-                                                           meshData.getMax().x,
-                                                           meshData.getMax().y,
-                                                           meshData.getMax().z)
+                                                           bbox.max.x,
+                                                           bbox.max.y,
+                                                           bbox.max.z)
                                                  .c_str());
-
                         // Add Part Number field
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted("Part Number:");
@@ -447,6 +459,102 @@ namespace gladius::ui
                         }
                     }
 
+                    // Render ImageStackView for image stacks
+                    if (stack)
+                    {
+                        auto imgStack = stack->getImageStack();
+                        if (imgStack && !imgStack->empty())
+                        {
+                            // Get or create the view for this resource
+                            auto & view = m_imageStackViews[key];
+                            view.setImageStack(imgStack);
+
+                            // T059/T060/T061: Set up transform callback with undo support
+                            view.setTransformCallback(
+                                [this, document, key, &view](ImageStackTransform transform)
+                                {
+                                    // Get mutable ImageStack
+                                    auto & resourceManager =
+                                        document->getGeneratorContext().resourceManager;
+                                    auto const & resources = resourceManager.getResourceMap();
+
+                                    io::ImageStack * mutableStack = nullptr;
+                                    for (auto & [resKey, res] : resources)
+                                    {
+                                        if (resKey == key)
+                                        {
+                                            auto * stackRes =
+                                                dynamic_cast<ImageStackResource *>(res.get());
+                                            if (stackRes)
+                                            {
+                                                mutableStack = stackRes->getImageStack();
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if (!mutableStack)
+                                    {
+                                        return;
+                                    }
+
+                                    // T060: Create undo restore point
+                                    if (m_modelEditor)
+                                    {
+                                        switch (transform)
+                                        {
+                                        case ImageStackTransform::FlipHorizontal:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Flip ImageStack Horizontal");
+                                            break;
+                                        case ImageStackTransform::FlipVertical:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Flip ImageStack Vertical");
+                                            break;
+                                        case ImageStackTransform::Rotate90CW:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Rotate ImageStack 90\xC2\xB0 CW");
+                                            break;
+                                        case ImageStackTransform::Rotate90CCW:
+                                            m_modelEditor->createUndoRestorePoint(
+                                                "Rotate ImageStack 90\xC2\xB0 CCW");
+                                            break;
+                                        }
+                                    }
+
+                                    // Apply the transform
+                                    switch (transform)
+                                    {
+                                    case ImageStackTransform::FlipHorizontal:
+                                        mutableStack->flipHorizontal();
+                                        break;
+                                    case ImageStackTransform::FlipVertical:
+                                        mutableStack->flipVertical();
+                                        break;
+                                    case ImageStackTransform::Rotate90CW:
+                                        mutableStack->rotate90CW();
+                                        break;
+                                    case ImageStackTransform::Rotate90CCW:
+                                        mutableStack->rotate90CCW();
+                                        break;
+                                    }
+
+                                    // Mark model as modified
+                                    if (m_modelEditor)
+                                    {
+                                        m_modelEditor->markModelAsModified();
+                                    }
+
+                                    // T061: Refresh layer texture
+                                    view.invalidateTexture();
+                                });
+
+                            ImGui::Separator();
+                            ImGui::Text("Layer Preview:");
+                            view.render();
+                        }
+                    }
+
                     // Add Part Number field for image resources
                     if (ImGui::TreeNodeEx("Properties", infoNodeFlags))
                     {
@@ -507,6 +615,116 @@ namespace gladius::ui
 
                     // delete image stack
                     auto safeResult = document->isItSafeToDeleteResource(key);
+
+                    // Create FunctionFromImage3D button
+                    ImGui::BeginDisabled(exportInProgress);
+                    if (ImGui::Button("Create Function"))
+                    {
+                        auto resourceId = key.getResourceId();
+                        if (resourceId.has_value())
+                        {
+                            m_pendingImageStackId = resourceId.value();
+                            m_newFunctionName = key.getDisplayName();
+                            m_showCreateFunctionDialog = true;
+                            ImGui::OpenPopup("Create FunctionFromImage3D");
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    {
+                        ImGui::SetTooltip(
+                            "Create a FunctionFromImage3D that samples this ImageStack");
+                    }
+
+                    // Create FunctionFromImage3D dialog
+                    if (ImGui::BeginPopupModal("Create FunctionFromImage3D", &m_showCreateFunctionDialog,
+                                               ImGuiWindowFlags_AlwaysAutoResize))
+                    {
+                        ImGui::Text("Enter a name for the new function:");
+                        ImGui::InputText("##FunctionName", &m_newFunctionName);
+
+                        if (ImGui::Button("Create", ImVec2(120, 0)))
+                        {
+                            if (m_pendingImageStackId.has_value())
+                            {
+                                auto model3mf = document->get3mfModel();
+                                if (model3mf)
+                                {
+                                    try
+                                    {
+                                        auto uniqueResId = gladius::io::resourceIdToUniqueResourceId(
+                                            model3mf, m_pendingImageStackId.value());
+                                        auto imageStack =
+                                            model3mf->GetImageStackByID(uniqueResId);
+                                        if (imageStack)
+                                        {
+                                            auto func =
+                                                model3mf->AddFunctionFromImage3D(imageStack.get());
+                                            if (func)
+                                            {
+                                                func->SetFilter(Lib3MF::eTextureFilter::Linear);
+                                                func->SetTileStyles(Lib3MF::eTextureTileStyle::Wrap,
+                                                                    Lib3MF::eTextureTileStyle::Wrap,
+                                                                    Lib3MF::eTextureTileStyle::Wrap);
+                                                func->SetOffset(0.0);
+                                                func->SetScale(1.0);
+
+                                                // Register the function in the assembly
+                                                nodes::Builder builder;
+                                                nodes::SamplingSettings settings;
+                                                builder.createFunctionFromImage3D(
+                                                    *document->getAssembly(),
+                                                    func->GetModelResourceID(),
+                                                    m_pendingImageStackId.value(),
+                                                    settings);
+
+                                                // Set the user-provided name
+                                                auto function = document->getAssembly()->findModel(
+                                                    func->GetModelResourceID());
+                                                if (function)
+                                                {
+                                                    function->setDisplayName(m_newFunctionName);
+                                                }
+
+                                                document->update3mfModel();
+                                                document->markFileAsChanged();
+
+                                                // Refresh ModelEditor to show the new function
+                                                if (m_modelEditor)
+                                                {
+                                                    m_modelEditor->refreshAssembly();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch (std::exception const & e)
+                                    {
+                                        auto logger = document->getSharedLogger();
+                                        if (logger)
+                                        {
+                                            logger->addEvent(
+                                                {fmt::format("Failed to create FunctionFromImage3D: {}",
+                                                             e.what()),
+                                                 events::Severity::Error});
+                                        }
+                                    }
+                                }
+                            }
+                            m_showCreateFunctionDialog = false;
+                            m_pendingImageStackId.reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                        {
+                            m_showCreateFunctionDialog = false;
+                            m_pendingImageStackId.reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+
+                    ImGui::SameLine();
                     if (ImGui::Button("Delete"))
                     {
                         if (safeResult.canBeRemoved)
@@ -587,7 +805,40 @@ namespace gladius::ui
         case ResourceViewDialogOp::ImportImageStack:
             if (document)
             {
-                document->addImageStackResource(path);
+                auto importResult = document->addImageStackResourceWithPadding(path);
+
+                // Show notification if any images were padded
+                if (importResult.hasPaddedFiles())
+                {
+                    auto logger = document->getSharedLogger();
+                    if (logger)
+                    {
+                        std::string message = fmt::format(
+                            "ImageStack imported with padding to {}x{}. Padded {} file(s): ",
+                            importResult.maxWidth,
+                            importResult.maxHeight,
+                            importResult.paddedFiles.size());
+
+                        size_t const maxFilesToShow = 5;
+                        for (size_t i = 0;
+                             i < std::min(importResult.paddedFiles.size(), maxFilesToShow);
+                             ++i)
+                        {
+                            if (i > 0)
+                            {
+                                message += ", ";
+                            }
+                            message += importResult.paddedFiles[i];
+                        }
+                        if (importResult.paddedFiles.size() > maxFilesToShow)
+                        {
+                            message += fmt::format(
+                                " and {} more", importResult.paddedFiles.size() - maxFilesToShow);
+                        }
+
+                        logger->addEvent({message, events::Severity::Info});
+                    }
+                }
             }
             break;
         case ResourceViewDialogOp::AddMesh:

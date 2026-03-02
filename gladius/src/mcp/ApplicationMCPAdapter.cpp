@@ -51,6 +51,7 @@ namespace gladius
         m_renderingTool = std::make_unique<mcp::tools::RenderingTool>(app);
         m_validationTool = std::make_unique<mcp::tools::ValidationTool>(app);
         m_utilityTool = std::make_unique<mcp::tools::UtilityTool>(app);
+        m_libraryTool = std::make_unique<mcp::tools::LibraryTool>(app);
     }
 
     ApplicationMCPAdapter::~ApplicationMCPAdapter() = default;
@@ -261,8 +262,29 @@ namespace gladius
       const std::vector<FunctionArgument> & arguments,
       const std::string & outputName)
     {
-        return m_functionOperationsTool->createFunctionFromExpression(
+        auto result = m_functionOperationsTool->createFunctionFromExpression(
           name, expression, outputType, arguments, outputName);
+        if (!result.first)
+        {
+            m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
+        }
+        return result;
+    }
+
+    std::pair<bool, uint32_t> ApplicationMCPAdapter::createFunctionFromSnippet(
+      const std::string & name,
+      const std::string & snippet,
+      const std::string & outputType,
+      const std::vector<FunctionArgument> & arguments,
+      const std::string & outputName)
+    {
+        auto result = m_functionOperationsTool->createFunctionFromSnippet(
+          name, snippet, outputType, arguments, outputName);
+        if (!result.first)
+        {
+            m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
+        }
+        return result;
     }
 
     // 3MF and implicit modeling operations
@@ -903,9 +925,12 @@ namespace gladius
     }
 
     // 3MF Resource creation methods implementation
-    std::pair<bool, uint32_t> ApplicationMCPAdapter::createLevelSet(uint32_t functionId)
+    std::pair<bool, uint32_t> ApplicationMCPAdapter::createLevelSet(
+      uint32_t functionId,
+      std::array<float, 3> minPoint,
+      std::array<float, 3> maxPoint)
     {
-        return m_resourceManagementTool->createLevelSet(functionId);
+        return m_resourceManagementTool->createLevelSet(functionId, minPoint, maxPoint);
     }
 
     std::pair<bool, uint32_t>
@@ -1007,12 +1032,14 @@ gladius::ApplicationMCPAdapter::createFunctionCallNode(uint32_t targetFunctionId
 }
 
 nlohmann::json
-gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                        uint32_t nodeId,
-                                                                        bool autoConnect)
+gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(
+  uint32_t functionId,
+  uint32_t nodeId,
+  bool autoConnect,
+  std::vector<std::string> const & excludeParams)
 {
     return m_functionOperationsTool->createConstantNodesForMissingParameters(
-      functionId, nodeId, autoConnect);
+      functionId, nodeId, autoConnect, excludeParams);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::removeUnusedNodes(uint32_t functionId)
@@ -1116,4 +1143,94 @@ nlohmann::json gladius::ApplicationMCPAdapter::performAutoValidation(bool includ
     }
 
     return simplified;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Library operations — delegate to LibraryTool
+// ────────────────────────────────────────────────────────────────────────
+
+nlohmann::json gladius::ApplicationMCPAdapter::listLibrary(std::string const & category) const
+{
+    return m_libraryTool->listLibrary(category);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::getLibraryEntryInfo(std::string const & category,
+                                                                   std::string const & name) const
+{
+    return m_libraryTool->getLibraryEntryInfo(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntry(std::string const & name,
+                                                                   std::string const & category,
+                                                                   std::string const & expression,
+                                                                   std::string const & description,
+                                                                   bool overwrite)
+{
+    return m_libraryTool->createLibraryEntry(name, category, expression, description, overwrite);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntryFromSnippet(
+    std::string const & name,
+    std::string const & category,
+    std::string const & snippet,
+    std::string const & description,
+    std::vector<FunctionArgument> const & arguments,
+    std::string const & outputType,
+    bool overwrite)
+{
+    return m_libraryTool->createLibraryEntryFromSnippet(
+      name, category, snippet, description, arguments, outputType, overwrite);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t functionId,
+                                                                std::string const & category,
+                                                                std::string const & name,
+                                                                std::string const & description,
+                                                                bool overwrite,
+                                                                bool keepScaffold)
+{
+    return m_libraryTool->exportToLibrary(
+        functionId, category, name, description, overwrite, keepScaffold);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setLibraryMetadata(
+    std::vector<uint32_t> const & functionIds, std::string const & description)
+{
+    return m_libraryTool->setLibraryMetadata(functionIds, description);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::importLibraryEntry(std::string const & category,
+                                                                   std::string const & name)
+{
+    return m_libraryTool->importLibraryEntry(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::deleteLibraryEntry(std::string const & category,
+                                                                   std::string const & name)
+{
+    return m_libraryTool->deleteLibraryEntry(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::getFunctionSnippet(uint32_t functionId) const
+{
+    return m_functionOperationsTool->getFunctionSnippet(functionId);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setFunctionSnippet(
+  uint32_t functionId,
+  std::string const & snippet,
+  std::string const & outputType,
+  std::vector<FunctionArgument> const & arguments)
+{
+    return m_functionOperationsTool->setFunctionSnippet(functionId, snippet, outputType, arguments);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::getProgramSnippet() const
+{
+    return m_functionOperationsTool->getProgramSnippet();
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string const & snippet)
+{
+    return m_functionOperationsTool->setProgramSnippet(snippet);
 }

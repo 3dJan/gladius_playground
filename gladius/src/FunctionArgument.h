@@ -11,7 +11,8 @@ namespace gladius
     enum class ArgumentType
     {
         Scalar, // float
-        Vector  // float3 (x, y, z)
+        Vector, // float3 (x, y, z)
+        Matrix  // mat4 (4x4 matrix)
     };
 
     /**
@@ -115,6 +116,13 @@ namespace gladius
          * @return true if name is valid for use as argument
          */
         static bool isValidArgumentName(std::string const & name);
+
+        /**
+         * @brief Check if a name is a reserved keyword (types, control flow, or built-in function)
+         * @param name The name to check
+         * @return true if name is reserved and must not be used as an argument name
+         */
+        static bool isReservedKeyword(std::string const & name);
     };
 
 } // namespace gladius

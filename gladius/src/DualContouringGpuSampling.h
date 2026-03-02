@@ -76,12 +76,62 @@ namespace gladius::dual_contouring
                                          std::vector<float> const & thicknessLUT,
                                          int lutResolution);
 
+        /// Sample SDF values for shell volumes (material bands between two depth boundaries)
+        /// Returns false if GPU sampling fails and CPU fallback should be used
+        [[nodiscard]] bool sampleCornersShellVolume(std::vector<Eigen::Vector3f> const & positions,
+                                         std::vector<float> & outValues,
+                                         std::vector<float> const & outerLUT,
+                                         std::vector<float> const & innerLUT,
+                                         int lutResolution,
+                                         bool isInnermostLayer);
+
+        /// Sample SDF values using precomputed surface-aligned thickness field
+        /// This is the surface-color-corrected version that samples from spatial position
+        /// instead of color→LUT lookup at interior points
+        /// @param outerField 3D grid of outer boundary thickness (position → thickness)
+        /// @param innerField 3D grid of inner boundary thickness (position → thickness), empty for single boundary
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost material layer (no inner boundary)
+        /// @return False if GPU sampling fails
+        [[nodiscard]] bool sampleCornersWithThicknessField(
+            std::vector<Eigen::Vector3f> const & positions,
+            std::vector<float> & outValues,
+            std::vector<float> const & outerField,
+            std::vector<float> const & innerField,
+            int fieldResolution,
+            Eigen::Matrix4f const & worldToField,
+            bool isInnermostLayer);
+
         /// Sample SDF values and gradients at Hermite positions
         /// Returns false if GPU sampling fails and CPU fallback should be used
         [[nodiscard]] bool sampleHermite(std::vector<Eigen::Vector3f> const & positions,
                          std::vector<float> & outValues,
                          std::vector<Eigen::Vector3f> & outGradients,
                          float epsilonOverride = -1.0F);
+
+        /// Sample shell SDF values and gradients at Hermite positions using thickness fields
+        /// This samples gradient on the shell SDF (not model SDF) for correct vertex placement
+        /// @param positions Input positions to sample
+        /// @param outValues Output SDF values
+        /// @param outGradients Output gradient vectors
+        /// @param outerField 3D grid of outer boundary thickness
+        /// @param innerField 3D grid of inner boundary thickness (empty for innermost layer)
+        /// @param fieldResolution Resolution of thickness field grids (e.g., 128)
+        /// @param worldToField 4x4 transform from world coordinates to field grid coordinates
+        /// @param isInnermostLayer True if this is the innermost layer (no inner boundary)
+        /// @param epsilonOverride Override for gradient epsilon (use configured value if <= 0)
+        /// @return False if GPU sampling fails
+        [[nodiscard]] bool sampleHermiteWithThicknessField(
+            std::vector<Eigen::Vector3f> const & positions,
+            std::vector<float> & outValues,
+            std::vector<Eigen::Vector3f> & outGradients,
+            std::vector<float> const & outerField,
+            std::vector<float> const & innerField,
+            int fieldResolution,
+            Eigen::Matrix4f const & worldToField,
+            bool isInnermostLayer,
+            float epsilonOverride = -1.0F);
 
         /// Get accumulated statistics
         [[nodiscard]] GpuSamplingStats const & getStats() const

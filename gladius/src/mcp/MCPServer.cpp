@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -136,11 +137,8 @@ namespace gladius::mcp
     {
         m_toolInfo[name] = {name, description, schema};
         m_tools[name] = std::move(func);
-        // Only log in HTTP mode, not stdio mode
-        if (m_transportType == TransportType::HTTP)
-        {
-            std::cout << "Registered MCP tool: " << name << std::endl;
-        }
+        // Always log to stderr (stdout is reserved for MCP protocol in stdio mode)
+        std::cerr << "Registered MCP tool: " << name << std::endl;
     }
 
     bool MCPServer::start(int port, TransportType transport)
@@ -181,7 +179,7 @@ namespace gladius::mcp
     {
         if (m_running)
         {
-            std::cout << "MCP Server is already running" << std::endl;
+            std::cerr << "MCP Server is already running" << std::endl;
             return false;
         }
 
@@ -192,7 +190,7 @@ namespace gladius::mcp
           [this, port]()
           {
               m_running = true;
-              std::cout << "MCP Server starting on port " << port << std::endl;
+              std::cerr << "MCP Server starting on port " << port << std::endl;
 
               if (!m_server->listen("localhost", port))
               {
@@ -234,11 +232,8 @@ namespace gladius::mcp
         }
 
         m_port = 0;
-        // Only print if not in stdio mode
-        if (m_transportType == TransportType::HTTP)
-        {
-            std::cout << "MCP Server stopped" << std::endl;
-        }
+        // Log to stderr (stdout may be reserved for MCP protocol)
+        std::cerr << "MCP Server stopped" << std::endl;
     }
 
     bool MCPServer::isRunning() const
@@ -411,9 +406,24 @@ namespace gladius::mcp
 
             if (toolIt == m_tools.end())
             {
-                return createErrorResponse(request.contains("id") ? request["id"] : json(nullptr),
-                                           -32601,
-                                           "Tool not found: " + toolName);
+                // Build the tool list directly from the registered map so it is always
+                // complete regardless of which tools were compiled or registered.
+                std::vector<std::string> availableTools;
+                availableTools.reserve(m_tools.size());
+                for (auto const & [name, handler] : m_tools)
+                {
+                    availableTools.push_back(name);
+                }
+                std::sort(availableTools.begin(), availableTools.end());
+
+                std::string msg = "Tool not found: " + toolName + "\n\nAvailable tools:\n";
+                for (auto const & name : availableTools)
+                {
+                    msg += "  " + name + "\n";
+                }
+
+                return createErrorResponse(
+                  request.contains("id") ? request["id"] : json(nullptr), -32601, msg);
             }
 
             json params = request["params"].value("arguments", json::object());
@@ -483,254 +493,6 @@ namespace gladius::mcp
               }
               auto result = m_application->get3MFStructure();
               return result;
-          });
-
-        // FUNCTION GRAPH INTROSPECTION
-        registerTool(
-          "get_function_graph",
-          "Get the node graph of a function (model) as JSON for introspection/visualization",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"},
-               {"description",
-                "ModelResourceID of the function (model) to serialize (from "
-                "get_3mf_structure)"}}}}},
-           {"required", {"function_id"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              if (!params.contains("function_id"))
-              {
-                  return {{"success", false}, {"error", "Missing required parameter: function_id"}};
-              }
-              uint32_t function_id = params["function_id"];
-              return m_application->getFunctionGraph(function_id);
-          });
-
-        // FUNCTION GRAPH IMPORT (batch create)
-        registerTool("set_function_graph",
-                     "Create or replace a function graph from a JSON description (nodes + links)",
-                     {{"type", "object"},
-                      {"properties",
-                       {{"function_id",
-                         {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-                        {"graph",
-                         {{"description",
-                           "Graph JSON with nodes and links. Minimal schema: { "
-                           "nodes:[{id,type,display_name?,position?}], "
-                           "links:[{from_node_id,from_port,to_node_id,to_parameter}] }"}}},
-                        {"replace",
-                         {{"type", "boolean"},
-                          {"description", "Replace existing graph (default true), else merge"}}}}},
-                      {"required", {"function_id", "graph"}}},
-                     [this](const json & params) -> json
-                     {
-                         if (!m_application)
-                         {
-                             return {{"success", false}, {"error", "No application available"}};
-                         }
-                         if (!params.contains("function_id") || !params.contains("graph"))
-                         {
-                             return {{"success", false}, {"error", "Missing required parameters"}};
-                         }
-                         uint32_t function_id = params["function_id"];
-                         bool replace = params.value("replace", true);
-                         return m_application->setFunctionGraph(
-                           function_id, params["graph"], replace);
-                     });
-
-        // FUNCTION GRAPH MANIPULATION
-        registerTool(
-          "get_node_info",
-          "Get detailed information about a specific node in a function graph",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-             {"node_id", {{"type", "integer"}, {"description", "ID of the node to inspect"}}}}},
-           {"required", {"function_id", "node_id"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              if (!params.contains("function_id"))
-              {
-                  return {{"success", false}, {"error", "Missing required parameter: function_id"}};
-              }
-              if (!params.contains("node_id"))
-              {
-                  return {{"success", false}, {"error", "Missing required parameter: node_id"}};
-              }
-              uint32_t function_id = params["function_id"];
-              uint32_t node_id = params["node_id"];
-              return m_application->getNodeInfo(function_id, node_id);
-          });
-
-        registerTool(
-          "create_node",
-          "Create a new node in a function graph",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-             {"node_type", {{"type", "string"}, {"description", "Type of the node to create"}}},
-             {"display_name",
-              {{"type", "string"}, {"description", "Optional display name for the node"}}},
-             {"node_id", {{"type", "integer"}, {"description", "Optional ID for the new node"}}}}},
-           {"required", {"function_id", "node_type"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              uint32_t function_id = params["function_id"];
-              std::string node_type = params["node_type"];
-              std::string display_name = params.value("display_name", "");
-              uint32_t node_id = params.value("node_id", 0);
-              return m_application->createNode(function_id, node_type, display_name, node_id);
-          });
-
-        registerTool(
-          "delete_node",
-          "Delete a node from a function graph",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-             {"node_id", {{"type", "integer"}, {"description", "ID of the node to delete"}}}}},
-           {"required", {"function_id", "node_id"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              uint32_t function_id = params["function_id"];
-              uint32_t node_id = params["node_id"];
-              return m_application->deleteNode(function_id, node_id);
-          });
-
-        registerTool("set_parameter_value",
-                     "Set the value of a parameter on a node",
-                     {{"type", "object"},
-                      {"properties",
-                       {{"function_id",
-                         {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-                        {"node_id", {{"type", "integer"}, {"description", "ID of the node"}}},
-                        {"parameter_name",
-                         {{"type", "string"}, {"description", "Name of the parameter to set"}}},
-                        {"value", {{"description", "Value to set"}}}}},
-                      {"required", {"function_id", "node_id", "parameter_name", "value"}}},
-                     [this](const json & params) -> json
-                     {
-                         if (!m_application)
-                         {
-                             return {{"success", false}, {"error", "No application available"}};
-                         }
-                         uint32_t function_id = params["function_id"];
-                         uint32_t node_id = params["node_id"];
-                         std::string parameter_name = params["parameter_name"];
-                         json value = params["value"];
-                         return m_application->setParameterValue(
-                           function_id, node_id, parameter_name, value);
-                     });
-
-        registerTool(
-          "create_link",
-          "Create a link between two nodes in a function graph",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-             {"source_node_id", {{"type", "integer"}, {"description", "ID of the source node"}}},
-             {"source_port_name", {{"type", "string"}, {"description", "Name of the source port"}}},
-             {"target_node_id", {{"type", "integer"}, {"description", "ID of the target node"}}},
-             {"target_parameter_name",
-              {{"type", "string"}, {"description", "Name of the target parameter"}}}}},
-           {"required",
-            {"function_id",
-             "source_node_id",
-             "source_port_name",
-             "target_node_id",
-             "target_parameter_name"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              uint32_t function_id = params["function_id"];
-              uint32_t source_node_id = params["source_node_id"];
-              std::string source_port_name = params["source_port_name"];
-              uint32_t target_node_id = params["target_node_id"];
-              std::string target_parameter_name = params["target_parameter_name"];
-              return m_application->createLink(function_id,
-                                               source_node_id,
-                                               source_port_name,
-                                               target_node_id,
-                                               target_parameter_name);
-          });
-
-        registerTool(
-          "delete_link",
-          "Delete a link from a function graph",
-          {{"type", "object"},
-           {"properties",
-            {{"function_id",
-              {{"type", "integer"}, {"description", "ModelResourceID of the function"}}},
-             {"target_node_id", {{"type", "integer"}, {"description", "ID of the target node"}}},
-             {"target_parameter_name",
-              {{"type", "string"}, {"description", "Name of the target parameter"}}}}},
-           {"required", {"function_id", "target_node_id", "target_parameter_name"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              uint32_t function_id = params["function_id"];
-              uint32_t target_node_id = params["target_node_id"];
-              std::string target_parameter_name = params["target_parameter_name"];
-              return m_application->deleteLink(function_id, target_node_id, target_parameter_name);
-          });
-
-        registerTool(
-          "create_function_call_node",
-          "Creates a function call node with a resource node for the function reference. This "
-          "is a specialized node creation method that: 1) Creates a Resource node with the "
-          "referenced function ID, 2) Creates a FunctionCall node, 3) Connects the Resource "
-          "node's output to the FunctionCall's FunctionId input, 4) Updates the FunctionCall "
-          "node's inputs/outputs based on the referenced function, 5) Registers the new nodes "
-          "with the model. Returns unconnected inputs and outputs with their types.",
-          {{"type", "object"},
-           {"properties",
-            {{"target_function_id",
-              {{"type", "integer"},
-               {"description", "The ID of the function (model) where the nodes will be added"}}},
-             {"referenced_function_id",
-              {{"type", "integer"}, {"description", "The ID of the function that will be called"}}},
-             {"display_name",
-              {{"type", "string"},
-               {"description", "Optional display name for the function call node"}}}}},
-           {"required", {"target_function_id", "referenced_function_id"}}},
-          [this](const json & params) -> json
-          {
-              if (!m_application)
-              {
-                  return {{"success", false}, {"error", "No application available"}};
-              }
-              uint32_t target_function_id = params["target_function_id"];
-              uint32_t referenced_function_id = params["referenced_function_id"];
-              std::string display_name = params.value("display_name", "");
-              return m_application->createFunctionCallNode(
-                target_function_id, referenced_function_id, display_name);
           });
 
         // DOCUMENT MANAGEMENT (3MF FILES)
@@ -916,7 +678,8 @@ namespace gladius::mcp
                                        {"function_name", name},
                                        {"expression", expression},
                                        {"output_type", outputType},
-                                       {"resource_id", result.second}};
+                                       {"resource_id", result.second},
+                                       {"function_id", result.second}};
 
                       // Add automatic validation after function creation
                       json validationOptions = {{"compile", false}, {"max_messages", 10}};
@@ -941,20 +704,281 @@ namespace gladius::mcp
               });
         }
 
+        // CREATE FUNCTION FROM SNIPPET (multi-line with assignments, if→select, return)
+        {
+            json snippetSchema;
+            snippetSchema["type"] = "object";
+
+            json props;
+            props["name"] = {{"type", "string"},
+                            {"description", "Name for the new function"}};
+            props["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "Multi-line snippet. Supports: float variable assignments "
+               "(float x = expr;), if(cond) a else b → select node, "
+               "return expr; as last statement. Operators: + - * /, "
+               "functions: sin, cos, tan, asin, acos, atan, atan2, sqrt, abs, exp, log, pow, "
+               "mod, fmod, min, max, clamp. Component access: pos.x, pos.y, pos.z."}};
+            props["output_type"] = {{"type", "string"},
+                                   {"description", "Output type: 'float' (default) or 'vec3'"},
+                                   {"default", "float"}};
+
+            // Arguments (same schema as expression tool)
+            json itemsProps;
+            itemsProps["name"] = {{"type", "string"}, {"description", "Argument name"}};
+            {
+                json typeProp;
+                typeProp["type"] = "string";
+                typeProp["enum"] = json::array({"float", "vec3"});
+                typeProp["description"] = "Argument type: 'float' or 'vec3'.";
+                itemsProps["type"] = typeProp;
+            }
+            json itemsObj;
+            itemsObj["type"] = "object";
+            itemsObj["properties"] = itemsProps;
+            itemsObj["required"] = json::array({"name", "type"});
+
+            json arguments;
+            arguments["type"] = "array";
+            arguments["items"] = itemsObj;
+            arguments["description"] = "Function input arguments";
+            props["arguments"] = arguments;
+
+            snippetSchema["properties"] = props;
+            snippetSchema["required"] = json::array({"name", "snippet"});
+
+            registerTool(
+              "create_function_from_snippet",
+              "Create a volumetric function from a multi-line snippet. Unlike "
+              "create_function_from_expression (single expression only), this tool supports "
+              "multiple lines with: float variable assignments (float x = expr;), "
+              "if→select conversion (if(a<b) c else d → select node), "
+              "and a final return statement. All math operators and functions from the "
+              "expression tool are supported. Use this for complex functions that need "
+              "intermediate variables.",
+              snippetSchema,
+              [this](const json & params) -> json
+              {
+                  if (!params.contains("name"))
+                  {
+                      return {{"success", false}, {"error", "Missing required parameter: name"}};
+                  }
+                  if (!params.contains("snippet"))
+                  {
+                      return {{"success", false},
+                              {"error", "Missing required parameter: snippet"}};
+                  }
+
+                  std::string name = params["name"];
+                  std::string snippet = params["snippet"];
+                  std::string outputType = params.value("output_type", "float");
+
+                  std::vector<FunctionArgument> arguments;
+                  if (params.contains("arguments") && params["arguments"].is_array())
+                  {
+                      for (const auto & argJson : params["arguments"])
+                      {
+                          std::string argName = argJson["name"];
+                          std::string argType = argJson["type"];
+                          ArgumentType type = (argType == "float" || argType == "scalar")
+                                                ? ArgumentType::Scalar
+                                                : ArgumentType::Vector;
+                          arguments.emplace_back(argName, type);
+                      }
+                  }
+
+                  auto result = m_application->createFunctionFromSnippet(
+                    name, snippet, outputType, arguments, "");
+
+                  if (result.first)
+                  {
+                      json response = {{"success", true},
+                                       {"function_name", name},
+                                       {"snippet", snippet},
+                                       {"output_type", outputType},
+                                       {"resource_id", result.second},
+                                       {"function_id", result.second}};
+
+                      json validationOptions = {{"compile", false}, {"max_messages", 10}};
+                      auto validation = m_application->validateModel(validationOptions);
+                      if (!validation.value("success", false))
+                      {
+                          response["validation"] = validation;
+                      }
+
+                      return response;
+                  }
+                  else
+                  {
+                      return {{"success", false},
+                              {"error", m_application->getLastErrorMessage()}};
+                  }
+              });
+        }
+
+        // GET/SET FUNCTION SNIPPET (code view for functions)
+        {
+            json getSnippetSchema;
+            getSnippetSchema["type"] = "object";
+            getSnippetSchema["properties"] = {
+              {"function_id",
+               {{"type", "integer"}, {"description", "Resource ID of the function"}}}};
+            getSnippetSchema["required"] = json::array({"function_id"});
+
+            registerTool(
+              "get_function_snippet",
+              "Get the GLSL-like code representation of a function's node graph. "
+              "Returns a multi-line snippet with variable assignments and a return statement.",
+              getSnippetSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  return m_application->getFunctionSnippet(functionId);
+              });
+
+            json setSnippetSchema;
+            setSnippetSchema["type"] = "object";
+            json setProps;
+            setProps["function_id"] = {
+              {"type", "integer"}, {"description", "Resource ID of the function to update"}};
+            setProps["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "GLSL-like code snippet. Supports assignments, math ops, vec3(), "
+               "dot(), cross(), and return statement."}};
+            setProps["output_type"] = {
+              {"type", "string"},
+              {"description", "Output type: 'float' (default) or 'vec3'"},
+              {"default", "float"}};
+            setProps["arguments"] = {
+              {"type", "array"},
+              {"description", "Function arguments [{name, type}]"},
+              {"items",
+               {{"type", "object"},
+                {"properties",
+                 {{"name", {{"type", "string"}}}, {"type", {{"type", "string"}}}}}}}};
+            setSnippetSchema["properties"] = setProps;
+            setSnippetSchema["required"] = json::array({"function_id", "snippet"});
+
+            registerTool(
+              "set_function_snippet",
+              "Replace a function's node graph from a GLSL-like code snippet. "
+              "Parses the snippet, validates it, and replaces the graph. "
+              "Returns the normalized snippet on success.",
+              setSnippetSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  std::string snippet = params["snippet"];
+                  std::string outputType = params.value("output_type", "float");
+
+                  std::vector<FunctionArgument> arguments;
+                  if (params.contains("arguments") && params["arguments"].is_array())
+                  {
+                      for (auto const & argJson : params["arguments"])
+                      {
+                          std::string argName = argJson["name"];
+                          std::string argType = argJson["type"];
+                          ArgumentType type = (argType == "float" || argType == "scalar")
+                                                ? ArgumentType::Scalar
+                                                : ArgumentType::Vector;
+                          arguments.emplace_back(argName, type);
+                      }
+                  }
+
+                  return m_application->setFunctionSnippet(
+                    functionId, snippet, outputType, arguments);
+              });
+
+            // get_program_snippet: whole-program code listing
+            json programSnippetSchema;
+            programSnippetSchema["type"] = "object";
+            programSnippetSchema["properties"] = json::object();
+            programSnippetSchema["required"] = json::array();
+
+            registerTool(
+              "get_program_snippet",
+              "Get the entire document as a single GLSL-like code listing with all "
+              "functions in dependency order. Useful for understanding the full program.",
+              programSnippetSchema,
+              [this](json const & /*params*/) -> json
+              {
+                  return m_application->getProgramSnippet();
+              });
+
+            // set_program_snippet: replace all functions from a multi-function listing
+            json setProgramSchema;
+            setProgramSchema["type"] = "object";
+            json setProgramProps;
+            setProgramProps["snippet"] = {
+              {"type", "string"},
+              {"description",
+               "Multi-function GLSL-like code listing. Each function block must have "
+               "a '// Function: name (ID: num)' header followed by the function body."}};
+            setProgramSchema["properties"] = setProgramProps;
+            setProgramSchema["required"] = json::array({"snippet"});
+
+            registerTool(
+              "set_program_snippet",
+              "Replace all function graphs from a multi-function GLSL-like code listing. "
+              "Each function must include a comment header with display name and ID. "
+              "Returns the normalized program on success.",
+              setProgramSchema,
+              [this](json const & params) -> json
+              {
+                  std::string snippet = params["snippet"];
+                  return m_application->setProgramSnippet(snippet);
+              });
+        }
+
         // LEVEL SETS (Convert functions to 3D geometry for 3MF)
         registerTool(
           "create_levelset",
           "Create a level set from a volumetric function - converts function to 3D geometry for "
-          "3MF",
+          "3MF. The bounding box defines the evaluation domain for the SDF function.",
           {{"type", "object"},
            {"properties",
             {{"function_id",
-              {{"type", "integer"}, {"description", "Resource ID of the volumetric function"}}}}},
+              {{"type", "integer"}, {"description", "Resource ID of the volumetric function"}}},
+             {"min_point",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description",
+                "Minimum corner [x,y,z] of the bounding box (default: [-10,-10,-10])"}}},
+             {"max_point",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description",
+                "Maximum corner [x,y,z] of the bounding box (default: [10,10,10])"}}}
+            }},
            {"required", {"function_id"}}},
           [this](const json & params) -> json
           {
               uint32_t function_id = params["function_id"];
-              auto result = m_application->createLevelSet(function_id);
+              std::array<float, 3> minPoint = {-10.f, -10.f, -10.f};
+              std::array<float, 3> maxPoint = {10.f, 10.f, 10.f};
+              if (params.contains("min_point") && params["min_point"].is_array() &&
+                  params["min_point"].size() == 3)
+              {
+                  for (int i = 0; i < 3; ++i)
+                  {
+                      minPoint[i] = params["min_point"][i].get<float>();
+                  }
+              }
+              if (params.contains("max_point") && params["max_point"].is_array() &&
+                  params["max_point"].size() == 3)
+              {
+                  for (int i = 0; i < 3; ++i)
+                  {
+                      maxPoint[i] = params["max_point"][i].get<float>();
+                  }
+              }
+              auto result = m_application->createLevelSet(function_id, minPoint, maxPoint);
 
               if (result.first)
               {
@@ -1146,7 +1170,26 @@ namespace gladius::mcp
                          }
                          else if (type == "string")
                          {
-                             std::string string_value = value;
+                             // Coerce non-string JSON values to string when type="string".
+                             // MCP clients may send numeric values like 19 instead of "19"
+                             // for metadata fields such as library-functions.
+                             std::string string_value;
+                             if (value.is_string())
+                             {
+                                 string_value = value.get<std::string>();
+                             }
+                             else if (value.is_number_integer())
+                             {
+                                 string_value = std::to_string(value.get<long long>());
+                             }
+                             else if (value.is_number_float())
+                             {
+                                 string_value = std::to_string(value.get<double>());
+                             }
+                             else
+                             {
+                                 string_value = value.dump();
+                             }
                              success = m_application->setStringParameter(
                                model_id, node_name, parameter_name, string_value);
                          }
@@ -1342,92 +1385,116 @@ namespace gladius::mcp
         // ADVANCED RENDERING WITH CAMERA CONTROL
         registerTool(
           "render_with_camera",
-          "Render with full camera and lighting control for high-quality output",
+          "Render with full camera and lighting control for high-quality output. "
+          "Camera and render parameters can be passed flat (recommended) or nested "
+          "under camera_settings / render_settings for backward compatibility.",
           {{"type", "object"},
            {"properties",
             {{"output_path",
               {{"type", "string"}, {"description", "File path where to save the rendered image"}}},
+             // Flat camera parameters (preferred)
+             {"eye_position",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Camera position [x, y, z]"}}},
+             {"target_position",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Look-at target [x, y, z]"}}},
+             {"up_vector",
+              {{"type", "array"},
+               {"items", {{"type", "number"}}},
+               {"minItems", 3},
+               {"maxItems", 3},
+               {"description", "Up direction [x, y, z] (default: [0,0,1])"}}},
+             {"field_of_view",
+              {{"type", "number"},
+               {"minimum", 10.0},
+               {"maximum", 150.0},
+               {"description", "Field of view in degrees (default: 45)"}}},
+             // Flat render parameters
+             {"width",
+              {{"type", "integer"},
+               {"minimum", 64},
+               {"maximum", 8192},
+               {"description", "Image width in pixels (default: 1024)"}}},
+             {"height",
+              {{"type", "integer"},
+               {"minimum", 64},
+               {"maximum", 8192},
+               {"description", "Image height in pixels (default: 1024)"}}},
+             {"format",
+              {{"type", "string"},
+               {"enum", {"png", "jpg"}},
+               {"description", "Output format (default: png)"}}},
+             {"quality",
+              {{"type", "number"},
+               {"minimum", 0.0},
+               {"maximum", 1.0},
+               {"description", "Quality for lossy formats (default: 0.9)"}}},
+             {"background_color",
+              {{"type", "array"},
+               {"items", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+               {"minItems", 4},
+               {"maxItems", 4},
+               {"description", "Background color [r,g,b,a] (default: [0.2,0.2,0.2,1.0])"}}},
+             {"enable_shadows",
+              {{"type", "boolean"}, {"description", "Enable shadows (default: true)"}}},
+             {"enable_lighting",
+              {{"type", "boolean"}, {"description", "Enable lighting (default: true)"}}},
+             // Legacy nested objects (backward compatible)
              {"camera_settings",
-              {{"type", "object"},
-               {"description", "Camera parameters"},
-               {"properties",
-                {{"eye_position",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Camera position [x, y, z]"}}},
-                 {"target_position",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Look-at target [x, y, z]"}}},
-                 {"up_vector",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}}},
-                   {"minItems", 3},
-                   {"maxItems", 3},
-                   {"description", "Up direction [x, y, z]"},
-                   {"default", {0, 0, 1}}}},
-                 {"field_of_view",
-                  {{"type", "number"},
-                   {"minimum", 10.0},
-                   {"maximum", 150.0},
-                   {"description", "Field of view in degrees"},
-                   {"default", 45.0}}}}},
-               {"required", {"eye_position", "target_position"}}}},
+              {{"type", "object"}, {"description", "Legacy nested camera parameters"}}},
              {"render_settings",
-              {{"type", "object"},
-               {"description", "Rendering parameters"},
-               {"properties",
-                {{"width",
-                  {{"type", "integer"},
-                   {"minimum", 64},
-                   {"maximum", 8192},
-                   {"description", "Image width in pixels"},
-                   {"default", 1024}}},
-                 {"height",
-                  {{"type", "integer"},
-                   {"minimum", 64},
-                   {"maximum", 8192},
-                   {"description", "Image height in pixels"},
-                   {"default", 1024}}},
-                 {"format",
-                  {{"type", "string"},
-                   {"enum", {"png", "jpg"}},
-                   {"description", "Output format"},
-                   {"default", "png"}}},
-                 {"quality",
-                  {{"type", "number"},
-                   {"minimum", 0.0},
-                   {"maximum", 1.0},
-                   {"description", "Quality for lossy formats"},
-                   {"default", 0.9}}},
-                 {"background_color",
-                  {{"type", "array"},
-                   {"items", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
-                   {"minItems", 4},
-                   {"maxItems", 4},
-                   {"description", "Background color [r, g, b, a]"},
-                   {"default", {0.2, 0.2, 0.2, 1.0}}}},
-                 {"enable_shadows",
-                  {{"type", "boolean"}, {"description", "Enable shadows"}, {"default", true}}},
-                 {"enable_lighting",
-                  {{"type", "boolean"},
-                   {"description", "Enable lighting"},
-                   {"default", true}}}}}}}}},
-           {"required", {"output_path", "camera_settings"}}},
+              {{"type", "object"}, {"description", "Legacy nested render parameters"}}}}},
+           {"required", {"output_path"}}},
           [this](const json & params) -> json
           {
-              if (!params.contains("output_path") || !params.contains("camera_settings"))
+              if (!params.contains("output_path"))
               {
-                  return {{"success", false}, {"error", "Missing required parameters"}};
+                  return {{"success", false}, {"error", "Missing required parameter: output_path"}};
               }
 
               std::string outputPath = params["output_path"];
-              json cameraSettings = params["camera_settings"];
+
+              // Build camera_settings: flat params take precedence over nested object
+              json cameraSettings = params.value("camera_settings", json::object());
+              for (auto const & key :
+                   {"eye_position", "target_position", "up_vector", "field_of_view"})
+              {
+                  if (params.contains(key))
+                  {
+                      cameraSettings[key] = params[key];
+                  }
+              }
+
+              if (!cameraSettings.contains("eye_position") ||
+                  !cameraSettings.contains("target_position"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required camera parameters: eye_position and target_position"}};
+              }
+
+              // Build render_settings: flat params take precedence over nested object
               json renderSettings = params.value("render_settings", json::object());
+              for (auto const & key : {"width",
+                                       "height",
+                                       "format",
+                                       "quality",
+                                       "background_color",
+                                       "enable_shadows",
+                                       "enable_lighting"})
+              {
+                  if (params.contains(key))
+                  {
+                      renderSettings[key] = params[key];
+                  }
+              }
 
               bool success =
                 m_application->renderWithCamera(outputPath, cameraSettings, renderSettings);
@@ -1565,6 +1632,382 @@ namespace gladius::mcp
                   return {{"success", false}, {"error", "No application available"}};
               }
               return m_application->removeUnusedResources();
+          });
+
+        // ===================================================================
+        // LIBRARY TOOLS
+        // Browse, create, import, export, and delete library entries
+        // ===================================================================
+
+        // LIST LIBRARY
+        registerTool(
+          "list_library",
+          "List all library categories and their entries. Returns category names, entry "
+          "names, descriptions, and tagged function IDs. Scans both shipped and user "
+          "library directories.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description",
+                "Optional: filter to a specific category (subdirectory name). "
+                "If omitted, lists all categories."}}}}},
+           {"required", json::array()}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              std::string category = params.value("category", "");
+              return m_application->listLibrary(category);
+          });
+
+        // GET LIBRARY ENTRY INFO
+        registerTool(
+          "get_library_entry_info",
+          "Get detailed information about a specific library entry, including function list "
+          "with names, types, and input/output parameter signatures. Does NOT open the file "
+          "as the active document.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->getLibraryEntryInfo(category, name);
+          });
+
+        // CREATE LIBRARY ENTRY
+        registerTool(
+          "create_library_entry",
+          "Create a new library entry from a GLSL-like snippet (or simple expression). "
+          "Either 'snippet' or 'expression' (deprecated, single-line) must be provided. "
+          "Creates a 3MF file with the specified function, library metadata, and saves "
+          "it to the user library directory. The 'snippet' field accepts multi-line code "
+          "with float assignments, if/else, and return statements. For backward "
+          "compatibility, 'expression' is also accepted (single-line, x/y/z auto-"
+          "detected). Supported: operators + - * /; functions sin, cos, tan, acos, "
+          "asin, atan, atan2, sqrt, abs, exp, log, pow, mod, min, max, clamp, mix, "
+          "step, smoothstep, length, dot, cross, normalize; constants pi, e.",
+          {{"type", "object"},
+           {"properties",
+            {{"name",
+              {{"type", "string"},
+               {"description",
+                "Entry name (will be used as filename, alphanumeric + hyphens + "
+                "underscores)"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Library category (subdirectory name, created if needed)"}}},
+             {"snippet",
+              {{"type", "string"},
+               {"description",
+                "GLSL-like code defining the SDF function. Supports multi-line "
+                "assignments (float x = expr;), if/else, and return. Example: "
+                "'float r = length(pos);\nreturn r - radius;'"}}},
+             {"expression",
+              {{"type", "string"},
+               {"description",
+                "Deprecated: use 'snippet' instead. Single-line math expression "
+                "with x,y,z auto-detection. Example: 'sqrt(x*x+y*y+z*z)-5'"}}},
+             {"arguments",
+              {{"type", "array"},
+               {"description",
+                "Function input arguments. Each has 'name' and 'type' "
+                "(float or vec3). If omitted and snippet uses pos.x/pos.y/pos.z, "
+                "a pos:vec3 argument is auto-inferred."},
+               {"items",
+                {{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}}},
+                   {"type",
+                    {{"type", "string"},
+                     {"enum", {"float", "vec3"}}}}}}}}}},
+             {"output_type",
+              {{"type", "string"},
+               {"description", "Output type: 'float' (default) or 'vec3'."},
+               {"default", "float"}}},
+             {"description",
+              {{"type", "string"},
+               {"description", "Human-readable description of the function"}}},
+             {"overwrite",
+              {{"type", "boolean"},
+               {"description",
+                "If true, overwrite an existing entry with the same name. "
+                "Default: false."},
+               {"default", false}}}}},
+           {"required", {"name", "category", "description"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+
+              auto missing = std::vector<std::string>{};
+              for (auto const & key : {"name", "category", "description"})
+              {
+                  if (!params.contains(key))
+                  {
+                      missing.emplace_back(key);
+                  }
+              }
+
+              bool hasSnippet = params.contains("snippet");
+              bool hasExpression = params.contains("expression");
+
+              if (!hasSnippet && !hasExpression)
+              {
+                  missing.emplace_back("snippet");
+              }
+
+              if (!missing.empty())
+              {
+                  std::string missingList;
+                  for (size_t i = 0; i < missing.size(); ++i)
+                  {
+                      if (i > 0)
+                      {
+                          missingList += ", ";
+                      }
+                      missingList += missing[i];
+                  }
+                  return {{"success", false},
+                          {"error", "Missing required parameters: " + missingList},
+                          {"usage_example",
+                           {{"name", "spur-gear"},
+                            {"category", "mechanical"},
+                            {"snippet",
+                             "float r = length(pos);\nreturn r - radius;"},
+                            {"arguments",
+                             {{{"name", "pos"}, {"type", "vec3"}},
+                              {{"name", "radius"}, {"type", "float"}}}},
+                            {"description", "Sphere with given radius"}}}};
+              }
+
+              std::string name = params["name"];
+              std::string category = params["category"];
+              std::string description = params["description"];
+              bool overwrite = params.value("overwrite", false);
+
+              // 'expression' is a legacy alias: auto-detects x,y,z → pos
+              if (hasExpression && !hasSnippet)
+              {
+                  std::string expression = params["expression"];
+                  return m_application->createLibraryEntry(
+                    name, category, expression, description, overwrite);
+              }
+
+              std::string snippet = params["snippet"];
+              std::string outputType = params.value("output_type", "float");
+
+              std::vector<FunctionArgument> arguments;
+              if (params.contains("arguments") && params["arguments"].is_array())
+              {
+                  for (auto const & argJson : params["arguments"])
+                  {
+                      std::string argName = argJson["name"];
+                      std::string argType = argJson["type"];
+                      ArgumentType type =
+                        (argType == "float" || argType == "scalar")
+                          ? ArgumentType::Scalar
+                          : ArgumentType::Vector;
+                      arguments.emplace_back(argName, type);
+                  }
+              }
+
+              return m_application->createLibraryEntryFromSnippet(
+                name, category, snippet, description, arguments, outputType, overwrite);
+          });
+
+        // EXPORT TO LIBRARY
+        registerTool(
+          "export_to_library",
+          "Export a function from the current document to the library. The function and "
+          "all its transitive dependencies are exported as a library entry with proper "
+          "metadata. The current document is preserved. Use keep_scaffold=true to "
+          "preserve the full document structure (build items, levelset, mesh, main) so "
+          "the entry renders standalone like shipped library primitives.",
+          {{"type", "object"},
+           {"properties",
+            {{"function_id",
+              {{"type", "integer"},
+               {"description",
+                "ModelResourceID of the function to export (from get_3mf_structure)"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Library category (subdirectory name, created if needed)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}},
+             {"description",
+              {{"type", "string"}, {"description", "Human-readable description"}}},
+             {"overwrite",
+              {{"type", "boolean"},
+               {"description",
+                "If true, overwrite an existing entry. Default: false."},
+               {"default", false}}},
+             {"keep_scaffold",
+              {{"type", "boolean"},
+               {"description",
+                "If true, keep the full document scaffold (build items, levelset, mesh, "
+                "main function) so the entry renders standalone. Default: false."},
+               {"default", false}}}}},
+           {"required", {"function_id", "category", "name", "description"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("function_id") || !params.contains("category") ||
+                  !params.contains("name") || !params.contains("description"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required parameters: function_id, category, name, "
+                           "description"},
+                          {"usage_example",
+                           {{"function_id", 5},
+                            {"category", "primitives"},
+                            {"name", "my-sphere"},
+                            {"description", "Sphere with radius 5"},
+                            {"keep_scaffold", true}}}};
+              }
+              uint32_t functionId = params["function_id"];
+              std::string category = params["category"];
+              std::string name = params["name"];
+              std::string description = params["description"];
+              bool overwrite = params.value("overwrite", false);
+              bool keepScaffold = params.value("keep_scaffold", false);
+              return m_application->exportToLibrary(
+                functionId, category, name, description, overwrite, keepScaffold);
+          });
+
+        // IMPORT LIBRARY ENTRY
+        registerTool(
+          "import_library_entry",
+          "Import a library entry's tagged functions (and their dependencies) into the "
+          "current document. The imported functions can then be used via "
+          "create_function_from_snippet or set_function_snippet. Requires an active document.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->importLibraryEntry(category, name);
+          });
+
+        // DELETE LIBRARY ENTRY
+        registerTool(
+          "delete_library_entry",
+          "Delete a library entry from the user library. Cannot delete shipped "
+          "(read-only) library entries.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Library category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](const json & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "my-sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->deleteLibraryEntry(category, name);
+          });
+
+        // SET LIBRARY METADATA
+        registerTool(
+          "set_library_metadata",
+          "Stamp library metadata (tagged function IDs and description) onto the "
+          "current document's 3MF model. Use this before save_document / "
+          "save_document_as when you want a document to behave as a library entry "
+          "without going through export_to_library.",
+          {{"type", "object"},
+           {"properties",
+            {{"function_ids",
+              {{"type", "array"},
+               {"items", {{"type", "integer"}}},
+               {"description",
+                "Array of ModelResourceIDs of the tagged (importable) functions"}}},
+             {"description",
+              {{"type", "string"},
+               {"description",
+                "Human-readable description of the library entry"}}}}},
+           {"required", {"function_ids", "description"}}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("function_ids") || !params.contains("description"))
+              {
+                  return {{"success", false},
+                          {"error",
+                           "Missing required parameters: function_ids and description"},
+                          {"usage_example",
+                           {{"function_ids", {5}},
+                            {"description", "My library entry"}}}};
+              }
+              auto functionIds =
+                params["function_ids"].get<std::vector<uint32_t>>();
+              std::string description = params["description"];
+              return m_application->setLibraryMetadata(functionIds, description);
           });
     }
 

@@ -5,10 +5,12 @@
 #include "Mesh.h"
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
+#include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
+#include "nodes/IssueList.h"
 #include "nodes/Model.h"
 #include "ui/GLView.h"
 
@@ -118,6 +120,20 @@ namespace gladius
         void loadNonBlocking(std::filesystem::path filename);
         void merge(std::filesystem::path filename);
 
+        /// Import functions from another file without triggering recompilation.
+        /// Use when the caller will create additional nodes before compilation.
+        void mergeOnly(std::filesystem::path filename);
+
+        /// Merge a library file and resolve the best matching imported function.
+        /// Does NOT trigger recompilation — the caller is expected to create a
+        /// FunctionCall node and let the flag-driven mechanism handle it.
+        /// @param filename  Path to the .3mf library file.
+        /// @param targetFunctionName  Display name to match (empty = first new).
+        /// @return FunctionMatch with the resolved function (id==0 on failure).
+        [[nodiscard]] nodes::FunctionMatch
+        mergeAndResolve(std::filesystem::path filename,
+                        std::string const & targetFunctionName);
+
         /**
          * @brief Check if a file is currently being loaded asynchronously
          * @return true if a file load is in progress
@@ -147,6 +163,7 @@ namespace gladius
         void markFileAsChanged();
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
+        nodes::SharedAssembly getFlatAssembly() const;
 
         /**
          * @brief Get the current assembly filename
@@ -238,6 +255,9 @@ namespace gladius
 
         ResourceKey addImageStackResource(std::filesystem::path const & path);
 
+        /// Import image stack with padding support - returns ImportResult for notification handling
+        io::ImportResult addImageStackResourceWithPadding(std::filesystem::path const & path);
+
         // syncing of the 3MF model with the document
 
         /**
@@ -297,14 +317,49 @@ namespace gladius
         void rebuildResourceDependencyGraph();
 
         /**
+         * @brief Mark validation as needing to be re-run.
+         *
+         * Called when the graph structure changes (nodes added/removed, connections changed).
+         * The next call to validateAssemblyIfDirty() will re-run validation.
+         */
+        void markValidationDirty();
+
+        /**
+         * @brief Validate the assembly only if marked dirty.
+         *
+         * Efficient method for UI use - only re-validates when the graph has changed.
+         * Clears the dirty flag after validation.
+         *
+         * @param context The validation context (Interactive, FileLoad, or Api)
+         * @return True if the assembly is valid, false otherwise
+         */
+        bool validateAssemblyIfDirty(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
          * @brief Validates the current assembly
          *
          * Validates the assembly using the nodes::Validator.
-         * Logs any validation errors.
+         * Populates the issue list with any validation errors.
+         * When called during file loading or API operations, also logs events.
          *
+         * @param context The validation context (Interactive, FileLoad, or Api)
          * @return True if the assembly is valid, false otherwise
          */
-        bool validateAssembly() const;
+        bool validateAssembly(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings
+         *
+         * @return Reference to the issue list
+         */
+        nodes::IssueList& getIssueList();
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings (const version)
+         *
+         * @return Const reference to the issue list
+         */
+        nodes::IssueList const& getIssueList() const;
 
         /**
          * @brief Get the backup manager instance
@@ -394,6 +449,12 @@ namespace gladius
 
         /// Flag to track if UI mode is active (determines if backups should be created)
         bool m_uiMode = false;
+
+        /// Flag to track if validation needs to be re-run
+        std::atomic<bool> m_validationDirty{true};
+
+        /// Issue list containing validation errors and warnings
+        nodes::IssueList m_issueList;
     };
 
     using SharedDocument = std::shared_ptr<Document>;
