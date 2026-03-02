@@ -23,6 +23,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -595,7 +596,14 @@ namespace gladius::tests
     TEST_F(MeshSdfPerformance_Test, VoxelGrid_GpuBuild_EndToEnd)
     {
         // Skip if GPU tests are not enabled
+#ifdef _WIN32
+        char* gpuTestsEnv = nullptr;
+        size_t gpuTestsEnvLen = 0;
+        _dupenv_s(&gpuTestsEnv, &gpuTestsEnvLen, "GLADIUS_RUN_GPU_TESTS");
+        std::unique_ptr<char, decltype(&free)> gpuTestsEnvGuard(gpuTestsEnv, &free);
+#else
         char const* gpuTestsEnv = std::getenv("GLADIUS_RUN_GPU_TESTS");
+#endif
         if (!gpuTestsEnv || std::string(gpuTestsEnv) != "1")
         {
             GTEST_SKIP() << "GPU tests disabled. Set GLADIUS_RUN_GPU_TESTS=1 to enable.";
