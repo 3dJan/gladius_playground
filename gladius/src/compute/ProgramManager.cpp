@@ -309,6 +309,59 @@ namespace gladius
             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
     }
 
+    void ProgramManager::requestShutdownAll()
+    {
+        // Request shutdown on all programs (no locking needed - just sets atomic flags)
+        if (m_optimizedRenderProgram)
+        {
+            m_optimizedRenderProgram->requestShutdown();
+        }
+        if (m_slicerProgram)
+        {
+            m_slicerProgram->requestShutdown();
+        }
+        if (m_dualContouringSamplingProgram)
+        {
+            m_dualContouringSamplingProgram->requestShutdown();
+        }
+        if (m_hierarchicalDCProgram)
+        {
+            m_hierarchicalDCProgram->requestShutdown();
+        }
+        if (m_manifoldDualContouringProgram)
+        {
+            m_manifoldDualContouringProgram->requestShutdown();
+        }
+    }
+
+    void ProgramManager::waitForAllCompilations()
+    {
+        // Wait for all compilations to complete
+        // Note: Lock is needed to safely access program pointers
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (m_optimizedRenderProgram)
+        {
+            m_optimizedRenderProgram->waitForCompilation();
+        }
+        if (m_slicerProgram)
+        {
+            m_slicerProgram->waitForCompilation();
+        }
+        if (m_dualContouringSamplingProgram)
+        {
+            m_dualContouringSamplingProgram->waitForCompilation();
+        }
+        if (m_hierarchicalDCProgram)
+        {
+            m_hierarchicalDCProgram->waitForCompilation();
+        }
+        if (m_manifoldDualContouringProgram)
+        {
+            m_manifoldDualContouringProgram->waitForCompilation();
+        }
+    }
+
     ComputeContext & ProgramManager::getComputeContext() const
     {
         return *m_ComputeContext;

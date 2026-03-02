@@ -1,42 +1,31 @@
 #include "ThreemfFileViewer.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
-#include "FileChooser.h"
-#include "Widgets.h"
+#include "LibraryDragPayload.h"
 #include "imgui.h"
-#include "io/3mf/Importer3mf.h"
 #include <algorithm>
-#include <cstdint>
 #include <fmt/format.h>
-#include <lodepng.h>
-#include "io/3mf/Lib3mfLoader.h"
 
 namespace gladius::ui
 {
     ThreemfFileViewer::ThreemfFileViewer(events::SharedLogger logger)
         : m_logger(std::move(logger))
     {
-        try
-        {
-            m_wrapper = gladius::io::loadLib3mfScoped();
-        }
-        catch (const std::exception & e)
-        {
-            if (m_logger)
-            {
-                m_logger->addEvent({e.what(), events::Severity::Error});
-            }
-        }
+        m_thumbnailExtractor = std::make_unique<ThreemfThumbnailExtractor>(m_logger);
+        m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger);
     }
 
     ThreemfFileViewer::~ThreemfFileViewer()
     {
-        // Clean up OpenGL textures
-        for (auto & fileInfo : m_files)
+        if (m_asyncLoader)
         {
-            if (fileInfo.thumbnailTextureId != 0)
+            m_asyncLoader->cancelAll();
+        }
+
+        if (m_thumbnailExtractor)
+        {
+            for (auto & info : m_files)
             {
-                glDeleteTextures(1, &fileInfo.thumbnailTextureId);
-                fileInfo.thumbnailTextureId = 0;
+                m_thumbnailExtractor->releaseThumbnail(info);
             }
         }
     }
@@ -50,8 +39,6 @@ namespace gladius::ui
         }
     }
 
-    // setVisibility removed - no longer needed as this is a pure widget
-
     void ThreemfFileViewer::refreshDirectory()
     {
         m_needsRefresh = true;
@@ -64,20 +51,23 @@ namespace gladius::ui
             return;
         }
 
-        // Clean up existing textures
-        for (auto & fileInfo : m_files)
+        if (m_asyncLoader)
         {
-            if (fileInfo.thumbnailTextureId != 0)
-            {
-                glDeleteTextures(1, &fileInfo.thumbnailTextureId);
-                fileInfo.thumbnailTextureId = 0;
-            }
+            m_asyncLoader->cancelAll();
         }
 
+        if (m_thumbnailExtractor)
+        {
+            for (auto & info : m_files)
+            {
+                m_thumbnailExtractor->releaseThumbnail(info);
+            }
+        }
         m_files.clear();
 
         if (!std::filesystem::exists(m_directory) || !std::filesystem::is_directory(m_directory))
         {
+            m_needsRefresh = false;
             return;
         }
 
@@ -87,10 +77,15 @@ namespace gladius::ui
             {
                 if (entry.is_regular_file() && entry.path().extension() == ".3mf")
                 {
-                    ThreemfFileInfo fileInfo;
-                    fileInfo.filePath = entry.path();
-                    fileInfo.fileName = entry.path().stem().string();
-                    m_files.push_back(fileInfo);
+                    if (m_thumbnailExtractor)
+                    {
+                        auto info = m_thumbnailExtractor->createThumbnailInfo(entry.path(), 0);
+                        m_files.push_back(std::move(info));
+                        if (m_asyncLoader)
+                        {
+                            m_asyncLoader->requestLoad(m_files.back());
+                        }
+                    }
                 }
             }
         }
@@ -105,314 +100,256 @@ namespace gladius::ui
         m_needsRefresh = false;
     }
 
-    std::vector<unsigned char>
-    ThreemfFileViewer::extractThumbnail(const std::filesystem::path & filePath)
-    {
-        std::vector<unsigned char> thumbnailData;
-
-        if (!m_wrapper)
-        {
-            return thumbnailData;
-        }
-
-        try
-        {
-            auto model = m_wrapper->CreateModel();
-            auto reader = model->QueryReader("3mf");
-
-            reader->SetStrictModeActive(false);
-            reader->ReadFromFile(filePath.string());
-
-            if (model->HasPackageThumbnailAttachment())
-            {
-                auto thumbnail = model->GetPackageThumbnailAttachment();
-                if (thumbnail)
-                {
-                    thumbnail->WriteToBuffer(thumbnailData);
-                }
-            }
-        }
-        catch (const std::exception & e)
-        {
-            if (m_logger)
-            {
-                m_logger->addEvent({fmt::format("Failed to extract thumbnail from {}: {}",
-                                                filePath.string(),
-                                                e.what()),
-                                    events::Severity::Warning});
-            }
-        }
-
-        return thumbnailData;
-    }
-
-    void ThreemfFileViewer::loadThumbnail(ThreemfFileInfo & fileInfo)
-    {
-        if (fileInfo.thumbnailLoaded)
-        {
-            return;
-        }
-
-        fileInfo.thumbnailData = extractThumbnail(fileInfo.filePath);
-        fileInfo.hasThumbnail = !fileInfo.thumbnailData.empty();
-        fileInfo.thumbnailLoaded = true;
-
-        if (fileInfo.hasThumbnail)
-        {
-            // Decode the PNG data to get width and height
-            std::vector<unsigned char> image;
-            unsigned int width, height;
-            unsigned int error = lodepng::decode(image, width, height, fileInfo.thumbnailData);
-
-            if (error == 0)
-            {
-                fileInfo.thumbnailWidth = width;
-                fileInfo.thumbnailHeight = height;
-                createThumbnailTexture(fileInfo);
-            }
-            else
-            {
-                fileInfo.hasThumbnail = false;
-                if (m_logger)
-                {
-                    m_logger->addEvent({fmt::format("Failed to decode thumbnail for {}: {}",
-                                                    fileInfo.fileName,
-                                                    lodepng_error_text(error)),
-                                        events::Severity::Warning});
-                }
-            }
-        }
-    }
-
-    void ThreemfFileViewer::createThumbnailTexture(ThreemfFileInfo & fileInfo)
-    {
-        if (fileInfo.thumbnailTextureId != 0 || !fileInfo.hasThumbnail ||
-            fileInfo.thumbnailData.empty())
-        {
-            return;
-        }
-
-        // Decode the PNG data
-        std::vector<unsigned char> decodedImage;
-        unsigned int width, height;
-        unsigned int error = lodepng::decode(decodedImage, width, height, fileInfo.thumbnailData);
-
-        if (error != 0)
-        {
-            return;
-        }
-
-        // Create OpenGL texture
-        GLuint textureId;
-        glGenTextures(1, &textureId);
-        glBindTexture(GL_TEXTURE_2D, textureId);
-
-        // Set texture parameters
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        // Upload the image data to the texture
-        glTexImage2D(GL_TEXTURE_2D,
-                     0,
-                     GL_RGBA,
-                     width,
-                     height,
-                     0,
-                     GL_RGBA,
-                     GL_UNSIGNED_BYTE,
-                     decodedImage.data());
-
-        // Unbind the texture
-        glBindTexture(GL_TEXTURE_2D, 0);
-
-        // Store the texture ID
-        fileInfo.thumbnailTextureId = textureId;
-    }
-
     void ThreemfFileViewer::render(SharedDocument doc)
     {
         // Scan the directory if needed
         scanDirectory();
 
-        // Calculate the number of columns that fit into the window based on thumbnail size
-        float const windowWidth = ImGui::GetContentRegionAvail().x;
-        float const spacing = ImGui::GetStyle().ItemSpacing.x;
-        float const effectiveItemWidth = m_thumbnailSize + spacing;
+        // Poll async loader and create textures for decoded thumbnails
+        if (m_asyncLoader)
+        {
+            m_asyncLoader->update();
+            m_asyncLoader->processPendingTextures();
 
-        // Calculate how many thumbnails fit in the window width
-        m_columns = std::max(1, static_cast<int>(windowWidth / effectiveItemWidth));
+            if (m_thumbnailExtractor)
+            {
+                for (auto & info : m_files)
+                {
+                    if (info.loadState == ThumbnailLoadState::DecodedPending)
+                    {
+                        m_thumbnailExtractor->createTextureFromPixels(info);
+                    }
+                }
+            }
+        }
 
-        bool oneThumbnailLoaded = false;
-        // Display files in a grid
         if (m_files.empty())
         {
             ImGui::TextUnformatted("No 3MF files found in the specified directory");
+            return;
+        }
+
+        // Calculate grid layout
+        float const availWidth = ImGui::GetContentRegionAvail().x - 10.0f;
+        float const spacing = ImGui::GetStyle().ItemSpacing.x;
+        float cellWidth = m_thumbnailSize + 20.0f;
+        m_columns = std::max(1, static_cast<int>(std::floor(availWidth / cellWidth)));
+        cellWidth = (availWidth - spacing * (m_columns - 1)) / m_columns;
+        float const cellHeight = m_thumbnailSize + 60.0f;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5, 5));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+
+        int itemIdx = 0;
+        for (auto & info : m_files)
+        {
+            ImGui::PushID(itemIdx);
+
+            if (itemIdx % m_columns != 0)
+            {
+                ImGui::SameLine();
+            }
+
+            ImVec2 const itemPos = ImGui::GetCursorPos();
+            renderThumbnailItem(info, doc, cellWidth, cellHeight, itemPos);
+
+            ImGui::PopID();
+            itemIdx++;
+        }
+
+        ImGui::PopStyleVar(2);
+    }
+
+    void ThreemfFileViewer::renderThumbnailItem(ThreemfThumbnailExtractor::ThumbnailInfo & info,
+                                                SharedDocument doc,
+                                                float cellWidth,
+                                                float cellHeight,
+                                                const ImVec2 & itemPos)
+    {
+        ImGui::BeginGroup();
+
+        // Selectable background button
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.1f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+
+        bool const isDoubleClicked =
+          ImGui::Button("##thumb", ImVec2(cellWidth, cellHeight)) &&
+          ImGui::IsMouseDoubleClicked(0);
+
+        if (isDoubleClicked && doc)
+        {
+            try
+            {
+                doc->merge(info.filePath);
+                if (m_logger)
+                {
+                    m_logger->addEvent(
+                      {fmt::format("Loaded file: {}", info.fileName), events::Severity::Info});
+                }
+            }
+            catch (const std::exception & e)
+            {
+                if (m_logger)
+                {
+                    m_logger->addEvent(
+                      {fmt::format("Failed to load file {}: {}", info.fileName, e.what()),
+                       events::Severity::Error});
+                }
+            }
+        }
+
+        // Tooltip
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(info.filePath.string().c_str());
+            if (!info.description.empty())
+            {
+                ImGui::Separator();
+                ImGui::TextUnformatted(info.description.c_str());
+            }
+            if (!info.libraryFunctionNames.empty())
+            {
+                ImGui::Separator();
+                ImGui::TextUnformatted("Functions:");
+                for (const auto & name : info.libraryFunctionNames)
+                {
+                    ImGui::BulletText("%s", name.c_str());
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextUnformatted("Double-click to import");
+            ImGui::EndTooltip();
+        }
+
+        ImGui::PopStyleColor(3);
+
+        // Drag-and-drop source
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+        {
+            ThreemfThumbnailExtractor::ThumbnailInfo const * payloadPtr = &info;
+            ImGui::SetDragDropPayload(LIBRARY_DND_TYPE, &payloadPtr, sizeof(payloadPtr));
+
+            if (info.hasLibraryMetadata && !info.libraryFunctionNames.empty())
+            {
+                ImGui::TextUnformatted(info.libraryFunctionNames.front().c_str());
+            }
+            else
+            {
+                ImGui::TextUnformatted(info.fileName.c_str());
+            }
+            ImGui::EndDragDropSource();
+        }
+
+        // Draw thumbnail / placeholder over the button
+        ImGui::SetItemAllowOverlap();
+        ImGui::SetCursorPos(itemPos);
+
+        float const thumbPosX = itemPos.x + (cellWidth - m_thumbnailSize) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(thumbPosX, itemPos.y + 5.0f));
+
+        if (info.hasThumbnail && info.thumbnailTextureId != 0)
+        {
+            float displayWidth = m_thumbnailSize;
+            float displayHeight = m_thumbnailSize;
+
+            if (info.thumbnailWidth > 0 && info.thumbnailHeight > 0)
+            {
+                float const aspectRatio = static_cast<float>(info.thumbnailWidth) /
+                                          static_cast<float>(info.thumbnailHeight);
+                if (aspectRatio > 1.0f)
+                {
+                    displayHeight = m_thumbnailSize / aspectRatio;
+                }
+                else
+                {
+                    displayWidth = m_thumbnailSize * aspectRatio;
+                }
+            }
+
+            float const centerX = thumbPosX + (m_thumbnailSize - displayWidth) * 0.5f;
+            ImGui::SetCursorPos(ImVec2(
+              centerX, itemPos.y + 5.0f + (m_thumbnailSize - displayHeight) * 0.5f));
+
+            ImGui::Image(
+              reinterpret_cast<void *>(static_cast<intptr_t>(info.thumbnailTextureId)),
+              ImVec2(displayWidth, displayHeight));
+        }
+        else if (info.loadState == ThumbnailLoadState::Loading ||
+                 info.loadState == ThumbnailLoadState::DecodedPending)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.2f, 0.5f));
+            char const * icon = (info.loadState == ThumbnailLoadState::Loading)
+                                  ? ICON_FA_SPINNER
+                                  : ICON_FA_IMAGE;
+            ImGui::Button(icon, ImVec2(m_thumbnailSize, m_thumbnailSize));
+            ImGui::PopStyleColor(3);
         }
         else
         {
-            // No need for a child window as we're already in a tab or window
-            float availableHeight = ImGui::GetContentRegionAvail().y;
+            // Placeholder: teal tint for library items
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.5f, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.6f, 0.6f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.6f, 0.7f, 0.7f));
+            ImGui::Button(reinterpret_cast<const char *>(ICON_FA_FILE_IMPORT),
+                          ImVec2(m_thumbnailSize, m_thumbnailSize));
+            ImGui::PopStyleColor(3);
+        }
 
-            // Calculate item width based on available width and desired columns
-            float windowWidth = ImGui::GetContentRegionAvail().x;
-            float itemWidth =
-              (windowWidth - ImGui::GetStyle().ItemSpacing.x * (m_columns - 1)) / m_columns;
+        // File name
+        renderFileName(info.fileName, cellWidth, itemPos);
 
-            // Define standard item size for consistent layout
-            const float itemHeight = m_thumbnailSize + 40.0f; // Thumbnail + space for text
-
-            // Loop through files and display them in a grid
-            int fileIndex = 0;
-            for (auto & fileInfo : m_files)
+        // Library function names (if any)
+        if (info.hasLibraryMetadata && !info.libraryFunctionNames.empty())
+        {
+            std::string funcLabel;
+            for (size_t i = 0; i < info.libraryFunctionNames.size(); ++i)
             {
-                // Start on a new line if not the first item and not at the start of a row
-                if (fileIndex > 0 && (fileIndex % m_columns) != 0)
+                if (i > 0)
                 {
-                    ImGui::SameLine();
+                    funcLabel += ", ";
                 }
-
-                // Create a unique ID for the item
-                ImGui::PushID(fileIndex);
-
-                // Create a selectable group for the file
-                ImGui::BeginGroup();
-
-                // Process thumbnail if not already loaded
-                if (!fileInfo.thumbnailLoaded && !oneThumbnailLoaded)
-                {
-                    oneThumbnailLoaded = true;
-                    loadThumbnail(fileInfo);
-                }
-
-                // Calculate display dimensions while maintaining aspect ratio
-                float aspectRatio = 1.0f;
-                float thumbnailHeight = m_thumbnailSize;
-                float thumbnailWidth = m_thumbnailSize;
-
-                if (fileInfo.hasThumbnail && fileInfo.thumbnailWidth > 0 &&
-                    fileInfo.thumbnailHeight > 0)
-                {
-                    aspectRatio = static_cast<float>(fileInfo.thumbnailWidth) /
-                                  static_cast<float>(fileInfo.thumbnailHeight);
-
-                    // Calculate dimensions to fit within the standard size while preserving
-                    // aspect ratio
-                    if (aspectRatio > 1.0f) // Wider than tall
-                    {
-                        thumbnailHeight = m_thumbnailSize / aspectRatio;
-                    }
-                    else // Taller than wide or square
-                    {
-                        thumbnailWidth = m_thumbnailSize * aspectRatio;
-                    }
-                }
-
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-
-                // Save the initial cursor position before the selectable
-                ImVec2 itemStartPos = ImGui::GetCursorPos();
-
-                // Create a selectable container with fixed height for consistent layout
-                bool isClicked = ImGui::Selectable("##selector",
-                                                   false,
-                                                   ImGuiSelectableFlags_AllowDoubleClick,
-                                                   ImVec2(m_thumbnailSize, itemHeight));
-
-                // Save selectable height to properly position elements
-                ImVec2 selectableSize = ImGui::GetItemRectSize();
-
-                // Return cursor to beginning of the item so we can draw inside the selectable
-                // area
-                ImGui::SetCursorPos(itemStartPos);
-
-                // Handle thumbnail click event after setting up visual elements
-                if (isClicked && ImGui::IsMouseDoubleClicked(0))
-                {
-                    // Double click to import all functions of the file
-                    try
-                    {
-                        doc->merge(fileInfo.filePath);
-
-                        if (m_logger)
-                        {
-                            m_logger->addEvent({fmt::format("Loaded file: {}", fileInfo.fileName),
-                                                events::Severity::Info});
-                        }
-                    }
-                    catch (const std::exception & e)
-                    {
-                        if (m_logger)
-                        {
-                            m_logger->addEvent({fmt::format("Failed to load file {}: {}",
-                                                            fileInfo.fileName,
-                                                            e.what()),
-                                                events::Severity::Error});
-                        }
-                    }
-                }
-
-                // Center the thumbnail horizontally and vertically within the item area
-                float centeringOffsetX = (m_thumbnailSize - thumbnailWidth) * 0.5f;
-                float centeringOffsetY = (m_thumbnailSize - thumbnailHeight) * 0.5f;
-
-                // Calculate proper thumbnail position (centered in the top portion of the
-                // selectable)
-                ImVec2 thumbnailPos =
-                  ImVec2(itemStartPos.x + centeringOffsetX, itemStartPos.y + centeringOffsetY);
-
-                // Set cursor position to draw the thumbnail
-                ImGui::SetCursorPos(thumbnailPos);
-
-                // Display the thumbnail or placeholder
-                if (fileInfo.hasThumbnail && fileInfo.thumbnailTextureId != 0)
-                {
-                    ImGui::Image(
-                      reinterpret_cast<void *>(static_cast<intptr_t>(fileInfo.thumbnailTextureId)),
-                      ImVec2(thumbnailWidth, thumbnailHeight));
-                }
-                else
-                {
-                    // Draw a placeholder if no thumbnail is available
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
-                    ImGui::Button(reinterpret_cast<const char *>(ICON_FA_FILE_IMPORT),
-                                  ImVec2(m_thumbnailSize, m_thumbnailSize));
-                    ImGui::PopStyleColor();
-                }
-
-                ImGui::PopStyleVar();
-
-                // Position text at the bottom of the selectable area
-                float textHeight = ImGui::GetTextLineHeight();
-                float textY = itemStartPos.y + selectableSize.y - textHeight - 5.0f; // 5px margin
-
-                // Add file name below the thumbnail
-                float textWidth = ImGui::CalcTextSize(fileInfo.fileName.c_str()).x;
-
-                if (textWidth > m_thumbnailSize)
-                {
-                    // Truncate file name if it's too long
-                    std::string truncatedName = fileInfo.fileName.substr(0, 20) + "...";
-                    float posX =
-                      itemStartPos.x +
-                      (m_thumbnailSize - ImGui::CalcTextSize(truncatedName.c_str()).x) * 0.5f;
-
-                    ImGui::SetCursorPos(ImVec2(posX, textY));
-                    ImGui::TextUnformatted(truncatedName.c_str());
-                }
-                else
-                {
-                    float posX = itemStartPos.x + (m_thumbnailSize - textWidth) * 0.5f;
-                    ImGui::SetCursorPos(ImVec2(posX, textY));
-                    ImGui::TextUnformatted(fileInfo.fileName.c_str());
-                }
-
-                ImGui::EndGroup();
-                ImGui::PopID();
-
-                fileIndex++;
+                funcLabel += info.libraryFunctionNames[i];
             }
+            if (funcLabel.size() > 30)
+            {
+                funcLabel = funcLabel.substr(0, 27) + "...";
+            }
+
+            float const funcWidth = ImGui::CalcTextSize(funcLabel.c_str()).x;
+            float const funcX = itemPos.x + (cellWidth - funcWidth) * 0.5f;
+            ImGui::SetCursorPos(ImVec2(funcX, ImGui::GetCursorPosY()));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+            ImGui::TextUnformatted(funcLabel.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::EndGroup();
+    }
+
+    void ThreemfFileViewer::renderFileName(const std::string & fileName,
+                                           float cellWidth,
+                                           const ImVec2 & itemPos)
+    {
+        float const textY = itemPos.y + m_thumbnailSize + 15.0f;
+        ImVec2 textSize = ImGui::CalcTextSize(fileName.c_str());
+
+        if (textSize.x > cellWidth - 10.0f)
+        {
+            std::string truncated = fileName.substr(0, 20) + "...";
+            textSize = ImGui::CalcTextSize(truncated.c_str());
+            ImGui::SetCursorPos(ImVec2(itemPos.x + (cellWidth - textSize.x) * 0.5f, textY));
+            ImGui::TextUnformatted(truncated.c_str());
+        }
+        else
+        {
+            ImGui::SetCursorPos(ImVec2(itemPos.x + (cellWidth - textSize.x) * 0.5f, textY));
+            ImGui::TextUnformatted(fileName.c_str());
         }
     }
 

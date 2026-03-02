@@ -45,6 +45,14 @@ namespace gladius
                                          const std::vector<FunctionArgument> & arguments = {},
                                          const std::string & outputName = "");
 
+            /// Create a function from a multi-line snippet (assignments, if→select, return).
+            std::pair<bool, uint32_t>
+            createFunctionFromSnippet(const std::string & name,
+                                      const std::string & snippet,
+                                      const std::string & outputType,
+                                      const std::vector<FunctionArgument> & arguments = {},
+                                      const std::string & outputName = "");
+
             // Function analysis
             nlohmann::json analyzeFunctionProperties(const std::string & functionName) const;
 
@@ -99,11 +107,29 @@ namespace gladius
             nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
                                                   uint32_t referencedFunctionId,
                                                   const std::string & displayName = "");
-            nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                   uint32_t nodeId,
-                                                                   bool autoConnect = true);
+            nlohmann::json createConstantNodesForMissingParameters(
+              uint32_t functionId,
+              uint32_t nodeId,
+              bool autoConnect = true,
+              std::vector<std::string> const & excludeParams = {});
             nlohmann::json removeUnusedNodes(uint32_t functionId);
             nlohmann::json listChangeableParameters() const;
+
+            /// Get the code snippet representation of a function's graph.
+            nlohmann::json getFunctionSnippet(uint32_t functionId) const;
+
+            /// Replace a function's graph from a code snippet.
+            nlohmann::json setFunctionSnippet(
+              uint32_t functionId,
+              std::string const & snippet,
+              std::string const & outputType = "float",
+              std::vector<FunctionArgument> const & arguments = {});
+
+            /// Get the entire program as a single code listing in dependency order.
+            nlohmann::json getProgramSnippet() const;
+
+            /// Replace all functions from a multi-function code listing.
+            nlohmann::json setProgramSnippet(std::string const & snippet);
         };
     }
 }

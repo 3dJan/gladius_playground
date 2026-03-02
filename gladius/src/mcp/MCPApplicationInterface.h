@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -72,13 +73,24 @@ namespace gladius
                                      const std::vector<FunctionArgument> & arguments = {},
                                      const std::string & outputName = "") = 0;
 
+        /// Create a function from a multi-line snippet (assignments, if→select, return).
+        virtual std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string & name,
+                                  const std::string & snippet,
+                                  const std::string & outputType,
+                                  const std::vector<FunctionArgument> & arguments = {},
+                                  const std::string & outputName = "") = 0;
+
         // 3MF and implicit modeling operations
         virtual bool validateDocumentFor3MF() const = 0;
         virtual bool exportDocumentAs3MF(const std::string & path,
                                          bool includeImplicitFunctions = true) const = 0;
 
         // 3MF Resource creation methods (return success flag and resource ID)
-        virtual std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) = 0;
+        virtual std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> minPoint = {-10.f, -10.f, -10.f},
+          std::array<float, 3> maxPoint = {10.f, 10.f, 10.f}) = 0;
         virtual std::pair<bool, uint32_t> createImage3DFunction(const std::string & name,
                                                                 const std::string & imagePath,
                                                                 float valueScale = 1.0f,
@@ -244,9 +256,11 @@ namespace gladius
          * @return JSON with creation result, including information about created constant nodes and
          * links
          */
-        virtual nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                       uint32_t nodeId,
-                                                                       bool autoConnect = true) = 0;
+        virtual nlohmann::json createConstantNodesForMissingParameters(
+          uint32_t functionId,
+          uint32_t nodeId,
+          bool autoConnect = true,
+          std::vector<std::string> const & excludeParams = {}) = 0;
 
         /**
          * @brief Removes unused nodes from a function graph
@@ -260,6 +274,34 @@ namespace gladius
          * @return JSON with removal result, including information about removed nodes
          */
         virtual nlohmann::json removeUnusedNodes(uint32_t functionId) = 0;
+
+        /// Get code snippet for a function. Override to provide implementation.
+        virtual nlohmann::json getFunctionSnippet(uint32_t /*functionId*/) const
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Set function graph from a code snippet. Override to provide implementation.
+        virtual nlohmann::json
+        setFunctionSnippet(uint32_t /*functionId*/,
+                           std::string const & /*snippet*/,
+                           std::string const & /*outputType*/ = "float",
+                           std::vector<FunctionArgument> const & /*arguments*/ = {})
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Get the entire program as a single code listing. Override to provide implementation.
+        virtual nlohmann::json getProgramSnippet() const
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Replace all functions from a multi-function code listing. Override to provide impl.
+        virtual nlohmann::json setProgramSnippet(std::string const & /*snippet*/)
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
 
         // Manufacturing validation
         virtual nlohmann::json
@@ -432,6 +474,81 @@ namespace gladius
         // Batch operations
         virtual bool executeBatchOperations(const nlohmann::json & operations,
                                             bool rollbackOnError = true) = 0;
+
+        // Library operations
+
+        /// @brief List all library categories and their entries.
+        /// @param category Optional filter for a specific category.
+        /// @return JSON with categories array, each containing entries with metadata.
+        virtual nlohmann::json listLibrary(std::string const & category = "") const = 0;
+
+        /// @brief Get detailed information about a specific library entry.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with function signatures, metadata, and parameters.
+        virtual nlohmann::json getLibraryEntryInfo(std::string const & category,
+                                                   std::string const & name) const = 0;
+
+        /// @brief Create a new library entry from a math expression.
+        /// @param name Entry name (used as filename).
+        /// @param category Category subdirectory name.
+        /// @param expression Math expression defining the SDF function.
+        /// @param description Human-readable description.
+        /// @param overwrite If true, replace an existing entry with the same name.
+        /// @return JSON with creation result including path and function ID.
+        virtual nlohmann::json createLibraryEntry(std::string const & name,
+                                                  std::string const & category,
+                                                  std::string const & expression,
+                                                  std::string const & description,
+                                                  bool overwrite = false) = 0;
+
+        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
+        virtual nlohmann::json
+        createLibraryEntryFromSnippet(std::string const & name,
+                                      std::string const & category,
+                                      std::string const & snippet,
+                                      std::string const & description,
+                                      std::vector<FunctionArgument> const & arguments,
+                                      std::string const & outputType = "float",
+                                      bool overwrite = false) = 0;
+
+        /// @brief Export a function from the active document to the library.
+        /// @param functionId ModelResourceID of the function to export.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @param description Human-readable description.
+        /// @param overwrite If true, replace an existing entry.
+        /// @param keepScaffold If true, keep the full document scaffold (build items,
+        ///        levelset, mesh, main) so the entry renders standalone.
+        /// @return JSON with export result including path and tagged function IDs.
+        virtual nlohmann::json exportToLibrary(uint32_t functionId,
+                                               std::string const & category,
+                                               std::string const & name,
+                                               std::string const & description,
+                                               bool overwrite = false,
+                                               bool keepScaffold = false) = 0;
+
+        /// @brief Set library metadata (tagged functions and description) on the current document.
+        /// @param functionIds Resource IDs of tagged (importable) functions.
+        /// @param description Human-readable description of the library entry.
+        /// @return JSON with success status.
+        virtual nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                           std::string const & description) = 0;
+
+        /// @brief Import a library entry's tagged functions into the active document.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with imported function IDs and names.
+        virtual nlohmann::json importLibraryEntry(std::string const & category,
+                                                  std::string const & name) = 0;
+
+        /// @brief Delete a library entry from the user library.
+        /// @param category Category subdirectory name.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with deletion result (fails for shipped/read-only entries).
+        virtual nlohmann::json deleteLibraryEntry(std::string const & category,
+                                                  std::string const & name) = 0;
 
         // Error handling
         virtual std::string getLastErrorMessage() const = 0;

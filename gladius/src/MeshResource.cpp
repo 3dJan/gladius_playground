@@ -1,13 +1,3 @@
-#include "MeshResource.h"
-#include "io/VdbImporter.h"
-
-namespace gladius
-{
-    void MeshResource::loadImpl()
-    {
-        m_payloadData.meta.clear();
-        m_payloadData.data.clear();
-        vdb::VdbImporter const reader;
-        reader.writeMesh(m_mesh, m_payloadData);
-    }
-}
+// Backward compatibility source file
+// Implementation moved to MeshResourceVdb.cpp
+// This file is kept for CMake GLOB compatibility but contains no code

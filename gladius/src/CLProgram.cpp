@@ -1406,7 +1406,12 @@ namespace gladius
 
     void CLProgram::compileNonBlocking(BuildCallBack & callBack)
     {
-        ProfileFunction m_kernelCompilation = std::async([&]() { this->compile(callBack); });
+        // Reset shutdown flag at start of new compilation
+        m_shutdownRequested = false;
+
+        // Copy callback to avoid dangling reference in async lambda
+        auto callbackCopy = callBack;
+        m_kernelCompilation = std::async(std::launch::async, [this, callbackCopy]() mutable { this->compile(callbackCopy); });
     }
 
     void CLProgram::compileSingleLevel(BuildCallBack & callBack, size_t currentHash)
@@ -1447,6 +1452,17 @@ namespace gladius
 
         try
         {
+            // Check for shutdown request before starting the potentially long-running build
+            if (m_shutdownRequested.load(std::memory_order_acquire))
+            {
+                if (m_logger)
+                {
+                    m_logger->logInfo("OpenCL: Compilation aborted due to shutdown request");
+                }
+                m_isCompilationInProgress = false;
+                return;
+            }
+
             // write to file for debugging
             dumpSource("debug.cl");
             m_program->build({m_ComputeContext->GetDevice()}, arguments.c_str(), nullptr, nullptr);
@@ -1549,7 +1565,12 @@ namespace gladius
 
     void CLProgram::buildWithLibNonBlocking(BuildCallBack & callBack)
     {
-        m_kernelCompilation = std::async([&]() { this->compile(callBack); });
+        // Reset shutdown flag at start of new compilation
+        m_shutdownRequested = false;
+
+        // Copy callback to avoid dangling reference in async lambda
+        auto callbackCopy = callBack;
+        m_kernelCompilation = std::async(std::launch::async, [this, callbackCopy]() mutable { this->compile(callbackCopy); });
     }
 
     void CLProgram::finishCompilation()
@@ -1558,6 +1579,16 @@ namespace gladius
         {
             m_kernelCompilation.get();
         }
+    }
+
+    void CLProgram::requestShutdown()
+    {
+        m_shutdownRequested.store(true, std::memory_order_release);
+    }
+
+    bool CLProgram::isShutdownRequested() const noexcept
+    {
+        return m_shutdownRequested.load(std::memory_order_acquire);
     }
 
     void CLProgram::loadAndCompileSource(const FileNames & filenames,

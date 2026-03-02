@@ -219,6 +219,12 @@ namespace gladius::nodes
         void setDisplayName(std::string const & name);
         [[nodiscard]] std::optional<std::string> getDisplayName() const;
 
+        /// @brief Create a FunctionCall node wired to the given function.
+        /// @param functionId The resource ID of the function to call.
+        /// @param sourceModel The model providing inputs/outputs.
+        /// @return Pointer to the newly created FunctionCall node.
+        FunctionCall * createFunctionCallNode(ResourceId functionId, Model & sourceModel);
+
         void setLogger(events::SharedLogger logger);
 
         void setResourceId(ResourceId resourceId);
@@ -238,6 +244,10 @@ namespace gladius::nodes
 
         void markAsLayouted();
         [[nodiscard]] bool hasBeenLayouted() const;
+
+        /// Returns true when the model has non-trivial nodes whose positions are
+        /// all identical (typically 0,0), indicating that no layout has been applied.
+        [[nodiscard]] bool needsAutoLayout() const;
 
         void setIsValid(bool isValid);
 

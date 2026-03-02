@@ -144,7 +144,7 @@ namespace gladius
                     {
                         // Ensure the flattened assembly exists and kernel is generated
                         document->updateFlatAssembly();
-                        core->tryRefreshProgramProtected(document->getAssembly());
+                        core->tryRefreshProgramProtected(document->getFlatAssembly());
                         core->recompileBlockingNoLock();
                     }
                     auto logger = document->getSharedLogger();
@@ -172,6 +172,29 @@ namespace gladius
                     phase2["messages"] = msgs;
                     phase2["errors"] = static_cast<int>(phase2.value("errors", 0)) + 1;
                 }
+
+                // Inject actionable hints for common compile errors
+                if (!phase2.value("ok", true))
+                {
+                    auto & msgs = phase2["messages"];
+                    for (auto const & msg : msgs)
+                    {
+                        auto text = msg.value("message", std::string{});
+                        if (text.find("undeclared identifier") != std::string::npos)
+                        {
+                            msgs.push_back(
+                              {{"severity", "hint"},
+                               {"message",
+                                "Undeclared identifier usually means a function input "
+                                "is not connected. Use create_constant_nodes_for_missing"
+                                "_parameters or manually add constant nodes and link them "
+                                "to the unconnected inputs. Check resourceid parameters "
+                                "as well — they must reference valid function resource IDs."}});
+                            break;
+                        }
+                    }
+                }
+
                 out["phases"].push_back(phase2);
             }
 

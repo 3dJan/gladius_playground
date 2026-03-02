@@ -62,6 +62,7 @@ namespace gladius
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
         m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
         m_programs.reset();
         setSliceHeight(0.f);
     }
@@ -192,7 +193,7 @@ namespace gladius
             lock(m_computeMutex, std::adopt_lock);
         if (isAutoUpdateBoundingBoxEnabled())
         {
-            resetBoundingBox();
+            markBoundingBoxStale();
         }
 
         auto & paramBuf = getResourceContext()->getParameterBuffer();
@@ -692,6 +693,27 @@ namespace gladius
     void ComputeCore::resetBoundingBox()
     {
         m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
+    }
+
+    void ComputeCore::markBoundingBoxStale()
+    {
+        m_boundingBoxStale.store(true, std::memory_order_release);
+    }
+
+    bool ComputeCore::isBoundingBoxStale() const
+    {
+        return m_boundingBoxStale.load(std::memory_order_acquire);
+    }
+
+    void ComputeCore::recomputeStaleBoundingBox()
+    {
+        if (!m_boundingBoxStale.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        m_boundingBox.reset();
+        m_boundingBoxStale.store(false, std::memory_order_release);
     }
 
     BitmapLayer ComputeCore::generateDownSkinMap(float z_mm, Vector2 pixelSize_mm)
@@ -1183,8 +1205,18 @@ namespace gladius
           bbox.max.z));
 
         // Expand bounding box with margin
-        auto const margin = 10.f;
+        // When bbox is stale (parameter changed but not yet recomputed), use a larger
+        // proportional margin to provide headroom for parameter-induced geometry changes
         auto sdfBBox = m_boundingBox.value();
+        float margin = 10.f;
+        if (m_boundingBoxStale.load(std::memory_order_acquire))
+        {
+            auto const dx = bbox.max.x - bbox.min.x;
+            auto const dy = bbox.max.y - bbox.min.y;
+            auto const dz = bbox.max.z - bbox.min.z;
+            auto const diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+            margin = std::max(20.f, 0.15f * diagonal);
+        }
         sdfBBox.min.x -= margin;
         sdfBBox.min.y -= margin;
         sdfBBox.min.z -= margin;
@@ -1633,17 +1665,20 @@ namespace gladius
 
         glFinish();
 
-        // Only render if precomputed SDF is available. When SDF is invalid (e.g., after parameter
-        // change), we keep the previous preview visible until async SDF precomputation completes.
-        if (!m_precompSdfIsValid)
+        // Use precomputed SDF when available for fast rendering, fall back to full model
+        // evaluation otherwise (slower but ensures the preview always updates)
+        if (m_precompSdfIsValid)
         {
-            LOG_LOCATION;
-            return;
+            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
-
-        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
+        else
+        {
+            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        }
 
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,

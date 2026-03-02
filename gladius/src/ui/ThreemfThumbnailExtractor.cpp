@@ -4,6 +4,7 @@
 #include <fmt/format.h>
 #include <lodepng.h>
 #include "io/3mf/Lib3mfLoader.h"
+#include "io/3mf/LibraryMetadata.h"
 
 namespace gladius::ui
 {
@@ -279,6 +280,41 @@ namespace gladius::ui
                 // No thumbnail in file - not an error, just no thumbnail
                 result.success = false;
                 result.errorMessage = "No thumbnail in 3MF file";
+            }
+
+            // Extract library metadata (function names + description)
+            try
+            {
+                auto libMeta = io::readLibraryMetadata(model);
+                if (libMeta)
+                {
+                    result.hasLibraryMetadata = true;
+                    result.description = libMeta->libraryDescription;
+
+                    auto const taggedIds = io::parseResourceIds(libMeta->libraryFunctions);
+                    auto funcIter = model->GetResources();
+                    while (funcIter->MoveNext())
+                    {
+                        auto res = funcIter->GetCurrent();
+                        auto implicitFunc =
+                          std::dynamic_pointer_cast<Lib3MF::CImplicitFunction>(res);
+                        if (!implicitFunc)
+                        {
+                            continue;
+                        }
+                        auto const modelId = res->GetModelResourceID();
+                        if (std::find(taggedIds.begin(), taggedIds.end(), modelId) !=
+                            taggedIds.end())
+                        {
+                            result.libraryFunctionNames.push_back(
+                              implicitFunc->GetDisplayName());
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Library metadata extraction is optional - continue without it
             }
         }
         catch (const std::exception & e)

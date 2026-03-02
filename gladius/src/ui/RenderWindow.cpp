@@ -220,6 +220,7 @@ namespace gladius::ui
         m_asyncJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
+        m_asyncBboxJobInFlight.store(false, std::memory_order_release);
         
         // Invalidate distance init buffer on epoch change - camera/scene changed (FR-005)
         if (m_core)
@@ -263,48 +264,10 @@ namespace gladius::ui
             return;
         }
 
-        // Try to acquire compute token non-blocking
-        auto token = m_core->requestComputeToken();
-        bool const hasComputeToken = token.has_value();
-
-        // If we don't have the compute token, we can still display existing buffers
-        // This keeps the UI responsive during parameter changes
-        if (!hasComputeToken)
-        {
-            // Check if we have async preview content to display
-            bool hasAsyncContent = false;
-            std::shared_ptr<GLImageBuffer> displayImage;
-
-            if (m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
-            {
-                auto * frontBuf = m_asyncController->frontBuffer();
-                if (frontBuf && frontBuf->image)
-                {
-                    displayImage = frontBuf->image;
-                    hasAsyncContent = true;
-                }
-            }
-
-            // Fallback to result image if available
-            if (!hasAsyncContent)
-            {
-                displayImage = m_core->getResultImage();
-                hasAsyncContent = displayImage != nullptr;
-            }
-
-            if (hasAsyncContent && displayImage)
-            {
-                // Show existing content without blocking - no busy indicator needed
-                renderExistingFrame(displayImage);
-                return;
-            }
-
-            // No content available - show busy overlay
-            renderBusyOverlay();
-            return;
-        }
-
-        // Execute rendering logic FIRST - this processes async results and promotes buffers
+        // Execute rendering logic FIRST - this processes async results and promotes buffers.
+        // Do NOT gate this on the compute token: processAsyncResults() and
+        // processAsyncPreviewResults() must run every frame to consume completed async
+        // jobs. Rendering functions that need the GPU acquire the token internally.
         render(m_renderWindowState);
 
         // THEN get the image to display - will see newly promoted front buffer
@@ -691,8 +654,8 @@ namespace gladius::ui
 
         invalidateView();
         
-        m_preComputedSdfDirty = true;
-        m_parameterDirty = true;
+        m_preComputedSdfDirty.store(true, std::memory_order_release);
+        m_parameterDirty.store(true, std::memory_order_release);
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_lowResFeedbackPending.store(true, std::memory_order_release);
 
@@ -712,6 +675,27 @@ namespace gladius::ui
         {
             m_asyncBboxUpdatePending.store(true, std::memory_order_release);
         }
+    }
+
+    void RenderWindow::invalidateViewDueToParameterChange()
+    {
+        // Lightweight invalidation for parameter changes (e.g. slider drags).
+        // Preserves the cached bounding box and marks it stale instead of clearing it.
+        // This avoids a full GPU bbox recomputation (~325ms) on every parameter tick.
+        m_core->setSdfValid(false);
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+
+        invalidateView();
+
+        m_preComputedSdfDirty.store(true, std::memory_order_release);
+        m_parameterDirty.store(true, std::memory_order_release);
+        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
+        m_lowResFeedbackPending.store(true, std::memory_order_release);
+        m_modelModifiedSinceLastCenter = true;
+
+        // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin
+        m_core->markBoundingBoxStale();
+        m_lastParameterChangeTime = std::chrono::steady_clock::now();
     }
 
     void RenderWindow::renderScene(RenderWindowState & state)
@@ -1183,8 +1167,26 @@ namespace gladius::ui
             state.isRendering = false;
             state.renderQualityWhileMoving = 0.1f;
 
-            invalidateViewDuetoModelUpdate();
+            // Only invalidate ONCE when compilation starts, not every frame.
+            // Repeated invalidation bumps the epoch on every frame, cancelling
+            // all in-flight work and preventing the pipeline from ever making
+            // progress once compilation finishes.
+            if (!m_compilationInvalidated)
+            {
+                invalidateViewDuetoModelUpdate();
+                m_compilationInvalidated = true;
+            }
             return;
+        }
+
+        // Post-compilation transition: re-invalidate once to set up fresh pipeline state
+        // (bbox pending, SDF dirty, low-res feedback pending) now that the compiled
+        // program is ready. This replaces the old pattern of invalidating every frame
+        // during compilation, which spammed epoch increments.
+        if (m_compilationInvalidated)
+        {
+            m_compilationInvalidated = false;
+            invalidateViewDuetoModelUpdate();
         }
 
         // Lazy initialization: only initialize async rendering once renderer is ready
@@ -1458,10 +1460,29 @@ namespace gladius::ui
                 m_asyncController->enqueueJob(sdfJob);
             }
 
-            // Schedule bbox update if pending and no bbox job in flight
-            if (bboxPending && !bboxJobActive)
+            // Schedule bbox update if pending and no bbox/SDF job is currently in flight.
+            // We check sdfJobActive (captured at frame start, before new SDF scheduling)
+            // rather than sdfDirty to avoid permanently blocking bbox when SDF keeps
+            // failing (e.g., updateBBox() returns false because bbox was reset).
+            // When SDF succeeds it computes bbox as a side effect, so bboxPending
+            // is cleared in processAsyncResults to avoid redundant jobs.
+            if (bboxPending && !bboxJobActive && !sdfJobActive)
             {
                 scheduleAsyncBboxUpdate();
+            }
+
+            // Debounce: recompute stale bounding box after slider drag stops.
+            // recomputeStaleBoundingBox() clears the cached bbox so the next SDF job
+            // does a full bbox recompute with the current parameters.
+            if (m_core->isBoundingBoxStale() && !bboxJobActive && !sdfJobActive)
+            {
+                auto const now = std::chrono::steady_clock::now();
+                if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
+                {
+                    m_core->recomputeStaleBoundingBox();
+                    m_core->setSdfValid(false);
+                    m_preComputedSdfDirty = true;
+                }
             }
 
             if (lowResPending)
@@ -1541,7 +1562,15 @@ namespace gladius::ui
                 }
             }
 
-            invalidateView();
+            // Camera-only change from centering — don't bump epoch.
+            // SDF/bbox jobs are not camera-dependent and must not be cancelled.
+            m_dirty = true;
+            state.isMoving = true;
+            state.currentLine = 0;
+            state.renderingStepSize = kInitialProgressiveStepSize;
+            state.isRendering = false;
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lastLowResRenderTime = std::chrono::system_clock::now();
         }
 
         if (state.isMoving && m_preComputedSdfDirty)
@@ -1743,6 +1772,19 @@ namespace gladius::ui
                     m_asyncSdfJobInFlight.store(false, std::memory_order_release);
                     m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
                 }
+                // Handle SDF completion: clear dirty flag and trigger preview refresh.
+                // Must continue here so cancelled SDF results don't fall through to the
+                // generic cancelled handler, which would clear HQ progressive render state.
+                if (result.precomputedSdfUpdated && !isOutdated)
+                {
+                    m_preComputedSdfDirty.store(false, std::memory_order_release);
+                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                    // SDF computation already updated bbox (via updateBBox() in
+                    // precomputeSdfAsync and commitSdfSuccess). Clear pending bbox
+                    // to avoid scheduling a redundant bbox job.
+                    m_asyncBboxUpdatePending.store(false, std::memory_order_release);
+                }
+                continue;
             }
 
             // Handle bbox update results
@@ -1763,17 +1805,7 @@ namespace gladius::ui
                 continue;
             }
 
-            if (result.precomputedSdfUpdated)
-            {
-                // If the update is already outdated, keep dirty=true so we schedule a new SDF job
-                // for the current parameters.
-                if (!isOutdated)
-                {
-                    m_preComputedSdfDirty.store(false, std::memory_order_release);
-                    // SDF is now valid - trigger a low-res preview render to show the updated model
-                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-                }
-            }
+            // From here on, only HQ progressive render results are processed.
 
             if (result.cancelled)
             {
@@ -1918,15 +1950,13 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncRenderJob", strlen("AsyncRenderJob"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
+        // co_await waitForEvent() resumes on the OpenCL callback thread, so the zone destructor
+        // would fire on a different thread than where it was created.
+        // Use the inner ZoneScopedN blocks (which don't cross co_await) for profiling.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
 #endif
-
-        ZoneValue(job.startLine);
-        ZoneValue(job.stepSize);
-        ZoneValue(job.epoch);
 
         auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
         auto const & commandQueue =
@@ -1944,14 +1974,12 @@ namespace gladius::ui
 
         if (cancellationRequested())
         {
-            ZoneText("CancelledEarly", 14);
             result.cancelled = true;
             co_return result;
         }
 
         if (!job.enableHighQuality)
         {
-            ZoneText("HQDisabled", 10);
             result.cancelled = true;
             co_return result;
         }
@@ -1992,7 +2020,6 @@ namespace gladius::ui
 
             if (writeBuffer->image)
             {
-                ZoneScopedN("CopyLowResPreviewAsBase");
                 if (auto const resultImage = m_core->getResultImage())
                 {
                     cl::Event previewCopyEvent{};
@@ -2043,8 +2070,6 @@ namespace gladius::ui
             }
             else
             {
-                ZoneScopedN("RenderSceneComputeOnly");
-
                 if (writeBuffer != nullptr && writeBuffer->image)
                 {
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
@@ -2070,7 +2095,6 @@ namespace gladius::ui
 
                     if (advanced && !result.cancelled)
                     {
-                        ZoneScopedN("CopyToResultImageForDisplay");
                         if (auto const resultImage = m_core->getResultImage())
                         {
                             cl::Event copyBackEvent{};
@@ -2532,8 +2556,8 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncSdfPrecomputation", strlen("AsyncSdfPrecomputation"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
+        // co_await waitForEvent() resumes on the OpenCL callback thread.
 
         using namespace async_rendering;
 
@@ -2577,9 +2601,17 @@ namespace gladius::ui
 
             if (!sdfEvent())
             {
-                // Failed to launch (preconditions not met) - but don't invalidate the old SDF
-                // so preview can continue with stale data
-                result.cancelled = true;
+                // Empty event: either SDF is already valid or preconditions failed.
+                // If SDF is valid, report success so sdfDirty gets cleared.
+                // Otherwise treat as cancellation.
+                if (m_core->isSdfValid())
+                {
+                    result.precomputedSdfUpdated = true;
+                }
+                else
+                {
+                    result.cancelled = true;
+                }
                 co_return result;
             }
 
@@ -2624,8 +2656,7 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncParameterUpdate", strlen("AsyncParameterUpdate"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
 
         using namespace async_rendering;
 
@@ -2726,8 +2757,7 @@ namespace gladius::ui
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
       -> coro::task<async_rendering::FrameResultMeta>
     {
-        ZoneScoped;
-        ZoneName("AsyncPreviewJob", strlen("AsyncPreviewJob"));
+        // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncPreviewWorker");
 #endif
@@ -2766,7 +2796,6 @@ namespace gladius::ui
             auto lowResImage = m_core->getLowResPreviewImage();
             if (!lowResImage)
             {
-                ZoneText("NoLowResImage", 13);
                 result.cancelled = true;
                 m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                 co_return result;
@@ -2779,7 +2808,6 @@ namespace gladius::ui
             if (!renderEvent())
             {
                 // Empty event means precondition failed (e.g., program not valid)
-                ZoneText("RenderFailed", 12);
                 result.cancelled = true;
                 m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                 co_return result;
@@ -2806,7 +2834,6 @@ namespace gladius::ui
                     else if (status < 0)
                     {
                         // Error status
-                        ZoneText("EventError", 10);
                         result.cancelled = true;
                         m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                         co_return result;
@@ -2817,7 +2844,6 @@ namespace gladius::ui
                         auto const elapsed = std::chrono::steady_clock::now() - pollStart;
                         if (elapsed > timeout)
                         {
-                            ZoneText("Timeout", 7);
                             result.cancelled = true;
                             m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
                             co_return result;
@@ -2875,7 +2901,6 @@ namespace gladius::ui
         // Store the result for UI thread polling
         m_asyncController->setLatestPreviewResult(previewMeta);
 
-        ZoneText("PreviewComplete", 15);
         co_return result;
     }
 

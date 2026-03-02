@@ -1720,6 +1720,13 @@ namespace gladius::nodes
                             OutputTypeMap{{FieldNames::Value, ParameterTypeIndex::ResourceId}}}};
             NodeBase::applyTypeRule(m_typeRules.front());
             updateNodeIds();
+            
+            // Resource nodes always have resourceId set directly, not via connection
+            auto * param = getParameter(FieldNames::ResourceId);
+            if (param)
+            {
+                param->setInputSourceRequired(false);
+            }
         }
 
         [[nodiscard]] ResourceId getResourceId() const
@@ -1757,6 +1764,12 @@ namespace gladius::nodes
         [[nodiscard]] std::string getDescription() const override
         {
             return {"Returns the ResourceId of the Resource node"};
+        }
+
+        /// @brief Resource nodes store a constant resource ID, no input validation needed
+        [[nodiscard]] bool isExemptFromInputValidation() const override
+        {
+            return true;
         }
 
         // name does not match, but it is called when the model is updated

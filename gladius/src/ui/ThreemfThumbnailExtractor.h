@@ -36,6 +36,13 @@ namespace gladius::ui
         std::uintmax_t fileSize = 0;                ///< File size in bytes
         std::vector<std::pair<std::string, std::string>> metadata; ///< Extracted metadata key-value pairs
         std::string errorMessage;                   ///< Error description if failed
+
+        /// @brief Library description from gladius:library-description metadata
+        std::string description;
+        /// @brief Display names of importable functions from gladius:library-functions metadata
+        std::vector<std::string> libraryFunctionNames;
+        /// @brief Whether gladius library metadata was present in this file
+        bool hasLibraryMetadata = false;
     };
 
     /**
@@ -112,6 +119,13 @@ namespace gladius::ui
             std::time_t timestamp = 0;                ///< Last modified timestamp
             ThreemfFileInfo fileInfo;                 ///< Additional file metadata
             ThumbnailLoadState loadState = ThumbnailLoadState::NotStarted; ///< Current loading state
+
+            /// @brief Library description from gladius:library-description metadata
+            std::string description;
+            /// @brief Display names of importable functions from gladius:library-functions metadata
+            std::vector<std::string> libraryFunctionNames;
+            /// @brief Whether gladius library metadata was present in this file
+            bool hasLibraryMetadata = false;
         };
 
         /**

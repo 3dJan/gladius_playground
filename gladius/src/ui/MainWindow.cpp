@@ -63,8 +63,11 @@ namespace gladius::ui
         m_doc->setUiMode(true);
 
         m_modelEditor.setDocument(m_doc);
-        // Set the library root directory
-        m_modelEditor.setLibraryRootDirectory(getAppDir() / "library");
+
+        // Sync shipped library items into the user's persistent library directory.
+        // This copies new files without overwriting existing user customizations.
+        (void) syncShippedLibrary();
+        m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
 
         using namespace gladius;
 
@@ -809,10 +812,28 @@ namespace gladius::ui
                     meshExportDialog();
                     cliExportDialog();
                 }
+
+                // Library export dialog (modal, renders independently of compute)
+                m_libraryExportDialog.render();
+                if (m_libraryExportDialog.wasExportCompleted())
+                {
+                    m_modelEditor.refreshLibraryDirectories();
+                }
+                if (m_libraryExportDialog.hadError())
+                {
+                    m_logView.show();
+                }
+
                 mainMenu();
                 showExitPopUp();
                 showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
+
+                // Render library browser only when the model editor is visible.
+                if (m_modelEditor.isVisible())
+                {
+                    m_modelEditor.renderLibraryBrowser();
+                }
 
                 if (m_shortcutSettingsDialog.isVisible())
                 {
@@ -840,7 +861,7 @@ namespace gladius::ui
                 renderStatusBar();
             }
 
-            // Library browser is now rendered by the ModelEditor
+            // Library browser is rendered from the main UI loop.
         }
         catch (OpenCLError & e)
         {
@@ -975,7 +996,35 @@ namespace gladius::ui
         case AsyncDialogOperation::ImportImageStack:
         {
             io::ImageStackCreator creator;
-            creator.importDirectoryAsFunctionFromImage3D(m_doc->get3mfModel(), filename);
+            auto result = creator.importDirectoryWithPadding(m_doc->get3mfModel(), filename);
+
+            // T052: Show notification if any images were padded
+            if (result.hasPaddedFiles() && m_logger)
+            {
+                std::string message = fmt::format(
+                    "ImageStack imported with padding to {}x{}. Padded {} file(s): ",
+                    result.maxWidth,
+                    result.maxHeight,
+                    result.paddedFiles.size());
+
+                // List first few padded files
+                size_t const maxFilesToShow = 5;
+                for (size_t i = 0; i < std::min(result.paddedFiles.size(), maxFilesToShow); ++i)
+                {
+                    if (i > 0)
+                    {
+                        message += ", ";
+                    }
+                    message += result.paddedFiles[i];
+                }
+                if (result.paddedFiles.size() > maxFilesToShow)
+                {
+                    message += fmt::format(
+                        " and {} more", result.paddedFiles.size() - maxFilesToShow);
+                }
+
+                m_logger->addEvent({message, events::Severity::Info});
+            }
             break;
         }
         case AsyncDialogOperation::OpenAfterSavePrompt:
@@ -1049,19 +1098,22 @@ namespace gladius::ui
               {
                   refreshModel();
               }
-              // For parameter-only changes, just invalidate the view
-              // The m_parameterDirty flag is already set above, and updateModel() will
-              // handle it using the fast updateParameter() path
-              else if (parameterModifiedByModelEditor)
-              {
-                  // Just trigger a view update - updateModel() will handle the parameter update
-                  m_renderWindow.invalidateView();
-              }
+              // For parameter-only changes, m_parameterDirty is already set above.
+              // updateModel() will handle it using the fast updateParameter() path
+              // and call invalidateViewDueToParameterChange() which bumps the epoch.
+              // Do NOT call invalidateView() here — it would bump the epoch a second
+              // time, causing in-flight SDF results to be discarded as outdated.
 
-              // Mark model as up to date after compilation check
-              if (modelWasModified || parameterModifiedByModelEditor)
+              // Only clear the modified flags when no compile request is
+              // pending.  If refreshModel() was skipped because a
+              // compilation was already in-progress, the flags must
+              // survive so the next frame retries the compilation.
+              if (!m_modelEditor.isCompileRequested())
               {
-                  m_modelEditor.markModelAsUpToDate();
+                  if (modelWasModified || parameterModifiedByModelEditor)
+                  {
+                      m_modelEditor.markModelAsUpToDate();
+                  }
               }
           });
     }
@@ -1134,9 +1186,10 @@ namespace gladius::ui
             return;
         }
 
+        // Defer editor reset until the async load inside newFromTemplate() completes.
+        // (Same deferred pattern used by loadFileDeferred().)
+        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->newFromTemplate();
-        resetEditorState();
-        m_renderWindow.centerView();
     }
 
     void MainWindow::renderWindow()
@@ -1240,6 +1293,13 @@ namespace gladius::ui
             {
                 closeMenu();
                 saveCurrentFunction();
+            }
+
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>(ICON_FA_BOOK "\tExport to Library...")))
+            {
+                closeMenu();
+                m_libraryExportDialog.open(m_doc, getUserLibraryDir());
             }
 
             if (m_currentAssemblyFileName)
@@ -1355,7 +1415,11 @@ namespace gladius::ui
               reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tLibrary Browser")))
         {
             closeMenu();
-            m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+            if (!m_modelEditor.isVisible())
+            {
+                m_modelEditor.setVisibility(true);
+            }
+            m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
             m_modelEditor.setLibraryVisibility(true);
             m_isLibraryBrowserVisible = true;
         }
@@ -1675,6 +1739,14 @@ namespace gladius::ui
         {
             m_showExportInProgressWarning = true;
             return;
+        }
+
+        // Gracefully stop any ongoing compilations before exit
+        auto & programManager = m_core->getProgramManager();
+        if (programManager.isAnyCompilationInProgressNonBlocking())
+        {
+            programManager.requestShutdownAll();
+            programManager.waitForAllCompilations();
         }
 
         if (m_fileChanged)
@@ -2398,7 +2470,7 @@ namespace gladius::ui
         if (m_parameterDirty)
         {
             m_doc->updateParameter();
-            m_renderWindow.invalidateViewDuetoModelUpdate();
+            m_renderWindow.invalidateViewDueToParameterChange();
             m_parameterDirty = false;
         }
         updateContours();
@@ -2481,7 +2553,11 @@ namespace gladius::ui
           ShortcutCombo(ImGuiKey_B, true), // Ctrl+B
           [this]()
           {
-              m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+              if (!m_modelEditor.isVisible())
+              {
+                  m_modelEditor.setVisibility(true);
+              }
+              m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
               m_modelEditor.toggleLibraryVisibility();
               m_isLibraryBrowserVisible = m_modelEditor.isLibraryVisible();
           });

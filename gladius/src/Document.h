@@ -5,6 +5,7 @@
 #include "Mesh.h"
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
+#include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
@@ -119,6 +120,20 @@ namespace gladius
         void loadNonBlocking(std::filesystem::path filename);
         void merge(std::filesystem::path filename);
 
+        /// Import functions from another file without triggering recompilation.
+        /// Use when the caller will create additional nodes before compilation.
+        void mergeOnly(std::filesystem::path filename);
+
+        /// Merge a library file and resolve the best matching imported function.
+        /// Does NOT trigger recompilation — the caller is expected to create a
+        /// FunctionCall node and let the flag-driven mechanism handle it.
+        /// @param filename  Path to the .3mf library file.
+        /// @param targetFunctionName  Display name to match (empty = first new).
+        /// @return FunctionMatch with the resolved function (id==0 on failure).
+        [[nodiscard]] nodes::FunctionMatch
+        mergeAndResolve(std::filesystem::path filename,
+                        std::string const & targetFunctionName);
+
         /**
          * @brief Check if a file is currently being loaded asynchronously
          * @return true if a file load is in progress
@@ -148,6 +163,7 @@ namespace gladius
         void markFileAsChanged();
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
+        nodes::SharedAssembly getFlatAssembly() const;
 
         /**
          * @brief Get the current assembly filename
@@ -238,6 +254,9 @@ namespace gladius
         void addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius);
 
         ResourceKey addImageStackResource(std::filesystem::path const & path);
+
+        /// Import image stack with padding support - returns ImportResult for notification handling
+        io::ImportResult addImageStackResourceWithPadding(std::filesystem::path const & path);
 
         // syncing of the 3MF model with the document
 

@@ -109,7 +109,8 @@
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "ENABLE_COVERAGE": "OFF",
-                "ENABLE_TRACY": "TRUE"
+                "ENABLE_TRACY": "TRUE",
+                "CMAKE_BUILD_PARALLEL_LEVEL": "8"
             }
         },
         {

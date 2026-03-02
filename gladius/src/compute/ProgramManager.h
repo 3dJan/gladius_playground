@@ -54,6 +54,14 @@ namespace gladius
         /// Safe to call from any thread without risk of blocking.
         [[nodiscard]] bool isAnyCompilationInProgressNonBlocking() const noexcept;
 
+        /// Request shutdown of all ongoing compilations.
+        /// Sets the shutdown flag on all programs to abort compilation early.
+        void requestShutdownAll();
+
+        /// Wait for all ongoing compilations to finish.
+        /// Should be called after requestShutdownAll() during application shutdown.
+        void waitForAllCompilations();
+
         [[nodiscard]] ComputeContext & getComputeContext() const;
 
         void compileSlicerProgramBlocking();

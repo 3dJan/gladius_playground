@@ -11,7 +11,7 @@
 #include <fmt/format.h>
 #include <lodepng.h>
 
-#include "MeshResource.h"
+#include "MeshResourceVdb.h"
 
 namespace gladius
 {
@@ -53,7 +53,7 @@ namespace gladius
 
     void ResourceManager::addResource(ResourceKey key, vdb::TriangleMesh && mesh)
     {
-        m_resources[key] = std::make_unique<MeshResource>(key, std::move(mesh));
+        m_resources[key] = std::make_unique<MeshResourceVdb>(key, std::move(mesh));
     }
 
     void ResourceManager::addResource(ResourceKey key, openvdb::GridBase::Ptr && grid)

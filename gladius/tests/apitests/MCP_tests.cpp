@@ -63,6 +63,15 @@ namespace gladius::tests
                      const std::string &),
                     (override));
 
+        MOCK_METHOD((std::pair<bool, uint32_t>),
+                    createFunctionFromSnippet,
+                    (const std::string &,
+                     const std::string &,
+                     const std::string &,
+                     const std::vector<FunctionArgument> &,
+                     const std::string &),
+                    (override));
+
         MOCK_METHOD(std::string, getLastErrorMessage, (), (const, override));
 
         // New MCP interface methods
@@ -70,7 +79,10 @@ namespace gladius::tests
         MOCK_METHOD(bool, exportDocumentAs3MF, (const std::string &, bool), (const, override));
 
         // New 3MF Resource creation methods
-        MOCK_METHOD((std::pair<bool, uint32_t>), createLevelSet, (uint32_t), (override));
+        MOCK_METHOD((std::pair<bool, uint32_t>),
+                    createLevelSet,
+                    (uint32_t, Float3Array, Float3Array),
+                    (override));
         MOCK_METHOD((std::pair<bool, uint32_t>),
                     createImage3DFunction,
                     (const std::string &, const std::string &, float, float),
@@ -158,10 +170,57 @@ namespace gladius::tests
                     (override));
         MOCK_METHOD(nlohmann::json,
                     createConstantNodesForMissingParameters,
-                    (uint32_t, uint32_t, bool),
+                    (uint32_t, uint32_t, bool, std::vector<std::string> const &),
                     (override));
         MOCK_METHOD(nlohmann::json, removeUnusedNodes, (uint32_t), (override));
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));
+
+        // Library operations
+        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &), (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    getLibraryEntryInfo,
+                    (std::string const &, std::string const &),
+                    (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    createLibraryEntry,
+                    (std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    createLibraryEntryFromSnippet,
+                    (std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     std::vector<FunctionArgument> const &,
+                     std::string const &,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    exportToLibrary,
+                    (uint32_t,
+                     std::string const &,
+                     std::string const &,
+                     std::string const &,
+                     bool,
+                     bool),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    setLibraryMetadata,
+                    (std::vector<uint32_t> const &,
+                     std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    importLibraryEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    deleteLibraryEntry,
+                    (std::string const &, std::string const &),
+                    (override));
     };
 
     class MCPServerTest : public ::testing::Test

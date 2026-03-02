@@ -55,6 +55,31 @@ namespace gladius::ui
         return it->first;
     }
 
+    /// Measure the maximum label width among visible ports in a port map.
+    /// Ports whose \p isVisible() returns false are skipped. When \p skipResourceId
+    /// is true, ports with type index == ResourceId are also skipped.
+    template <typename PortMap>
+    static float measureMaxPortLabelWidth(PortMap & ports, bool skipResourceId)
+    {
+        float maxWidth = 0.f;
+        for (auto & [name, port] : ports)
+        {
+            if (!port.isVisible())
+            {
+                continue;
+            }
+            if (skipResourceId && port.getTypeIndex() == ParameterTypeIndex::ResourceId)
+            {
+                continue;
+            }
+            maxWidth = std::max(maxWidth, ImGui::CalcTextSize(name.c_str()).x);
+            float const typeLabelWidth =
+              ImGui::CalcTextSize(typeToString(port.getTypeIndex()).c_str()).x * 0.5f;
+            maxWidth = std::max(maxWidth, typeLabelWidth);
+        }
+        return maxWidth;
+    }
+
     NodeView::NodeView()
     {
         m_nodeTypeToColor = createNodeTypeToColors();
@@ -248,6 +273,10 @@ namespace gladius::ui
 
     void NodeView::setModelEditor(ModelEditor * editor)
     {
+        if (m_modelEditor == editor)
+        {
+            return;
+        }
         m_modelEditor = editor;
         reset();
     }
@@ -267,8 +296,24 @@ namespace gladius::ui
         return m_modelChanged;
     }
 
+    void NodeView::clearPerFrameFlags()
+    {
+        m_parameterChanged = false;
+        m_modelChanged = false;
+    }
+
     void NodeView::setAssembly(nodes::SharedAssembly assembly)
     {
+        // Same shared_ptr instance — assembly object unchanged, skip full reset.
+        if (m_assembly == assembly)
+        {
+            if (m_modelEditor)
+            {
+                setCurrentModel(m_modelEditor->currentModel());
+            }
+            return;
+        }
+
         m_assembly = std::move(assembly);
         if (m_modelEditor)
         {
@@ -291,6 +336,16 @@ namespace gladius::ui
         {
             return;
         }
+
+        // Keep width cache when the underlying function is the same but the
+        // shared_ptr instance changed (e.g. assembly refresh/remap).
+        if (m_currentModel && model &&
+            m_currentModel->getResourceId() == model->getResourceId())
+        {
+            m_currentModel = std::move(model);
+            return;
+        }
+
         m_currentModel = std::move(model);
         reset();
         m_columnWidths.clear();
@@ -1373,15 +1428,6 @@ namespace gladius::ui
         }
         ImGui::PopID();
 
-        auto & columnWidths = getOrCreateColumnWidths(baseNode.getId());
-        // Add padding to all columns of this node
-        for (auto & columnWidth : columnWidths)
-        {
-            if (columnWidth > 0.f)
-            {
-                columnWidth += 10.f * m_uiScale;
-            }
-        }
     }
 
     std::string sourceName(Model & nodes, PortId portId)
@@ -1962,12 +2008,13 @@ namespace gladius::ui
         }
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
+        float const padding = 10.f * m_uiScale;
         constexpr float minWidth = 170.f;
-        // sum of all column widths
+        // sum of all column widths (with per-column padding)
         float tableWidth = 0.f;
         for (auto width : columnWidths)
         {
-            tableWidth += width;
+            tableWidth += (width > 0.f) ? (width + padding) : 0.f;
         }
 
         float const fillSpace = std::max(0.f, minWidth - tableWidth - 20.f * m_uiScale);
@@ -1981,13 +2028,15 @@ namespace gladius::ui
                               ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn(
-              "Inputs", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + columnWidths[2]);
+              "Inputs", ImGuiTableColumnFlags_WidthFixed,
+              columnWidths[1] + columnWidths[2] + padding);
             if (needsFillSpace)
             {
                 ImGui::TableSetupColumn("Seperation", ImGuiTableColumnFlags_WidthFixed, fillSpace);
             }
             ImGui::TableSetupColumn(
-              "Outputs", ImGuiTableColumnFlags_WidthFixed, columnWidths[6] + columnWidths[7]);
+              "Outputs", ImGuiTableColumnFlags_WidthFixed,
+              columnWidths[6] + columnWidths[7] + padding);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -2008,11 +2057,27 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
-        auto const tableWidth = columnWidths[1] + columnWidths[2];
+        // Bootstrap widths from content so labels are not clipped even if
+        // cached widths were reset (e.g. after graph/model sync).
+        if (columnWidths[1] <= 0.f || columnWidths[2] <= 0.f)
+        {
+            auto const & style = ImGui::GetStyle();
+            float const pinButtonWidth = ImGui::GetFontSize() * 1.5f + style.FramePadding.x * 2.0f;
+            float const maxInputLabelWidth =
+              measureMaxPortLabelWidth(node.parameter(), !m_resoureIdNodesVisible);
+
+            columnWidths[1] = std::max(columnWidths[1], pinButtonWidth);
+            columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
+        }
+
+        // Each WidthFixed column loses 2*CellPadding.x of content area
+        // internally.  Add that back so measured text widths fit.
+        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
+        auto const tableWidth = (columnWidths[1] + colPad) + (columnWidths[2] + colPad);
         if (ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(tableWidth, 0)))
         {
-            ImGui::TableSetupColumn("InputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1]);
-            ImGui::TableSetupColumn("InputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2]);
+            ImGui::TableSetupColumn("InputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + colPad);
+            ImGui::TableSetupColumn("InputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2] + colPad);
 
             columnWidths[1] = 0.f;
             columnWidths[2] = 0.f;
@@ -2139,14 +2204,31 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
+        // Bootstrap widths from output content so long user-defined names are
+        // visible even before a stable two-pass cache has converged.
+        if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
+        {
+            auto const & style = ImGui::GetStyle();
+            float const maxOutputLabelWidth =
+              measureMaxPortLabelWidth(node.getOutputs(), false);
+
+            float const pinGlyphWidth =
+              ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
+              style.FramePadding.x * 2.0f;
+
+            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
+            columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
+        }
+
+        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         if (ImGui::BeginTable("outputs",
                               2,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(columnWidths[6] + columnWidths[7], 0)))
+                              ImVec2((columnWidths[6] + colPad) + (columnWidths[7] + colPad), 0)))
         {
             ImGui::TableSetupColumn(
-              "OutputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[6]);
-            ImGui::TableSetupColumn("OutputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7]);
+              "OutputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[6] + colPad);
+            ImGui::TableSetupColumn("OutputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7] + colPad);
 
             columnWidths[6] = 0.f;
             columnWidths[7] = 0.f;
@@ -2213,14 +2295,15 @@ namespace gladius::ui
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
         ImGui::PushID(node.getId());
-        auto widthOutputs = columnWidths[6] + columnWidths[7];
+        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
+        auto widthOutputs = columnWidths[6] + columnWidths[7] + colPad;
         if (ImGui::BeginTable("InputAndOutputs",
                               2,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(columnWidths[0] + widthOutputs, 0)))
+                              ImVec2(columnWidths[0] + colPad + widthOutputs + colPad, 0)))
         {
-            ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0]);
-            ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs);
+            ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0] + colPad);
+            ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs + colPad);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -2295,6 +2378,11 @@ namespace gladius::ui
     bool NodeView::columnWidthsAreInitialized() const
     {
         return !m_columnWidths.empty();
+    }
+
+    void NodeView::clearColumnWidths()
+    {
+        m_columnWidths.clear();
     }
 
     nodes::NodeBase * NodeView::findNodeById(nodes::NodeId nodeId) const
@@ -2427,23 +2515,26 @@ namespace gladius::ui
             calculateGroupBounds(group);
         }
 
-        // Get mouse position for hover effects
+        // Get mouse position for hover effects (screen space)
         ImVec2 const mousePos = ImGui::GetMousePos();
-        std::string const hoveredGroupHeader = getGroupUnderMouseHeader(mousePos);
+
+        // Draw group overlays directly on the window draw list (no node-editor nodes).
+        // All group rects are in canvas space; convert to screen space for drawing.
+        ImDrawList * drawList = ImGui::GetWindowDrawList();
 
         for (auto const & [tag, group] : m_nodeGroups)
         {
-            // Calculate group rectangle with padding
-            ImVec2 groupMin, groupMax;
-            if (!calculateGroupRect(group, groupMin, groupMax))
+            // Calculate group rectangle with padding (canvas space)
+            ImVec2 canvasMin, canvasMax;
+            if (!calculateGroupRect(group, canvasMin, canvasMax))
             {
                 continue; // Skip groups with no valid nodes
             }
 
-            ax::NodeEditor::NodeId const groupId = ax::NodeEditor::NodeId(
-              std::hash<std::string>{}(tag)); // Use a hash of the tag as the node ID
-
-            ImVec2 const groupSize = ImVec2(groupMax.x - groupMin.x, groupMax.y - groupMin.y);
+            // Convert to screen space for drawing
+            ImVec2 const screenMin = ed::CanvasToScreen(canvasMin);
+            ImVec2 const screenMax = ed::CanvasToScreen(canvasMax);
+            ImVec2 const groupSize = ImVec2(screenMax.x - screenMin.x, screenMax.y - screenMin.y);
 
             // Calculate tag dimensions for positioning
             ImVec2 const tagSize = ImGui::CalcTextSize(tag.c_str());
@@ -2451,38 +2542,15 @@ namespace gladius::ui
             constexpr float HEADER_HEIGHT = 50.0f;
             constexpr float BORDER_WIDTH = 10.0f;
 
-            // Position tag at top-left with some offset
-            ImVec2 const tagPos = ImVec2(groupMin.x + TAG_PADDING, groupMin.y + TAG_PADDING);
-
-            // Determine if this group's header is hovered for visual feedback
-            bool const isHeaderHovered = (hoveredGroupHeader == tag);
-
-            // Set node color based on group color
-            ed::PushStyleColor(ed::StyleColor_NodeBg,
-                               ImVec4(group.color.x, group.color.y, group.color.z, 0.2f));
-
-            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 10.0f);
-
-            // Put the z order of the group node to the back
-            ed::SetNodeZPosition(groupId, -100.0f);
-            ed::BeginNode(groupId);
-
-            ed::BeginGroupHint(groupId);
-
-            ed::SetNodePosition(groupId, groupMin);
-
-            // Style the group node with semi-transparent background
-            ImDrawList * drawList = ImGui::GetWindowDrawList();
-            ImVec2 const nodeScreenPos = ed::GetNodePosition(groupId);
+            // Determine if this group's header is hovered for visual feedback (screen space)
+            bool const isHeaderHovered =
+              (mousePos.y >= screenMin.y && mousePos.y <= screenMin.y + HEADER_HEIGHT &&
+               mousePos.x >= screenMin.x && mousePos.x <= screenMax.x);
 
             // Draw background rectangle with group color (semi-transparent)
             ImVec4 const bgColor = ImVec4(group.color.x, group.color.y, group.color.z, 0.4f);
             ImU32 const bgColorU32 = ImGui::ColorConvertFloat4ToU32(bgColor);
-            drawList->AddRectFilled(
-              nodeScreenPos,
-              ImVec2(nodeScreenPos.x + groupSize.x, nodeScreenPos.y + groupSize.y),
-              bgColorU32,
-              8.0f);
+            drawList->AddRectFilled(screenMin, screenMax, bgColorU32, 8.0f);
 
             // Draw draggable header area with visual feedback
             ImVec4 headerColor =
@@ -2492,8 +2560,8 @@ namespace gladius::ui
             ImU32 const headerColorU32 = ImGui::ColorConvertFloat4ToU32(headerColor);
 
             drawList->AddRectFilled(
-              nodeScreenPos,
-              ImVec2(nodeScreenPos.x + groupSize.x, nodeScreenPos.y + HEADER_HEIGHT),
+              screenMin,
+              ImVec2(screenMax.x, screenMin.y + HEADER_HEIGHT),
               headerColorU32,
               8.0f,
               ImDrawFlags_RoundCornersTop);
@@ -2506,34 +2574,32 @@ namespace gladius::ui
 
                 // Left border
                 drawList->AddRectFilled(
-                  ImVec2(nodeScreenPos.x, nodeScreenPos.y + HEADER_HEIGHT),
-                  ImVec2(nodeScreenPos.x + BORDER_WIDTH, nodeScreenPos.y + groupSize.y),
+                  ImVec2(screenMin.x, screenMin.y + HEADER_HEIGHT),
+                  ImVec2(screenMin.x + BORDER_WIDTH, screenMax.y),
                   borderHighlight,
                   0.0f);
 
                 // Right border
                 drawList->AddRectFilled(
-                  ImVec2(nodeScreenPos.x + groupSize.x - BORDER_WIDTH,
-                         nodeScreenPos.y + HEADER_HEIGHT),
-                  ImVec2(nodeScreenPos.x + groupSize.x, nodeScreenPos.y + groupSize.y),
+                  ImVec2(screenMax.x - BORDER_WIDTH, screenMin.y + HEADER_HEIGHT),
+                  ImVec2(screenMax.x, screenMax.y),
                   borderHighlight,
                   0.0f);
 
                 // Bottom border
-                drawList->AddRectFilled(ImVec2(nodeScreenPos.x + BORDER_WIDTH,
-                                               nodeScreenPos.y + groupSize.y - BORDER_WIDTH),
-                                        ImVec2(nodeScreenPos.x + groupSize.x - BORDER_WIDTH,
-                                               nodeScreenPos.y + groupSize.y),
-                                        borderHighlight,
-                                        8.0f,
-                                        ImDrawFlags_RoundCornersBottom);
+                drawList->AddRectFilled(
+                  ImVec2(screenMin.x + BORDER_WIDTH, screenMax.y - BORDER_WIDTH),
+                  ImVec2(screenMax.x - BORDER_WIDTH, screenMax.y),
+                  borderHighlight,
+                  8.0f,
+                  ImDrawFlags_RoundCornersBottom);
             }
 
             // Draw drag handle icon in header
             if (isHeaderHovered)
             {
                 ImVec2 const handlePos =
-                  ImVec2(nodeScreenPos.x + groupSize.x - 30.0f, nodeScreenPos.y + 15.0f);
+                  ImVec2(screenMax.x - 30.0f, screenMin.y + 15.0f);
                 ImU32 const handleColor = IM_COL32(255, 255, 255, 200);
 
                 // Draw simple grip lines
@@ -2545,49 +2611,17 @@ namespace gladius::ui
                 }
             }
 
+            // Draw tag label
             ImVec2 const tagScreenPos =
-              ImVec2(nodeScreenPos.x + TAG_PADDING, nodeScreenPos.y - TAG_PADDING);
-            ImVec2 const tagBgMin = ImVec2(tagScreenPos.x - 14.0f, tagScreenPos.y - 12.0f);
-            ImVec2 const tagBgMax =
-              ImVec2(tagScreenPos.x + tagSize.x + 14.0f, tagScreenPos.y + tagSize.y + 12.0f);
-
-            // Draw tag background
+              ImVec2(screenMin.x + TAG_PADDING, screenMin.y + TAG_PADDING);
             ImVec4 const tagBgColor = ImVec4(group.color.x, group.color.y, group.color.z, 0.8f);
             ImU32 const tagBgColorU32 = ImGui::ColorConvertFloat4ToU32(tagBgColor);
 
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0)); // Transparent background
-            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImU32(tagBgColorU32));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImU32(tagBgColorU32));
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-
-            // Use unique ID for each tag input
-            ImGui::PushID(("tag_input_" + tag).c_str());
-
-            static std::string inputBuffer;
-            inputBuffer = tag;
-            ImGui::SetNextItemWidth(tagSize.x + 20.0f);
-            if (ImGui::InputText("##tag_input",
-                                 &inputBuffer,
-                                 ImGuiInputTextFlags_EnterReturnsTrue |
-                                   ImGuiInputTextFlags_AutoSelectAll))
-            {
-                if (!inputBuffer.empty() && inputBuffer != tag)
-                {
-                    replaceGroupTag(tag, inputBuffer);
-                }
-            }
-
-            ImGui::PopID();
-            ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor(4);
-
-            ed::EndGroupHint();
-            ed::EndNode();
-
-            ed::PopStyleVar();   // Pop the node border width style
-            ed::PopStyleColor(); // Pop the node background color style
+            ImVec2 const tagBgMin = ImVec2(tagScreenPos.x - 4.0f, tagScreenPos.y - 2.0f);
+            ImVec2 const tagBgMax =
+              ImVec2(tagScreenPos.x + tagSize.x + 4.0f, tagScreenPos.y + tagSize.y + 2.0f);
+            drawList->AddRectFilled(tagBgMin, tagBgMax, tagBgColorU32, 4.0f);
+            drawList->AddText(tagScreenPos, IM_COL32(255, 255, 255, 255), tag.c_str());
         }
     }
 
@@ -2761,58 +2795,6 @@ namespace gladius::ui
         return {};
     }
 
-    void NodeView::handleGroupMovement()
-    {
-        if (m_nodeGroups.empty() || m_skipGroupMovement)
-        {
-            return;
-        }
-
-        // Check each group node for position changes
-        for (const auto & [tag, group] : m_nodeGroups)
-        {
-            // Generate the group node ID (same way as in renderNodeGroups)
-            ed::NodeId const groupNodeId = ed::NodeId(std::hash<std::string>{}(tag));
-
-            ImVec2 const currentPos = ed::GetNodePosition(groupNodeId);
-
-            // Check if we have a previous position for this group node
-            auto prevPosIt =
-              m_previousNodePositions.find(static_cast<nodes::NodeId>(groupNodeId.Get()));
-            if (prevPosIt == m_previousNodePositions.end())
-            {
-                // Store the initial position
-                m_previousNodePositions[static_cast<nodes::NodeId>(groupNodeId.Get())] = currentPos;
-                continue;
-            }
-
-            ImVec2 const previousPos = prevPosIt->second;
-
-            // Calculate movement delta (with small threshold to avoid floating point precision
-            // issues)
-            constexpr float MOVEMENT_THRESHOLD = 0.5f;
-            ImVec2 const delta = ImVec2(currentPos.x - previousPos.x, currentPos.y - previousPos.y);
-
-            if (std::abs(delta.x) > MOVEMENT_THRESHOLD || std::abs(delta.y) > MOVEMENT_THRESHOLD)
-            {
-                // Group node has moved, move all nodes in the group by the same delta
-                m_skipGroupMovement = true; // Prevent recursion
-
-                for (nodes::NodeId const nodeId : group.nodes)
-                {
-                    ImVec2 const nodeCurrentPos = ed::GetNodePosition(nodeId);
-                    ImVec2 const newPos =
-                      ImVec2(nodeCurrentPos.x + delta.x, nodeCurrentPos.y + delta.y);
-                    ed::SetNodePosition(nodeId, newPos);
-                }
-
-                m_skipGroupMovement = false; // Re-enable group movement
-
-                // Update the stored position for the group node
-                m_previousNodePositions[static_cast<nodes::NodeId>(groupNodeId.Get())] = currentPos;
-            }
-        }
-    }
     void NodeView::handleGroupDragging()
     {
         if (m_nodeGroups.empty())
@@ -2910,9 +2892,13 @@ namespace gladius::ui
 
         for (const auto & [tag, group] : m_nodeGroups)
         {
-            ImVec2 groupMin, groupMax;
-            if (!calculateGroupRect(group, groupMin, groupMax))
+            ImVec2 canvasMin, canvasMax;
+            if (!calculateGroupRect(group, canvasMin, canvasMax))
                 continue;
+
+            // Convert canvas-space group rect to screen space for mouse comparison
+            ImVec2 const groupMin = ed::CanvasToScreen(canvasMin);
+            ImVec2 const groupMax = ed::CanvasToScreen(canvasMax);
 
             // Check header (top area)
             if (mousePos.y >= groupMin.y && mousePos.y <= groupMin.y + HEADER_HEIGHT &&
@@ -2950,9 +2936,13 @@ namespace gladius::ui
 
         for (const auto & [tag, group] : m_nodeGroups)
         {
-            ImVec2 groupMin, groupMax;
-            if (!calculateGroupRect(group, groupMin, groupMax))
+            ImVec2 canvasMin, canvasMax;
+            if (!calculateGroupRect(group, canvasMin, canvasMax))
                 continue;
+
+            // Convert to screen space for mouse comparison
+            ImVec2 const groupMin = ed::CanvasToScreen(canvasMin);
+            ImVec2 const groupMax = ed::CanvasToScreen(canvasMax);
 
             // Check interior (excluding header and borders)
             ImVec2 interiorMin(groupMin.x + BORDER_WIDTH, groupMin.y + HEADER_HEIGHT);
@@ -2977,12 +2967,15 @@ namespace gladius::ui
 
         ImVec2 const mousePos = ImGui::GetMousePos();
 
-        // Check if mouse is over any group
+        // Check if mouse is over any group (convert canvas to screen space)
         for (const auto & [tag, group] : m_nodeGroups)
         {
-            ImVec2 groupMin, groupMax;
-            if (!calculateGroupRect(group, groupMin, groupMax))
+            ImVec2 canvasMin, canvasMax;
+            if (!calculateGroupRect(group, canvasMin, canvasMax))
                 continue;
+
+            ImVec2 const groupMin = ed::CanvasToScreen(canvasMin);
+            ImVec2 const groupMax = ed::CanvasToScreen(canvasMax);
 
             // Check if mouse is within group bounds
             if (mousePos.x >= groupMin.x && mousePos.x <= groupMax.x && mousePos.y >= groupMin.y &&

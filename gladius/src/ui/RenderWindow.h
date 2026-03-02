@@ -63,6 +63,7 @@ namespace gladius::ui
         bool isRenderingInProgress() const;
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
+        void invalidateViewDueToParameterChange();
         void renderScene(RenderWindowState & state);
 
         void hide();
@@ -294,10 +295,15 @@ namespace gladius::ui
         std::atomic<bool> m_asyncBboxUpdatePending{
           false}; // Tracks if bbox needs update after current job
         std::atomic<bool> m_asyncSdfJobInFlight{false};
+
+        /// Debounce delay before recomputing a stale bounding box
+        static constexpr auto kBboxDebounceDelay = std::chrono::milliseconds(500);
+        std::chrono::steady_clock::time_point m_lastParameterChangeTime{};
         std::atomic<uint64_t> m_asyncSdfInFlightEpoch{0};
         std::atomic<bool> m_lowResFeedbackPending{false};
         std::atomic<uint64_t> m_lastLowResPreviewEpoch{0};
         bool m_asyncInitialized{false};
+        bool m_compilationInvalidated{false};
 
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};

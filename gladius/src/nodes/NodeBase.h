@@ -170,7 +170,12 @@ namespace gladius::nodes
 
         virtual void accept(Visitor & /*unused*/) {};
 
-        auto screenPos() -> float2 &
+        [[nodiscard]] auto screenPos() -> float2 &
+        {
+            return m_screenPos;
+        }
+
+        [[nodiscard]] auto screenPos() const -> float2 const &
         {
             return m_screenPos;
         }

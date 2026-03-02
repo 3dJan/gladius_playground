@@ -46,4 +46,26 @@ namespace gladius::mcp::tools
     {
         m_lastErrorMessage = message;
     }
+
+    nlohmann::json MCPToolBase::createToolError(std::string const & error,
+                                                nlohmann::json const & usageExample,
+                                                nlohmann::json const & additionalInfo)
+    {
+        nlohmann::json result;
+        result["success"] = false;
+        result["error"] = error;
+        if (!usageExample.empty())
+        {
+            result["usage_example"] = usageExample;
+        }
+        // Merge additional info (e.g. available_categories, available_entries)
+        if (additionalInfo.is_object())
+        {
+            for (auto const & [key, value] : additionalInfo.items())
+            {
+                result[key] = value;
+            }
+        }
+        return result;
+    }
 } // namespace gladius::mcp::tools

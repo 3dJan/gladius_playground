@@ -382,6 +382,7 @@ namespace gladius
         if (!std::filesystem::exists(templateFiletName))
         {
             newModel();
+            return;
         }
         loadNonBlocking(templateFiletName);
     }
@@ -763,6 +764,34 @@ namespace gladius
         (void) refreshModelAsync(); // Result intentionally ignored for merge
     }
 
+    void Document::mergeOnly(std::filesystem::path filename)
+    {
+        mergeImpl(filename);
+    }
+
+    nodes::FunctionMatch Document::mergeAndResolve(std::filesystem::path filename,
+                                                   std::string const & targetFunctionName)
+    {
+        // Snapshot existing function IDs before the merge.
+        std::set<nodes::ResourceId> existingIds;
+        if (m_assembly)
+        {
+            for (auto const & [id, _] : m_assembly->getFunctions())
+            {
+                existingIds.insert(id);
+            }
+        }
+
+        mergeImpl(filename);
+
+        if (!m_assembly)
+        {
+            return {};
+        }
+
+        return m_assembly->findImportedFunction(targetFunctionName, existingIds, nullptr);
+    }
+
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
     {
         if (filename.extension() == ".3mf")
@@ -789,6 +818,11 @@ namespace gladius
     {
 
         return m_assembly;
+    }
+
+    nodes::SharedAssembly Document::getFlatAssembly() const
+    {
+        return m_flatAssembly;
     }
 
     std::optional<std::filesystem::path> Document::getCurrentAssemblyFilename() const
@@ -1632,30 +1666,58 @@ namespace gladius
 
     ResourceKey Document::addImageStackResource(std::filesystem::path const & path)
     {
-        io::ImageStackCreator creator;
-        auto stack = creator.addImageStackFromDirectory(get3mfModel(), path);
+        auto result = addImageStackResourceWithPadding(path);
+        return result.imageStack
+                   ? ResourceKey{result.imageStack->GetModelResourceID(), ResourceType::ImageStack}
+                   : ResourceKey{0, ResourceType::Unknown};
+    }
 
-        if (!stack)
+    io::ImportResult Document::addImageStackResourceWithPadding(std::filesystem::path const & path)
+    {
+        io::ImageStackCreator creator;
+        auto importResult = creator.importDirectoryWithPadding(get3mfModel(), path);
+
+        if (!importResult.imageStack)
         {
             auto logger = getSharedLogger();
             if (logger)
             {
                 logger->addEvent(
-                  {fmt::format("Failed to import image stack from directory: {}", path.string()),
-                   events::Severity::Error});
+                    {fmt::format("Failed to import image stack from directory: {}", path.string()),
+                     events::Severity::Error});
             }
-
-            return ResourceKey{0, ResourceType::Unknown};
+            return importResult;
         }
+
         auto & resourceManager = getGeneratorContext().resourceManager;
-        auto const key = ResourceKey{stack->GetModelResourceID(), ResourceType::ImageStack};
+        auto const key =
+            ResourceKey{importResult.imageStack->GetModelResourceID(), ResourceType::ImageStack};
 
         io::ImageExtractor extractor;
+        auto const files = creator.getFiles(path);
 
-        auto grid = extractor.loadAsVdbGrid(creator.getFiles(path), io::FileLoaderType::Filesystem);
-        resourceManager.addResource(key, std::move(grid));
+        // Detect pixel format from first file to choose import method
+        io::PixelFormat pixelFormat = io::PixelFormat::GRAYSCALE_8BIT;
+        if (!files.empty())
+        {
+            pixelFormat = extractor.determinePixelFormatFromFile(files.front());
+        }
+
+        if (pixelFormat == io::PixelFormat::GRAYSCALE_8BIT)
+        {
+            // Use VDB grid for grayscale 8-bit images
+            auto grid = extractor.loadAsVdbGrid(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(grid));
+        }
+        else
+        {
+            // Use 3D texture for other formats (RGBA, RGB, etc.)
+            auto stack = extractor.loadImageStack(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(stack));
+        }
+
         resourceManager.loadResources();
-        return key;
+        return importResult;
     }
 
     void Document::update3mfModel()
@@ -1765,6 +1827,10 @@ namespace gladius
             }
             return 0;
         }
+
+        // Sync internal node graph → 3MF model so the dependency graph reflects
+        // any recent edits (e.g. new FunctionCall nodes created via MCP tools).
+        update3mfModel();
 
         // Ensure the resource dependency graph is up-to-date
         rebuildResourceDependencyGraph();

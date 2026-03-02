@@ -208,6 +208,9 @@ namespace gladius::ui
         m_validationOverlay.setNavigationCallback(
           [this](nodes::NodeId nodeId, nodes::ResourceId modelId)
           { requestNodeFocus(nodeId, modelId); });
+
+        // T060: Setup ResourceView with ModelEditor for undo support in transforms
+        m_resourceView.setModelEditor(this);
     }
 
     ModelEditor::~ModelEditor()
@@ -462,12 +465,6 @@ namespace gladius::ui
             m_showAddModel = true;
         }
 
-        ImGui::SameLine();
-        if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CALCULATOR "\tExpression")))
-        {
-            showExpressionDialog();
-        }
-
         ImGui::Unindent();
 
         for (auto & model : m_assembly->getFunctions())
@@ -628,6 +625,11 @@ namespace gladius::ui
                     }
 
                     ImGui::SameLine();
+                }
+
+                // Allow renaming for all non-assembly functions (including managed ones)
+                if (!isAssembly)
+                {
                     if (ImGui::Button("Rename"))
                     {
                         m_outlineRenaming = true;
@@ -895,6 +897,8 @@ namespace gladius::ui
     {
         // Mark the editor to re-apply node positions and refresh view on next frame
         m_nodePositionsNeedUpdate = true;
+        m_pendingCenterViewFrames = 0;
+        m_pendingCenterViewRequest = false;
         m_dirty = true;
         // Defer selection clearing until an editor is active to avoid calling NodeEditor APIs out
         // of context
@@ -904,7 +908,7 @@ namespace gladius::ui
         // but only once per function to preserve user edits.
         if (m_currentModel)
         {
-            m_pendingAutoLayout = !m_currentModel->hasBeenLayouted();
+            m_pendingAutoLayout = m_currentModel->needsAutoLayout();
         }
         else
         {
@@ -1098,6 +1102,11 @@ namespace gladius::ui
     auto ModelEditor::showAndEdit() -> bool
     {
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        // Detect if the document replaced its assembly (e.g. file load, MCP operation)
+        // and re-sync before rendering the frame.
+        refreshAssembly();
+
         if (!m_currentModel || !m_assembly)
         {
             return false;
@@ -1150,6 +1159,18 @@ namespace gladius::ui
                                                                        "\tCenter View")))
                     {
                         ed::NavigateToContent();
+                    }
+                    if (m_pendingCenterViewRequest)
+                    {
+                        if (m_pendingCenterViewFrames > 0)
+                        {
+                            --m_pendingCenterViewFrames;
+                        }
+                        else
+                        {
+                            ed::NavigateToContent();
+                            m_pendingCenterViewRequest = false;
+                        }
                     }
 
                     // Block Undo/Redo/Copy/Paste during export
@@ -1350,8 +1371,91 @@ namespace gladius::ui
 
                 m_popupMenuFunction();
 
-                auto * currentCtx = getCurrentEditorContext();
-                ed::SetCurrentEditor(currentCtx);
+                // Tab bar: always show Graph + Code; show Properties only for Image3D
+                auto previousTabMode = m_currentTabMode;
+                ImGuiTabItemFlags codeTabFlags = ImGuiTabItemFlags_None;
+                if (m_forceCodeTab)
+                {
+                    codeTabFlags = ImGuiTabItemFlags_SetSelected;
+                    m_forceCodeTab = false;
+                }
+                if (ImGui::BeginTabBar("FunctionTabs"))
+                {
+                    if (ImGui::BeginTabItem("Graph"))
+                    {
+                        m_currentTabMode = TabMode::Graph;
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Code", nullptr, codeTabFlags))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        ImGui::EndTabItem();
+                    }
+                    if (isFunctionFromImage3D())
+                    {
+                        if (ImGui::BeginTabItem("Properties"))
+                        {
+                            m_currentTabMode = TabMode::Properties;
+                            ImGui::EndTabItem();
+                        }
+                    }
+                    ImGui::EndTabBar();
+                }
+
+                // Warn about unsaved code changes when switching away from Code tab
+                if (previousTabMode == TabMode::Code && m_currentTabMode != TabMode::Code &&
+                    m_codeView.hasUnsavedChanges())
+                {
+                    ImGui::OpenPopup("Unsaved Code Changes");
+                }
+                if (ImGui::BeginPopupModal("Unsaved Code Changes", nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text("You have unsaved changes in the Code editor.");
+                    ImGui::Text("Discard changes and switch tabs?");
+                    ImGui::Separator();
+                    if (ImGui::Button("Discard", ImVec2(120, 0)))
+                    {
+                        m_codeView.discardChanges();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stay in Code", ImVec2(120, 0)))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        m_forceCodeTab = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                // Render Properties panel if in Properties tab
+                if (m_currentTabMode == TabMode::Properties)
+                {
+                    m_functionFromImage3DView.setFunction(m_currentModel.get(),
+                                                         m_assembly.get());
+                    m_functionFromImage3DView.setModelEditor(this);
+                    if (m_functionFromImage3DView.render())
+                    {
+                        parameterChanged = true;
+                    }
+                }
+                else if (m_currentTabMode == TabMode::Code)
+                {
+                    m_codeView.setFunction(m_currentModel->getResourceId(),
+                                           m_currentModel.get(),
+                                           m_assembly.get());
+                    if (m_codeView.render())
+                    {
+                        parameterChanged = true;
+                        m_nodeViewVisitor.clearColumnWidths();
+                    }
+                }
+                else
+                {
+                    // Normal graph view
+                    auto * currentCtx = getCurrentEditorContext();
+                    ed::SetCurrentEditor(currentCtx);
 
                 ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
                                    ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
@@ -1377,26 +1481,25 @@ namespace gladius::ui
                 m_nodeViewVisitor.setExportState(m_exportState);
                 if (m_currentModel)
                 {
-                    m_nodeWidthsInitialized = m_nodeViewVisitor.columnWidthsAreInitialized();
+                    // Perform pending initial auto-layout BEFORE visitNodes so
+                    // that nodes are rendered at their layouted positions on
+                    // this very frame. This ensures ed::End() computes correct
+                    // node bounds immediately, which NavigateToContent relies on.
+                    if (m_pendingAutoLayout)
+                    {
+                        m_pendingAutoLayout = false;
+                        autoLayout();
+
+                        // Keep m_nodePositionsNeedUpdate=true so that
+                        // applyNodePositions() (after ed::End) can reliably
+                        // push the layouted NodeBase::screenPos values into the
+                        // node editor context on first visit.
+                    }
+
                     m_currentModel->visitNodes(m_nodeViewVisitor);
 
                     // Update node groups after nodes are rendered and positioned
                     m_nodeViewVisitor.updateNodeGroups();
-
-                    // Perform pending initial auto-layout after nodes are first rendered,
-                    // so widths/metrics are available to the layout engine.
-                    if (m_pendingAutoLayout && m_nodeWidthsInitialized)
-                    {
-                        m_pendingAutoLayout = false;
-                        autoLayout();
-                    }
-
-                    // Center view AFTER autolayout completes for first-time visits
-                    if (m_pendingCenterView)
-                    {
-                        m_pendingCenterView = false;
-                        ed::NavigateToContent();
-                    }
 
                 }
                 onCreateNode();
@@ -1417,9 +1520,6 @@ namespace gladius::ui
                         m_pendingPasteRequest = true;
                     }
                 }
-
-                // Handle group movement - detect when nodes are moved and move their group members
-                m_nodeViewVisitor.handleGroupMovement();
 
                 // Handle group dragging via header/border areas - must be called before rendering
                 m_nodeViewVisitor.handleGroupDragging();
@@ -1448,6 +1548,9 @@ namespace gladius::ui
                 {
                     m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
                 }
+
+                // Handle drag-and-drop from the library browser
+                handleLibraryDrop();
 
                 // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
                 // Uses ed::GetHoveredNode() for correct node-level hover detection
@@ -1481,6 +1584,7 @@ namespace gladius::ui
 
                 ed::End();
                 ed::PopStyleColor();
+                } // end else (Graph view)
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
 
@@ -1499,13 +1603,22 @@ namespace gladius::ui
 
                 m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
 
-                if (m_nodePositionsNeedUpdate)
+                // Clear per-frame flags so they don't persist into the next frame.
+                // Without this, a single parameter change causes showAndEdit() to
+                // return true every subsequent frame, continuously bumping the async
+                // epoch and preventing HQ progressive rendering from ever starting.
+                m_nodeViewVisitor.clearPerFrameFlags();
+
+                if (m_currentTabMode == TabMode::Graph)
                 {
-                    applyNodePositions();
-                }
-                else
-                {
-                    readBackNodePositions();
+                    if (m_nodePositionsNeedUpdate)
+                    {
+                        applyNodePositions();
+                    }
+                    else
+                    {
+                        readBackNodePositions();
+                    }
                 }
             }
 
@@ -1710,9 +1823,6 @@ namespace gladius::ui
             }
         }
 
-        // Render the library browser (separate window)
-        m_libraryBrowser.render(m_doc);
-
         m_parameterDirty = parameterChanged;
         return m_parameterDirty;
     }
@@ -1782,13 +1892,40 @@ namespace gladius::ui
         m_assembly = std::move(assembly);
         m_currentModel = m_assembly->assemblyModel();
 
-        // if there are other models, we switch to the first one
-        if (m_assembly->getFunctions().size() > 1)
+        // Try to show the function referenced by the first build item's levelset.
+        // The assembly model contains FunctionCall nodes whose functionId points to the
+        // user-defined functions used by each build item.
+        auto const & assemblyModel = m_assembly->assemblyModel();
+        nodes::SharedModel initialModel;
+        if (assemblyModel)
         {
-            // find first function that is not the assembly model
+            for (auto const & [nodeId, node] : *assemblyModel)
+            {
+                if (auto const * fc = dynamic_cast<nodes::FunctionCall const *>(node.get()))
+                {
+                    auto const funcId = fc->getFunctionId();
+                    if (funcId != 0)
+                    {
+                        initialModel = m_assembly->findModel(funcId);
+                    }
+                    if (initialModel)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (initialModel)
+        {
+            m_currentModel = initialModel;
+        }
+        else if (m_assembly->getFunctions().size() > 1)
+        {
+            // Fallback: pick the first function that is not the assembly model
             for (auto & [id, model] : m_assembly->getFunctions())
             {
-                if (model->getResourceId() != m_assembly->assemblyModel()->getResourceId())
+                if (model->getResourceId() != assemblyModel->getResourceId())
                 {
                     m_currentModel = model;
                     break;
@@ -1825,12 +1962,104 @@ namespace gladius::ui
         return lowerText.find(lowerFilter) != std::string::npos;
     }
 
+    void ModelEditor::handleLibraryDrop()
+    {
+        if (!m_currentModel || !m_doc)
+        {
+            return;
+        }
+
+        // Only accept the drop when the node-editor canvas is hovered.
+        auto const * payload = ImGui::GetDragDropPayload();
+        if (!payload || !payload->IsDataType(LIBRARY_DND_TYPE))
+        {
+            return;
+        }
+
+        // The payload is a pointer to the ThumbnailInfo in the library browser.
+        // We only proceed on mouse-release (drop).
+        if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            return;
+        }
+
+        auto const * const * ppFileInfo =
+          static_cast<ThreemfThumbnailExtractor::ThumbnailInfo const * const *>(payload->Data);
+        if (!ppFileInfo || !*ppFileInfo)
+        {
+            return;
+        }
+
+        auto const & fileInfo = **ppFileInfo;
+
+        // Determine which function display name to look for after merge.
+        std::string targetFunctionName;
+        if (fileInfo.hasLibraryMetadata && !fileInfo.libraryFunctionNames.empty())
+        {
+            // NOTE: Only the first tagged function gets a FunctionCall node.
+            // Additional tagged functions are imported but must be referenced manually.
+            targetFunctionName = fileInfo.libraryFunctionNames.front();
+        }
+
+        // Refresh the assembly pointer — the document may have replaced it
+        // since we last captured it (e.g. during file load).
+        refreshAssembly();
+
+        // Merge the library file and resolve the best matching function.
+        nodes::FunctionMatch match;
+        try
+        {
+            match = m_doc->mergeAndResolve(fileInfo.filePath, targetFunctionName);
+        }
+        catch (std::exception const & e)
+        {
+            if (m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                  {fmt::format("Library drop failed: {}", e.what()),
+                   events::Severity::Error});
+            }
+            return;
+        }
+
+        // Re-fetch the assembly — merge may have replaced the shared_ptr.
+        refreshAssembly();
+
+        if (match.id == 0 || !match.model)
+        {
+            return;
+        }
+
+        createFunctionCallNodeAtCursor(match.id, match.model);
+    }
+
+    void ModelEditor::createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
+                                                      nodes::SharedModel const & sourceModel)
+    {
+        createUndoRestorePoint("Import library function");
+
+        // Suspend the node editor to correctly query the mouse position
+        // in screen space (same pattern as the right-click popup).
+        ed::Suspend();
+        auto const mouseScreen = ImGui::GetMousePos();
+        ed::Resume();
+
+        auto const posOnCanvas = ed::ScreenToCanvas(mouseScreen);
+
+        auto * createdNode = m_currentModel->createFunctionCallNode(functionId, *sourceModel);
+        ed::SetNodePosition(createdNode->getId(), posOnCanvas);
+
+        requestNodeFocus(createdNode->getId());
+        markModelAsModified();
+    }
+
     void ModelEditor::functionToolBox(ImVec2 mousePos)
     {
         auto functions = m_assembly->getFunctions();
         for (auto & [id, model] : functions)
         {
-            if (!model || model->isManaged() || model == m_currentModel)
+            // Skip null models and current model (can't call self)
+            if (!model || model == m_currentModel)
             {
                 continue;
             }
@@ -1848,18 +2077,9 @@ namespace gladius::ui
             {
                 createUndoRestorePoint("Create node");
                 auto posOnCanvas = ed::ScreenToCanvas(mousePos);
-                // create function call node
-                auto createdNode = m_currentModel->create<nodes::FunctionCall>();
-                createdNode->setFunctionId(id); // expands to a ResourceId node during writing
-                createdNode->updateInputsAndOutputs(*model);
-                m_currentModel->registerInputs(*createdNode);
-                m_currentModel->registerOutputs(*createdNode);
-                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
-                if (model->getDisplayName().has_value())
-                {
-                    createdNode->setDisplayName(model->getDisplayName().value());
-                }
+                auto * createdNode = m_currentModel->createFunctionCallNode(id, *model);
+                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
                 // Request focus on the newly created node for keyboard-driven workflow
                 requestNodeFocus(createdNode->getId());
@@ -2105,11 +2325,6 @@ namespace gladius::ui
             return;
         }
 
-        // if (!m_nodeWidthsInitialized)
-        // {
-        //     return;
-        // }
-
         createUndoRestorePoint("Autolayout");
 
         // Use the dedicated layout engine for all layout operations
@@ -2199,8 +2414,10 @@ namespace gladius::ui
                 auto const targetPos = node.second->screenPos();
                 ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
             }
-            // Defer NavigateToContent until after autolayout completes
-            m_pendingCenterView = true;
+            // Schedule first-visit centering through the same path as the
+            // manual toolbar action, with a small deterministic frame delay.
+            m_pendingCenterViewRequest = true;
+            m_pendingCenterViewFrames = 2;
             m_visitedFunctions.insert(funcId);
         }
     }
@@ -2498,6 +2715,11 @@ namespace gladius::ui
         m_libraryBrowser.refreshDirectories();
     }
 
+    void ModelEditor::renderLibraryBrowser()
+    {
+        m_libraryBrowser.render(m_doc);
+    }
+
     void ModelEditor::requestManualCompile()
     {
         m_isManualCompileRequested = true;
@@ -2749,6 +2971,54 @@ namespace gladius::ui
     {
         // Check if any of the editor windows are hovered
         return ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) && isVisible();
+    }
+
+    bool ModelEditor::isFunctionFromImage3D() const
+    {
+        if (!m_currentModel)
+        {
+            return false;
+        }
+
+        // Check if the model contains an ImageSampler node
+        for (auto const & [id, node] : *m_currentModel)
+        {
+            if (dynamic_cast<nodes::ImageSampler *>(node.get()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void ModelEditor::refreshAssembly()
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+
+        auto newAssembly = m_doc->getAssembly();
+        if (newAssembly == m_assembly)
+        {
+            return; // Same object — nothing to update.
+        }
+
+        // The document replaced its assembly (e.g. on file load).
+        // Re-map m_currentModel to the equivalent model in the new assembly.
+        auto const oldResourceId =
+            m_currentModel ? m_currentModel->getResourceId() : nodes::ResourceId{0};
+
+        m_assembly = std::move(newAssembly);
+
+        if (m_assembly && oldResourceId != 0)
+        {
+            m_currentModel = m_assembly->findModel(oldResourceId);
+        }
+        if (!m_currentModel && m_assembly)
+        {
+            m_currentModel = m_assembly->assemblyModel();
+        }
     }
 
     void ModelEditor::requestNodeFocus(nodes::NodeId nodeId)
