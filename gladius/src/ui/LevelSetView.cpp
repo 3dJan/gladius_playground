@@ -64,7 +64,7 @@ namespace gladius::ui
                 ImGui::TextUnformatted("Min Feature Size");
                 ImGui::TableNextColumn();
                 {
-                    float minFeatureSize = levelSet->GetMinFeatureSize();
+                    float minFeatureSize = static_cast<float>(levelSet->GetMinFeatureSize());
                     if (ImGui::InputFloat("##MinFeatureSize", &minFeatureSize))
                     {
                         levelSet->SetMinFeatureSize(minFeatureSize);
@@ -88,7 +88,7 @@ namespace gladius::ui
                 ImGui::TextUnformatted("Fallback Value");
                 ImGui::TableNextColumn();
                 {
-                    float fallbackValue = levelSet->GetFallBackValue();
+                    float fallbackValue = static_cast<float>(levelSet->GetFallBackValue());
                     if (ImGui::InputFloat("##FallbackValue", &fallbackValue))
                     {
                         levelSet->SetFallBackValue(fallbackValue);

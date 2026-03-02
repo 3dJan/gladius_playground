@@ -32,7 +32,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
+#ifdef _WIN32
+#include <process.h>
+#endif
 #include <set>
 #include <vector>
 
@@ -60,7 +62,13 @@ namespace gladius_tests::color_export
                         std::string const suffix =
                             testInfo ? (std::string(testInfo->test_suite_name()) + "_" + testInfo->name()) : "unknown";
                         m_outputDir = std::filesystem::temp_directory_path() /
-                                                 ("gladius_color_export_tests_" + std::to_string(static_cast<long>(::getpid())) + "_" + suffix);
+                                                 ("gladius_color_export_tests_" + std::to_string(static_cast<long>(
+#ifdef _WIN32
+                                                     ::_getpid()
+#else
+                                                     ::getpid()
+#endif
+                                                 )) + "_" + suffix);
             std::filesystem::create_directories(m_outputDir);
         }
 
