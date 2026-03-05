@@ -288,6 +288,7 @@ namespace gladius::ui
 
         /// Storage for node groups organized by tag
         std::unordered_map<std::string, NodeGroup> m_nodeGroups;
+        bool m_nodeGroupsDirty{true}; ///< Rebuild groups on next updateNodeGroups() call
 
         /// Tag editing state
         std::string m_editingTag;

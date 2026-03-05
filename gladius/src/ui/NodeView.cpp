@@ -299,7 +299,12 @@ namespace gladius::ui
     void NodeView::clearPerFrameFlags()
     {
         m_parameterChanged = false;
+        if (m_modelChanged)
+        {
+            m_nodeGroupsDirty = true;
+        }
         m_modelChanged = false;
+        m_currentLinkId = 0;
     }
 
     void NodeView::setAssembly(nodes::SharedAssembly assembly)
@@ -327,6 +332,7 @@ namespace gladius::ui
         m_currentLinkId = 0;
         m_parameterChanged = false;
         m_modelChanged = false;
+        m_nodeGroupsDirty = true;
         m_previousNodePositions.clear(); // Clear position tracking when resetting
     }
 
@@ -2460,8 +2466,15 @@ namespace gladius::ui
         if (!m_currentModel)
         {
             m_nodeGroups.clear();
+            m_nodeGroupsDirty = false;
             return;
         }
+
+        if (!m_nodeGroupsDirty)
+        {
+            return;
+        }
+        m_nodeGroupsDirty = false;
 
         // Clear existing groups
         m_nodeGroups.clear();
