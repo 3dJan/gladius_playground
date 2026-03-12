@@ -476,6 +476,10 @@ namespace gladius
             }
 
             auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                return; // Background worker holds the compute mutex; skip to avoid blocking
+            }
 
             if (!m_generatorContext)
             {

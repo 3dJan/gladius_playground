@@ -1097,6 +1097,13 @@ namespace gladius::ui
               if (compileRequested)
               {
                   refreshModel();
+                  // If compilation was successfully launched, the async worker
+                  // handles parameter updates — skip the redundant main-thread path
+                  // that would block on Queue.finish() while the worker runs.
+                  if (!m_modelEditor.isCompileRequested())
+                  {
+                      m_parameterDirty = false;
+                  }
               }
               // For parameter-only changes, m_parameterDirty is already set above.
               // updateModel() will handle it using the fast updateParameter() path
