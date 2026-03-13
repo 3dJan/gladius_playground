@@ -606,8 +606,10 @@ namespace gladius::ui
 
             if (ImGui::IsItemHovered())
             {
+                ed::Suspend();
                 ImGui::SetTooltip(
                   "%s (%s)", pin.name.c_str(), typeToString(pin.typeIndex).c_str());
+                ed::Resume();
             }
         }
 
@@ -633,8 +635,10 @@ namespace gladius::ui
 
             if (ImGui::IsItemHovered())
             {
+                ed::Suspend();
                 ImGui::SetTooltip(
                   "%s (%s)", pin.name.c_str(), typeToString(pin.typeIndex).c_str());
+                ed::Resume();
             }
         }
 
@@ -659,7 +663,9 @@ namespace gladius::ui
         // Tooltip with full node name on hover
         if (ImGui::IsItemHovered())
         {
+            ed::Suspend();
             ImGui::SetTooltip("%s", node.getDisplayName().c_str());
+            ed::Resume();
         }
 
         ed::PopStyleColor(2);
