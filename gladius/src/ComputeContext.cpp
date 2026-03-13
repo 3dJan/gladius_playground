@@ -911,7 +911,7 @@ namespace gladius
 
             // Use a null stream to suppress output during initialization
             std::ostringstream nullStream;
-            auto accelerators = queryAccelerators(std::cout);
+            auto accelerators = queryAccelerators(nullStream);
 
             if (accelerators.empty())
             {

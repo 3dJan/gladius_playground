@@ -108,41 +108,75 @@ namespace gladius::ui
             auto outputs = beginNode.getOutputs();
             std::optional<std::string> paramToRemove;
             std::optional<std::pair<std::string, std::string>> paramToRename;
+            std::optional<std::pair<std::string, std::string>> paramToReorder;
 
-            for (auto & output : outputs)
+            std::vector<std::pair<std::string, nodes::Port*>> sortedOutputs;
+            for (auto & out : outputs)
             {
+                sortedOutputs.push_back({out.first, &out.second});
+            }
+            std::sort(sortedOutputs.begin(), sortedOutputs.end(), [](const auto & a, const auto & b) {
+                return a.second->getSortIndex() < b.second->getSortIndex();
+            });
+
+            for (auto & outputPair : sortedOutputs)
+            {
+                auto outputName = outputPair.first;
+                auto& output = *outputPair.second;
+
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 
-                ImGui::PushID(output.first.c_str());
-                std::string currentName = output.first;
+                ImGui::PushID(outputName.c_str());
+                std::string currentName = outputName;
                 
                 ImGui::SetNextItemWidth(-1);
                 if (ImGui::InputText("##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
                 {
-                    if (currentName != output.first && !currentName.empty())
+                    if (currentName != outputName && !currentName.empty())
                     {
-                        paramToRename = {output.first, currentName};
+                        paramToRename = {outputName, currentName};
                     }
                 }
-                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != output.first && !currentName.empty())
+                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != outputName && !currentName.empty())
                 {
-                    paramToRename = {output.first, currentName};
+                    paramToRename = {outputName, currentName};
                 }
                 
                 ImGui::TableNextColumn();
 
-                std::type_index typeIndex = output.second.getTypeIndex();
+                std::type_index typeIndex = output.getTypeIndex();
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
                 
                 ImGui::TableNextColumn();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
                 {
-                    paramToRemove = output.first;
+                    paramToRemove = outputName;
+                }
+                ImGui::SameLine();
+                ImGui::Button(reinterpret_cast<const char *>(ICON_FA_GRIP_VERTICAL));
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                {
+                    ImGui::SetDragDropPayload("DND_ARGUMENT_BEGIN", outputName.c_str(), outputName.size() + 1);
+                    ImGui::Text("Move %s", outputName.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget())
+                {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("DND_ARGUMENT_BEGIN", ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
+                    {
+                        std::string sourceName = static_cast<const char*>(payload->Data);
+                        std::string targetName = outputName;
+                        if (sourceName != targetName && payload->IsDelivery())
+                        {
+                            paramToReorder = {sourceName, targetName};
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
                 }
 
                 ImGui::TableNextColumn();
-                renderPortPin(output.second.getId(),
+                renderPortPin(output.getId(),
                               false,
                               typeIndex,
                               reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
@@ -158,6 +192,11 @@ namespace gladius::ui
             if (paramToRename)
             {
                 m_modelEditor->currentModel()->renameArgument(paramToRename->first, paramToRename->second);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToReorder)
+            {
+                m_modelEditor->currentModel()->reorderArgument(paramToReorder->first, paramToReorder->second);
                 m_modelEditor->markModelAsModified();
             }
         }

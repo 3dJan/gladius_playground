@@ -369,11 +369,6 @@ namespace gladius::nodes
             return;
         }
 
-        if (m_beginNode->parameter().find(newName) != m_beginNode->parameter().end())
-        {
-            return;
-        }
-
         auto & params = m_beginNode->parameter();
         if (auto it = params.find(oldName); it != params.end())
         {
@@ -390,51 +385,6 @@ namespace gladius::nodes
             node.mapped().setShortName(newName);
             node.mapped().setUniqueName(m_beginNode->getUniqueName() + "_" + newName);
             outputs.insert(std::move(node));
-        }
-    }
-
-    void Model::reorderArgument(ParameterName source, ParameterName target)
-    {
-        if (m_beginNode == nullptr || source == target)
-        {
-            return;
-        }
-
-        auto & params = m_beginNode->parameter();
-        auto & outputs = m_beginNode->getOutputs();
-
-        auto srcParamIt = params.find(source);
-        auto tgtParamIt = params.find(target);
-        if (srcParamIt == params.end() || tgtParamIt == params.end())
-        {
-            return;
-        }
-
-        // Collect entries sorted by current sortIndex
-        std::vector<ParameterName> ordered;
-        ordered.reserve(params.size());
-        for (auto & [name, _] : params)
-        {
-            ordered.push_back(name);
-        }
-        std::sort(ordered.begin(), ordered.end(), [&](auto const & a, auto const & b) {
-            return params.at(a).getSortIndex() < params.at(b).getSortIndex();
-        });
-
-        // Remove source from ordered list and insert before target
-        ordered.erase(std::remove(ordered.begin(), ordered.end(), source), ordered.end());
-        auto targetIt = std::find(ordered.begin(), ordered.end(), target);
-        ordered.insert(targetIt, source);
-
-        // Reassign sequential sort indices
-        for (int i = 0; i < static_cast<int>(ordered.size()); ++i)
-        {
-            params.at(ordered[i]).setSortIndex(i);
-            auto outIt = outputs.find(ordered[i]);
-            if (outIt != outputs.end())
-            {
-                outIt->second.setSortIndex(i);
-            }
         }
     }
 
@@ -456,11 +406,6 @@ namespace gladius::nodes
     void Model::renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName)
     {
         if (m_endNode == nullptr || oldName == newName)
-        {
-            return;
-        }
-
-        if (m_endNode->parameter().find(newName) != m_endNode->parameter().end())
         {
             return;
         }
@@ -1179,4 +1124,3 @@ namespace gladius::nodes
     }
 
 } // namespace gladius::nodes
-

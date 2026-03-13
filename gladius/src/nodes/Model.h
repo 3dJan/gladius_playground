@@ -185,8 +185,13 @@ namespace gladius::nodes
         auto getPortRegistry() -> PortRegistry &;
 
         void addArgument(ParameterName name, VariantParameter parameter);
+        void removeArgument(ParameterName const & name);
+        void renameArgument(ParameterName const & oldName, ParameterName const & newName);
+        void reorderArgument(ParameterName source, ParameterName target);
 
         void addFunctionOutput(ParameterName name, VariantParameter parameter);
+        void removeFunctionOutput(ParameterName const & name);
+        void renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName);
 
         nodes::Begin * getBeginNode();
 

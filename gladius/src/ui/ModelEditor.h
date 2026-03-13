@@ -237,7 +237,7 @@ namespace gladius::ui
         /// Returns the editor context for the current model, or nullptr if no model is set.
         ed::EditorContext * getCurrentEditorContext();
 
-        bool m_visible = false;
+        bool m_visible = true;
         std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
         std::set<nodes::ResourceId> m_visitedFunctions;  ///< Track first-time visits for NavigateToContent
         int m_pendingCenterViewFrames = 0;  ///< Frame countdown before requesting center view

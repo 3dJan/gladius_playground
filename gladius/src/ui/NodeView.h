@@ -328,6 +328,7 @@ namespace gladius::ui
         /// Async file dialog for filename parameters
         AsyncFileDialog m_asyncFileDialog;
         nodes::NodeId m_asyncFileDialogNodeId{0};  ///< Node whose filename is being edited
+        nodes::NodeId m_renamingNodeId{0};         ///< Node whose name is currently being edited inline
         std::string m_asyncFileDialogParamName;    ///< Parameter name being edited
 
         /// T052: Function selection search filter
