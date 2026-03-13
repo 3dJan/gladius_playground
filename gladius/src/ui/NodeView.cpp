@@ -115,12 +115,10 @@ namespace gladius::ui
                 std::type_index typeIndex = output.second.getTypeIndex();
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
                 ImGui::TableNextColumn();
-                BeginPin(output.second.getId(), ed::PinKind::Output);
-
-                ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(typeIndex));
-                ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                ImGui::PopStyleColor();
-                ed::EndPin();
+                renderPortPin(output.second.getId(),
+                              false,
+                              typeIndex,
+                              reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
             }
             ImGui::EndTable();
         }
@@ -167,11 +165,10 @@ namespace gladius::ui
             {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                BeginPin(input.second.getId(), ed::PinKind::Input);
-                ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(input.second.getTypeIndex()));
-                ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                ImGui::PopStyleColor();
-                ed::EndPin();
+                renderPortPin(input.second.getId(),
+                              true,
+                              input.second.getTypeIndex(),
+                              reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(input.first.c_str());
                 ImGui::TableNextColumn();
@@ -2109,15 +2106,8 @@ namespace gladius::ui
                     bool const inputMissing = !parameter.second.getSource().has_value() &&
                                               parameter.second.isInputSourceRequired();
 
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                                          typeToColor(parameter.second.getTypeIndex()));
                     const ed::PinId pinId = parameter.second.getId();
-                    BeginPin(pinId, ed::PinKind::Input);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0});
 
-                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f); // Scale the button width
-
-                    // Check if this node should receive focus (keyboard-driven workflow)
                     bool shouldFocus =
                       m_modelEditor && m_modelEditor->shouldFocusNode(node.getId());
                     if (shouldFocus && parameter.first == node.constParameter().begin()->first)
@@ -2127,17 +2117,11 @@ namespace gladius::ui
                         m_modelEditor->clearNodeFocus();
                     }
 
-                    if (ImGui::Button(
-                          reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
-                          ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f)))
+                    if (renderPortPin(pinId.Get(), true, parameter.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT), true, false))
                     {
                         columnWidths[1] = std::max(columnWidths[1], ImGui::GetItemRectSize().x);
                         showLinkAssignmentMenu(parameter);
                     }
-
-                    ImGui::PopStyleVar();
-                    ed::EndPin();
-                    ImGui::PopStyleColor(); // Pop the style color for pin text
 
                     columnWidths[1] = std::max(columnWidths[1], ImGui::GetItemRectSize().x);
                     ImGui::TableNextColumn();
@@ -2260,12 +2244,8 @@ namespace gladius::ui
                     ImGui::TableNextColumn();
 
                     const ed::PinId pinId = output.second.getId();
-                    BeginPin(pinId, ed::PinKind::Output);
-                    ImGui::SetWindowFontScale(1.5f); // Scale up the font by 1.5
-                    ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                    ImGui::SetWindowFontScale(1.0f); // Reset the font scale to default
-
-                    ed::EndPin();
+                    
+                    renderPortPin(pinId.Get(), false, output.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
 
                     columnWidths[7] = std::max(columnWidths[7], ImGui::GetItemRectSize().x);
                     ImGui::PopStyleColor();
@@ -2312,6 +2292,122 @@ namespace gladius::ui
         ImGui::EndTable();
         ImGui::PopID();
         footer(node);
+    }
+
+    bool NodeView::renderPortPin(nodes::PortId pinId,
+                                 bool isInput,
+                                 std::type_index typeIndex,
+                                 const std::string & iconOrText,
+                                 bool asButton,
+                                 bool isFocused)
+    {
+        bool clicked = false;
+        ImVec4 color = typeToColor(typeIndex);
+        bool shouldGlow = false;
+        bool shouldDim = false;
+
+        ed::PinId edPinId(pinId);
+        ed::PinKind kind = isInput ? ed::PinKind::Input : ed::PinKind::Output;
+
+        if (m_modelEditor)
+        {
+            auto const & dragState = m_modelEditor->linkDragState();
+            if (dragState.isDragging && dragState.sourcePortId != pinId)
+            {
+                if (dragState.isCompatible(pinId))
+                {
+                    shouldGlow = true;
+                }
+                else
+                {
+                    shouldDim = true;
+                }
+            }
+        }
+
+        if (shouldGlow)
+        {
+            float time = static_cast<float>(ImGui::GetTime());
+            float pulse = 0.8f + 0.2f * std::sin(time * 10.0f);
+            color.x = std::min(1.0f, color.x * pulse * 1.5f);
+            color.y = std::min(1.0f, color.y * pulse * 1.5f);
+            color.z = std::min(1.0f, color.z * pulse * 1.5f);
+            color.w = 1.0f;
+        }
+        else if (shouldDim)
+        {
+            color.w = 0.2f;
+        }
+
+        BeginPin(edPinId, kind);
+
+        if (asButton)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            if (shouldDim)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+            }
+            else if (shouldGlow)
+            {
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x, color.y, color.z, 0.4f));
+            }
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0});
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
+
+            bool btnClicked = ImGui::Button(iconOrText.c_str(), ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f));
+
+            ImGui::PopStyleVar();
+
+            if (shouldDim)
+            {
+                ImGui::PopStyleColor(3);
+            }
+            else if (shouldGlow)
+            {
+                ImGui::PopStyleColor(1);
+            }
+            ImGui::PopStyleColor(); // Col_Text
+
+            clicked = btnClicked || isFocused;
+        }
+        else
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            if (kind == ed::PinKind::Output)
+            {
+                ImGui::SetWindowFontScale(1.5f);
+            }
+            ImGui::TextUnformatted(iconOrText.c_str());
+            if (kind == ed::PinKind::Output)
+            {
+                ImGui::SetWindowFontScale(1.0f);
+            }
+            ImGui::PopStyleColor();
+        }
+
+        if (m_modelEditor)
+        {
+            auto const & dragState = m_modelEditor->linkDragState();
+            if (dragState.isDragging && dragState.sourcePortId != pinId && ImGui::IsItemHovered())
+            {
+                if (shouldGlow)
+                {
+                    ImGui::SetTooltip("Compatible port \xE2\x80\x94 drop to connect");
+                }
+                else if (shouldDim)
+                {
+                    ImGui::SetTooltip("Incompatible port type");
+                }
+            }
+        }
+
+        ed::EndPin();
+
+        return clicked;
     }
 
     ImVec4 NodeView::typeToColor(std::type_index tyepIndex)

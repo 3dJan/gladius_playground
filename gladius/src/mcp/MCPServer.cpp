@@ -2009,6 +2009,51 @@ namespace gladius::mcp
               std::string description = params["description"];
               return m_application->setLibraryMetadata(functionIds, description);
           });
+
+#ifdef ENABLE_UI_TESTING
+        // UI TESTING TOOLS
+        registerTool(
+          "ui_click",
+          "Perform a UI click on the specified ImGui test engine path",
+          {{"type", "object"},
+           {"properties",
+            {{"path",
+              {{"type", "string"},
+               {"description", "The ImGui test path (e.g., '//MainWindow/File/Open')"}}}}},
+           {"required", json::array({"path"})}},
+          [this](const json & params) -> json
+          {
+              if (!params.contains("path"))
+              {
+                  return {{"success", false}, {"error", "Missing required parameter: path"}};
+              }
+              std::string path = params["path"];
+              bool success = m_application->uiClick(path);
+              return {{"success", success},
+                      {"message", success ? "Click queued successfully" : "Failed to queue click"}};
+          });
+
+        registerTool(
+          "capture_screenshot",
+          "Capture a screenshot of the current UI",
+          {{"type", "object"},
+           {"properties",
+            {{"output_path",
+              {{"type", "string"},
+               {"description", "The file path where the screenshot will be saved"}}}}},
+           {"required", json::array({"output_path"})}},
+          [this](const json & params) -> json
+          {
+              if (!params.contains("output_path"))
+              {
+                  return {{"success", false}, {"error", "Missing required parameter: output_path"}};
+              }
+              std::string outputPath = params["output_path"];
+              bool success = m_application->captureUIScreenshot(outputPath);
+              return {{"success", success},
+                      {"message", success ? "Screenshot captured successfully" : "Failed to capture screenshot"}};
+          });
+#endif
     }
 
     void MCPServer::runStdioLoop()

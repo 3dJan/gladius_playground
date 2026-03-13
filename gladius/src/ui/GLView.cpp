@@ -8,6 +8,16 @@
 #include <imgui_impl_win32.h>
 #endif
 #include "imgui.h"
+#ifdef ENABLE_UI_TESTING
+// Fix X11 collision
+#ifdef KeyPress
+#undef KeyPress
+#endif
+#include "imgui_te_engine.h"
+#include "imgui_te_context.h"
+#include "imgui_te_ui.h"
+#endif
+
 #include <GLFW/glfw3.h>
 
 #ifdef _WIN32
@@ -22,6 +32,7 @@
 #include <iostream>
 #include <sago/platform_folders.h>
 #include <thread>
+#include <lodepng.h>
 
 namespace gladius
 {
@@ -68,6 +79,15 @@ namespace gladius
 
             ImGui_ImplOpenGL2_Shutdown();
             ImGui_ImplGlfw_Shutdown();
+
+#ifdef ENABLE_UI_TESTING
+            if (m_testEngine)
+            {
+                ImGuiTestEngine_Stop(m_testEngine);
+                ImGuiTestEngine_DestroyContext(m_testEngine);
+                m_testEngine = nullptr;
+            }
+#endif
 
             ImGui::DestroyContext();
             if (glfwGetCurrentContext())
@@ -369,6 +389,16 @@ namespace gladius
         // Setup Platform/Renderer bindings
         ImGui_ImplGlfw_InitForOpenGL(m_window, true);
         ImGui_ImplOpenGL2_Init();
+
+#ifdef ENABLE_UI_TESTING
+        m_testEngine = ImGuiTestEngine_CreateContext();
+        ImGuiTestEngineIO& test_io = ImGuiTestEngine_GetIO(m_testEngine);
+        test_io.ConfigVerboseLevel = ImGuiTestVerboseLevel_Info;
+        test_io.ConfigVerboseLevelOnError = ImGuiTestVerboseLevel_Debug;
+        test_io.ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
+        
+        ImGuiTestEngine_Start(m_testEngine, ImGui::GetCurrentContext());
+#endif
     }
 
     auto GLView::isViewSettingsVisible() -> bool
@@ -388,7 +418,17 @@ namespace gladius
         ImGui_ImplOpenGL2_NewFrame();
 
         ImGui_ImplGlfw_NewFrame();
+
+// ImGuiTestEngineHook_PreNewFrame is handled natively when IMGUI_ENABLE_TEST_ENGINE is defined.
+
         ImGui::NewFrame();
+        
+#ifdef ENABLE_UI_TESTING
+        if (m_testEngine && m_show_demo_window)
+        {
+            ImGuiTestEngine_ShowTestEngineWindows(m_testEngine, NULL);
+        }
+#endif
 
         if (m_showViewSettings)
         {
@@ -455,6 +495,13 @@ namespace gladius
             ImGui::UpdatePlatformWindows();
             ImGui::RenderPlatformWindowsDefault();
             glfwMakeContextCurrent(backup_current_context);
+        }
+#endif
+
+#ifdef ENABLE_UI_TESTING
+        if (m_testEngine)
+        {
+            ImGuiTestEngine_PostSwap(m_testEngine);
         }
 #endif
     }
@@ -826,6 +873,7 @@ namespace gladius
             io.IniFilename = m_iniFileNameStorage.c_str();
         }
 
+        processPendingScreenshot();
         glfwSwapBuffers(m_window);
     }
 
@@ -980,5 +1028,69 @@ namespace gladius
     {
         m_userScale = 1.0f;
         recomputeTotalScale();
+    }
+
+    std::future<bool> GLView::requestScreenshot(const std::string& outputPath)
+    {
+        std::lock_guard<std::mutex> lock(m_screenshotMutex);
+        m_screenshotPath = outputPath;
+        m_screenshotPromise = std::make_shared<std::promise<bool>>();
+        
+        // Ensure UI wakes up if it was idle
+        glfwPostEmptyEvent();
+
+        return m_screenshotPromise->get_future();
+    }
+
+    void GLView::processPendingScreenshot()
+    {
+        std::string currentPath;
+        std::shared_ptr<std::promise<bool>> currentPromise;
+
+        {
+            std::lock_guard<std::mutex> lock(m_screenshotMutex);
+            if (!m_screenshotPromise) {
+                return;
+            }
+            currentPath = m_screenshotPath;
+            currentPromise = m_screenshotPromise;
+            
+            // clear state so we don't capture multiple times
+            m_screenshotPath.clear();
+            m_screenshotPromise.reset();
+        }
+
+        if (!m_window || currentPath.empty()) {
+            currentPromise->set_value(false);
+            return;
+        }
+
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(m_window, &width, &height);
+
+        if (width <= 0 || height <= 0) {
+            currentPromise->set_value(false);
+            return;
+        }
+
+        std::vector<unsigned char> pixels(width * height * 4);
+        
+        // Make sure we're reading from the frame buffer
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+        // OpenGL reads bottom-to-top, lodepng expects top-to-bottom.
+        std::vector<unsigned char> flipped(pixels.size());
+        for (int y = 0; y < height; ++y) {
+            std::copy(pixels.begin() + y * width * 4,
+                      pixels.begin() + (y + 1) * width * 4,
+                      flipped.begin() + (height - 1 - y) * width * 4);
+        }
+
+        unsigned error = lodepng::encode(currentPath, flipped, width, height);
+        if (error) {
+            std::cerr << "Screenshot lodepng encode error " << error << ": " << lodepng_error_text(error) << std::endl;
+        }
+
+        currentPromise->set_value(error == 0);
     }
 }

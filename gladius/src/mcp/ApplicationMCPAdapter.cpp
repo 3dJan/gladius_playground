@@ -1234,3 +1234,62 @@ nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string con
 {
     return m_functionOperationsTool->setProgramSnippet(snippet);
 }
+
+#ifdef ENABLE_UI_TESTING
+#include <imgui.h>
+#undef KeyPress
+#include <imgui_te_engine.h>
+#include <imgui_te_context.h>
+#include "../ui/MainWindow.h"
+#include "../ui/GLView.h"
+#include "../Application.h"
+#include <future>
+#include <chrono>
+
+// We use a shared pointer because the lambda needs to persist, but the test might outlive our function
+static std::string g_last_click_path = "";
+static void static_mcp_ui_click(ImGuiTestContext* ctx)
+{
+    ctx->ItemClick(g_last_click_path.c_str());
+}
+
+static ImGuiTest* g_mcp_ui_click_test = nullptr;
+
+bool gladius::ApplicationMCPAdapter::uiClick(const std::string & path)
+{
+    if (!m_application) return false;
+    auto & mainWindow = m_application->getMainWindow();
+    auto testEngine = mainWindow.getGLView().getTestEngine();
+    if (!testEngine) return false;
+    
+    g_last_click_path = path;
+    
+    if (!g_mcp_ui_click_test) {
+        g_mcp_ui_click_test = ImGuiTestEngine_RegisterTest(testEngine, "MCP", "action_click");
+        g_mcp_ui_click_test->TestFunc = static_mcp_ui_click;
+    }
+    
+    ImGuiTestEngine_QueueTest(testEngine, g_mcp_ui_click_test, 0);
+    return true;
+}
+
+bool gladius::ApplicationMCPAdapter::captureUIScreenshot(const std::string & outputPath)
+{
+    if (!m_application) return false;
+    
+    // Actually, captureUIScreenshot is virtual and needs to be returned synchronously.
+    // requestScreenshot returns a future. We will block and wait for it.
+    auto futureSuccess = m_application->getMainWindow().getGLView().requestScreenshot(outputPath);
+    
+    if (futureSuccess.valid()) {
+        // Wait up to some reasonable time, say 5 seconds.
+        if (futureSuccess.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            return futureSuccess.get();
+        } else {
+            return false; // timeout
+        }
+    }
+
+    return false;
+}
+#endif

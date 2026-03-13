@@ -277,5 +277,10 @@ namespace gladius
                                           std::string const & name) override;
         nlohmann::json deleteLibraryEntry(std::string const & category,
                                           std::string const & name) override;
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(const std::string & path) override;
+        bool captureUIScreenshot(const std::string & outputPath) override;
+#endif
     };
 }

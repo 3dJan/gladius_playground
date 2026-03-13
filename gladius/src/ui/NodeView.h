@@ -189,6 +189,13 @@ namespace gladius::ui
 
         ImVec4 typeToColor(std::type_index tyepIndex);
 
+        bool renderPortPin(nodes::PortId pinId,
+                           bool isInput,
+                           std::type_index typeIndex,
+                           const std::string & iconOrText,
+                           bool asButton = false,
+                           bool isFocused = false);
+
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
                         nodes::VariantType & val);

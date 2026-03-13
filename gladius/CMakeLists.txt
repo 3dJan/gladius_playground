@@ -13,6 +13,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
+option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
+
+if(ENABLE_UI_TESTING)
+    message(STATUS "UI Testing and Automation is ENABLED")
+endif()
 
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "2")

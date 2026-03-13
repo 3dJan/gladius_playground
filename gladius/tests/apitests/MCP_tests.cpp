@@ -221,6 +221,11 @@ namespace gladius::tests
                     deleteLibraryEntry,
                     (std::string const &, std::string const &),
                     (override));
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(const std::string & /*path*/) override { return false; }
+        bool captureUIScreenshot(const std::string & /*outputPath*/) override { return false; }
+#endif
     };
 
     class MCPServerTest : public ::testing::Test

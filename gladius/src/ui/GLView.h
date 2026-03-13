@@ -4,10 +4,12 @@
 
 #include <filesystem>
 #include <functional>
+#include <future>
 
 #include "imgui.h"
 
 struct GLFWwindow;
+struct ImGuiTestEngine;
 
 namespace gladius
 {
@@ -47,6 +49,11 @@ namespace gladius
         void setRenderCallback(const ViewCallBack & func);
 
         void setFileDropCallback(const FileDropCallBack & func);
+
+#ifdef ENABLE_UI_TESTING
+        ImGuiTestEngine* getTestEngine() { return m_testEngine; }
+#endif
+
 
         void applyFullscreenMode();
 
@@ -133,6 +140,9 @@ namespace gladius
         // [[nodiscard]]
         // HWND getNativeWindowHandle();
 
+        // Request a screenshot to be saved at the end of the next rendered frame
+        std::future<bool> requestScreenshot(const std::string& outputPath);
+
       private:
         void init();
         void setGladiusTheme(ImGuiIO & io);
@@ -141,6 +151,7 @@ namespace gladius
         void displayUI();
         void determineUiScale();
         void recomputeTotalScale();
+        void processPendingScreenshot();
 
         static void noOp()
         {
@@ -155,7 +166,9 @@ namespace gladius
         RequestCloseCallBack m_close = noOp;
 
         FileDropCallBack m_fileDrop = noOpFileDrop;
-
+        std::string m_screenshotPath;
+        std::shared_ptr<std::promise<bool>> m_screenshotPromise;
+        std::mutex m_screenshotMutex;
         // applied tri-state fullscreen mode (current native window state)
         FullscreenMode m_appliedFullscreenMode{FullscreenMode::Windowed};
         WindowSettings m_windowSettings;
@@ -175,5 +188,9 @@ namespace gladius
         float m_uiScale = 1.0f;   // total = base * user
         float m_baseScale = 1.0f; // detected from OS/monitor/DPI
         float m_userScale = 1.0f; // user preference, persisted
+        
+#ifdef ENABLE_UI_TESTING
+        ImGuiTestEngine* m_testEngine = nullptr;
+#endif
     };
 }

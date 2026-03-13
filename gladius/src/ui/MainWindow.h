@@ -104,6 +104,11 @@ namespace gladius::ui
             return m_computeAvailable;
         }
 
+        GLView & getGLView()
+        {
+            return m_mainView;
+        }
+
         /**
          * @brief Initialize the shortcut system
          * Registers standard keyboard shortcuts for the application
