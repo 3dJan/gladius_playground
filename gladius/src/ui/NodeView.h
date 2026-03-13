@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../nodes/Model.h"
+#include "CircleNodeRenderer.h"
 #include "FileDialogService.h"
 #include "Style.h"
 
@@ -177,6 +178,7 @@ namespace gladius::ui
 
       private:
         void show(nodes::NodeBase & node);
+        void showCompactNode(nodes::NodeBase & node);
         void header(nodes::NodeBase & node);
         void content(nodes::NodeBase & node);
         void footer(nodes::NodeBase & node);

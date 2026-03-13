@@ -1,6 +1,7 @@
 #include "NodeView.h"
 
 #include "Assembly.h"
+#include "CircleNodeRenderer.h"
 #include "ExportState.h"
 #include "FileChooser.h"
 #include "InputList.h"
@@ -16,6 +17,8 @@
 
 #include "imguinodeeditor.h"
 #include <IconFontCppHeaders/IconsFontAwesome5.h>
+
+#include <cmath>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -87,7 +90,14 @@ namespace gladius::ui
 
     void NodeView::visit(NodeBase & baseNode)
     {
-        show(baseNode);
+        if (circle_node::isEligible(baseNode))
+        {
+            showCompactNode(baseNode);
+        }
+        else
+        {
+            show(baseNode);
+        }
     }
 
     void NodeView::visit(Begin & beginNode)
@@ -464,6 +474,196 @@ namespace gladius::ui
         header(baseNode);
         content(baseNode);
         footer(baseNode);
+    }
+
+    void NodeView::showCompactNode(NodeBase & node)
+    {
+        m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        auto const symbol = circle_node::getOperatorSymbol(node);
+
+        // Determine the node's category color for the border
+        auto const colorIter = m_nodeTypeToColor.find(typeid(node));
+        ImVec4 borderColor = {0.5f, 0.5f, 0.5f, 1.f};
+        if (colorIter != m_nodeTypeToColor.end())
+        {
+            borderColor = colorIter->second;
+        }
+
+        // Collect visible ports
+        struct PinInfo
+        {
+            nodes::PortId id;
+            std::type_index typeIndex;
+            std::string name;
+        };
+        std::vector<PinInfo> inputs;
+        std::vector<PinInfo> outputs;
+
+        for (auto & [name, param] : node.parameter())
+        {
+            if (!param.isVisible() || param.getId() == -1)
+            {
+                continue;
+            }
+            inputs.push_back({param.getId(), param.getTypeIndex(), name});
+        }
+        for (auto & [name, port] : node.getOutputs())
+        {
+            if (!port.isVisible())
+            {
+                continue;
+            }
+            outputs.push_back({port.getId(), port.getTypeIndex(), name});
+        }
+
+        // Scale up label font for better readability in compact nodes
+        constexpr float LABEL_FONT_SCALE = 2.0f;
+        float const fontScale = ImGui::GetIO().FontGlobalScale;
+
+        ImGui::SetWindowFontScale(fontScale * LABEL_FONT_SCALE);
+        ImVec2 const textSize = ImGui::CalcTextSize(symbol.c_str());
+        ImGui::SetWindowFontScale(fontScale);
+
+        ImVec2 const pinSize =
+          ImGui::CalcTextSize(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
+        float const pinHalf = std::max(pinSize.x, pinSize.y) * 0.5f;
+
+        // Size the circle to fit the label plus pin margins.
+        // No inscribed-square inflation needed because the label is centered
+        // and pins are placed on the perimeter via absolute positioning.
+        float const labelPad = 20.f * m_uiScale;
+        float const minSide =
+          std::max(textSize.x + 2.f * pinHalf + labelPad, textSize.y + 2.f * pinHalf + labelPad);
+        float const side = std::max(minSide, 4.f * pinHalf);
+        float const halfSide = side * 0.5f;
+
+        float const nodePad = 4.f;
+
+        // Push rounding = half the outer side to turn the square into a circle
+        float const outerHalf = (side + 2.f * nodePad) * 0.5f;
+        ed::PushStyleVar(ed::StyleVar_NodeRounding, outerHalf);
+        ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 2.5f * m_uiScale);
+        ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(nodePad, nodePad, nodePad, nodePad));
+        ed::PushStyleColor(ed::StyleColor_NodeBorder, borderColor);
+        ed::PushStyleColor(
+          ed::StyleColor_NodeBg,
+          ImVec4(borderColor.x * 0.12f, borderColor.y * 0.12f, borderColor.z * 0.12f, 0.95f));
+
+        ed::SetNodeZPosition(node.getId(), 1.f);
+        ed::BeginNode(node.getId());
+        ImGui::PushID(node.getId());
+
+        // Establish the circle size with an invisible spacer.
+        ImVec2 const origin = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(side, side));
+
+        ImVec2 const center(origin.x + halfSide, origin.y + halfSide);
+        float const pinR = halfSide - pinHalf; // pin center sits on this radius
+
+        // Compute pin screen position for a given angle (math convention:
+        // 0 = right, counter-clockwise, Y flipped for screen coords).
+        auto pinScreenPos = [&](float angle) -> ImVec2
+        {
+            return {center.x + pinR * std::cos(angle) - pinSize.x * 0.5f,
+                    center.y - pinR * std::sin(angle) - pinSize.y * 0.5f};
+        };
+
+        // Port angle helpers.
+        // Inputs on left semicircle, outputs on right semicircle.
+        // 1 port  → horizontal center (π or 0)
+        // 2 ports → ±π/3 from horizontal (upper and lower)
+        constexpr float PI = 3.14159265f;
+        auto inputAngle = [](int index, int count) -> float
+        {
+            if (count == 1)
+            {
+                return PI;
+            }
+            return (index == 0) ? (PI - PI / 3.f) : (PI + PI / 3.f);
+        };
+        auto outputAngle = [](int index, int count) -> float
+        {
+            if (count == 1)
+            {
+                return 0.f;
+            }
+            return (index == 0) ? (PI / 3.f) : (-PI / 3.f);
+        };
+
+        // Render input pins on the left perimeter
+        for (int i = 0; i < static_cast<int>(inputs.size()); ++i)
+        {
+            auto const & pin = inputs[i];
+            ImGui::SetCursorScreenPos(
+              pinScreenPos(inputAngle(i, static_cast<int>(inputs.size()))));
+
+            ed::BeginPin(pin.id, ed::PinKind::Input);
+            ImGui::PushStyleColor(ImGuiCol_Text, circle_node::portColor(pin.typeIndex));
+            ImGui::TextUnformatted(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
+            ImGui::PopStyleColor();
+            ed::EndPin();
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip(
+                  "%s (%s)", pin.name.c_str(), typeToString(pin.typeIndex).c_str());
+            }
+        }
+
+        // Render label at center
+        ImGui::SetCursorScreenPos(
+          {center.x - textSize.x * 0.5f, center.y - textSize.y * 0.5f});
+        ImGui::SetWindowFontScale(fontScale * LABEL_FONT_SCALE);
+        ImGui::TextUnformatted(symbol.c_str());
+        ImGui::SetWindowFontScale(fontScale);
+
+        // Render output pins on the right perimeter
+        for (int i = 0; i < static_cast<int>(outputs.size()); ++i)
+        {
+            auto const & pin = outputs[i];
+            ImGui::SetCursorScreenPos(
+              pinScreenPos(outputAngle(i, static_cast<int>(outputs.size()))));
+
+            ed::BeginPin(pin.id, ed::PinKind::Output);
+            ImGui::PushStyleColor(ImGuiCol_Text, circle_node::portColor(pin.typeIndex));
+            ImGui::TextUnformatted(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
+            ImGui::PopStyleColor();
+            ed::EndPin();
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip(
+                  "%s (%s)", pin.name.c_str(), typeToString(pin.typeIndex).c_str());
+            }
+        }
+
+        // Render links for connected inputs
+        for (auto & [name, param] : node.parameter())
+        {
+            if (param.getSource().has_value())
+            {
+                ImVec4 const linkColor = param.isValid()
+                                           ? typeToColor(param.getTypeIndex())
+                                           : LinkColors::ColorInvalid;
+                ed::Link(++m_currentLinkId,
+                         param.getSource().value().portId,
+                         param.getId(),
+                         linkColor);
+            }
+        }
+
+        ImGui::PopID();
+        ed::EndNode();
+
+        // Tooltip with full node name on hover
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("%s", node.getDisplayName().c_str());
+        }
+
+        ed::PopStyleColor(2);
+        ed::PopStyleVar(3);
     }
 
     void NodeView::header(NodeBase & baseNode)
