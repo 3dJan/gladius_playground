@@ -279,6 +279,7 @@ namespace gladius
                                           std::string const & name) override;
 
 #ifdef ENABLE_UI_TESTING
+        std::vector<std::string> uiDumpItems(const std::string & parentPath) override;
         bool uiClick(const std::string & path) override;
         bool captureUIScreenshot(const std::string & outputPath) override;
 #endif

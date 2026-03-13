@@ -556,6 +556,9 @@ namespace gladius
         /// @return True if the click was successfully queued.
         virtual bool uiClick(const std::string & path) = 0;
 
+        /// @brief Dump all items within a parent path.
+        virtual std::vector<std::string> uiDumpItems(const std::string & parentPath) = 0;
+
         /// @brief Capture a screenshot of the current UI.
         /// @param outputPath The file path where the screenshot will be saved.
         /// @return True if the screenshot was saved successfully.

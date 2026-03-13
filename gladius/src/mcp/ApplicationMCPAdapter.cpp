@@ -1248,12 +1248,96 @@ nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string con
 
 // We use a shared pointer because the lambda needs to persist, but the test might outlive our function
 static std::string g_last_click_path = "";
+static std::shared_ptr<std::promise<bool>> g_mcp_click_promise;
 static void static_mcp_ui_click(ImGuiTestContext* ctx)
 {
-    ctx->ItemClick(g_last_click_path.c_str());
+    // Use NoError so we don't crash the entire app if the item path is invalid
+    ctx->ItemClick(g_last_click_path.c_str(), 0, ImGuiTestOpFlags_NoError);
+
+    // Give the UI a few frames to process the click, trigger callbacks, and build the new layout.
+    ctx->Yield(3);
+
+    if (g_mcp_click_promise) {
+        g_mcp_click_promise->set_value(true);
+        g_mcp_click_promise.reset();
+    }
 }
 
 static ImGuiTest* g_mcp_ui_click_test = nullptr;
+
+static std::shared_ptr<std::promise<std::vector<std::string>>> g_mcp_dump_promise;
+static std::string g_mcp_dump_path;
+static void static_mcp_ui_dump(ImGuiTestContext* ctx)
+{
+    std::vector<std::string> results;
+    
+    // Give ImGui one frame to settle layout before dumping
+    ctx->Yield(1);
+
+    if (g_mcp_dump_path.empty()) {
+        ImGuiContext* imgui_ctx = ImGui::GetCurrentContext();
+        for (int i = 0; i < imgui_ctx->Windows.Size; i++) {
+            if (auto* window = imgui_ctx->Windows[i]) {
+                if (window->Name) {
+                    ImGuiTestItemList out_list;
+                    ctx->GatherItems(&out_list, ImGuiTestRef(window->Name), -1);
+                    for (int j = 0; j < out_list.GetSize(); j++) {
+                        const ImGuiTestItemInfo* item = out_list.GetByIndex(j);
+                        if (item && item->DebugLabel[0] != '\0') {
+                            results.push_back(std::string(window->Name) + "/" + item->DebugLabel);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        ImGuiTestItemList out_list;
+        ctx->GatherItems(&out_list, ImGuiTestRef(g_mcp_dump_path.c_str()), -1);
+        for (int i = 0; i < out_list.GetSize(); i++)
+        {
+            const ImGuiTestItemInfo* item = out_list.GetByIndex(i);
+            if (item && item->DebugLabel[0] != '\0')
+            {
+                results.push_back(item->DebugLabel);
+            }
+        }
+    }
+    
+    if (g_mcp_dump_promise) {
+        g_mcp_dump_promise->set_value(results);
+        g_mcp_dump_promise.reset();
+    }
+}
+
+static ImGuiTest* g_mcp_ui_dump_test = nullptr;
+
+std::vector<std::string> gladius::ApplicationMCPAdapter::uiDumpItems(const std::string & parentPath)
+{
+    if (!m_application) return {};
+    auto & mainWindow = m_application->getMainWindow();
+    auto testEngine = mainWindow.getGLView().getTestEngine();
+    if (!testEngine) return {};
+    
+    g_mcp_dump_path = parentPath;
+    g_mcp_dump_promise = std::make_shared<std::promise<std::vector<std::string>>>();
+    auto future = g_mcp_dump_promise->get_future();
+    
+    if (!g_mcp_ui_dump_test) {
+        g_mcp_ui_dump_test = ImGuiTestEngine_RegisterTest(testEngine, "MCP", "action_dump");
+        g_mcp_ui_dump_test->TestFunc = static_mcp_ui_dump;
+    }
+    
+    ImGuiTestEngine_QueueTest(testEngine, g_mcp_ui_dump_test, 0);
+    
+    // Wait for the result
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        return future.get();
+    } else {
+        std::cerr << "Timeout waiting for UI dump test to complete\n";
+        g_mcp_dump_promise.reset();
+        return {};
+    }
+}
 
 bool gladius::ApplicationMCPAdapter::uiClick(const std::string & path)
 {
@@ -1263,6 +1347,8 @@ bool gladius::ApplicationMCPAdapter::uiClick(const std::string & path)
     if (!testEngine) return false;
     
     g_last_click_path = path;
+    g_mcp_click_promise = std::make_shared<std::promise<bool>>();
+    auto future = g_mcp_click_promise->get_future();
     
     if (!g_mcp_ui_click_test) {
         g_mcp_ui_click_test = ImGuiTestEngine_RegisterTest(testEngine, "MCP", "action_click");
@@ -1270,7 +1356,15 @@ bool gladius::ApplicationMCPAdapter::uiClick(const std::string & path)
     }
     
     ImGuiTestEngine_QueueTest(testEngine, g_mcp_ui_click_test, 0);
-    return true;
+    
+    // Wait for the UI processing frames to finish
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        return future.get();
+    } else {
+        std::cerr << "Timeout waiting for UI click test\n";
+        g_mcp_click_promise.reset();
+        return false;
+    }
 }
 
 bool gladius::ApplicationMCPAdapter::captureUIScreenshot(const std::string & outputPath)

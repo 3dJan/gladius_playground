@@ -389,6 +389,11 @@ namespace gladius::tests
             return false;
         }
 
+        std::vector<std::string> uiDumpItems(const std::string & /*parentPath*/) override
+        {
+            return {};
+        }
+
         bool captureUIScreenshot(const std::string & /*outputPath*/) override
         {
             return false;
