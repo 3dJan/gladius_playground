@@ -361,8 +361,10 @@ namespace gladius::ui
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
 
-        // One-time auto layout helper state
-        bool m_pendingAutoLayout{false};
+        // One-time auto layout helper state.
+        // Counts down frames before executing layout so that the node editor
+        // has had a chance to compute actual node sizes (frame 0 = inactive).
+        int m_pendingAutoLayoutFrames{0};
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};

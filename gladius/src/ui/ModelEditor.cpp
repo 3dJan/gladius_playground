@@ -52,7 +52,7 @@ namespace gladius::ui
         /// Horizontal offset when placing a new node relative to a selected node
         constexpr float kNodePlacementOffsetX = 400.0f;
         /// Default fallback node size when actual size is unavailable
-        constexpr ImVec2 kDefaultNodeSize{500.0f, 400.0f};
+        constexpr ImVec2 kDefaultNodeSize{150.0f, 100.0f};
         /// Width for input text fields in dialogs
         constexpr float kInputTextWidth = 260.0f;
         /// Standard button width in dialogs
@@ -923,11 +923,11 @@ namespace gladius::ui
         // but only once per function to preserve user edits.
         if (m_currentModel)
         {
-            m_pendingAutoLayout = m_currentModel->needsAutoLayout();
+            m_pendingAutoLayoutFrames = m_currentModel->needsAutoLayout() ? 2 : 0;
         }
         else
         {
-            m_pendingAutoLayout = false;
+            m_pendingAutoLayoutFrames = 0;
         }
     }
 
@@ -1500,15 +1500,18 @@ namespace gladius::ui
                     // that nodes are rendered at their layouted positions on
                     // this very frame. This ensures ed::End() computes correct
                     // node bounds immediately, which NavigateToContent relies on.
-                    if (m_pendingAutoLayout)
+                    if (m_pendingAutoLayoutFrames > 0)
                     {
-                        m_pendingAutoLayout = false;
-                        autoLayout();
+                        --m_pendingAutoLayoutFrames;
+                        if (m_pendingAutoLayoutFrames == 0)
+                        {
+                            autoLayout();
 
-                        // Keep m_nodePositionsNeedUpdate=true so that
-                        // applyNodePositions() (after ed::End) can reliably
-                        // push the layouted NodeBase::screenPos values into the
-                        // node editor context on first visit.
+                            // Keep m_nodePositionsNeedUpdate=true so that
+                            // applyNodePositions() (after ed::End) can reliably
+                            // push the layouted NodeBase::screenPos values into
+                            // the node editor context on first visit.
+                        }
                     }
 
                     m_currentModel->visitNodes(m_nodeViewVisitor);
