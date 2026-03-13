@@ -96,31 +96,70 @@ namespace gladius::ui
         
         // Use a fixed width table to constrain the node nicely
         if (ImGui::BeginTable("beginNodeTable",
-                              3,
+                              4,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(240.f * m_uiScale, 0.f)))
+                              ImVec2(280.f * m_uiScale, 0.f)))
         {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 60.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 40.f * m_uiScale);
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 30.f * m_uiScale);
 
             auto outputs = beginNode.getOutputs();
+            std::optional<std::string> paramToRemove;
+            std::optional<std::pair<std::string, std::string>> paramToRename;
+
             for (auto & output : outputs)
             {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(output.first.c_str());
+                
+                ImGui::PushID(output.first.c_str());
+                std::string currentName = output.first;
+                
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText("##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
+                {
+                    if (currentName != output.first && !currentName.empty())
+                    {
+                        paramToRename = {output.first, currentName};
+                    }
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != output.first && !currentName.empty())
+                {
+                    paramToRename = {output.first, currentName};
+                }
+                
                 ImGui::TableNextColumn();
 
                 std::type_index typeIndex = output.second.getTypeIndex();
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
+                
+                ImGui::TableNextColumn();
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
+                {
+                    paramToRemove = output.first;
+                }
+
                 ImGui::TableNextColumn();
                 renderPortPin(output.second.getId(),
                               false,
                               typeIndex,
                               reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                ImGui::PopID();
             }
             ImGui::EndTable();
+
+            if (paramToRemove)
+            {
+                m_modelEditor->currentModel()->removeArgument(*paramToRemove);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToRename)
+            {
+                m_modelEditor->currentModel()->renameArgument(paramToRename->first, paramToRename->second);
+                m_modelEditor->markModelAsModified();
+            }
         }
         
         // Wrap the CollapsingHeader in a dummy fixed-width region by using BeginChild
@@ -161,6 +200,9 @@ namespace gladius::ui
             ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 100.f * m_uiScale);
 
+            std::optional<std::string> paramToRemove;
+            std::optional<std::pair<std::string, std::string>> paramToRename;
+
             for (auto & input : endNode.parameter())
             {
                 ImGui::TableNextRow();
@@ -169,17 +211,32 @@ namespace gladius::ui
                               true,
                               input.second.getTypeIndex(),
                               reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(input.first.c_str());
+
+                ImGui::PushID(input.first.c_str());
+                std::string currentName = input.first;
+                
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText("##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
+                {
+                    if (currentName != input.first && !currentName.empty())
+                    {
+                        paramToRename = {input.first, currentName};
+                    }
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != input.first && !currentName.empty())
+                {
+                    paramToRename = {input.first, currentName};
+                }
+
                 ImGui::TableNextColumn();
-                // Remove
-                // if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
-                // {
-                //     // ToDo: remove input
-                // }
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
+                {
+                    paramToRemove = input.first;
+                }
                 ImGui::TableNextColumn();
                 std::type_index typeIndex = input.second.getTypeIndex();
-                // typeControl("", typeIndex);
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
                 if (input.second.getSource().has_value())
                 {
@@ -192,6 +249,7 @@ namespace gladius::ui
                              input.second.getId(),
                              linkColor);
                 }
+                ImGui::PopID();
             }
 
             ImGui::TableNextRow();
@@ -210,16 +268,27 @@ namespace gladius::ui
                 typeControl("type", typeIndex);
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
                 {
-                    m_modelEditor->currentModel()->addFunctionOutput(
-                      newParameterName, createVariantTypeFromTypeIndex(typeIndex));
-
-                    m_assembly->updateInputsAndOutputs();
-                    m_parameterChanged = true;
-                    m_modelChanged = true;
+                    if (!newParameterName.empty())
+                    {
+                        m_modelEditor->currentModel()->addFunctionOutput(
+                          newParameterName, nodes::VariantParameter(nodes::VariantType{0.f}));
+                        m_modelEditor->markModelAsModified();
+                    }
                 }
                 ImGui::PopID();
             }
             ImGui::EndTable();
+
+            if (paramToRemove)
+            {
+                m_modelEditor->currentModel()->removeFunctionOutput(*paramToRemove);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToRename)
+            {
+                m_modelEditor->currentModel()->renameFunctionOutput(paramToRename->first, paramToRename->second);
+                m_modelEditor->markModelAsModified();
+            }
         }
 
         footer(endNode);
