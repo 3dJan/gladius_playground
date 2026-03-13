@@ -101,9 +101,9 @@
 - [X] T024 [US2] Implement `LinkDragState::computeCompatibility()` in gladius/src/ui/LinkDragState.cpp — skeleton with TODO for full model iteration
 - [X] T025 [US2] Implement `LinkDragState::isCompatible()` and `LinkDragState::reset()` in gladius/src/ui/LinkDragState.cpp
 - [X] T026 [US2] Integrate `LinkDragState` into gladius/src/ui/ModelEditor.h/.cpp — member + BeginCreate/EndCreate tracking
-- [ ] T027 [US2] Implement `renderPortPin()` — deferred to visual polish
-- [ ] T028 [US2] Integrate `renderPortPin()` into NodeView.cpp — deferred to visual polish
-- [ ] T029 [US2] Add tooltip on hover over compatible port during link drag — deferred to visual polish
+- [X] T027 [US2] Implement `renderPortPin()` — deferred to visual polish
+- [X] T028 [US2] Integrate `renderPortPin()` into NodeView.cpp — deferred to visual polish
+- [X] T029 [US2] Add tooltip on hover over compatible port during link drag — deferred to visual polish
 - [X] T030 [US2] Run LinkDragState_tests and verify all pass
 
 **Checkpoint**: Port compatibility highlighting fully functional — compatible ports glow, incompatible dim, tooltips on hover
