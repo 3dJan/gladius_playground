@@ -1072,6 +1072,11 @@ namespace gladius::ui
               }
 
               const auto parameterModifiedByModelEditor = m_modelEditor.showAndEdit();
+              // T047: Route parameter changes through throttle
+              if (parameterModifiedByModelEditor)
+              {
+                  m_parameterThrottle.onParameterChanged();
+              }
               m_parameterDirty = parameterModifiedByModelEditor || m_parameterDirty;
               m_dirty = m_parameterDirty || m_dirty;
               m_contoursDirty = m_parameterDirty || m_contoursDirty;
@@ -1097,6 +1102,7 @@ namespace gladius::ui
               if (compileRequested)
               {
                   refreshModel();
+                  m_parameterThrottle.reset(); // Full compile resets throttle state
                   // If compilation was successfully launched, the async worker
                   // handles parameter updates — skip the redundant main-thread path
                   // that would block on Queue.finish() while the worker runs.
@@ -2476,9 +2482,13 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
-            m_doc->updateParameter();
-            m_renderWindow.invalidateViewDueToParameterChange();
-            m_parameterDirty = false;
+            // T047: Only update parameters when throttle allows (debounce interval expired)
+            if (m_parameterThrottle.shouldRecompile())
+            {
+                m_doc->updateParameter();
+                m_renderWindow.invalidateViewDueToParameterChange();
+                m_parameterDirty = false;
+            }
         }
         updateContours();
     }

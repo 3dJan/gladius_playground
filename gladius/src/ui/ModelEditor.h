@@ -10,6 +10,7 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "LibraryDragPayload.h"
+#include "LinkDragState.h"
 #include "NodeClipboard.h"
 #include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
@@ -74,6 +75,9 @@ namespace gladius::ui
         [[nodiscard]] bool modelWasModified() const;
 
         [[nodiscard]] bool isCompileRequested() const;
+
+        /// Access the current link drag state for port compatibility rendering.
+        [[nodiscard]] LinkDragState const & linkDragState() const { return m_linkDragState; }
 
         void markModelAsModified();
         void markModelAsUpToDate();
@@ -290,6 +294,7 @@ namespace gladius::ui
         static void noOp() {};
         PopupMenuFunction m_popupMenuFunction = noOp;
         NodeView m_nodeViewVisitor;
+        LinkDragState m_linkDragState;
 
         bool m_modelWasModified{false};
         bool m_outlineRenaming{true};

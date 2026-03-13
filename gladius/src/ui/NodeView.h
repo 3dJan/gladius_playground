@@ -323,6 +323,9 @@ namespace gladius::ui
         nodes::NodeId m_asyncFileDialogNodeId{0};  ///< Node whose filename is being edited
         std::string m_asyncFileDialogParamName;    ///< Parameter name being edited
 
+        /// T052: Function selection search filter
+        std::string m_functionSearchFilter;
+
         ColumnWidths & getOrCreateColumnWidths(nodes::NodeId nodeId);
     };
 } // namespace gladius::ui

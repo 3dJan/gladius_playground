@@ -6,6 +6,7 @@
 #include "InputList.h"
 #include "LinkColors.h"
 #include "ModelEditor.h"
+#include "NumericWidgets.h"
 #include "Parameter.h"
 #include "Style.h"
 #include "Widgets.h"
@@ -93,22 +94,23 @@ namespace gladius::ui
     void NodeView::visit(Begin & beginNode)
     {
         header(beginNode);
-        
-        // Use a fixed width table to constrain the node nicely
         if (ImGui::BeginTable("beginNodeTable",
                               3,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(240.f * m_uiScale, 0.f)))
+                              ImVec2(0.f, 0.f)))
         {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
-            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 30.f * m_uiScale);
+            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 20.f * m_uiScale);
 
             auto outputs = beginNode.getOutputs();
+            int rowIndex = 0;
             for (auto & output : outputs)
             {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
+
+                ImGui::PushID(rowIndex);
                 ImGui::TextUnformatted(output.first.c_str());
                 ImGui::TableNextColumn();
 
@@ -121,30 +123,36 @@ namespace gladius::ui
                 ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                 ImGui::PopStyleColor();
                 ed::EndPin();
+                ImGui::PopID();
+                ++rowIndex;
             }
-            ImGui::EndTable();
-        }
-        
-        // Wrap the CollapsingHeader in a dummy fixed-width region by using BeginChild
-        // or just use TreeNode without the Framed flag to prevent horizontal stretching
-        if (ImGui::TreeNodeEx("Add Argument", 0))
-        {
-            ImGui::PushID("AddArgument");
-            auto & newParameterName = m_newChannelProperties[beginNode.getId()].name;
-            ImGui::SetNextItemWidth(100.f * m_uiScale);
-            ImGui::InputText("name", &newParameterName);
-            std::type_index & typeIndex = m_newChannelProperties[beginNode.getId()].typeIndex;
-            typeControl("type", typeIndex);
-            if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(200.f * m_uiScale);
+            if (ImGui::CollapsingHeader("Add Argument", ImGuiTreeNodeFlags_Framed))
             {
-                m_modelEditor->currentModel()->addArgument(
-                  newParameterName, createVariantTypeFromTypeIndex(typeIndex));
-                m_assembly->updateInputsAndOutputs();
-                m_parameterChanged = true;
-                m_modelChanged = true;
+                ImGui::PushID("AddArgument");
+                auto & newParameterName = m_newChannelProperties[beginNode.getId()].name;
+                ImGui::SetNextItemWidth(100.f * m_uiScale);
+                ImGui::InputText("name", &newParameterName);
+                // ImGui::SameLine();
+                std::type_index & typeIndex = m_newChannelProperties[beginNode.getId()].typeIndex;
+                typeControl("type", typeIndex);
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
+                {
+                    // TODO: check if name is unique and valid
+
+                    m_modelEditor->currentModel()->addArgument(
+                      newParameterName, createVariantTypeFromTypeIndex(typeIndex));
+                    m_assembly->updateInputsAndOutputs();
+                    m_parameterChanged = true;
+                    m_modelChanged = true;
+                }
+                ImGui::PopID();
             }
-            ImGui::PopID();
-            ImGui::TreePop();
+
+            ImGui::EndTable();
         }
 
         footer(beginNode);
@@ -154,14 +162,13 @@ namespace gladius::ui
     {
         header(endNode);
         if (ImGui::BeginTable("beginNodeTable",
-                              4,
+                              3,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(400 * m_uiScale, 100 * m_uiScale)))
+                              ImVec2(0.f, 0.f)))
         {
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 20.f * m_uiScale);
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 200.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 100.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
 
             for (auto & input : endNode.parameter())
             {
@@ -174,12 +181,6 @@ namespace gladius::ui
                 ed::EndPin();
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(input.first.c_str());
-                ImGui::TableNextColumn();
-                // Remove
-                // if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
-                // {
-                //     // ToDo: remove input
-                // }
                 ImGui::TableNextColumn();
                 std::type_index typeIndex = input.second.getTypeIndex();
                 // typeControl("", typeIndex);
@@ -365,14 +366,16 @@ namespace gladius::ui
     {
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
-        const auto colorIter = m_nodeTypeToColor.find(typeid(baseNode));
+        // T032/T034: Apply category-colored rounded node style
+        auto const colorIter = m_nodeTypeToColor.find(typeid(baseNode));
         m_popStyle = false;
         if (colorIter != std::end(m_nodeTypeToColor))
         {
-            const auto color = colorIter->second;
-            ed::PushStyleColor(ed::StyleColor_NodeBorder, color);
+            auto const color = colorIter->second;
+            NodeRenderConfig const config{4.f, 20.f};
+            pushNodeStyle(config, color);
             ed::PushStyleColor(ed::StyleColor_NodeBg,
-                               ImColor(color.x * 0.1f, color.y * 0.1f, color.z * 0.1f, 0.9f));
+                               ImColor(color.x * 0.25f, color.y * 0.25f, color.z * 0.25f, 0.9f));
             m_popStyle = true;
         }
 
@@ -380,8 +383,11 @@ namespace gladius::ui
         ed::BeginNode(baseNode.getId());
         ImGui::PushID(baseNode.getId());
 
-        ImGui::PushItemWidth(150 * m_uiScale);
+        // T031: Content-based width instead of fixed 150px
         std::string displayName = baseNode.getDisplayName();
+        float const nameWidth = ImGui::CalcTextSize(displayName.c_str()).x;
+        float const minWidth = computeMinNodeWidth(nameWidth, 100.f * m_uiScale, m_uiScale);
+        ImGui::PushItemWidth(minWidth);
         if (ImGui::InputText("", &displayName))
         {
             if (displayName.empty())
@@ -1083,6 +1089,34 @@ namespace gladius::ui
 
     void NodeView::functionCallControls(nodes::FunctionCall & node)
     {
+        // T050: Display referenced function name prominently
+        auto const funcId = node.getFunctionId();
+        auto const & functions = m_assembly->getFunctions();
+        auto const funcIt = functions.find(funcId);
+        if (funcIt != functions.end())
+        {
+            auto const funcName = funcIt->second->getDisplayName().value_or(
+              fmt::format("Function #{}", funcId));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.85f, 0.5f, 1.0f));
+            ImGui::TextUnformatted(funcName.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        // T051: Navigate to referenced function graph
+        if (funcIt != functions.end())
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(reinterpret_cast<char const *>(ICON_FA_ARROW_RIGHT)))
+            {
+                m_modelEditor->navigateToFunction(funcId, node.getId());
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Open function graph");
+            }
+        }
+
+        ImGui::SameLine();
         // Compact icon button that opens a popup menu with actions
         if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_ELLIPSIS_H)))
         {
@@ -1416,7 +1450,8 @@ namespace gladius::ui
 
         if (m_popStyle)
         {
-            ed::PopStyleColor(2); // We push 2 colors in header(), so pop 2 here
+            ed::PopStyleColor(1); // Pop NodeBg pushed in header()
+            popNodeStyle();       // Pops NodeBorder color + NodeRounding/NodeBorderWidth vars
         }
         ImGui::PopID();
 
@@ -1543,9 +1578,7 @@ namespace gladius::ui
             {
             case ContentType::Length:
             {
-                std::string formatString{"%.3f "};
-                changed = ui::floatEdit(parameter.first, *pval);
-                // changed = ImGui::DragFloat(parameter.first.c_str(), pval, increment);
+                changed = adaptiveDragFloat(parameter.first.c_str(), pval, ContentType::Length);
                 break;
             }
             case ContentType::Angle:
@@ -1555,7 +1588,7 @@ namespace gladius::ui
             }
             default:
             {
-                changed = ImGui::DragFloat(parameter.first.c_str(), pval, increment);
+                changed = adaptiveDragFloat(parameter.first.c_str(), pval, parameter.second.getContentType());
                 break;
             }
             }
@@ -1605,9 +1638,9 @@ namespace gladius::ui
 
             if (parameter.second.getContentType() == ContentType::Length)
             {
-                changed |= ImGui::DragFloat("x", &pval->x, increment);
-                changed |= ImGui::DragFloat("y", &pval->y, increment);
-                changed |= ImGui::DragFloat("z", &pval->z, increment);
+                changed |= adaptiveDragFloat("x", &pval->x, ContentType::Length);
+                changed |= adaptiveDragFloat("y", &pval->y, ContentType::Length);
+                changed |= adaptiveDragFloat("z", &pval->z, ContentType::Length);
             }
             else if (parameter.second.getContentType() == ContentType::Color)
             {
@@ -1621,9 +1654,9 @@ namespace gladius::ui
             }
             else
             {
-                changed |= ImGui::DragFloat("x", &pval->x, increment);
-                changed |= ImGui::DragFloat("y", &pval->y, increment);
-                changed |= ImGui::DragFloat("z", &pval->z, increment);
+                changed |= adaptiveDragFloat("x", &pval->x, parameter.second.getContentType());
+                changed |= adaptiveDragFloat("y", &pval->y, parameter.second.getContentType());
+                changed |= adaptiveDragFloat("z", &pval->z, parameter.second.getContentType());
             }
 
             bool const modifiable = parameter.second.isModifiable();
@@ -1739,11 +1772,30 @@ namespace gladius::ui
 
                       if (ImGui::BeginPopup("Functions"))
                       {
+                          // T052: Searchable function selection
+                          ImGui::SetNextItemWidth(200.f);
+                          ImGui::InputTextWithHint("##funcFilter", "Search...", &m_functionSearchFilter);
+                          ImGui::Separator();
+
                           for (auto & [id, model] : m_assembly->getFunctions())
                           {
-                              if (ImGui::Button(model->getDisplayName()
-                                                  .value_or(fmt::format("# {}", id))
-                                                  .c_str()))
+                              auto const name = model->getDisplayName()
+                                                  .value_or(fmt::format("# {}", id));
+
+                              // Filter by search text (case-insensitive)
+                              if (!m_functionSearchFilter.empty())
+                              {
+                                  auto lowerName = name;
+                                  auto lowerFilter = m_functionSearchFilter;
+                                  std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                                  std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
+                                  if (lowerName.find(lowerFilter) == std::string::npos)
+                                  {
+                                      continue;
+                                  }
+                              }
+
+                              if (ImGui::Button(name.c_str()))
                               {
                                   nodes::FunctionCall * functionCallNode =
                                     dynamic_cast<nodes::FunctionCall *>(&node);
@@ -1905,6 +1957,7 @@ namespace gladius::ui
         }
 
         ImGui::Indent(20 * m_uiScale);
+        bool handled = false;
         if (parameter.first != FieldNames::Shape)
         {
             if (parameter.second.getTypeIndex() == ParameterTypeIndex::Int)

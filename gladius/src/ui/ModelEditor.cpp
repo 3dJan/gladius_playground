@@ -820,6 +820,13 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
+            // Start tracking link drag state for port compatibility highlighting
+            if (!m_linkDragState.isDragging)
+            {
+                m_linkDragState.isDragging = true;
+                // Compatibility will be computed when we know the source port
+            }
+
             ed::PinId inputPinId, outputPinId;
             if (ed::QueryNewLink(&inputPinId, &outputPinId))
             {
@@ -850,6 +857,14 @@ namespace gladius::ui
             // to the dedicated helper that opens the Create Node popup when
             // appropriate.
             onQueryNewNode();
+        }
+        else
+        {
+            // Link drag ended or was cancelled — reset state
+            if (m_linkDragState.isDragging)
+            {
+                m_linkDragState.reset();
+            }
         }
         ed::EndCreate();
 
