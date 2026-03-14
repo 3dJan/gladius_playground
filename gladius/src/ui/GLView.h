@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../gpgpu.h"
+#include "Theme.h"
 
 #include <filesystem>
 #include <functional>
@@ -143,6 +144,20 @@ namespace gladius
         // Request a screenshot to be saved at the end of the next rendered frame
         std::future<bool> requestScreenshot(const std::string& outputPath);
 
+        /// Get the current theme
+        [[nodiscard]] ThemeId getCurrentTheme() const
+        {
+            return m_currentTheme;
+        }
+
+        /// Change the active theme (takes effect immediately)
+        void setCurrentTheme(ThemeId theme)
+        {
+            m_currentTheme = theme;
+            applyTheme(m_currentTheme);
+            m_originalStyle = ImGui::GetStyle();
+        }
+
       private:
         void init();
         void setGladiusTheme(ImGuiIO & io);
@@ -188,6 +203,7 @@ namespace gladius
         float m_uiScale = 1.0f;   // total = base * user
         float m_baseScale = 1.0f; // detected from OS/monitor/DPI
         float m_userScale = 1.0f; // user preference, persisted
+        ThemeId m_currentTheme{ThemeId::Modern}; // active theme
         
 #ifdef ENABLE_UI_TESTING
         ImGuiTestEngine* m_testEngine = nullptr;
