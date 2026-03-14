@@ -14,6 +14,8 @@ Auto-generated from all feature plans. Last updated: 2025-12-29
 - In-memory graph model (`nodes::Assembly`, `nodes::Model`) persisted as 3MF files (022-mcp-snippet-extensions)
 - C++20 + ImGui, imgui-node-editor (vcpkg: `unofficial::imgui-node-editor`), lib3mf, OpenCL 1.2+ (023-node-editor-ux)
 - 3MF files (widget layout mode persistence in parameter metadata) (023-node-editor-ux)
+- C++20 + ImGui, imgui-node-editor, OpenGL, OpenCL, lib3mf, fmt (023-node-editor-ux)
+- 3MF document data plus node/parameter metadata persisted with the document; no new external storage (023-node-editor-ux)
 
 - C++20 + OpenCL 1.2+, existing gladius compute infrastructure (001-spatial-sdf)
 
@@ -33,9 +35,9 @@ tests/
 C++20: Follow standard conventions
 
 ## Recent Changes
+- 023-node-editor-ux: Added C++20 + ImGui, imgui-node-editor, OpenGL, OpenCL, lib3mf, fmt
 - 023-node-editor-ux: Added C++20 + ImGui, imgui-node-editor (vcpkg: `unofficial::imgui-node-editor`), lib3mf, OpenCL 1.2+
 - 023-node-editor-ux: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
-- 022-mcp-snippet-extensions: Added C++20 (Clang on Linux) + lib3mf (3MF file handling), ImGui (UI), nlohmann::json (MCP protocol), GTest/GMock (testing)
 
 
 <!-- MANUAL ADDITIONS START -->
