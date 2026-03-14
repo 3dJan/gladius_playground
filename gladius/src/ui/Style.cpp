@@ -107,7 +107,7 @@ namespace gladius::ui
     {
         float constexpr PADDING = 40.f;
         float const measuredWidth = std::max(headerTextWidth, contentWidth) + PADDING * uiScale;
-        return std::max(measuredWidth, sharedNodeMetrics().minimumNodeWidth * uiScale);
+        return std::max(measuredWidth, sharedNodeMetrics().minimumNodeWidth * uiScale * 1.1f);
     }
 
     ImVec4 generateColorFromTypeTag(std::string const & typeTag)

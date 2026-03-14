@@ -129,19 +129,19 @@ namespace gladius::ui
             auto const typeIndex = parameter.getTypeIndex();
             if (typeIndex == nodes::ParameterTypeIndex::Float3)
             {
-                return (parameter.getContentType() == ContentType::Color ? 240.f : 320.f) * uiScale;
+                return (parameter.getContentType() == ContentType::Color ? 260.f : 340.f) * uiScale;
             }
             if (typeIndex == nodes::ParameterTypeIndex::Matrix4)
             {
-                return 340.f * uiScale;
+                return 360.f * uiScale;
             }
             if (typeIndex == nodes::ParameterTypeIndex::ResourceId)
             {
-                return 300.f * uiScale;
+                return 320.f * uiScale;
             }
             if (typeIndex == nodes::ParameterTypeIndex::String)
             {
-                return 260.f * uiScale;
+                return 280.f * uiScale;
             }
             if (typeIndex == nodes::ParameterTypeIndex::Int ||
                 typeIndex == nodes::ParameterTypeIndex::Float)
@@ -256,11 +256,11 @@ namespace gladius::ui
         if (ImGui::BeginTable("beginNodeTable",
                               4,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(280.f * m_uiScale, 0.f)))
+                              ImVec2(360.f * m_uiScale, 0.f)))
         {
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 60.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 40.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 55.f * m_uiScale);
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 30.f * m_uiScale);
 
             auto outputs = beginNode.getOutputs();
@@ -390,11 +390,11 @@ namespace gladius::ui
         if (ImGui::BeginTable("endNodeTable",
                               4,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(280.f * m_uiScale, 0.f)))
+                              ImVec2(360.f * m_uiScale, 0.f)))
         {
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 30.f * m_uiScale);
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 40.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 55.f * m_uiScale);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 60.f * m_uiScale);
 
             std::optional<std::string> paramToRemove;
@@ -689,7 +689,7 @@ namespace gladius::ui
         ImGui::PushID(node.getId());
 
         // Measure label size at 2× scale
-        float const fontScale = ImGui::GetIO().FontGlobalScale;
+        float const fontScale = 1.0f;
         constexpr float LABEL_FONT_SCALE = 2.0f;
                 std::string const compactTitle =
                     (displayName.empty() || displayName == node.name()) ? symbol : displayName;
@@ -908,9 +908,9 @@ namespace gladius::ui
         ImGui::PopItemWidth();
 
         ImGui::Indent(20.f * m_uiScale);
-        ImGui::SetWindowFontScale(0.8f * ImGui::GetIO().FontGlobalScale);
+        ImGui::SetWindowFontScale(0.8f);
         ImGui::TextUnformatted(baseNode.name().c_str());
-        ImGui::SetWindowFontScale(ImGui::GetIO().FontGlobalScale);
+        ImGui::SetWindowFontScale(1.0f);
         ImGui::Unindent(20.f * m_uiScale);
     }
 
@@ -1622,9 +1622,11 @@ namespace gladius::ui
                       }
                       if (ImGui::IsItemHovered())
                       {
+                          ed::Suspend();
                           ImGui::SetTooltip(
                             "Creates a FunctionGradient node that computes the gradient of this "
                             "function call.");
+                          ed::Resume();
                       }
 
                       if (ImGui::Selectable(reinterpret_cast<const char *>(ICON_FA_RULER_COMBINED
@@ -1640,9 +1642,11 @@ namespace gladius::ui
                       }
                       if (ImGui::IsItemHovered())
                       {
+                          ed::Suspend();
                           ImGui::SetTooltip(
                             "Creates a NormalizeDistanceField node that normalizes the distance "
                             "field gradient.");
+                          ed::Resume();
                       }
 
                       ImGui::EndPopup();
@@ -2701,23 +2705,23 @@ namespace gladius::ui
                     if (!inputMissing)
                     {
                         // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f * ImGui::GetIO().FontGlobalScale);
+                        ImGui::SetWindowFontScale(0.5f);
                         ImGui::TextUnformatted(
                           typeToString(parameter.second.getTypeIndex()).c_str());
                         columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(ImGui::GetIO().FontGlobalScale);
+                        ImGui::SetWindowFontScale(1.0f);
                     }
                     if (inputMissing)
                     {
                         // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f * ImGui::GetIO().FontGlobalScale);
+                        ImGui::SetWindowFontScale(0.5f);
                         ImGui::TextUnformatted(
                           fmt::format("Add a input of {} type",
                                       typeToString(parameter.second.getTypeIndex()))
                             .c_str());
                         ImGui::PopStyleColor(); // Pop style color for missing input
                         columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(ImGui::GetIO().FontGlobalScale);
+                        ImGui::SetWindowFontScale(1.0f);
                     }
                 }
                 ImGui::PopID();
@@ -2799,10 +2803,10 @@ namespace gladius::ui
 
                     // Add a label below the button with the type name
 
-                    ImGui::SetWindowFontScale(0.5f * ImGui::GetIO().FontGlobalScale);
+                    ImGui::SetWindowFontScale(0.5f);
 
                     ImGui::TextUnformatted(typeToString(output.second.getTypeIndex()).c_str());
-                    ImGui::SetWindowFontScale(ImGui::GetIO().FontGlobalScale);
+                    ImGui::SetWindowFontScale(1.0f);
                     columnWidths[6] = std::max(columnWidths[6], ImGui::GetItemRectSize().x);
 
                     ImGui::TableNextColumn();
