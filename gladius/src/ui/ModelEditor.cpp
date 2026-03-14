@@ -820,16 +820,44 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
-            // Start tracking link drag state for port compatibility highlighting
-            if (!m_linkDragState.isDragging)
-            {
-                m_linkDragState.isDragging = true;
-                // Compatibility will be computed when we know the source port
-            }
-
             ed::PinId inputPinId, outputPinId;
             if (ed::QueryNewLink(&inputPinId, &outputPinId))
             {
+                if (m_currentModel)
+                {
+                    if (outputPinId && !inputPinId)
+                    {
+                        auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
+                        if (auto * sourcePort = m_currentModel->getPort(outId); sourcePort != nullptr)
+                        {
+                            if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != outId)
+                            {
+                                m_linkDragState.beginDrag(outId, sourcePort->getTypeIndex(), true);
+                                m_linkDragState.computeCompatibility(*m_currentModel);
+                            }
+                        }
+                    }
+                    else if (inputPinId && !outputPinId)
+                    {
+                        auto const inputId = static_cast<nodes::ParameterId>(inputPinId.Get());
+                        auto const & parameterRegistry = m_currentModel->getConstParameterRegistry();
+                        if (auto const parameterIter = parameterRegistry.find(inputId);
+                            parameterIter != parameterRegistry.end())
+                        {
+                            auto * sourceParameter =
+                              dynamic_cast<nodes::VariantParameter *>(parameterIter->second);
+                            if (sourceParameter != nullptr &&
+                                (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != inputId))
+                            {
+                                m_linkDragState.beginDrag(inputId,
+                                                         sourceParameter->getTypeIndex(),
+                                                         false);
+                                m_linkDragState.computeCompatibility(*m_currentModel);
+                            }
+                        }
+                    }
+                }
+
                 // A new link is being created between two pins.
                 // Attempt to add the link if both pins are valid.
                 if (inputPinId && outputPinId)
@@ -844,10 +872,12 @@ namespace gladius::ui
                             !m_currentModel->addLink(outId, inId))
                         {
                             ed::RejectNewItem();
+                            m_linkDragState.reset();
                         }
                         else
                         {
                             markModelAsModified();
+                            m_linkDragState.reset();
                         }
                     }
                 }

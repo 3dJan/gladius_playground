@@ -9,10 +9,8 @@
 
 namespace gladius::ui
 {
-    namespace
+    namespace numeric_widget_detail
     {
-        /// Compute adaptive step size based on current value magnitude.
-        /// Uses logarithmic scaling: increment ∝ pow(10, floor(log10(|value| + ε)))
         float computeAdaptiveStep(float value)
         {
             float constexpr EPSILON = 1e-6f;
@@ -21,19 +19,45 @@ namespace gladius::ui
             return std::pow(10.f, order) * 0.01f;
         }
 
-        /// Apply modifier key multipliers to the base step.
-        float applyModifiers(float baseStep)
+        float applyModifierStep(float baseStep, bool isFineAdjustment, bool isCoarseAdjustment)
         {
-            auto const & io = ImGui::GetIO();
-            if (io.KeyShift)
+            if (isFineAdjustment)
             {
                 return baseStep * 0.01f; // Fine control
             }
-            if (io.KeyCtrl)
+            if (isCoarseAdjustment)
             {
                 return baseStep * 100.f; // Coarse control
             }
             return baseStep;
+        }
+
+        float clampToBounds(float value, std::optional<float> minValue, std::optional<float> maxValue)
+        {
+            if (minValue.has_value() && maxValue.has_value())
+            {
+                return std::clamp(value, *minValue, *maxValue);
+            }
+
+            if (minValue.has_value())
+            {
+                return std::max(value, *minValue);
+            }
+
+            if (maxValue.has_value())
+            {
+                return std::min(value, *maxValue);
+            }
+
+            return value;
+        }
+
+        int computeDisplayPrecision(float value)
+        {
+            int const digitCount = (value != 0.f)
+                                     ? static_cast<int>(std::log10(std::abs(value))) + 3
+                                     : 3;
+            return std::clamp(digitCount, 1, 8);
         }
 
         /// Compute the angle from center to a screen position.
@@ -56,7 +80,7 @@ namespace gladius::ui
             }
             return delta;
         }
-    } // namespace
+    } // namespace numeric_widget_detail
 
     bool adaptiveDragFloat(char const * label,
                            float * value,
@@ -68,14 +92,12 @@ namespace gladius::ui
         }
 
         bool changed = false;
-        float const baseStep = computeAdaptiveStep(*value);
-        float const step = applyModifiers(baseStep);
+        float const baseStep = numeric_widget_detail::computeAdaptiveStep(*value);
+        auto const & io = ImGui::GetIO();
+        float const step = numeric_widget_detail::applyModifierStep(baseStep, io.KeyShift, io.KeyCtrl);
 
         // Format string with appropriate precision
-        int const digitCount = (*value != 0.f)
-                                 ? static_cast<int>(std::log10(std::abs(*value))) + 3
-                                 : 3;
-        int const clampedDigits = std::clamp(digitCount, 1, 8);
+        int const clampedDigits = numeric_widget_detail::computeDisplayPrecision(*value);
         std::string const format = fmt::format("%.{}f", clampedDigits);
 
         float const dragSpeed = std::max(step, 0.001f);
@@ -145,17 +167,20 @@ namespace gladius::ui
         if (isActive)
         {
             ImVec2 const mousePos = ImGui::GetIO().MousePos;
-            float const currentAngle = computeAngle(center, mousePos);
+            float const currentAngle = numeric_widget_detail::computeAngle(center, mousePos);
 
             // Use per-frame delta for smooth rotation
             ImVec2 const mouseDelta = ImGui::GetIO().MouseDelta;
             if (std::abs(mouseDelta.x) > 0.f || std::abs(mouseDelta.y) > 0.f)
             {
                 ImVec2 const prevPos = {mousePos.x - mouseDelta.x, mousePos.y - mouseDelta.y};
-                float const prevAngle = computeAngle(center, prevPos);
-                float const angleDelta = normalizeAngleDelta(currentAngle - prevAngle);
+                                float const prevAngle = numeric_widget_detail::computeAngle(center, prevPos);
+                                float const angleDelta =
+                                    numeric_widget_detail::normalizeAngleDelta(currentAngle - prevAngle);
 
-                float const step = applyModifiers(1.f);
+                                auto const & io = ImGui::GetIO();
+                                float const step =
+                                    numeric_widget_detail::applyModifierStep(1.f, io.KeyShift, io.KeyCtrl);
 
                 if (minValue.has_value() && maxValue.has_value())
                 {
@@ -167,7 +192,7 @@ namespace gladius::ui
                 else
                 {
                     // Unbounded: accumulate angle, scale to reasonable value change
-                    float const baseStep = computeAdaptiveStep(*value);
+                    float const baseStep = numeric_widget_detail::computeAdaptiveStep(*value);
                     float const valueDelta = angleDelta * baseStep * 10.f * step;
                     *value += valueDelta;
                 }
@@ -246,9 +271,16 @@ namespace gladius::ui
         }
         else // Slider mode
         {
-            float const minVal = params.minValue.value_or(0.f);
-            float const maxVal = params.maxValue.value_or(1.f);
-            changed = ImGui::SliderFloat(label, params.value, minVal, maxVal);
+            if (params.minValue.has_value() && params.maxValue.has_value())
+            {
+                changed = ImGui::SliderFloat(label, params.value, *params.minValue, *params.maxValue);
+            }
+            else
+            {
+                changed = adaptiveDragFloat(fmt::format("##{}", label).c_str(),
+                                            params.value,
+                                            params.contentType);
+            }
         }
 
         ImGui::PopID();
@@ -256,7 +288,9 @@ namespace gladius::ui
         // Clamp if bounded
         if (params.minValue.has_value() && params.maxValue.has_value())
         {
-            *params.value = std::clamp(*params.value, *params.minValue, *params.maxValue);
+            *params.value = numeric_widget_detail::clampToBounds(*params.value,
+                                                                 params.minValue,
+                                                                 params.maxValue);
         }
 
         return changed;

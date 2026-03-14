@@ -8,6 +8,25 @@
 
 namespace gladius::ui
 {
+    namespace numeric_widget_detail
+    {
+        /// Compute adaptive step size based on current value magnitude.
+        [[nodiscard]] float computeAdaptiveStep(float value);
+
+        /// Apply fine/coarse sensitivity modifiers to a base step.
+        [[nodiscard]] float applyModifierStep(float baseStep,
+                                              bool isFineAdjustment,
+                                              bool isCoarseAdjustment);
+
+        /// Clamp a numeric value when bounds are present.
+        [[nodiscard]] float clampToBounds(float value,
+                                          std::optional<float> minValue,
+                                          std::optional<float> maxValue);
+
+        /// Derive a readable decimal precision for the current value magnitude.
+        [[nodiscard]] int computeDisplayPrecision(float value);
+    } // namespace numeric_widget_detail
+
     /// Layout mode for numeric parameter widgets.
     /// Persisted per parameter in the 3MF document metadata.
     enum class WidgetLayoutMode

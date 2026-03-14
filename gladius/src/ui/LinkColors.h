@@ -4,6 +4,13 @@
 
 namespace gladius::ui
 {
+    enum class PinVisualState
+    {
+        Normal,
+        Highlighted,
+        Dimmed
+    };
+
     struct LinkColors
     {
         static constexpr ImVec4 ColorFloat = {0.6f, 0.6f, 1.f, 1.f};
@@ -41,6 +48,21 @@ namespace gladius::ui
             float const g = color.y * HighlightBrightness;
             float const b = color.z * HighlightBrightness;
             return {r < 1.f ? r : 1.f, g < 1.f ? g : 1.f, b < 1.f ? b : 1.f, color.w};
+        }
+
+        /// Apply a shared visual-state transform to a base pin color.
+        static constexpr ImVec4 applyPinVisualState(ImVec4 color, PinVisualState visualState)
+        {
+            switch (visualState)
+            {
+            case PinVisualState::Highlighted:
+                return highlighted(color);
+            case PinVisualState::Dimmed:
+                return dimmed(color);
+            case PinVisualState::Normal:
+            default:
+                return color;
+            }
         }
     };
 } // namespace gladius::ui

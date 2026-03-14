@@ -3,6 +3,7 @@
 #include "../nodes/Model.h"
 #include "CircleNodeRenderer.h"
 #include "FileDialogService.h"
+#include "LinkColors.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -23,10 +24,47 @@ namespace gladius::nodes
 namespace gladius::ui
 {
     class ExportState;
+  struct LinkDragState;
     class ModelEditor;
 
     std::string typeToString(std::type_index typeIndex);
     using ColumnWidths = std::array<float, 8>;
+
+  struct SharedPinVisualDecision
+  {
+    PinVisualState visualState = PinVisualState::Normal;
+    bool showCompatibilityTooltip = false;
+    bool showRegularTooltip = true;
+  };
+
+  struct CompactNodeLayoutMetrics
+  {
+    int rowCount = 1;
+    float diameter = 0.f;
+    float labelColumnWidth = 0.f;
+    float inputLabelWidth = 0.f;
+    float outputLabelWidth = 0.f;
+    float railWidth = 0.f;
+    float totalWidth = 0.f;
+    float totalHeight = 0.f;
+    bool useFallbackLayout = false;
+  };
+
+  /// Resolve the visual state for a shared pin primitive based on the current drag session.
+  [[nodiscard]] SharedPinVisualDecision resolveSharedPinVisualDecision(LinkDragState const * dragState,
+                                     nodes::PortId pinId,
+                                     bool isInput,
+                                     std::type_index typeIndex);
+
+  /// Compute the first-pass compact-node layout envelope used by shared left/right pin rails.
+  [[nodiscard]] CompactNodeLayoutMetrics computeCompactNodeLayoutMetrics(size_t inputCount,
+                                                                        size_t outputCount,
+                                                                        ImVec2 textSize,
+                                                                        float maxInputLabelWidth,
+                                                                        float maxOutputLabelWidth,
+                                                                        ImVec2 pinGlyph,
+                                                                        float rowSpacing,
+                                                                        float cellPaddingX);
 
     /**
      * @brief Structure that holds information about a group of nodes
@@ -195,8 +233,9 @@ namespace gladius::ui
                            bool isInput,
                            std::type_index typeIndex,
                            const std::string & iconOrText,
-                           bool asButton = true,
-                           bool isFocused = false);
+                           bool /* asButton – kept for call-site compat, ignored */ = false,
+                           bool isFocused = false,
+                           const std::string & tooltip = "");
 
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
@@ -298,6 +337,7 @@ namespace gladius::ui
         /// Storage for node groups organized by tag
         std::unordered_map<std::string, NodeGroup> m_nodeGroups;
         bool m_nodeGroupsDirty{true}; ///< Rebuild groups on next updateNodeGroups() call
+        int m_nodeStyleVarCount{0};
 
         /// Tag editing state
         std::string m_editingTag;

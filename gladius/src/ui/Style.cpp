@@ -17,6 +17,12 @@ namespace ed = ax::NodeEditor;
 namespace gladius::ui
 {
 
+    SharedNodeMetrics const & sharedNodeMetrics()
+    {
+        static SharedNodeMetrics const metrics{};
+        return metrics;
+    }
+
     // Function to generate a unique color for each node type
     ImVec4 generateUniqueColor(size_t index)
     {
@@ -100,9 +106,8 @@ namespace gladius::ui
     float computeMinNodeWidth(float headerTextWidth, float contentWidth, float uiScale)
     {
         float constexpr PADDING = 40.f;
-        float constexpr MIN_WIDTH = 120.f;
         float const measuredWidth = std::max(headerTextWidth, contentWidth) + PADDING * uiScale;
-        return std::max(measuredWidth, MIN_WIDTH * uiScale);
+        return std::max(measuredWidth, sharedNodeMetrics().minimumNodeWidth * uiScale);
     }
 
     ImVec4 generateColorFromTypeTag(std::string const & typeTag)

@@ -21,6 +21,15 @@ namespace gladius::ui
         /// @return true if a pending recompile should fire now.
         bool shouldRecompile();
 
+        /// Returns whether a deferred recompile is currently queued.
+        [[nodiscard]] bool hasPendingRecompile() const;
+
+        /// Update the coalescing window used for subsequent changes.
+        void setDebounceInterval(std::chrono::milliseconds debounceInterval);
+
+        /// Return the current coalescing window.
+        [[nodiscard]] std::chrono::milliseconds debounceInterval() const;
+
         /// Reset the throttle state, clearing any pending recompile.
         void reset();
 

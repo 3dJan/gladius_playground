@@ -62,6 +62,7 @@ namespace gladius::nodes
         , m_allInputReferencesAreValid(other.m_allInputReferencesAreValid)
         , m_nodesHaveBeenLayouted(other.m_nodesHaveBeenLayouted)
         , m_isValid(other.m_isValid)
+        , m_numericWidgetLayoutModes(other.m_numericWidgetLayoutModes)
     {
         m_outPorts.clear();
         m_inputParameter.clear();
@@ -334,6 +335,7 @@ namespace gladius::nodes
         auto & params = m_beginNode->parameter();
         if (auto it = params.find(name); it != params.end())
         {
+            m_numericWidgetLayoutModes.erase(it->second.getId());
             m_inputParameter.erase(it->second.getId());
             params.erase(it);
         }
@@ -448,9 +450,31 @@ namespace gladius::nodes
         auto & params = m_endNode->parameter();
         if (auto it = params.find(name); it != params.end())
         {
+            m_numericWidgetLayoutModes.erase(it->second.getId());
             m_inputParameter.erase(it->second.getId());
             params.erase(it);
         }
+    }
+
+    void Model::setNumericWidgetLayoutMode(ParameterId parameterId, NumericWidgetLayoutMode layoutMode)
+    {
+        m_numericWidgetLayoutModes[parameterId] = layoutMode;
+    }
+
+    NumericWidgetLayoutMode Model::getNumericWidgetLayoutMode(ParameterId parameterId) const
+    {
+        auto const iter = m_numericWidgetLayoutModes.find(parameterId);
+        if (iter == m_numericWidgetLayoutModes.end())
+        {
+            return NumericWidgetLayoutMode::DialPlusDragFloat;
+        }
+
+        return iter->second;
+    }
+
+    bool Model::hasNumericWidgetLayoutMode(ParameterId parameterId) const
+    {
+        return m_numericWidgetLayoutModes.find(parameterId) != m_numericWidgetLayoutModes.end();
     }
 
     void Model::renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName)
@@ -479,6 +503,84 @@ namespace gladius::nodes
         return m_outPorts;
     }
 
+    std::unordered_set<int64_t> Model::collectCompatibleLinkCandidates(int64_t sourceEndpointId,
+                                                                       bool sourceIsOutput)
+    {
+        std::unordered_set<int64_t> candidates;
+
+        if (sourceIsOutput)
+        {
+            auto const sourcePortIter = m_outPorts.find(static_cast<PortId>(sourceEndpointId));
+            if (sourcePortIter == m_outPorts.end() || sourcePortIter->second == nullptr)
+            {
+                return candidates;
+            }
+
+            for (auto const & [parameterId, parameter] : m_inputParameter)
+            {
+                auto * targetParameter = dynamic_cast<VariantParameter *>(parameter);
+                if (targetParameter == nullptr)
+                {
+                    continue;
+                }
+
+                if (targetParameter->getParentId() == sourcePortIter->second->getParentId())
+                {
+                    continue;
+                }
+
+                if (targetParameter->getTypeIndex() != sourcePortIter->second->getTypeIndex())
+                {
+                    continue;
+                }
+
+                if (isLinkValid(sourcePortIter->second->getId(), targetParameter->getId()))
+                {
+                    candidates.insert(parameterId);
+                }
+            }
+
+            return candidates;
+        }
+
+        auto const sourceParameterIter = m_inputParameter.find(static_cast<ParameterId>(sourceEndpointId));
+        if (sourceParameterIter == m_inputParameter.end())
+        {
+            return candidates;
+        }
+
+        auto * sourceParameter = dynamic_cast<VariantParameter *>(sourceParameterIter->second);
+        if (sourceParameter == nullptr)
+        {
+            return candidates;
+        }
+
+        for (auto const & [portId, port] : m_outPorts)
+        {
+            if (port == nullptr)
+            {
+                continue;
+            }
+
+            if (port->getParentId() == sourceParameter->getParentId())
+            {
+                continue;
+            }
+
+            if (port->getTypeIndex() != sourceParameter->getTypeIndex())
+            {
+                continue;
+            }
+
+            if (isLinkValid(port->getId(), sourceParameter->getId()))
+            {
+                candidates.insert(portId);
+            }
+        }
+
+        return candidates;
+    }
+
     const graph::AdjacencyListDirectedGraph & Model::getGraph() const
     {
         return m_graph;
@@ -497,6 +599,11 @@ namespace gladius::nodes
     InputParameterRegistry const & Model::getConstParameterRegistry() const
     {
         return m_inputParameter;
+    }
+
+    PortRegistry const & Model::getConstPortRegistry() const
+    {
+        return m_outPorts;
     }
 
     std::optional<NodeBase *> Model::getNode(NodeId id) const
@@ -727,6 +834,7 @@ namespace gladius::nodes
             for (auto & [name, param] : nodeToRemove->second->parameter())
             {
                 auto paramIter = m_inputParameter.find(param.getId());
+                m_numericWidgetLayoutModes.erase(param.getId());
                 if (param.getParentId() != nodeToRemove->second->getId())
                 {
                     // Log warning instead of throwing - this can happen in edge cases
@@ -1160,6 +1268,7 @@ namespace gladius::nodes
         m_allInputReferencesAreValid = false;
         m_nodesHaveBeenLayouted = false;
         m_isValid = true;
+        m_numericWidgetLayoutModes.clear();
     }
 
     FunctionCall * Model::createFunctionCallNode(ResourceId functionId, Model & sourceModel)

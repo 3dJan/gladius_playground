@@ -11,6 +11,24 @@
 
 namespace gladius::ui
 {
+    struct SharedPinMetrics
+    {
+        float interactionPadding = 6.f;
+        float compactRailSpacing = 4.f;
+        float minimumHitExtent = 18.f;
+    };
+
+    struct SharedNodeMetrics
+    {
+        float borderWidth = 4.f;
+        float rounding = 16.f;
+        float compactRounding = 999.f;
+        float minimumNodeWidth = 120.f;
+        float maximumCompactNodeWidth = 320.f;
+        int maximumCompactNodeRows = 2;
+        SharedPinMetrics pinMetrics{};
+    };
+
     struct NodeStyle
     {
         ImColor color = IM_COL32(20, 120, 20, 255);
@@ -34,6 +52,9 @@ namespace gladius::ui
 
     /// Compute the minimum node width that avoids clipping content.
     float computeMinNodeWidth(float headerTextWidth, float contentWidth, float uiScale);
+
+    /// Shared UI metrics used by the first-pass node-editor redesign.
+    SharedNodeMetrics const & sharedNodeMetrics();
 
     /// Generate a category color from a type tag string via deterministic hash.
     /// Uses HSV: hue = hash(tag) % 360, saturation = 0.6, value = 0.5.

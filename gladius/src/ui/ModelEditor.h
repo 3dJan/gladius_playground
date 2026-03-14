@@ -79,6 +79,9 @@ namespace gladius::ui
         /// Access the current link drag state for port compatibility rendering.
         [[nodiscard]] LinkDragState const & linkDragState() const { return m_linkDragState; }
 
+        /// Non-const access so NodeView can record the drag source pin when the mouse is pressed.
+        [[nodiscard]] LinkDragState & mutableLinkDragState() { return m_linkDragState; }
+
         void markModelAsModified();
         void markModelAsUpToDate();
         void setVisibility(bool visible);

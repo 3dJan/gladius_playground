@@ -42,6 +42,21 @@ namespace gladius::ui
         return false;
     }
 
+    bool ParameterThrottle::hasPendingRecompile() const
+    {
+        return m_pendingRecompile;
+    }
+
+    void ParameterThrottle::setDebounceInterval(std::chrono::milliseconds debounceInterval)
+    {
+        m_debounceInterval = debounceInterval;
+    }
+
+    std::chrono::milliseconds ParameterThrottle::debounceInterval() const
+    {
+        return m_debounceInterval;
+    }
+
     void ParameterThrottle::reset()
     {
         m_pendingRecompile = false;
