@@ -431,6 +431,10 @@ namespace gladius::ui
 
             for (auto const & [key, res] : resources)
             {
+                if (!res)
+                {
+                    continue;
+                }
                 auto const * stack = dynamic_cast<ImageStackResource const *>(res.get());
                 auto const * grid = dynamic_cast<VdbResource const *>(res.get());
                 if (!stack && !grid)

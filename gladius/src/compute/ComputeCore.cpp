@@ -825,6 +825,11 @@ namespace gladius
         return true;
     }
 
+    void ComputeCore::invalidateContourCache()
+    {
+        m_lastContourSliceHeight_mm = std::numeric_limits<cl_float>::quiet_NaN();
+    }
+
     bool ComputeCore::isSlicingInProgress() const
     {
         ProfileFunction

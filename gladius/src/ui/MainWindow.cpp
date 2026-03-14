@@ -249,9 +249,10 @@ namespace gladius::ui
         }
 
         auto z = m_core->getSliceHeight();
-        ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.);
-
-        m_core->setSliceHeight(z);
+        if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
+        {
+            m_core->setSliceHeight(z);
+        }
         bool tmp_m_dirty = m_dirty.load();
 
         ImGui::Checkbox("m_dirty", &tmp_m_dirty);
@@ -1090,7 +1091,6 @@ namespace gladius::ui
               }
               m_parameterDirty = parameterModifiedByModelEditor || m_parameterDirty;
               m_dirty = m_parameterDirty || m_dirty;
-              m_contoursDirty = m_parameterDirty || m_contoursDirty;
               bool const modelWasModified = m_modelEditor.modelWasModified();
               bool const compileRequested = m_modelEditor.isCompileRequested();
 
@@ -1114,6 +1114,7 @@ namespace gladius::ui
               {
                   refreshModel();
                   m_parameterThrottle.reset(); // Full compile resets throttle state
+                  m_contoursDirty = true;
                   // If compilation was successfully launched, the async worker
                   // handles parameter updates — skip the redundant main-thread path
                   // that would block on Queue.finish() while the worker runs.
@@ -1553,7 +1554,7 @@ namespace gladius::ui
         {
             return;
         }
-        m_core->requestContourUpdate({});
+        m_core->invalidateContourCache();
         m_contoursDirty = false;
     }
 
@@ -2499,6 +2500,7 @@ namespace gladius::ui
                 m_doc->updateParameter();
                 m_renderWindow.invalidateViewDueToParameterChange();
                 m_parameterDirty = false;
+                m_contoursDirty = true;
             }
         }
         updateContours();
