@@ -63,6 +63,52 @@ namespace gladius::ui
         constexpr float kDialogListWidth = 500.0f;
         /// Filter input width in popups
         constexpr float kFilterInputWidth = 200.0f;
+
+        [[nodiscard]] ImVec4 colorWithAlpha(ImVec4 color, float alpha)
+        {
+            color.w = alpha;
+            return color;
+        }
+
+        void pushNodeEditorTheme()
+        {
+            auto const & style = ImGui::GetStyle();
+            ImVec4 const frameBg = style.Colors[ImGuiCol_FrameBg];
+            ImVec4 const border = style.Colors[ImGuiCol_Border];
+            ImVec4 const accent = style.Colors[ImGuiCol_TabActive];
+            ImVec4 const accentHover = style.Colors[ImGuiCol_TabHovered];
+            ImVec4 const accentSoft = style.Colors[ImGuiCol_HeaderHovered];
+
+            ed::PushStyleColor(ed::StyleColor_Bg, colorWithAlpha(frameBg, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_Grid, colorWithAlpha(border, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_HovNodeBorder, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_SelNodeBorder, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_NodeSelRect, colorWithAlpha(accent, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_NodeSelRectBorder, colorWithAlpha(accentHover, 0.55f));
+            ed::PushStyleColor(ed::StyleColor_HovLinkBorder, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_SelLinkBorder, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_HighlightLinkBorder, colorWithAlpha(accentSoft, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_PinRect, colorWithAlpha(accentHover, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_PinRectBorder, colorWithAlpha(accentHover, 0.45f));
+            ed::PushStyleColor(ed::StyleColor_Flow, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_FlowMarker, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_GroupBg, colorWithAlpha(frameBg, 0.32f));
+            ed::PushStyleColor(ed::StyleColor_GroupBorder, colorWithAlpha(border, 0.45f));
+
+            ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f);
+            ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f);
+            ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f);
+            ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f);
+            ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f);
+            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 4.f);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 4.5f);
+        }
+
+        void popNodeEditorTheme()
+        {
+            ed::PopStyleVar(7);
+            ed::PopStyleColor(15);
+        }
     } // namespace
 
     std::vector<ModelEditor::LayoutStrategyDescriptor> ModelEditor::layoutStrategyDescriptors()
@@ -1501,137 +1547,138 @@ namespace gladius::ui
                     // Normal graph view
                     auto * currentCtx = getCurrentEditorContext();
                     ed::SetCurrentEditor(currentCtx);
+                    pushNodeEditorTheme();
+                    ed::Begin("Model Editor");
 
-                ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
-                                   ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
-
-                ed::Begin("Model Editor");
-
-                // Clear selection now that the editor context is active
-                if (m_pendingClearSelection)
-                {
-                    ed::ClearSelection();
-                    m_pendingClearSelection = false;
-                }
-
-                // Handle any deferred paste request once editor is active
-                if (m_pendingPasteRequest)
-                {
-                    m_pendingPasteRequest = false;
-                    pasteClipboardAtMouse();
-                }
-
-                m_nodeViewVisitor.setAssembly(m_assembly);
-                m_nodeViewVisitor.setModelEditor(this);
-                m_nodeViewVisitor.setExportState(m_exportState);
-                if (m_currentModel)
-                {
-                    // Perform pending initial auto-layout BEFORE visitNodes so
-                    // that nodes are rendered at their layouted positions on
-                    // this very frame. This ensures ed::End() computes correct
-                    // node bounds immediately, which NavigateToContent relies on.
-                    if (m_pendingAutoLayoutFrames > 0)
+                    // Clear selection now that the editor context is active
+                    if (m_pendingClearSelection)
                     {
-                        --m_pendingAutoLayoutFrames;
-                        if (m_pendingAutoLayoutFrames == 0)
-                        {
-                            autoLayout();
+                        ed::ClearSelection();
+                        m_pendingClearSelection = false;
+                    }
 
-                            // Keep m_nodePositionsNeedUpdate=true so that
-                            // applyNodePositions() (after ed::End) can reliably
-                            // push the layouted NodeBase::screenPos values into
-                            // the node editor context on first visit.
+                    // Handle any deferred paste request once editor is active
+                    if (m_pendingPasteRequest)
+                    {
+                        m_pendingPasteRequest = false;
+                        pasteClipboardAtMouse();
+                    }
+
+                    m_nodeViewVisitor.setAssembly(m_assembly);
+                    m_nodeViewVisitor.setModelEditor(this);
+                    m_nodeViewVisitor.setExportState(m_exportState);
+                    if (m_currentModel)
+                    {
+                        // Perform pending initial auto-layout BEFORE visitNodes so
+                        // that nodes are rendered at their layouted positions on
+                        // this very frame. This ensures ed::End() computes correct
+                        // node bounds immediately, which NavigateToContent relies on.
+                        if (m_pendingAutoLayoutFrames > 0)
+                        {
+                            --m_pendingAutoLayoutFrames;
+                            if (m_pendingAutoLayoutFrames == 0)
+                            {
+                                autoLayout();
+
+                                // Keep m_nodePositionsNeedUpdate=true so that
+                                // applyNodePositions() (after ed::End) can reliably
+                                // push the layouted NodeBase::screenPos values into
+                                // the node editor context on first visit.
+                            }
+                        }
+
+                        m_currentModel->visitNodes(m_nodeViewVisitor);
+
+                        // Update node groups after nodes are rendered and positioned
+                        m_nodeViewVisitor.updateNodeGroups();
+                    }
+
+                    onCreateNode();
+                    onDeleteNode();
+
+                    // Keyboard copy/paste when editor is focused
+                    // Block copy/paste during export to prevent model modifications
+                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+                    if (!exportLocked &&
+                        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                    {
+                        ImGuiIO & io = ImGui::GetIO();
+                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                        {
+                            copySelectionToClipboard();
+                        }
+                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+                        {
+                            m_pendingPasteRequest = true;
                         }
                     }
 
-                    m_currentModel->visitNodes(m_nodeViewVisitor);
+                    // Handle group dragging via header/border areas - must be called before
+                    // rendering
+                    m_nodeViewVisitor.handleGroupDragging();
 
-                    // Update node groups after nodes are rendered and positioned
-                    m_nodeViewVisitor.updateNodeGroups();
+                    // Render node group last, to prioritize node interaction
+                    m_nodeViewVisitor.renderNodeGroups();
 
-                }
-                onCreateNode();
-                onDeleteNode();
-
-                // Keyboard copy/paste when editor is focused
-                // Block copy/paste during export to prevent model modifications
-                bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
-                if (!exportLocked && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
-                {
-                    ImGuiIO & io = ImGui::GetIO();
-                    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                    // Allow quick navigation with mouse back/forward buttons when editor is
+                    // hovered
+                    if (isHovered())
                     {
-                        copySelectionToClipboard();
-                    }
-                    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
-                    {
-                        m_pendingPasteRequest = true;
-                    }
-                }
-
-                // Handle group dragging via header/border areas - must be called before rendering
-                m_nodeViewVisitor.handleGroupDragging();
-
-                // Render node group last, to prioritize node interaction
-                m_nodeViewVisitor.renderNodeGroups();
-
-                // Allow quick navigation with mouse back/forward buttons when editor is hovered
-                if (isHovered())
-                {
-                    // Prefer key-based detection for mouse X buttons using ImGuiKey_* constants
-                    if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
-                    {
-                        goBack();
-                    }
-                    if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
-                    {
-                        goForward();
-                    }
-                }
-
-                // Check for group double-clicks and handle them AFTER rendering (so bounds are
-                // updated)
-                std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
-                if (!doubleClickedGroup.empty())
-                {
-                    m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
-                }
-
-                // Handle drag-and-drop from the library browser
-                handleLibraryDrop();
-
-                // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
-                // Uses ed::GetHoveredNode() for correct node-level hover detection
-                ed::NodeId hoveredNodeId = ed::GetHoveredNode();
-                if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-                {
-                    auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
-                    auto nodeOpt = m_currentModel->getNode(nodeId);
-                    if (nodeOpt)
-                    {
-                        nodes::NodeBase * node = *nodeOpt;
-                        nodes::ResourceId functionId = 0;
-                        if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                        // Prefer key-based detection for mouse X buttons using ImGuiKey_*
+                        // constants
+                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
                         {
-                            functionId = fc->getFunctionId();
+                            goBack();
                         }
-                        else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
+                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
                         {
-                            fg->resolveFunctionId();
-                            functionId = fg->getFunctionId();
-                        }
-
-                        if (functionId != 0)
-                        {
-                            // Pass nodeId as sourceNode - when user navigates back,
-                            // the view will center on this FunctionCall/FunctionGradient node
-                            navigateToFunction(functionId, nodeId);
+                            goForward();
                         }
                     }
-                }
 
-                ed::End();
-                ed::PopStyleColor();
+                    // Check for group double-clicks and handle them AFTER rendering (so bounds
+                    // are updated)
+                    std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
+                    if (!doubleClickedGroup.empty())
+                    {
+                        m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
+                    }
+
+                    // Handle drag-and-drop from the library browser
+                    handleLibraryDrop();
+
+                    // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
+                    // Uses ed::GetHoveredNode() for correct node-level hover detection
+                    ed::NodeId hoveredNodeId = ed::GetHoveredNode();
+                    if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    {
+                        auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
+                        auto nodeOpt = m_currentModel->getNode(nodeId);
+                        if (nodeOpt)
+                        {
+                            nodes::NodeBase * node = *nodeOpt;
+                            nodes::ResourceId functionId = 0;
+                            if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                            {
+                                functionId = fc->getFunctionId();
+                            }
+                            else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
+                            {
+                                fg->resolveFunctionId();
+                                functionId = fg->getFunctionId();
+                            }
+
+                            if (functionId != 0)
+                            {
+                                // Pass nodeId as sourceNode - when user navigates back,
+                                // the view will center on this FunctionCall/FunctionGradient node
+                                navigateToFunction(functionId, nodeId);
+                            }
+                        }
+                    }
+
+                    ed::End();
+                    popNodeEditorTheme();
                 } // end else (Graph view)
 
                 // Export overlay is now rendered at MainWindow level to block entire UI

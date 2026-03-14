@@ -180,6 +180,73 @@ namespace gladius::ui
 
             return truncated.empty() ? ellipsis : truncated + ellipsis;
         }
+
+        [[nodiscard]] ImVec4 colorWithAlpha(ImVec4 color, float alphaMultiplier)
+        {
+            color.w *= alphaMultiplier;
+            return color;
+        }
+
+        [[nodiscard]] float measurePinColumnWidth()
+        {
+            auto const & style = ImGui::GetStyle();
+            float const glyphWidth =
+              ImGui::CalcTextSize(reinterpret_cast<char const *>(ICON_FA_CIRCLE)).x;
+            return std::max(sharedNodeMetrics().pinMetrics.minimumHitExtent, glyphWidth) +
+                   style.FramePadding.x * 1.5f;
+        }
+
+        void drawSecondaryText(std::string const & text, ImVec4 color)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextUnformatted(text.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        void initializeStandardNodeColumns(nodes::NodeBase & node,
+                                           ColumnWidths & columnWidths,
+                                           bool resourceNodesVisible)
+        {
+            float const pinColumnWidth = measurePinColumnWidth();
+            float maxInputLabelWidth = 0.f;
+            float maxOutputLabelWidth = 0.f;
+
+            for (auto & [name, parameter] : node.parameter())
+            {
+                if (!parameter.isVisible() || parameter.getId() == -1)
+                {
+                    continue;
+                }
+                if (!resourceNodesVisible &&
+                    parameter.getTypeIndex() == ParameterTypeIndex::ResourceId)
+                {
+                    continue;
+                }
+
+                maxInputLabelWidth = std::max(
+                  maxInputLabelWidth,
+                  std::max(ImGui::CalcTextSize(name.c_str()).x,
+                           ImGui::CalcTextSize(typeToString(parameter.getTypeIndex()).c_str()).x));
+            }
+
+            for (auto & [name, output] : node.getOutputs())
+            {
+                if (!output.isVisible())
+                {
+                    continue;
+                }
+
+                maxOutputLabelWidth = std::max(
+                  maxOutputLabelWidth,
+                  std::max(ImGui::CalcTextSize(name.c_str()).x,
+                           ImGui::CalcTextSize(typeToString(output.getTypeIndex()).c_str()).x));
+            }
+
+            columnWidths[1] = std::max(columnWidths[1], pinColumnWidth);
+            columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
+            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
+            columnWidths[7] = std::max(columnWidths[7], pinColumnWidth);
+        }
     } // namespace
 
     WidgetLayoutMode toUiLayoutMode(nodes::NumericWidgetLayoutMode layoutMode)
@@ -688,61 +755,78 @@ namespace gladius::ui
         ed::BeginNode(node.getId());
         ImGui::PushID(node.getId());
 
-        // Measure label size at 2× scale
+        // Measure label size with a small emphasis boost so compact nodes stay legible
         float const fontScale = 1.0f;
-        constexpr float LABEL_FONT_SCALE = 2.0f;
-                std::string const compactTitle =
-                    (displayName.empty() || displayName == node.name()) ? symbol : displayName;
-                ImGui::SetWindowFontScale(fontScale * LABEL_FONT_SCALE);
-                ImVec2 const textSize = ImGui::CalcTextSize(compactTitle.c_str());
+        constexpr float LABEL_FONT_SCALE = 1.15f;
+        std::string const compactTitle =
+          (displayName.empty() || displayName == node.name()) ? symbol : displayName;
+        ImGui::SetWindowFontScale(fontScale * LABEL_FONT_SCALE);
+        ImVec2 const textSize = ImGui::CalcTextSize(compactTitle.c_str());
         ImGui::SetWindowFontScale(fontScale);
         ImVec2 const pinGlyph = ImGui::CalcTextSize(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
         float const pinH = pinGlyph.y;
         float const spacing = ImGui::GetStyle().ItemSpacing.y;
-        CompactNodeLayoutMetrics const layoutMetrics = computeCompactNodeLayoutMetrics(inputs.size(),
-                                                                                                                                                                             outputs.size(),
-                                                                                                                                                                             textSize,
-                                                                                                                                                                             maxInputLabelWidth,
-                                                                                                                                                                             maxOutputLabelWidth,
-                                                                                                                                                                             pinGlyph,
-                                                                                                                                                                             spacing,
-                                                                                                                                                                             2.f);
+        CompactNodeLayoutMetrics const layoutMetrics =
+          computeCompactNodeLayoutMetrics(inputs.size(),
+                                          outputs.size(),
+                                          textSize,
+                                          maxInputLabelWidth,
+                                          maxOutputLabelWidth,
+                                          pinGlyph,
+                                          spacing,
+                                          2.f);
 
-                if (layoutMetrics.useFallbackLayout)
-                {
-                        show(node);
-                        return;
-                }
-
-                // Build layout via shared left/right rails with visible port labels.
-                float const capsuleWidth = layoutMetrics.totalWidth;
-                float const labelColW = layoutMetrics.labelColumnWidth;
-        int const maxRows = layoutMetrics.rowCount;
-                int const inputStartRow = (maxRows - static_cast<int>(inputs.size())) / 2;
-                int const outputStartRow = (maxRows - static_cast<int>(outputs.size())) / 2;
-                std::string const visibleCompactTitle =
-                    truncateTextToWidth(compactTitle, std::max(0.f, labelColW - ImGui::GetStyle().CellPadding.x * 2.f));
-                bool const compactTitleTruncated = visibleCompactTitle != compactTitle;
-
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(2.f, spacing * 0.5f));
-                if (ImGui::BeginTable("##compactNode", 5, ImGuiTableFlags_SizingFixedFit,
-                                                            ImVec2(capsuleWidth, 0.f)))
+        if (layoutMetrics.useFallbackLayout)
         {
-                        ImGui::TableSetupColumn("##inPin", ImGuiTableColumnFlags_WidthFixed, layoutMetrics.railWidth);
-                        ImGui::TableSetupColumn("##inLabel", ImGuiTableColumnFlags_WidthFixed, layoutMetrics.inputLabelWidth);
-                        ImGui::TableSetupColumn("##sym", ImGuiTableColumnFlags_WidthFixed, labelColW);
-                        ImGui::TableSetupColumn("##outLabel", ImGuiTableColumnFlags_WidthFixed, layoutMetrics.outputLabelWidth);
-                        ImGui::TableSetupColumn("##outPin", ImGuiTableColumnFlags_WidthFixed, layoutMetrics.railWidth);
+            ImGui::PopID();
+            ed::EndNode();
+            ed::PopStyleVar(3);
+            ed::PopStyleColor(2);
+            show(node);
+            return;
+        }
+
+        // Build layout via shared left/right rails with visible port labels.
+        float const capsuleWidth = layoutMetrics.totalWidth;
+        float const labelColW = layoutMetrics.labelColumnWidth;
+        int const maxRows = layoutMetrics.rowCount;
+        int const inputStartRow = (maxRows - static_cast<int>(inputs.size())) / 2;
+        int const outputStartRow = (maxRows - static_cast<int>(outputs.size())) / 2;
+        std::string const visibleCompactTitle = truncateTextToWidth(
+          compactTitle, std::max(0.f, labelColW - ImGui::GetStyle().CellPadding.x * 2.f));
+        bool const compactTitleTruncated = visibleCompactTitle != compactTitle;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.f, spacing * 0.5f));
+        if (ImGui::BeginTable("##compactNode",
+                              5,
+                              ImGuiTableFlags_SizingFixedFit |
+                                ImGuiTableFlags_NoPadInnerX,
+                              ImVec2(capsuleWidth, 0.f)))
+        {
+            ImGui::TableSetupColumn("##inPin",
+                                    ImGuiTableColumnFlags_WidthFixed,
+                                    layoutMetrics.railWidth);
+            ImGui::TableSetupColumn("##inLabel",
+                                    ImGuiTableColumnFlags_WidthFixed,
+                                    layoutMetrics.inputLabelWidth);
+            ImGui::TableSetupColumn("##sym", ImGuiTableColumnFlags_WidthFixed, labelColW);
+            ImGui::TableSetupColumn("##outLabel",
+                                    ImGuiTableColumnFlags_WidthFixed,
+                                    layoutMetrics.outputLabelWidth);
+            ImGui::TableSetupColumn("##outPin",
+                                    ImGuiTableColumnFlags_WidthFixed,
+                                    layoutMetrics.railWidth);
 
             for (int row = 0; row < maxRows; ++row)
             {
                 ImGui::TableNextRow();
 
-                                // --- Input pin column ---
+                // --- Input pin column ---
                 ImGui::TableSetColumnIndex(0);
-                                if (row >= inputStartRow && row < inputStartRow + static_cast<int>(inputs.size()))
+                if (row >= inputStartRow &&
+                    row < inputStartRow + static_cast<int>(inputs.size()))
                 {
-                                        auto const & pin = inputs[static_cast<size_t>(row - inputStartRow)];
+                    auto const & pin = inputs[static_cast<size_t>(row - inputStartRow)];
                     bool const clicked = renderPortPin(
                       pin.id, true, pin.typeIndex,
                       reinterpret_cast<char const *>(ICON_FA_CIRCLE), false, false,
@@ -886,11 +970,12 @@ namespace gladius::ui
         ImGui::PushID(baseNode.getId());
 
         std::string displayName = baseNode.getDisplayName();
-        float const headerWidth = std::max(150.f * m_uiScale,
+        float const headerWidth = std::max(180.f * m_uiScale,
                                            ImGui::CalcTextSize(displayName.c_str()).x +
-                                             ImGui::GetStyle().FramePadding.x * 6.f);
+                                             ImGui::GetStyle().FramePadding.x * 4.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.f, 6.f));
         ImGui::PushItemWidth(headerWidth);
-        if (ImGui::InputText("", &displayName))
+        if (ImGui::InputTextWithHint("##displayName", baseNode.name().c_str(), &displayName))
         {
             if (displayName.empty())
             {
@@ -906,12 +991,10 @@ namespace gladius::ui
         // ImGui::TextUnformatted(fmt::format(" (Order: {})", baseNode.getOrder()).c_str());
 
         ImGui::PopItemWidth();
-
-        ImGui::Indent(20.f * m_uiScale);
-        ImGui::SetWindowFontScale(0.8f);
-        ImGui::TextUnformatted(baseNode.name().c_str());
-        ImGui::SetWindowFontScale(1.0f);
-        ImGui::Unindent(20.f * m_uiScale);
+        ImGui::PopStyleVar();
+        drawSecondaryText(baseNode.name(),
+                          colorWithAlpha(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+                                         0.95f));
     }
 
     void NodeView::content(NodeBase & baseNode)
@@ -2570,7 +2653,9 @@ namespace gladius::ui
         }
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
-        float const padding = 10.f * m_uiScale;
+        initializeStandardNodeColumns(node, columnWidths, m_resoureIdNodesVisible);
+
+        float const padding = 16.f * m_uiScale;
         float const inputWidth = columnWidths[1] + columnWidths[2] + padding;
         float const outputWidth = columnWidths[6] + columnWidths[7] + padding;
         float const targetWidth = computeMinNodeWidth(0.f, inputWidth + outputWidth, m_uiScale);
@@ -2581,7 +2666,7 @@ namespace gladius::ui
 
         if (ImGui::BeginTable("InputAndOutputs",
                               (needsFillSpace) ? 3 : 2,
-                              ImGuiTableFlags_SizingStretchProp,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadInnerX,
                               ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn(
@@ -2604,8 +2689,8 @@ namespace gladius::ui
             }
             ImGui::TableNextColumn();
             outputPins(node);
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
     }
 
     void NodeView::inputPins(nodes::NodeBase & node)
@@ -2614,24 +2699,16 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
-        // Bootstrap widths from content so labels are not clipped even if
-        // cached widths were reset (e.g. after graph/model sync).
-        if (columnWidths[1] <= 0.f || columnWidths[2] <= 0.f)
-        {
-            auto const & style = ImGui::GetStyle();
-            float const pinButtonWidth = ImGui::GetFontSize() * 1.5f + style.FramePadding.x * 2.0f;
-            float const maxInputLabelWidth =
-              measureMaxPortLabelWidth(node.parameter(), !m_resoureIdNodesVisible);
-
-            columnWidths[1] = std::max(columnWidths[1], pinButtonWidth);
-            columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
-        }
+        initializeStandardNodeColumns(node, columnWidths, m_resoureIdNodesVisible);
 
         // Each WidthFixed column loses 2*CellPadding.x of content area
         // internally.  Add that back so measured text widths fit.
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         auto const tableWidth = (columnWidths[1] + colPad) + (columnWidths[2] + colPad);
-        if (ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(tableWidth, 0)))
+        if (ImGui::BeginTable("table",
+                              2,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadInnerX,
+                              ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn("InputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + colPad);
             ImGui::TableSetupColumn("InputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2] + colPad);
@@ -2701,27 +2778,21 @@ namespace gladius::ui
                     ImGui::TextUnformatted((parameter.first).c_str());
                     columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
 
-                    // Add a label below the button with the type name
                     if (!inputMissing)
                     {
-                        // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f);
-                        ImGui::TextUnformatted(
-                          typeToString(parameter.second.getTypeIndex()).c_str());
+                        drawSecondaryText(
+                          typeToString(parameter.second.getTypeIndex()),
+                          colorWithAlpha(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+                                         0.95f));
                         columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(1.0f);
                     }
                     if (inputMissing)
                     {
-                        // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f);
-                        ImGui::TextUnformatted(
-                          fmt::format("Add a input of {} type",
-                                      typeToString(parameter.second.getTypeIndex()))
-                            .c_str());
+                        drawSecondaryText(
+                          fmt::format("Required {}", typeToString(parameter.second.getTypeIndex())),
+                          colorWithAlpha(LinkColors::ColorInvalid, 0.9f));
                         ImGui::PopStyleColor(); // Pop style color for missing input
                         columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(1.0f);
                     }
                 }
                 ImGui::PopID();
@@ -2738,8 +2809,8 @@ namespace gladius::ui
                              linkColor);
                 }
             }
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
     }
 
     void NodeView::outputPins(nodes::NodeBase & node)
@@ -2748,26 +2819,12 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
-        // Bootstrap widths from output content so long user-defined names are
-        // visible even before a stable two-pass cache has converged.
-        if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
-        {
-            auto const & style = ImGui::GetStyle();
-            float const maxOutputLabelWidth =
-              measureMaxPortLabelWidth(node.getOutputs(), false);
-
-            float const pinGlyphWidth =
-                            ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CIRCLE)).x +
-              style.FramePadding.x * 2.0f;
-
-            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
-            columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
-        }
+        initializeStandardNodeColumns(node, columnWidths, m_resoureIdNodesVisible);
 
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         if (ImGui::BeginTable("outputs",
                               2,
-                              ImGuiTableFlags_SizingStretchProp,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadInnerX,
                               ImVec2((columnWidths[6] + colPad) + (columnWidths[7] + colPad), 0)))
         {
             ImGui::TableSetupColumn(
@@ -2801,12 +2858,9 @@ namespace gladius::ui
                     ImGui::TextUnformatted((output.first).c_str());
                     columnWidths[6] = std::max(columnWidths[6], ImGui::GetItemRectSize().x);
 
-                    // Add a label below the button with the type name
-
-                    ImGui::SetWindowFontScale(0.5f);
-
-                    ImGui::TextUnformatted(typeToString(output.second.getTypeIndex()).c_str());
-                    ImGui::SetWindowFontScale(1.0f);
+                    drawSecondaryText(
+                      typeToString(output.second.getTypeIndex()),
+                      colorWithAlpha(typeToColor(output.second.getTypeIndex()), 0.75f));
                     columnWidths[6] = std::max(columnWidths[6], ImGui::GetItemRectSize().x);
 
                     ImGui::TableNextColumn();
@@ -2820,8 +2874,8 @@ namespace gladius::ui
                 }
                 ImGui::PopID();
             }
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
     }
 
     void NodeView::viewInputNode(nodes::NodeBase & node)
@@ -2833,6 +2887,7 @@ namespace gladius::ui
         header(node);
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
+        initializeStandardNodeColumns(node, columnWidths, m_resoureIdNodesVisible);
 
         float minParamWidth = 0.f;
         for (auto & parameter : node.parameter())
@@ -2853,7 +2908,7 @@ namespace gladius::ui
         float const totalMeasuredWidth = computeMinNodeWidth(0.f, columnWidths[0] + widthOutputs, m_uiScale);
         if (ImGui::BeginTable("InputAndOutputs",
                               2,
-                              ImGuiTableFlags_SizingStretchProp,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadInnerX,
                               ImVec2(totalMeasuredWidth, 0)))
         {
             ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0] + colPad);
@@ -2873,8 +2928,8 @@ namespace gladius::ui
                 ImGui::TableNextColumn();
                 inputControls(node, parameter);
             }
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
         ImGui::PopID();
         footer(node);
     }
