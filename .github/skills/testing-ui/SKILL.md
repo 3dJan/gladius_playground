@@ -51,6 +51,32 @@ Once you discover the path, use `#tool:ui_click`. Provide the *exact* string.
 ### 5. Visual Verification
 After executing your clicks, call `#tool:capture_screenshot`. The MCP server is capable of encoding the screenshot in Base64 directly into the JSON-RPC response, so you can literally "see" if your UI layout changes applied successfully.
 
+## MCP Server Modes: Headless vs UI Mode
+
+Two Gladius MCP server entries are configured in `.vscode/mcp.json`:
+
+| Server name | Args | Use case |
+|---|---|---|
+| `gladius` | `--mcp-stdio --headless` | Default — no visible window, for modeling/generation tasks |
+| `gladius-ui` | `--mcp-stdio` | UI debugging — shows a real Gladius window you can observe and interact with |
+
+**Use `gladius-ui` for any session involving `ui_click`, `ui_dump_items`, or `capture_screenshot`** so you can visually verify what the agent is doing.
+
+Both servers are managed by VS Code's MCP host. They restart automatically when killed.
+
+## Restarting the MCP Server After a Rebuild
+
+**Do NOT add a stop/restart MCP tool.** A process cannot reliably send a response after killing itself — the connection would be severed before the reply reaches the client.
+
+The correct pattern is:
+
+- **Headless server** (`gladius`): run `pkill -f 'gladiusmcp --mcp-stdio --headless'`, or use the VS Code task **"Restart Gladius MCP Server (headless)"**.
+- **UI-mode server** (`gladius-ui`): run `pkill -f 'gladiusmcp --mcp-stdio$'`, or use the VS Code task **"Restart Gladius MCP Server (UI mode)"**.
+
+VS Code detects the process exiting and **automatically relaunches** the server with the new binary on the next tool call. Wait ~2 seconds before issuing the next MCP call.
+
+> **Why `pkill` works**: The MCP server entries in `.vscode/mcp.json` declare `"type": "stdio"`. VS Code's MCP host monitors each process and applies an automatic restart on unexpected exit.
+
 ## Common Pitfalls and Debugging Strategies
 
 1. **Deadlocks and Timeouts:**
