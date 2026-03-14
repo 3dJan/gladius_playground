@@ -2,118 +2,145 @@
 
 ## Entities
 
-### 1. NumericWidget (new)
+### 1. PortPresentationState
 
-Encapsulates the enhanced numeric input UI state for a single parameter.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `value` | `float*` | Pointer to the underlying parameter value |
-| `contentType` | `ContentType` | Existing enum: `Length`, `Angle`, default |
-| `layoutMode` | `WidgetLayoutMode` | `DialPlusDragFloat` (default) or `Slider` |
-| `minValue` | `std::optional<float>` | Min bound (if bounded) |
-| `maxValue` | `std::optional<float>` | Max bound (if bounded) |
-| `isBounded` | `bool` | Whether the parameter has min/max |
-| `accumulatedAngle` | `float` | For unbounded dials: cumulative rotation angle |
-
-**Validation**: `layoutMode` must be one of the two supported values. If `isBounded`, both `minValue` and `maxValue` must be set.
-
-### 2. WidgetLayoutMode (new enum)
-
-```cpp
-enum class WidgetLayoutMode
-{
-    DialPlusDragFloat, ///< Orbital dial paired with drag-float (default)
-    Slider             ///< Linear slider with value label
-};
-```
-
-Persisted per parameter in the document's node parameter metadata.
-
-### 3. OrbitalDialState (new)
-
-Transient per-frame state for the orbital dial interaction.
+Represents how a visible port behaves and appears during normal interaction and link creation.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `isActive` | `bool` | Whether user is currently dragging the dial |
-| `dragStartAngle` | `float` | Angle at drag start (radians) |
-| `currentAngle` | `float` | Current visual angle |
-| `centerPos` | `ImVec2` | Screen-space center of the dial |
-| `radius` | `float` | Dial radius in pixels |
+| `portId` | Identifier | Stable identifier for the visible port |
+| `direction` | Input / Output | Whether the port receives or emits links |
+| `resolvedType` | Type reference | Current data type used for compatibility decisions |
+| `labelMode` | Inline / TooltipOnly | Whether name/type is shown inline or only on hover |
+| `visualState` | Normal / Highlighted / Dimmed | Current interaction-driven visual state |
+| `hitTargetProfile` | Shared profile reference | Shared sizing/hover rules used across all node types |
 
-### 4. LinkDragState (new / extends existing)
+**Validation rules**:
+- `resolvedType` may be unresolved only for ports explicitly allowed to defer type resolution.
+- `hitTargetProfile` must match the shared pin interaction rules used by other node types.
 
-Tracks compatibility information during link creation.
+### 2. LinkDragSession
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `isDragging` | `bool` | Whether a link drag is in progress |
-| `sourcePortId` | `PortId` | The port being dragged from |
-| `sourcePortType` | `std::type_index` | Resolved type of source port |
-| `sourceIsOutput` | `bool` | Whether source is an output port |
-| `compatiblePorts` | `std::unordered_set<int64_t>` | Set of compatible port/parameter IDs |
-
-**State transitions**: `idle` → `dragging` (on drag start) → `idle` (on drop/cancel). Compatibility set is computed once on transition to `dragging`, and refreshed if `sourcePortId` changes.
-
-### 5. NodeRenderStyle (modified)
-
-Extends existing `NodeStyle` in `Style.h`.
+Captures the active drag operation used to evaluate and render compatibility feedback.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `color` | `ImColor` | Existing: node border/ring color |
-| `activeColor` | `ImColor` | Existing: color when selected |
-| `hoveredColor` | `ImColor` | Existing: color when hovered |
-| `borderWidth` | `float` | New: ring/border thickness (default ~4.0) |
-| `rounding` | `float` | New: corner rounding radius (default ~20.0) |
-| `showCategoryIcon` | `bool` | New: whether to show an icon glyph |
+| `sourcePortId` | Identifier | Port where the drag originated |
+| `sourceDirection` | Input / Output | Direction of the source port |
+| `sourceResolvedType` | Type reference | Current source type for compatibility evaluation |
+| `candidateSet` | Collection of identifiers | Ports that are compatible for the active drag |
+| `status` | Idle / Dragging / Cancelled / Dropped | Lifecycle of the interaction |
 
-### 6. ParameterThrottle (new)
+**State transitions**:
+- `Idle → Dragging` when the user begins a valid drag from a port
+- `Dragging → Dropped` when the user releases on a compatible target
+- `Dragging → Cancelled` when the gesture is aborted
+- `Dropped/Cancelled → Idle` after cleanup
 
-Debounce controller for parameter-to-recompile pipeline.
+### 3. NumericParameterPresentation
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `lastChangeTime` | `std::chrono::steady_clock::time_point` | When the last parameter change occurred |
-| `debounceInterval` | `std::chrono::milliseconds` | Default 100ms |
-| `pendingRecompile` | `bool` | Whether a recompile is waiting |
-| `latestValue` | `float` | The most recent parameter value (to send on recompile) |
-
-### 7. BeginEndNodeUI (modified)
-
-Enhanced UI state for begin/end node argument management.
+Defines the UI presentation and interaction rules for an inline numeric parameter editor.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `arguments` | `std::vector<ArgumentEntry>` | Ordered list of function arguments |
-| `dragSourceIndex` | `std::optional<int>` | Index of argument being reordered |
-| `dragTargetIndex` | `std::optional<int>` | Drop target index for reordering |
-| `pendingRemoval` | `std::optional<int>` | Argument index pending removal with confirmation |
-| `showConfirmDialog` | `bool` | Whether the removal confirmation dialog is shown |
+| `parameterId` | Identifier | Stable parameter identifier |
+| `contentType` | Domain type | Length, angle, scalar, vector component, etc. |
+| `layoutMode` | DialPlusDragFloat / Slider | Chosen presentation mode |
+| `boundsMode` | Bounded / Unbounded | Whether min/max are defined |
+| `currentValue` | Numeric value | Current displayed/editable value |
+| `sensitivityProfile` | Fine/Default/Coarse rules | Drag and keyboard adjustment behavior |
 
-### 8. ArgumentEntry (new)
+**Validation rules**:
+- Bounded parameters require both lower and upper limits.
+- Dial and drag-float views must remain synchronized for the same parameter.
+
+### 4. CompactNodePresentation
+
+Represents the compact visual layout applied to simple nodes.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | `std::string` | Argument name (editable) |
-| `typeIndex` | `std::type_index` | Data type of the argument |
-| `portId` | `PortId` | Associated port/pin ID |
-| `hasConnectedLinks` | `bool` | Whether any links are connected to this port |
+| `nodeId` | Identifier | Stable node identifier |
+| `shapeProfile` | Rounded / Capsule | Selected compact body style |
+| `categoryColor` | Visual token | Border/ring color derived from node category |
+| `centerContent` | Title / Glyph / Title+Glyph | Primary visual identifier shown in the center |
+| `leftRailPorts` | Ordered list of PortPresentationState | Input ports shown on the left rail |
+| `rightRailPorts` | Ordered list of PortPresentationState | Output ports shown on the right rail |
+| `fallbackMode` | Compact / Expanded | Whether the node must expand to preserve usability |
+
+**Validation rules**:
+- Compact layout must never reduce hit targets below the shared port interaction minimum.
+- `fallbackMode` switches to expanded when content cannot fit without clipping or overlap.
+
+### 5. SignatureRow
+
+Represents a single editable entry in a begin/end node signature.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rowId` | Identifier | Stable row identity |
+| `name` | Text | User-visible argument/output name |
+| `type` | Type reference | Declared type |
+| `orderIndex` | Integer | Visual and semantic order |
+| `connectionState` | Connected / Unconnected | Whether links currently reference the row |
+| `pendingAction` | None / Rename / Remove / Reorder | Current user action being resolved |
+
+**Validation rules**:
+- Names must remain non-empty.
+- Reorder operations must preserve link attachment semantics.
+
+### 6. RecompileCoalescingState
+
+Represents the boundary between immediate UI edits and deferred expensive recompute work.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `latestEditTimestamp` | Time value | Timestamp of the most recent parameter edit |
+| `pendingRecompile` | Boolean | Whether a recompute is queued |
+| `coalescingWindow` | Duration | Minimum delay before expensive work is retriggered |
+| `latestAuthoritativeValue` | Value snapshot | Most recent user-facing parameter value |
+
+**Validation rules**:
+- UI-visible values update immediately even while recompute is deferred.
+- Only the latest pending value may trigger the next expensive recompute.
 
 ## Relationships
 
-```
-NodeBase 1──* ParameterMap (existing) ── enhanced with NumericWidget state
-NodeBase ──> NodeRenderStyle (via type → style lookup)
-ModelEditor 1──1 LinkDragState
-Begin/End 1──* ArgumentEntry (ordered)
-MainWindow 1──1 ParameterThrottle
-NumericWidget 1──1 OrbitalDialState (transient, during interaction)
+```text
+CompactNodePresentation
+├── leftRailPorts  -> PortPresentationState[*]
+├── rightRailPorts -> PortPresentationState[*]
+└── centerContent
+
+LinkDragSession
+├── sourcePortId -> PortPresentationState
+└── candidateSet -> PortPresentationState[*]
+
+NumericParameterPresentation
+└── feeds -> RecompileCoalescingState
+
+Begin/End node
+└── owns -> SignatureRow[*]
 ```
 
-## Key Interactions
+## Key Interaction Flows
 
-1. **Parameter editing flow**: User interacts with NumericWidget → value updates immediately → ParameterThrottle debounces → recompile triggers on throttle expiry
-2. **Link drag flow**: User starts drag → LinkDragState computed → ModelEditor sets compatible ports → NodeView renders pin highlight states → drop validates compatibility
-3. **Argument reorder flow**: User drags argument row → BeginEndNodeUI tracks drag indices → on drop, Model reorders ports → connected links follow
+1. **Link creation flow**
+    - User begins drag from a `PortPresentationState`
+    - `LinkDragSession` is created
+    - Other ports move into highlighted/dimmed states based on compatibility
+    - Drop or cancel returns all ports to `Normal`
+
+2. **Numeric edit flow**
+    - User edits a `NumericParameterPresentation`
+    - Value changes immediately in the UI
+    - `RecompileCoalescingState` marks the model dirty and delays expensive recompute until the coalescing boundary is met
+
+3. **Compact-node fallback flow**
+    - `CompactNodePresentation` attempts compact layout
+    - If content cannot fit without clipping or shrinking hit targets, `fallbackMode` becomes `Expanded`
+
+4. **Signature editing flow**
+    - User edits a `SignatureRow`
+    - Row action resolves inline (rename, remove, reorder)
+    - Begin/end node and connected links update while preserving semantic order

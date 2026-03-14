@@ -1,153 +1,51 @@
-# Contracts: Node Editor UX Improvements (023)
+# Contract: Numeric Widget and Pin Behavior
 
-This feature is a desktop C++ GUI application using ImGui — there are no REST/GraphQL APIs. Contracts are defined as C++ interface/class signatures for the new components.
+This feature does not expose a REST or GraphQL API. The contracts below define the user-facing behavior and component boundaries that implementations must preserve.
 
-## 1. NumericWidget API
+## 1. Numeric widget contract
 
-```cpp
-namespace gladius::ui
-{
-    enum class WidgetLayoutMode
-    {
-        DialPlusDragFloat, ///< Orbital dial paired with drag-float (default)
-        Slider             ///< Linear slider with value label
-    };
+### Inputs
 
-    struct NumericWidgetParams
-    {
-        float * value = nullptr;
-        ContentType contentType = ContentType::Length;
-        WidgetLayoutMode layoutMode = WidgetLayoutMode::DialPlusDragFloat;
-        std::optional<float> minValue;
-        std::optional<float> maxValue;
-        float dragSensitivity = 1.0f; ///< Base sensitivity multiplier
-    };
+- Parameter identity
+- Current numeric value
+- Content type (for formatting and sensitivity rules)
+- Optional bounds
+- Layout mode (`DialPlusDragFloat` or `Slider`)
 
-    /// Renders an enhanced numeric widget (dial+drag-float or slider).
-    /// Returns true if the value was changed.
-    bool numericWidget(char const * label, NumericWidgetParams & params);
+### Required behavior
 
-    /// Renders an orbital dial knob.
-    /// Returns true if the value was changed by dial interaction.
-    bool orbitalDial(char const * label,
-                     float * value,
-                     float radius,
-                     std::optional<float> minValue = std::nullopt,
-                     std::optional<float> maxValue = std::nullopt);
+- The widget must allow immediate inline editing.
+- In `DialPlusDragFloat` mode, the dial and drag-float must always represent the same underlying value.
+- In `Slider` mode, the widget must still preserve keyboard accessibility and current-value visibility.
+- Modifier keys must affect sensitivity consistently across all numeric widgets.
+- Double-click or equivalent direct-entry affordance must allow precise typed values.
 
-    /// Renders an enhanced drag-float with adaptive sensitivity.
-    /// Supports Shift (fine), Ctrl (coarse) modifier keys.
-    /// Returns true if the value was changed.
-    bool adaptiveDragFloat(char const * label,
-                           float * value,
-                           ContentType contentType = ContentType::Length);
-}
-```
+### Outputs
 
-## 2. LinkDragState API
+- Updated numeric value
+- Immediate UI-visible feedback for the latest value
+- A parameter-change event that can be coalesced before expensive recompute work
 
-```cpp
-namespace gladius::ui
-{
-    struct LinkDragState
-    {
-        bool isDragging = false;
-        nodes::PortId sourcePortId{0};
-        std::type_index sourcePortType{typeid(void)};
-        bool sourceIsOutput = false;
-        std::unordered_set<int64_t> compatiblePorts;
+## 2. Shared pin interaction contract
 
-        /// Recompute compatible ports from the model for the current source port.
-        void computeCompatibility(nodes::Model const & model);
+### Inputs
 
-        /// Check if a specific port/parameter is compatible with the current drag source.
-        [[nodiscard]] bool isCompatible(int64_t portOrParamId) const;
+- Port identity
+- Port direction
+- Resolved port type
+- Label mode (inline or tooltip-only)
+- Current link-drag session, if any
 
-        /// Reset to idle state.
-        void reset();
-    };
-}
-```
+### Required behavior
 
-## 3. Node Rendering Extensions
+- All pins must share the same minimum hit target size.
+- All pins must support the same hover, click, and drag-start behavior.
+- Compact nodes and regular nodes must not diverge in drag reliability.
+- Hover feedback and tooltips must respect whether the node uses inline labels or tooltip-only labels.
+- During link drag, pins must move into highlighted or dimmed states based on compatibility.
 
-```cpp
-namespace gladius::ui
-{
-    struct NodeRenderConfig
-    {
-        float borderWidth = 4.0f;   ///< Category ring thickness
-        float rounding = 20.0f;     ///< Corner rounding radius
-        bool showCategoryIcon = false;
-    };
+### Outputs
 
-    /// Push enhanced node styling (rounding, border width, category color).
-    /// Must be paired with popNodeStyle().
-    void pushNodeStyle(NodeRenderConfig const & config, ImVec4 categoryColor);
-    void popNodeStyle();
-
-    /// Compute the minimum node width that avoids clipping content.
-    float computeMinNodeWidth(nodes::NodeBase const & node, float uiScale);
-}
-```
-
-## 4. Parameter Throttle API
-
-```cpp
-namespace gladius::ui
-{
-    class ParameterThrottle
-    {
-      public:
-        explicit ParameterThrottle(std::chrono::milliseconds debounceInterval = std::chrono::milliseconds(100));
-
-        /// Called when a parameter value changes. Returns true if a recompile should be triggered now.
-        bool onParameterChanged();
-
-        /// Called each frame. Returns true if debounce expired and a pending recompile should fire.
-        bool shouldRecompile();
-
-        /// Reset the throttle state.
-        void reset();
-
-      private:
-        std::chrono::steady_clock::time_point m_lastChangeTime;
-        std::chrono::milliseconds m_debounceInterval;
-        bool m_pendingRecompile = false;
-    };
-}
-```
-
-## 5. Begin/End Node Argument Management API
-
-```cpp
-namespace gladius::ui
-{
-    /// Renders the enhanced begin/end node argument table with
-    /// inline editing, reordering, and removal with confirmation.
-    /// Returns true if arguments were modified.
-    bool renderArgumentTable(nodes::Begin & beginNode,
-                             nodes::Assembly & assembly,
-                             float uiScale);
-
-    bool renderOutputTable(nodes::End & endNode,
-                           nodes::Assembly & assembly,
-                           float uiScale);
-}
-```
-
-## 6. Port Compatibility Highlighting API
-
-```cpp
-namespace gladius::ui
-{
-    /// Render a port pin with link-drag-aware highlighting.
-    /// When linkDrag is active, compatible ports get glow/highlight,
-    /// incompatible ports are dimmed.
-    void renderPortPin(nodes::PortId portId,
-                       std::type_index portType,
-                       ed::PinKind kind,
-                       LinkDragState const & linkDrag,
-                       float uiScale);
-}
-```
+- Pin interaction events (hover, click, drag start)
+- Visual state transitions (`Normal`, `Highlighted`, `Dimmed`)
+- A stable anchor point for the rendered link geometry

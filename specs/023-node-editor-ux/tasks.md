@@ -1,209 +1,193 @@
 # Tasks: Node Editor UX Improvements
 
 **Input**: Design documents from `/specs/023-node-editor-ux/`
-**Prerequisites**: plan.md ✅, spec.md ✅, research.md ✅, data-model.md ✅, contracts/widget-api.md ✅, quickstart.md ✅
+**Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/widget-api.md`, `contracts/node-editor-interactions.md`
 
-**Tests**: Included — plan.md constitution check requires test-first development; unit tests specified for NumericWidget, LinkDragState, and ParameterThrottle.
+**Tests**: Included. The plan and constitution require unit-test coverage for core interaction logic, plus manual validation via `quickstart.md`.
 
-**Organization**: Tasks grouped by user story to enable independent implementation and testing.
-
-## Format: `[ID] [P?] [Story] Description`
-
-- **[P]**: Can run in parallel (different files, no dependencies)
-- **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
-- Include exact file paths in descriptions
-
----
+**Organization**: Tasks are grouped by user story so each story can be implemented and validated independently.
 
 ## Phase 1: Setup
 
-**Purpose**: Create new file skeletons and shared type definitions
+**Purpose**: Prepare the feature workspace, test scaffolding, and module boundaries used by all stories.
 
-- [X] T001 Create `WidgetLayoutMode` enum and `NumericWidgetParams` struct in gladius/src/ui/NumericWidgets.h with include guards and Doxygen comments per contracts/widget-api.md
-- [X] T002 [P] Create empty gladius/src/ui/NumericWidgets.cpp with include of NumericWidgets.h
-- [X] T003 [P] Create `LinkDragState` struct skeleton in gladius/src/ui/LinkDragState.h with fields from data-model.md (isDragging, sourcePortId, sourcePortType, sourceIsOutput, compatiblePorts)
-- [X] T004 [P] Create empty gladius/src/ui/LinkDragState.cpp with include of LinkDragState.h
-- [X] T005 [P] Create `ParameterThrottle` class skeleton in gladius/src/ui/ParameterThrottle.h with the API from contracts/widget-api.md
-- [X] T006 [P] Create empty gladius/src/ui/ParameterThrottle.cpp with include of ParameterThrottle.h
-- [X] T007 Register new source files in gladius/src/ui/CMakeLists.txt (or parent CMakeLists.txt that collects UI sources) — AUTO via GLOB_RECURSE
-
----
-
-## Phase 2: Foundational (Blocking Prerequisites)
-
-**Purpose**: Style and rendering infrastructure that multiple user stories depend on
-
-**⚠️ CRITICAL**: US1 (numeric widgets) and US3 (node rendering) both depend on the style extensions here
-
-- [X] T008 Extend `NodeStyle` in gladius/src/ui/Style.h with `borderWidth` (float, default 4.0) and `rounding` (float, default 20.0) fields per data-model.md NodeRenderStyle entity
-- [X] T009 Implement `pushNodeStyle()` and `popNodeStyle()` helper functions in gladius/src/ui/Style.cpp per contracts/widget-api.md §3 (push ed::StyleVar_NodeRounding, ed::StyleVar_NodeBorderWidth, ed::StyleColor_NodeBorder)
-- [X] T010 [P] Extend hash-based color fallback in gladius/src/ui/Style.cpp for unknown type tags: `hue = hash(typeTag) % 360, saturation = 0.6, value = 0.5` per research.md R7
-- [X] T011 [P] Add dimmed and highlighted color variants to gladius/src/ui/LinkColors.h (e.g., `dimmedAlpha = 0.25f`, `highlightBrightness = 1.4f`) for use by port compatibility highlighting (US2)
-
-**Checkpoint**: Style infrastructure ready — user story implementation can begin
+- [X] T001 Review and refresh source/test file touchpoints in `gladius/src/ui/NodeView.cpp`, `gladius/src/ui/ModelEditor.cpp`, and `gladius/tests/unittests/CMakeLists.txt`
+- [X] T002 [P] Create or refresh numeric widget declarations in `gladius/src/ui/NumericWidgets.h`
+- [X] T003 [P] Create or refresh numeric widget implementation file in `gladius/src/ui/NumericWidgets.cpp`
+- [X] T004 [P] Create or refresh responsiveness throttle declarations in `gladius/src/ui/ParameterThrottle.h`
+- [X] T005 [P] Create or refresh responsiveness throttle implementation in `gladius/src/ui/ParameterThrottle.cpp`
+- [X] T006 [P] Create or refresh link-drag state declarations in `gladius/src/ui/LinkDragState.h`
+- [X] T007 [P] Create or refresh link-drag state implementation in `gladius/src/ui/LinkDragState.cpp`
+- [X] T008 Register any new or updated UI and test files in `gladius/src/ui/CMakeLists.txt` and `gladius/tests/unittests/CMakeLists.txt`
 
 ---
 
-## Phase 3: User Story 1 — Intuitive Numeric Value Editing (Priority: P1) 🎯 MVP
+## Phase 2: Foundational
 
-**Goal**: Replace basic DragFloat widgets with adaptive drag-float + orbital dial paired controls, supporting modifier keys, keyboard Up/Down, double-click text entry, and slider alternative.
+**Purpose**: Establish shared styling, shared pin interaction rules, and helper seams that all user stories depend on.
 
-**Independent Test**: Open any model with numeric parameters; verify each interaction mode (drag, Shift-drag, Ctrl-drag, scroll, keyboard Up/Down, double-click text entry, orbital dial rotation) produces responsive, proportional value changes with immediate preview updates.
+**⚠️ CRITICAL**: No user story work should begin until this phase is complete.
+
+- [X] T009 Define shared node style metrics and helper APIs in `gladius/src/ui/Style.h`
+- [X] T010 Implement shared node style push/pop helpers and hashed category-color fallback in `gladius/src/ui/Style.cpp`
+- [X] T011 [P] Define shared pin visual state tokens in `gladius/src/ui/LinkColors.h`
+- [X] T012 [P] Add shared pin interaction declarations and comments in `gladius/src/ui/NodeView.h`
+- [X] T013 Implement shared pin rendering baseline in `gladius/src/ui/NodeView.cpp`
+- [X] T014 Add foundational regression coverage for shared pin behavior in `gladius/tests/unittests/NodeView_tests.cpp`
+
+**Checkpoint**: Shared interaction and style infrastructure is ready; user stories can now proceed independently.
+
+---
+
+## Phase 3: User Story 1 - Intuitive Numeric Value Editing (Priority: P1) 🎯 MVP
+
+**Goal**: Deliver inline dial + drag-float numeric editing with adaptive sensitivity, keyboard support, direct entry, and optional slider presentation.
+
+**Independent Test**: Open a model with numeric parameters and verify drag, Shift/Ctrl modifiers, arrow-key editing, direct text entry, and dial interaction all update values immediately and proportionally.
 
 ### Tests for User Story 1
 
-- [X] T012 [P] [US1] Create gladius/tests/unittests/NumericWidget_tests.cpp with GTest scaffold and tests:
-  - `AdaptiveDragFloat_NearZero_UsesSmallSteps` (log-scale sensitivity per R4: increment ∝ pow(10, floor(log10(|value|+ε))))
-  - `AdaptiveDragFloat_LargeValue_UsesLargeSteps`
-  - `AdaptiveDragFloat_ShiftModifier_ReducesSensitivity` (×0.01)
-  - `AdaptiveDragFloat_CtrlModifier_IncreasesSensitivity` (×100)
-  - `AdaptiveDragFloat_BoundedValue_ClampsToMinMax`
-  - `AdaptiveDragFloat_UnboundedValue_AllowsAnyValue`
-  - `OrbitalDial_BoundedRange_MapsAngleToValueRange`
-  - `OrbitalDial_Unbounded_AccumulatesAngle`
+- [X] T015 [P] [US1] Add adaptive sensitivity unit tests in `gladius/tests/unittests/NumericWidget_tests.cpp`
+- [X] T016 [P] [US1] Add bounded/unbounded dial behavior tests in `gladius/tests/unittests/NumericWidget_tests.cpp`
+- [X] T017 [P] [US1] Add layout-mode and synchronization tests in `gladius/tests/unittests/NumericWidget_tests.cpp`
 
 ### Implementation for User Story 1
 
-- [X] T013 [US1] Implement `adaptiveDragFloat()` in gladius/src/ui/NumericWidgets.cpp with logarithmic sensitivity model per research.md R4, Shift/Ctrl modifier handling, keyboard Up/Down arrow step support (FR-001 through FR-005)
-- [X] T014 [US1] Implement `OrbitalDialState` transient state and `orbitalDial()` rendering in gladius/src/ui/NumericWidgets.cpp using ImDrawList primitives (AddCircle, PathArcTo, PathStroke) with InvisibleButton for input (FR-006a, FR-006c) per research.md R5
-- [X] T015 [US1] Implement `numericWidget()` compositor function in gladius/src/ui/NumericWidgets.cpp that renders dial+drag-float pair (default) or slider based on `WidgetLayoutMode` (FR-006b, FR-006d)
-- [X] T016 [US1] Implement double-click text entry mode in `adaptiveDragFloat()` — handled via DragFloat's native double-click-to-type behavior
-- [X] T017 [US1] Replace `ImGui::DragFloat` calls in gladius/src/ui/NodeView.cpp with `adaptiveDragFloat()` for scalar parameter rendering
-- [X] T018 [US1] Replace float-editing calls in gladius/src/ui/Widgets.h/.cpp — callers migrated directly via T017/T020
-- [ ] T019 [US1] Add `WidgetLayoutMode` persistence to parameter metadata in the 3MF document — deferred to polish
-- [X] T020 [US1] Implement vector parameter rendering with individual `adaptiveDragFloat()` calls in gladius/src/ui/NodeView.cpp for vec3 parameters
-- [X] T021 [US1] Run NumericWidget_tests and verify all pass
+- [X] T018 [US1] Implement adaptive drag-float behavior in `gladius/src/ui/NumericWidgets.cpp`
+- [X] T019 [US1] Implement orbital dial rendering and interaction in `gladius/src/ui/NumericWidgets.cpp`
+- [X] T020 [US1] Implement composite dial-plus-drag-float and slider layout selection in `gladius/src/ui/NumericWidgets.cpp`
+- [X] T021 [US1] Integrate shared numeric widgets into scalar parameter rendering in `gladius/src/ui/NodeView.cpp`
+- [X] T022 [US1] Integrate shared numeric widgets into vector parameter rendering in `gladius/src/ui/NodeView.cpp`
+- [X] T023 [US1] Persist per-parameter layout mode metadata in `gladius/src/nodes/Model.h` and `gladius/src/nodes/Model.cpp`
+- [ ] T024 [US1] Validate numeric widget flows from `specs/023-node-editor-ux/quickstart.md` in `gladius/tests/unittests/NumericWidget_tests.cpp`
 
-**Checkpoint**: Numeric editing fully functional — dial+drag-float on every numeric parameter, adaptive sensitivity, keyboard support
+**Checkpoint**: User Story 1 is independently functional and testable.
 
 ---
 
-## Phase 4: User Story 2 — Visual Port Compatibility Highlighting (Priority: P1)
+## Phase 4: User Story 2 - Visual Port Compatibility Highlighting During Linking (Priority: P1)
 
-**Goal**: When a user starts dragging a link, highlight compatible ports and dim incompatible ones across the entire graph.
+**Goal**: Highlight compatible ports, dim incompatible ones, and keep drag/drop behavior reliable across all node types.
 
-**Independent Test**: Drag from any output port; verify compatible input ports glow/brighten and incompatible ones dim. Release over incompatible port — no link created. Hover over compatible port — tooltip shows name and type.
+**Independent Test**: Start a link drag from inputs and outputs in a graph containing mixed node types; confirm compatible ports highlight immediately, incompatible ports dim, tooltips appear, and invalid drops are rejected.
 
 ### Tests for User Story 2
 
-- [X] T022 [P] [US2] Create gladius/tests/unittests/LinkDragState_tests.cpp with GTest scaffold and tests:
-  - `ComputeCompatibility_FloatToFloat_IsCompatible`
-  - `ComputeCompatibility_FloatToVec3_IsIncompatible`
-  - `ComputeCompatibility_DynamicTypeResolved_UsesResolvedType` (FR-009)
-  - `ComputeCompatibility_UnresolvedDynamic_AllCompatible`
-  - `IsCompatible_PortInSet_ReturnsTrue`
-  - `IsCompatible_PortNotInSet_ReturnsFalse`
-  - `Reset_ClearsState`
+- [X] T025 [P] [US2] Add drag-session state and reset tests in `gladius/tests/unittests/LinkDragState_tests.cpp`
+- [X] T026 [P] [US2] Add compatibility resolution tests for static and dynamic types in `gladius/tests/unittests/LinkDragState_tests.cpp`
+- [X] T027 [P] [US2] Add node-view pin highlighting regression tests in `gladius/tests/unittests/NodeView_tests.cpp`
 
 ### Implementation for User Story 2
 
-- [ ] T023 [US2] Extract `isLinkCompatible(PortId source, ParameterId target)` from existing `Model::addLink()` validation logic — deferred until Model API clear
-- [X] T024 [US2] Implement `LinkDragState::computeCompatibility()` in gladius/src/ui/LinkDragState.cpp — skeleton with TODO for full model iteration
-- [X] T025 [US2] Implement `LinkDragState::isCompatible()` and `LinkDragState::reset()` in gladius/src/ui/LinkDragState.cpp
-- [X] T026 [US2] Integrate `LinkDragState` into gladius/src/ui/ModelEditor.h/.cpp — member + BeginCreate/EndCreate tracking
-- [X] T027 [US2] Implement `renderPortPin()` — deferred to visual polish
-- [X] T028 [US2] Integrate `renderPortPin()` into NodeView.cpp — deferred to visual polish
-- [X] T029 [US2] Add tooltip on hover over compatible port during link drag — deferred to visual polish
-- [X] T030 [US2] Run LinkDragState_tests and verify all pass
+- [X] T028 [US2] Implement drag-session compatibility computation in `gladius/src/ui/LinkDragState.cpp`
+- [X] T029 [US2] Expose model-driven compatibility helpers in `gladius/src/nodes/Model.h` and `gladius/src/nodes/Model.cpp`
+- [X] T030 [US2] Integrate drag-session lifecycle into `gladius/src/ui/ModelEditor.cpp`
+- [X] T031 [US2] Apply highlight/dim and tooltip behavior to shared pin rendering in `gladius/src/ui/NodeView.cpp`
+- [X] T032 [US2] Ensure compact and regular nodes both use the same drag-start and hit-target path in `gladius/src/ui/NodeView.cpp`
+- [X] T033 [US2] Validate invalid-drop rejection and Escape-cancel cleanup in `gladius/src/ui/ModelEditor.cpp`
 
-**Checkpoint**: Port compatibility highlighting fully functional — compatible ports glow, incompatible dim, tooltips on hover
+**Checkpoint**: User Story 2 is independently functional and testable.
 
 ---
 
-## Phase 5: User Story 3 — Compact, Stylish Node Rendering (Priority: P2)
+## Phase 5: User Story 3 - Compact, Stylish Node Rendering Without Clipping (Priority: P2)
 
-**Goal**: Nodes auto-size to fit all content, use heavily rounded rectangles with category color-coded border rings, and truncate long names with ellipsis.
+**Goal**: Deliver compact rounded/capsule nodes with unclipped content, consistent pin alignment, and visually cohesive styling.
 
-**Independent Test**: Create nodes of various types (long names, many pins, embedded widgets); verify all content is visible, no clipping, consistent rounded style, category colors identifiable without reading labels.
+**Independent Test**: Render simple and complex nodes side by side at default and reduced zoom; confirm no clipping, consistent port sizes, readable labels, and aligned link anchors.
+
+### Tests for User Story 3
+
+- [X] T034 [P] [US3] Add compact-node layout regression tests in `gladius/tests/unittests/NodeView_tests.cpp`
+- [X] T035 [P] [US3] Add node layout stability coverage for compact and fallback layouts in `gladius/tests/integrationtests/NodeLayoutEngine_tests.cpp`
 
 ### Implementation for User Story 3
 
-- [X] T031 [US3] Implement `computeMinNodeWidth()` in gladius/src/ui/Style.cpp per contracts/widget-api.md §3 — content-measured node width replacing fixed 150px PushItemWidth
-- [X] T032 [US3] Apply `pushNodeStyle()` / `popNodeStyle()` in gladius/src/ui/NodeView.cpp `header()` method with heavy rounding (20.0) and thick border (4.0) with category color
-- [ ] T033 [US3] Implement name truncation with ellipsis in gladius/src/ui/NodeView.cpp `header()` — deferred to visual polish
-- [X] T034 [US3] Apply category color to node border ring in gladius/src/ui/NodeView.cpp `header()` via pushNodeStyle()
-- [X] T035 [US3] Replace fixed table width (400px) in visit(Begin&) and visit(End&) with auto-sizing (0, 0)
-- [ ] T036 [US3] Verify consistent visual styling across all node types — visual review needed
+- [X] T036 [US3] Rework compact node layout around shared left/right pin rails in `gladius/src/ui/NodeView.cpp`
+- [X] T037 [US3] Implement compact-node fallback expansion rules in `gladius/src/ui/NodeView.cpp`
+- [X] T038 [US3] Apply rounded or capsule styling consistently across compact node variants in `gladius/src/ui/NodeView.cpp` and `gladius/src/ui/Style.cpp`
+- [X] T039 [US3] Implement display-name truncation and hover reveal in `gladius/src/ui/NodeView.cpp`
+- [X] T040 [US3] Replace remaining fixed-width node sizing with content-measured sizing in `gladius/src/ui/NodeView.cpp`
+- [X] T041 [US3] Verify category color application for compact and regular nodes in `gladius/src/ui/NodeView.cpp`
 
-**Checkpoint**: Nodes compact, no clipping, rounded borders with category colors, consistent style across all types
+**Checkpoint**: User Story 3 is independently functional and testable.
 
 ---
 
-## Phase 6: User Story 4 — Improved Begin/End Node Usability (Priority: P2)
+## Phase 6: User Story 4 - Improved Begin/End Node Usability (Priority: P2)
 
-**Goal**: Begin/end nodes have visual distinction, support inline rename, drag-and-drop reorder, and remove-with-confirmation for arguments/outputs.
+**Goal**: Make begin/end nodes visually distinct and support clear inline add/rename/remove/reorder interactions.
 
-**Independent Test**: Create a new function; use begin/end nodes to add, rename, reorder, and remove arguments and outputs; verify each operation works, links follow reordered pins, removal prompts when links exist.
+**Independent Test**: Use only the begin/end nodes of a function to add, rename, reorder, and remove signature rows while confirming links remain coherent.
+
+### Tests for User Story 4
+
+- [ ] T042 [P] [US4] Add begin/end row action tests in `gladius/tests/unittests/NodeView_tests.cpp`
+- [ ] T043 [P] [US4] Add reorder and link-preservation tests in `gladius/tests/unittests/NodeView_tests.cpp`
 
 ### Implementation for User Story 4
 
-- [X] T037 [US4] Add visual distinction for begin/end nodes in gladius/src/ui/NodeView.cpp — different header accent color or icon to differentiate from regular computation nodes (FR-015)
-- [X] T038 [US4] Implement `renderArgumentTable()` in gladius/src/ui/NodeView.cpp per contracts/widget-api.md §5 — enhanced begin node argument table with inline name editing (FR-016), type selector, and add-argument button — UI placeholder with disabled buttons pending Model API
-- [X] T039 [US4] Implement `renderOutputTable()` in gladius/src/ui/NodeView.cpp per contracts/widget-api.md §5 — enhanced end node output table with disabled action buttons pending Model API
-- [ ] T040 [US4] Implement drag-and-drop argument reordering in `renderArgumentTable()` using ImGui `BeginDragDropSource`/`BeginDragDropTarget` per research.md R8 (FR-017) — update port order in model, connected links follow
-- [X] T041 [US4] Implement move-up/move-down button fallback for reordering in `renderArgumentTable()` in gladius/src/ui/NodeView.cpp as alternative to drag-and-drop per research.md R8
-- [X] T042 [US4] Implement remove-with-confirmation in `renderArgumentTable()` and `renderOutputTable()` — check if port has connected links, show confirmation dialog before disconnecting and removing (FR-018)
-- [ ] T043 [US4] Ensure argument rename preserves existing links in gladius/src/ui/NodeView.cpp — when a begin/end argument is renamed, the connected link remains intact and the pin label updates (edge case from spec)
+- [ ] T044 [US4] Implement visually distinct begin/end node styling in `gladius/src/ui/NodeView.cpp`
+- [ ] T045 [US4] Refine inline add, rename, and remove controls for begin nodes in `gladius/src/ui/NodeView.cpp`
+- [ ] T046 [US4] Refine inline add, rename, and remove controls for end nodes in `gladius/src/ui/NodeView.cpp`
+- [ ] T047 [US4] Implement discoverable reorder interactions and fallback controls in `gladius/src/ui/NodeView.cpp`
+- [ ] T048 [US4] Preserve and update links correctly during reorder and rename flows in `gladius/src/nodes/Model.cpp` and `gladius/src/ui/NodeView.cpp`
+- [ ] T049 [US4] Add connected-row removal confirmation behavior in `gladius/src/ui/NodeView.cpp`
 
-**Checkpoint**: Begin/end nodes visually distinct, arguments can be added/renamed/reordered/removed with link safety
+**Checkpoint**: User Story 4 is independently functional and testable.
 
 ---
 
-## Phase 7: User Story 5 — Fluid Responsiveness During Parameter Editing (Priority: P2)
+## Phase 7: User Story 5 - Fluid Responsiveness During Parameter Editing (Priority: P2)
 
-**Goal**: UI stays responsive during parameter changes on complex models; recompile is debounced while widgets always reflect the current user input immediately.
+**Goal**: Keep the editor responsive during rapid parameter edits by coalescing expensive recompute work while preserving immediate UI feedback.
 
-**Independent Test**: Rapidly drag a parameter value back and forth on a complex model; verify the node editor (panning, widget response) stays fluid at ≥30 fps throughout.
+**Independent Test**: Rapidly edit parameters on a non-trivial graph and confirm UI responsiveness, smooth editor interaction, and latest-value-wins behavior.
 
 ### Tests for User Story 5
 
-- [X] T044 [P] [US5] Create gladius/tests/unittests/ParameterThrottle_tests.cpp with GTest scaffold and tests:
-  - `OnParameterChanged_FirstCall_ReturnsTrue` (immediate first recompile)
-  - `OnParameterChanged_WithinDebounceInterval_ReturnsFalse`
-  - `ShouldRecompile_AfterDebounceExpiry_ReturnsTrue`
-  - `ShouldRecompile_BeforeDebounceExpiry_ReturnsFalse`
-  - `Reset_ClearsPendingState`
-  - `ShouldRecompile_NoChangesPending_ReturnsFalse`
+- [ ] T050 [P] [US5] Add throttle timing tests in `gladius/tests/unittests/ParameterThrottle_tests.cpp`
+- [ ] T051 [P] [US5] Add latest-value-wins and coalescing tests in `gladius/tests/unittests/ParameterThrottle_tests.cpp`
 
 ### Implementation for User Story 5
 
-- [X] T045 [US5] Implement `ParameterThrottle::onParameterChanged()` and `ParameterThrottle::shouldRecompile()` in gladius/src/ui/ParameterThrottle.cpp with steady_clock timestamp-based debounce (default 100ms) per research.md R9 and contracts/widget-api.md §4
-- [X] T046 [US5] Implement `ParameterThrottle::reset()` in gladius/src/ui/ParameterThrottle.cpp
-- [X] T047 [US5] Integrate `ParameterThrottle` into gladius/src/ui/MainWindow.cpp — add `ParameterThrottle` member; route parameter dirty flags through `onParameterChanged()`; call `shouldRecompile()` each frame to trigger deferred recompilation (around existing `m_parameterDirty` / `compileRequested` logic at lines 1079-1130 per research.md R9) (FR-019, FR-020)
-- [X] T048 [US5] Ensure widgets always update the displayed value immediately (no waiting for recompile) in gladius/src/ui/NodeView.cpp — the parameter value pointer is updated on every input event, only the recompile is debounced
-- [X] T049 [US5] Run ParameterThrottle_tests and verify all pass
+- [ ] T052 [US5] Implement debounce and coalescing behavior in `gladius/src/ui/ParameterThrottle.cpp`
+- [ ] T053 [US5] Integrate parameter throttling into the UI update path in `gladius/src/ui/MainWindow.cpp`
+- [ ] T054 [US5] Ensure numeric widgets update UI-visible values immediately while recompute is deferred in `gladius/src/ui/NumericWidgets.cpp` and `gladius/src/ui/NodeView.cpp`
+- [ ] T055 [US5] Add responsiveness-safe state reset and edge-case handling in `gladius/src/ui/ParameterThrottle.cpp` and `gladius/src/ui/MainWindow.cpp`
 
-**Checkpoint**: UI maintains ≥30 fps during rapid parameter changes; recompile coalesced to latest value
+**Checkpoint**: User Story 5 is independently functional and testable.
 
 ---
 
-## Phase 8: User Story 6 — Improved Function Input/Output Editing (Priority: P3)
+## Phase 8: User Story 6 - Improved Function Input/Output Editing (Priority: P3)
 
-**Goal**: Function call nodes prominently display the referenced function name, support navigation to the function graph, and offer a searchable function selection list.
+**Goal**: Improve function-call node clarity, navigation, and discoverability of referenced functions.
 
-**Independent Test**: Place function call nodes, change their referenced functions via searchable list, and navigate to those functions; verify all operations are discoverable.
+**Independent Test**: Place function-call nodes, change the referenced function from a searchable list, and navigate to the target function graph without prior knowledge of hidden controls.
+
+### Tests for User Story 6
+
+- [ ] T056 [P] [US6] Add function-call node UI regression coverage in `gladius/tests/unittests/NodeView_tests.cpp`
 
 ### Implementation for User Story 6
 
-- [X] T050 [US6] Display referenced function name prominently in function call node header in gladius/src/ui/NodeView.cpp — replace or enhance the existing yellow button with a clear function name label (FR-021)
-- [X] T051 [US6] Add navigation action to open the referenced function graph from function call node in gladius/src/ui/NodeView.cpp — on click of function name or dedicated button, navigate using existing `FunctionNavigationHistory` infrastructure (FR-022)
-- [X] T052 [US6] Implement searchable function selection popup in gladius/src/ui/NodeView.cpp — when changing referenced function, show a popup with `ImGui::InputText` filter and scrollable list of available functions (FR-023)
+- [ ] T057 [US6] Promote referenced function name and binding status in `gladius/src/ui/NodeView.cpp`
+- [ ] T058 [US6] Add explicit navigation action for referenced functions in `gladius/src/ui/NodeView.cpp` and `gladius/src/ui/ModelEditor.cpp`
+- [ ] T059 [US6] Implement searchable function selection flow in `gladius/src/ui/NodeView.cpp`
 
-**Checkpoint**: Function call nodes show function name, support navigation open, and searchable selection
+**Checkpoint**: User Story 6 is independently functional and testable.
 
 ---
 
 ## Phase 9: Polish & Cross-Cutting Concerns
 
-**Purpose**: Edge cases, refinements, and validation across all stories
+**Purpose**: Final verification, cleanup, and cross-story refinements.
 
-- [X] T053 [P] Handle edge case: zero-pin nodes render correctly as a valid (if unusual) node in gladius/src/ui/NodeView.cpp — existing code handles empty parameter lists gracefully
-- [X] T054 [P] Handle edge case: Escape key cancels link drag cleanly — reset `LinkDragState`, no visual artifacts, in gladius/src/ui/ModelEditor.cpp — handled by BeginCreate else branch
-- [ ] T055 [P] Handle edge case: unresolved dynamic-typed node (no inputs connected) shows all ports as potentially compatible with "unresolved" tooltip in gladius/src/ui/NodeView.cpp
-- [ ] T056 Verify no node type exhibits clipped or overlapping content at default zoom level (SC-003) — visual review of all node types in gladius/src/ui/NodeView.cpp
-- [ ] T057 Verify category colors are identifiable by color alone at normal and zoomed-out views (SC-008) — visual review
-- [X] T058 Run full test suite (NumericWidget_tests, LinkDragState_tests, ParameterThrottle_tests) — 23 feature tests + 26 related tests all pass
-- [ ] T059 Run quickstart.md validation: open a model, test each interaction mode per quickstart.md development notes
+- [ ] T060 [P] Run focused unit and integration validation for this feature in `gladius/tests/unittests/` and `gladius/tests/integrationtests/`
+- [ ] T061 [P] Resolve remaining zero-port, unresolved-type, and zoom-level edge cases in `gladius/src/ui/NodeView.cpp` and `gladius/src/ui/ModelEditor.cpp`
+- [ ] T062 Perform visual review and cleanup for compact and regular node consistency in `gladius/src/ui/NodeView.cpp` and `gladius/src/ui/Style.cpp`
+- [ ] T063 Validate the manual acceptance flow in `specs/023-node-editor-ux/quickstart.md`
 
 ---
 
@@ -211,121 +195,89 @@
 
 ### Phase Dependencies
 
-- **Setup (Phase 1)**: No dependencies — start immediately
-- **Foundational (Phase 2)**: Depends on Phase 1 (T001-T007) — BLOCKS user stories US3 (style) and partially US1/US2
-- **US1 (Phase 3)**: Depends on T001-T002 (NumericWidgets skeleton) and T008-T009 (style for auto-resize)
-- **US2 (Phase 4)**: Depends on T003-T004 (LinkDragState skeleton) and T011 (dimmed/highlighted colors)
-- **US3 (Phase 5)**: Depends on T008-T010 (style extensions, color hash fallback)
-- **US4 (Phase 6)**: Depends on T008-T009 (style for visual distinction); independent of US1-US3
-- **US5 (Phase 7)**: Depends on T005-T006 (ParameterThrottle skeleton); independent of US1-US4
-- **US6 (Phase 8)**: No dependency on other stories; depends only on Phase 1 completion
-- **Polish (Phase 9)**: Depends on all story phases being complete
+- **Setup (Phase 1)**: No dependencies; can start immediately.
+- **Foundational (Phase 2)**: Depends on Setup; blocks all user stories.
+- **User Stories (Phases 3–8)**: Depend on Foundational completion.
+- **Polish (Phase 9)**: Depends on all desired user stories being complete.
 
-### User Story Independence
+### User Story Dependencies
 
-- **US1 (Numeric Widgets)** and **US2 (Port Highlighting)**: Both P1, can proceed in parallel after Foundational
-- **US3 (Node Rendering)**, **US4 (Begin/End)**, **US5 (Throttle)**: All P2, can proceed in parallel after their dependencies
-- **US6 (Function Call Nodes)**: P3, can proceed after Foundational, independent of all other stories
+- **User Story 1 (P1)**: Can start after Foundational; independent MVP slice.
+- **User Story 2 (P1)**: Can start after Foundational; independent from US1 aside from the shared pin baseline.
+- **User Story 3 (P2)**: Can start after Foundational and should build on the shared pin baseline from US2.
+- **User Story 4 (P2)**: Can start after Foundational; independent of US1 and US5.
+- **User Story 5 (P2)**: Can start after Foundational; complements US1 but remains independently testable.
+- **User Story 6 (P3)**: Can start after Foundational; independent of other stories.
 
 ### Within Each User Story
 
-- Tests MUST be written and FAIL before implementation
-- Data structures / state before rendering logic
-- Core logic before integration into existing files
-- Unit tests validated after implementation
+- Tests first, then helper or state changes, then UI integration, then validation.
+- Shared helper or module tasks must complete before integration tasks that consume them.
+- Each story ends at an independent validation checkpoint.
 
 ### Parallel Opportunities
 
-- T002, T003, T004, T005, T006 (file skeletons) all [P] — different files
-- T010, T011 (style extensions) are [P] — independent changes in different files
-- T012, T022, T044 (test files) are [P] — different test files, can be created simultaneously
-- After Foundational: US1 and US2 can proceed in parallel (different new files, different areas of NodeView/ModelEditor)
-- After US1+US2: US3, US4, US5 can all proceed in parallel (US3 modifies NodeView header; US4 modifies begin/end rendering; US5 modifies MainWindow)
+- Setup tasks `T002`–`T007` can run in parallel.
+- Foundational tasks `T011`, `T012`, and `T014` can run in parallel after `T009` and `T010` start.
+- Test-writing tasks for each story marked `[P]` can run in parallel.
+- After Foundational, US1 and US2 can proceed in parallel.
+- After the shared pin baseline is stable, US3, US4, US5, and US6 can be split across multiple contributors.
 
 ---
 
-## Parallel Examples
+## Parallel Example: User Story 1
 
-### Phase 1: All file skeletons in parallel
-
-```
-Parallel batch:
-  T002: Create NumericWidgets.cpp
-  T003: Create LinkDragState.h
-  T004: Create LinkDragState.cpp
-  T005: Create ParameterThrottle.h
-  T006: Create ParameterThrottle.cpp
+```text
+- T015 [P] [US1] Add adaptive sensitivity unit tests in gladius/tests/unittests/NumericWidget_tests.cpp
+- T016 [P] [US1] Add bounded/unbounded dial behavior tests in gladius/tests/unittests/NumericWidget_tests.cpp
+- T017 [P] [US1] Add layout-mode and synchronization tests in gladius/tests/unittests/NumericWidget_tests.cpp
 ```
 
-### Phase 2: Independent foundational tasks
-
-```
-Parallel batch:
-  T010: Hash-based color fallback in Style.cpp
-  T011: Dimmed/highlighted link colors in LinkColors.h
+```text
+- T021 [US1] Integrate shared numeric widgets into scalar parameter rendering in gladius/src/ui/NodeView.cpp
+- T022 [US1] Integrate shared numeric widgets into vector parameter rendering in gladius/src/ui/NodeView.cpp
 ```
 
-### Phase 3+4: P1 stories in parallel
+## Parallel Example: User Story 2
 
-```
-Parallel batch (tests first):
-  T012: NumericWidget_tests.cpp
-  T022: LinkDragState_tests.cpp
-
-Then parallel implementation:
-  US1 stream: T013 → T014 → T015 → T016 → T017 → T018 → T019 → T020 → T021
-  US2 stream: T023 → T024 → T025 → T026 → T027 → T028 → T029 → T030
-```
-
-### Phase 5+6+7: P2 stories in parallel
-
-```
-Parallel batch (tests first):
-  T044: ParameterThrottle_tests.cpp
-
-Then parallel implementation:
-  US3 stream: T031 → T032 → T033 → T034 → T035 → T036
-  US4 stream: T037 → T038 → T039 → T040 → T041 → T042 → T043
-  US5 stream: T045 → T046 → T047 → T048 → T049
+```text
+- T025 [P] [US2] Add drag-session state and reset tests in gladius/tests/unittests/LinkDragState_tests.cpp
+- T026 [P] [US2] Add compatibility resolution tests for static and dynamic types in gladius/tests/unittests/LinkDragState_tests.cpp
+- T027 [P] [US2] Add node-view pin highlighting regression tests in gladius/tests/unittests/NodeView_tests.cpp
 ```
 
 ---
 
 ## Implementation Strategy
 
-### MVP First (US1 Only)
+### MVP First (User Story 1 Only)
 
-1. Complete Phase 1: Setup (T001-T007)
-2. Complete Phase 2: Foundational (T008-T011)
-3. Complete Phase 3: US1 — Numeric Widgets (T012-T021)
-4. **STOP and VALIDATE**: Every numeric parameter has dial+drag-float, adaptive sensitivity works, keyboard works
-5. Demo/review if ready
+1. Complete Setup and Foundational work.
+2. Complete User Story 1.
+3. Validate numeric editing independently.
+4. Stop and review before expanding scope.
 
 ### Incremental Delivery
 
-1. Setup + Foundational → Infrastructure ready
-2. Add US1 (Numeric Widgets) → Test independently → **MVP!** Most impactful single change
-3. Add US2 (Port Highlighting) → Test independently → Complete P1 stories
-4. Add US3 (Node Rendering) + US4 (Begin/End) + US5 (Throttle) → P2 stories in parallel
-5. Add US6 (Function Call Nodes) → P3 story
-6. Polish → Edge cases and final validation
-7. Each story adds value without breaking previous stories
+1. Setup + Foundational
+2. US1 → validate
+3. US2 → validate
+4. US3, US4, US5 in parallel or sequential order as capacity allows → validate each independently
+5. US6 → validate
+6. Polish and quickstart validation
+
+### Parallel Team Strategy
+
+1. One contributor stabilizes shared pin and style infrastructure.
+2. One contributor takes numeric widgets and responsiveness.
+3. One contributor takes compact, begin-end, and function-call presentation.
+4. Merge only after each story passes its independent validation checkpoint.
 
 ---
 
-## Summary
+## Notes
 
-| Metric | Count |
-|--------|-------|
-| **Total tasks** | 59 |
-| **US1 (Numeric Widgets)** | 10 tasks (T012-T021) |
-| **US2 (Port Highlighting)** | 9 tasks (T022-T030) |
-| **US3 (Node Rendering)** | 6 tasks (T031-T036) |
-| **US4 (Begin/End Nodes)** | 7 tasks (T037-T043) |
-| **US5 (Responsiveness)** | 6 tasks (T044-T049) |
-| **US6 (Function Call)** | 3 tasks (T050-T052) |
-| **Setup** | 7 tasks (T001-T007) |
-| **Foundational** | 4 tasks (T008-T011) |
-| **Polish** | 7 tasks (T053-T059) |
-| **Parallelizable tasks** | 16 tasks marked [P] |
-| **Suggested MVP scope** | US1 only (Phase 1 + 2 + 3 = 21 tasks) |
+- `[P]` means the task targets different files or isolated test additions and is safe to parallelize.
+- `[US1]`…`[US6]` labels map tasks back to independently testable user stories.
+- The initial polished pass explicitly excludes true circular perimeter-pin interaction.
+- Use VS Code tasks for build and test verification per project guidance.

@@ -14,6 +14,10 @@
 - Q: Where should per-parameter widget mode preferences be persisted? → A: The orbital dial is always shown in combination with a numeric drag-float input — they are paired, not alternative modes. The dial provides visual/rotary interaction while the drag-float provides precise numeric readout and text entry. No per-parameter mode persistence needed for this pairing.
 - Q: How aggressively should we pursue circular node rendering? → A: Start with heavily rounded rectangles using the same color-ring styling; true circular nodes as an optional second pass if framework customization allows it.
 
+### Session 2026-03-14
+
+- Q: What should take priority after observing clipping, anchor misalignment, and unreliable drag behavior in compact nodes? → A: Prioritize a systematic redesign that keeps interaction geometry stable across all node types. The initial polished pass uses a shared pin implementation, aligned left/right pin rails, and compact rounded/capsule node shapes. Experimental perimeter-mounted pins and true circular interaction geometry are explicitly deferred.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Intuitive Numeric Value Editing (Priority: P1)
@@ -69,7 +73,7 @@ As a user working with complex graphs containing many nodes, I want nodes to be 
 
 Currently, node sizing is sometimes inadequate — labels or widgets can clip at node boundaries, and nodes take more space than necessary. Nodes should auto-size to fit their content with appropriate padding, use a consistent visual style, and remain readable at various zoom levels.
 
-The reference design demonstrates a compelling **circular node shape** with color-coded rings that indicate node category (e.g., green for primitives, blue for boolean operations, red for subtractive operations, orange for value/constant nodes). Nodes display their name prominently in the center, with ports arranged around the perimeter. This approach yields a distinctive, modern look and makes it easy to identify node function at a glance through silhouette and color. Where circular shapes are impractical (nodes with many ports or large embedded widgets), a rounded-rectangle fallback with the same color-coding language should be used. An icon or glyph in the node center can further reinforce the node's purpose.
+The reference design demonstrates a compelling compact node style with strong silhouette and color coding. For the initial polished implementation, compact nodes should use a **shared, stable interaction model**: the same pin behavior as other nodes, aligned pin rails on the left/right edges, and a heavily rounded or capsule-like body with category-specific ring colors. This yields a distinctive, modern look while preserving reliable hit-testing, link anchors, and layout. An icon or glyph in the node center can further reinforce the node's purpose. True circular shapes with perimeter-mounted pins may be explored later only if they can match the same interaction quality.
 
 **Why this priority**: Visual clarity directly affects usability in complex graphs. Clipped content forces the user to guess or hover, slowing workflow.
 
@@ -82,9 +86,10 @@ The reference design demonstrates a compelling **circular node shape** with colo
 3. **Given** a node with embedded parameter widgets (sliders, text fields), **When** the user interacts with them, **Then** the widgets are large enough to be usable and do not overlap with pin labels.
 4. **Given** the user zooms out on a large graph, **When** nodes become smaller, **Then** the most important information (node name, connection state) remains legible, and less critical details (parameter values) gracefully fade or collapse.
 5. **Given** multiple node types of varying complexity, **When** rendered side by side, **Then** they share a consistent visual language (spacing, colors, typography, corner rounding) that looks cohesive and modern.
-6. **Given** a simple node with few ports (e.g., Sphere with Radius and Center), **When** rendered, **Then** it appears as a heavily rounded rectangle with its name centered, ports on left/right, and a category-specific ring color. True circular rendering may be explored in a future pass.
-7. **Given** a complex node with many ports or embedded widgets (e.g., a matrix node or a node with 6+ ports), **When** rendered, **Then** it uses the same rounded-rectangle layout and color-coding language.
+6. **Given** a simple node with few ports (e.g., Sphere with Radius and Center), **When** rendered, **Then** it appears as a compact heavily rounded or capsule-like node with its name or glyph centered, left/right aligned pins, and a category-specific ring color.
+7. **Given** a complex node with many ports or embedded widgets (e.g., a matrix node or a node with 6+ ports), **When** rendered, **Then** it uses the same pin behavior, spacing system, and color-coding language as the compact nodes while expanding vertically as needed.
 8. **Given** any node, **When** the user looks at the graph overview, **Then** the node's category is identifiable by its ring/border color without reading the label.
+9. **Given** a compact node and a regular node, **When** the user starts a drag, hovers a port, or drops a link, **Then** both node types respond with the same reliability, hit area feel, and link anchor alignment.
 
 ---
 
@@ -152,6 +157,7 @@ Currently, function call nodes show a yellow button that opens a selection popup
 - What happens when a dynamic-typed node has no inputs connected yet (unresolved type)? All ports of that node should be shown as potentially compatible, and the tooltip should indicate the type is unresolved.
 - What happens when the user starts a link drag and then presses Escape? The drag should cancel cleanly without creating any link or leaving visual artifacts.
 - What happens when a begin/end node argument is renamed while links exist? The existing link should be preserved and the connected pin label should update.
+- What happens when a compact node style cannot fit its content without reducing hit target size? The node should expand or fall back to a less compact layout rather than shrinking interactive targets.
 
 ## Requirements *(mandatory)*
 
@@ -184,9 +190,11 @@ Currently, function call nodes show a yellow button that opens a selection popup
 - **FR-013**: Nodes MUST have consistent visual styling including spacing, colors, corner rounding, and typography across all node types.
 - **FR-014**: Node display names that exceed available width MUST be truncated with an ellipsis, with the full name shown on hover.
 - **FR-014a**: Nodes MUST use category-based color coding (ring/border color) derived automatically by hashing the node's type tag, consistent with the existing group tag-based coloring system. This ensures new node types automatically receive distinct colors without manual assignment.
-- **FR-014b**: All nodes MUST be rendered as heavily rounded rectangles with a color-coded ring/border. True circular shapes for simple nodes (few ports) MAY be explored as an optional second pass if framework customization allows, but are not required for the initial implementation.
-- **FR-014c**: Complex nodes that cannot fit a circular layout MUST fall back to a rounded-rectangle shape that shares the same color-coding language.
-- **FR-014d**: Nodes MAY display a category icon or glyph in the center to further reinforce their purpose.
+- **FR-014b**: The initial polished implementation MUST use heavily rounded rectangular or capsule-like node bodies with a color-coded ring/border and aligned left/right pin rails.
+- **FR-014c**: Compact nodes and regular nodes MUST share the same pin interaction behavior, including hit target size, hover feedback, drag start reliability, and link anchor alignment.
+- **FR-014d**: Visual styling MUST NOT depend on pin placement or hit-testing rules that differ from the rest of the editor.
+- **FR-014e**: Nodes MAY display a category icon or glyph in the center to further reinforce their purpose.
+- **FR-014f**: True circular shapes or perimeter-mounted pins are out of scope for the initial polished implementation and MAY only be explored in a later pass if they can preserve the same interaction quality as the standard layout.
 
 **Begin/End Nodes**
 
@@ -227,12 +235,14 @@ Currently, function call nodes show a yellow button that opens a selection popup
 - **SC-007**: The visual styling of nodes is perceived as modern and cohesive — no visual inconsistencies between node types (verified by visual review).
 - **SC-008**: Node categories are identifiable by color alone (without reading labels) at normal and zoomed-out views, matching the color-coding scheme defined for each category.
 - **SC-009**: Every numeric parameter displays an orbital dial paired with a drag-float input by default, with an optional slider alternative available.
+- **SC-010**: Users can start a link drag successfully from any visible port on the first attempt, regardless of node style, without needing to aim for a small sub-region of the port.
+- **SC-011**: No compact node variant exhibits clipped ports, visibly misaligned link anchors, or inconsistent port sizing relative to regular nodes at default zoom.
 
 ## Assumptions
 
-- The existing imgui-node-editor library supports custom styling of pins and nodes sufficient to implement highlighting and dimming effects. If it does not, the node editor wrapper layer may need to be extended.
+- The current node editor framework supports a polished first pass based on stable inline pin layouts, shared pin rendering, and rounded/capsule node styling. Features that require special interaction geometry are deferred unless they can be implemented without destabilizing core interactions.
 - Orbital dial, slider, and other alternative widget modes are rendered **inline within the node body**. The orbital dial is always paired with a drag-float input (not an alternative mode). Nodes auto-resize to accommodate the widget layout. This keeps all parameter editing self-contained within the graph.
 - Hardware keyboard encoders that map to Up/Down arrow keys will generate standard key repeat events that the input system can process like normal keyboard input — no special driver integration is required.
 - The existing asynchronous compute pipeline architecture can be leveraged for parameter change throttling — this feature does not require a new async framework, only integration with the existing one.
-- The initial implementation uses heavily rounded rectangles with color-coded ring styling for all nodes. True circular node shapes may be explored as a second pass if the imgui-node-editor framework can be customized for perimeter port placement and circular hit-testing without destabilizing the editor.
+- The initial implementation uses heavily rounded or capsule-like nodes with color-coded ring styling and aligned left/right pin rails for all compact nodes. True circular node shapes and perimeter-mounted pins are explicitly deferred to a later exploratory pass.
 - The modifier keys for drag sensitivity (Shift for fine, Ctrl for coarse) follow common conventions in DCC tools (Blender, Houdini, etc.) and do not conflict with existing editor shortcuts.

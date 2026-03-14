@@ -32,7 +32,6 @@
 ## Notes
 
 - All items pass validation. Spec is ready for `/speckit.clarify` or `/speckit.plan`.
-- Circular node shapes included as a design goal (not deferred), with rounded-rectangle fallback if framework limits circular rendering. A feasibility spike is recommended.
-- Orbital dial and slider widget modes added as alternative numeric input presentations, inspired by reference design.
-- Node Properties panel assumed as a hosting location for per-parameter widget type selectors.
-- Assumptions section documents framework capabilities, modifier key conventions, and the circular node feasibility question.
+- The spec now reflects a systematic first pass focused on unified pin behavior, reliable drag/link interactions, and compact rounded/capsule nodes instead of experimental perimeter-mounted circular layouts.
+- True circular nodes are explicitly deferred to a later exploratory pass so the initial implementation can optimize for polish and interaction consistency.
+- Orbital dial and slider widget modes remain in scope for numeric editing.
