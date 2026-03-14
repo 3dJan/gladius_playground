@@ -5,30 +5,21 @@
 
 #include <gtest/gtest.h>
 
+#include "nodes/Model.h"
+#include "ui/NumericWidgets.h"
+
 #include <algorithm>
 #include <cmath>
 #include <optional>
 
 namespace gladius::ui::tests
 {
-    namespace
-    {
-        /// Mirrors the adaptive step computation from NumericWidgets.cpp
-        float computeAdaptiveStep(float value)
-        {
-            float constexpr EPSILON = 1e-6f;
-            float const magnitude = std::abs(value) + EPSILON;
-            float const order = std::floor(std::log10(magnitude));
-            return std::pow(10.f, order) * 0.01f;
-        }
-    }
-
     // --- T012: AdaptiveDragFloat sensitivity tests ---
 
     TEST(AdaptiveDragFloat, NearZero_UsesSmallSteps)
     {
         // Near zero, steps should be very small (order of ~1e-8)
-        float const step = computeAdaptiveStep(0.001f);
+        float const step = numeric_widget_detail::computeAdaptiveStep(0.001f);
         EXPECT_LT(step, 0.001f);
         EXPECT_GT(step, 0.f);
     }
@@ -36,15 +27,15 @@ namespace gladius::ui::tests
     TEST(AdaptiveDragFloat, LargeValue_UsesLargeSteps)
     {
         // For large values (~1000), steps should be proportionally large
-        float const step = computeAdaptiveStep(1000.f);
+        float const step = numeric_widget_detail::computeAdaptiveStep(1000.f);
         EXPECT_GE(step, 1.f);
     }
 
     TEST(AdaptiveDragFloat, ShiftModifier_ReducesSensitivity)
     {
         // Shift reduces sensitivity by ×0.01
-        float const baseStep = computeAdaptiveStep(10.f);
-        float const fineStep = baseStep * 0.01f;
+        float const baseStep = numeric_widget_detail::computeAdaptiveStep(10.f);
+        float const fineStep = numeric_widget_detail::applyModifierStep(baseStep, true, false);
         EXPECT_NEAR(fineStep, baseStep * 0.01f, 1e-9f);
         EXPECT_LT(fineStep, baseStep);
     }
@@ -52,8 +43,8 @@ namespace gladius::ui::tests
     TEST(AdaptiveDragFloat, CtrlModifier_IncreasesSensitivity)
     {
         // Ctrl increases sensitivity by ×100
-        float const baseStep = computeAdaptiveStep(10.f);
-        float const coarseStep = baseStep * 100.f;
+        float const baseStep = numeric_widget_detail::computeAdaptiveStep(10.f);
+        float const coarseStep = numeric_widget_detail::applyModifierStep(baseStep, false, true);
         EXPECT_NEAR(coarseStep, baseStep * 100.f, 1e-6f);
         EXPECT_GT(coarseStep, baseStep);
     }
@@ -63,10 +54,10 @@ namespace gladius::ui::tests
         float value = 5.f;
         float const minVal = 0.f;
         float const maxVal = 10.f;
-        value = std::clamp(value + 20.f, minVal, maxVal);
+        value = numeric_widget_detail::clampToBounds(value + 20.f, minVal, maxVal);
         EXPECT_FLOAT_EQ(value, 10.f);
 
-        value = std::clamp(value - 30.f, minVal, maxVal);
+        value = numeric_widget_detail::clampToBounds(value - 30.f, minVal, maxVal);
         EXPECT_FLOAT_EQ(value, 0.f);
     }
 
@@ -101,7 +92,7 @@ namespace gladius::ui::tests
     {
         // Unbounded: value accumulates proportionally to angle delta
         float value = 10.f;
-        float const baseStep = computeAdaptiveStep(value);
+        float const baseStep = numeric_widget_detail::computeAdaptiveStep(value);
         float constexpr PI = 3.14159265358979323846f;
 
         float const angleDelta = PI;
@@ -116,13 +107,64 @@ namespace gladius::ui::tests
 
     TEST(AdaptiveDragFloat, StepScalesLogarithmically)
     {
-        float const step1 = computeAdaptiveStep(1.f);
-        float const step10 = computeAdaptiveStep(10.f);
-        float const step100 = computeAdaptiveStep(100.f);
+        float const step1 = numeric_widget_detail::computeAdaptiveStep(1.f);
+        float const step10 = numeric_widget_detail::computeAdaptiveStep(10.f);
+        float const step100 = numeric_widget_detail::computeAdaptiveStep(100.f);
 
         // Each order of magnitude should increase the step by ~10x
         EXPECT_NEAR(step10 / step1, 10.f, 1.f);
         EXPECT_NEAR(step100 / step10, 10.f, 1.f);
+    }
+
+    TEST(AdaptiveDragFloat, ComputeDisplayPrecision_AdaptsToMagnitude)
+    {
+        EXPECT_LT(numeric_widget_detail::computeDisplayPrecision(0.001f),
+                  numeric_widget_detail::computeDisplayPrecision(1000.f));
+        EXPECT_GE(numeric_widget_detail::computeDisplayPrecision(0.f), 1);
+    }
+
+    TEST(NumericWidgetLayoutMode, MissingPreference_DefaultsToDialPlusDragFloat)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantScalar>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::Value);
+
+        EXPECT_EQ(model.getNumericWidgetLayoutMode(parameter.getId()),
+                  nodes::NumericWidgetLayoutMode::DialPlusDragFloat);
+        EXPECT_FALSE(model.hasNumericWidgetLayoutMode(parameter.getId()));
+    }
+
+    TEST(NumericWidgetLayoutMode, SetPreference_PersistsPerParameterId)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantScalar>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::Value);
+        model.setNumericWidgetLayoutMode(parameter.getId(), nodes::NumericWidgetLayoutMode::Slider);
+
+        EXPECT_TRUE(model.hasNumericWidgetLayoutMode(parameter.getId()));
+        EXPECT_EQ(model.getNumericWidgetLayoutMode(parameter.getId()),
+                  nodes::NumericWidgetLayoutMode::Slider);
+    }
+
+    TEST(NumericWidgetLayoutMode, CopiedModel_RetainsStoredPreference)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantScalar>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::Value);
+        auto const parameterId = parameter.getId();
+        model.setNumericWidgetLayoutMode(parameterId, nodes::NumericWidgetLayoutMode::Slider);
+
+        nodes::Model copiedModel(model);
+
+        EXPECT_TRUE(copiedModel.hasNumericWidgetLayoutMode(parameterId));
+        EXPECT_EQ(copiedModel.getNumericWidgetLayoutMode(parameterId),
+                  nodes::NumericWidgetLayoutMode::Slider);
     }
 
 } // namespace gladius::ui::tests
