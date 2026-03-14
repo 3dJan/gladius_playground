@@ -22,7 +22,6 @@
 #include "ComputeContext.h"
 #include "Document.h"
 #include "EventLogger.h"
-#include "ui/NodeView.h"
 #include "nodes/Assembly.h"
 #include <compute/ComputeCore.h>
 #include "ui/LayoutQualityAnalyzer.h"
@@ -442,74 +441,6 @@ namespace
 
         // Assert: No node or group overlaps even without extra padding
         LayoutQualityAnalyzer analyzer([](nodes::NodeId) { return ImVec2(220.0F, 160.0F); });
-        auto const metrics = analyzer.analyze(*model);
-
-        EXPECT_TRUE(metrics.nodeOverlaps.empty());
-        EXPECT_TRUE(metrics.groupOverlaps.empty());
-        EXPECT_GT(metrics.width, 0.0F);
-        EXPECT_GT(metrics.height, 0.0F);
-    }
-
-    TEST_F(NodeLayoutEngineTest, PerformAutoLayout_WithCompactAndFallbackFootprints_AvoidsOverlaps)
-    {
-        createRegressionGraph(*model);
-
-        std::unordered_map<nodes::NodeId, ImVec2> nodeSizes;
-        for (auto & [nodeId, nodePtr] : *model)
-        {
-            if (dynamic_cast<nodes::Addition *>(nodePtr.get()) != nullptr)
-            {
-                auto const compactMetrics = computeCompactNodeLayoutMetrics(2,
-                                                                           1,
-                                                                           ImVec2{24.0F, 20.0F},
-                                                                           40.0F,
-                                                                           30.0F,
-                                                                           ImVec2{14.0F, 14.0F},
-                                                                           4.0F,
-                                                                           2.0F);
-                nodeSizes.insert_or_assign(nodeId,
-                                           ImVec2(compactMetrics.totalWidth,
-                                                  std::max(140.0F, compactMetrics.totalHeight)));
-            }
-            else if (dynamic_cast<nodes::Multiplication *>(nodePtr.get()) != nullptr)
-            {
-                auto const fallbackMetrics = computeCompactNodeLayoutMetrics(2,
-                                                                            1,
-                                                                            ImVec2{24.0F, 20.0F},
-                                                                            170.0F,
-                                                                            120.0F,
-                                                                            ImVec2{14.0F, 14.0F},
-                                                                            4.0F,
-                                                                            2.0F);
-                EXPECT_TRUE(fallbackMetrics.useFallbackLayout);
-                nodeSizes.insert_or_assign(nodeId,
-                                           ImVec2(std::max(240.0F, fallbackMetrics.totalWidth),
-                                                  std::max(160.0F, fallbackMetrics.totalHeight)));
-            }
-            else
-            {
-                nodeSizes.insert_or_assign(nodeId, ImVec2(200.0F, 140.0F));
-            }
-        }
-
-        engine->setNodeSizeProvider([&nodeSizes](nodes::NodeId nodeId)
-                                    {
-                                        auto const it = nodeSizes.find(nodeId);
-                                        return it != nodeSizes.end() ? it->second : ImVec2(200.0F, 140.0F);
-                                    });
-
-        NodeLayoutEngine::LayoutConfig config;
-        config.nodeDistance = 180.0F;
-        config.layerSpacing = 420.0F;
-        config.groupPadding = 120.0F;
-
-        engine->performAutoLayout(*model, config);
-
-        LayoutQualityAnalyzer analyzer([&nodeSizes](nodes::NodeId nodeId)
-                                       {
-                                           auto const it = nodeSizes.find(nodeId);
-                                           return it != nodeSizes.end() ? it->second : ImVec2(200.0F, 140.0F);
-                                       });
         auto const metrics = analyzer.analyze(*model);
 
         EXPECT_TRUE(metrics.nodeOverlaps.empty());

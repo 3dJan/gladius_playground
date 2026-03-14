@@ -1,10 +1,7 @@
 #include "Style.h"
 
-#include "imguinodeeditor.h"
-
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <nodes/DerivedNodes.h>
 #include <nodes/nodesfwd.h>
 #include <tuple>
@@ -12,16 +9,8 @@
 #include <typeinfo>
 #include <unordered_map>
 
-namespace ed = ax::NodeEditor;
-
 namespace gladius::ui
 {
-
-    SharedNodeMetrics const & sharedNodeMetrics()
-    {
-        static SharedNodeMetrics const metrics{};
-        return metrics;
-    }
 
     // Function to generate a unique color for each node type
     ImVec4 generateUniqueColor(size_t index)
@@ -80,76 +69,6 @@ namespace gladius::ui
         std::apply([&](auto... nodeTypes) { (addNodeType(nodeTypes), ...); },
                    gladius::nodes::NodeTypes{});
 
-        // T037: Visual distinction for begin/end nodes — override with specific accent colors
-        map[typeid(gladius::nodes::Begin)] = ImVec4(0.2f, 0.7f, 0.4f, 1.0f);  // green accent
-        map[typeid(gladius::nodes::End)]   = ImVec4(0.7f, 0.3f, 0.3f, 1.0f);  // red accent
-
         return map;
     };
-
-    void pushNodeStyle(NodeRenderConfig const & config, ImVec4 categoryColor)
-    {
-        ed::PushStyleVar(ed::StyleVar_NodeRounding, config.rounding);
-        ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, config.borderWidth);
-        // Ensure content is inset enough to clear the rounded corners.
-        float const pad = std::max(12.f, config.rounding * 0.75f);
-        ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(pad, pad, pad, pad));
-        ed::PushStyleColor(ed::StyleColor_NodeBorder, categoryColor);
-    }
-
-    void popNodeStyle()
-    {
-        ed::PopStyleColor(1);
-        ed::PopStyleVar(3); // NodeRounding, NodeBorderWidth, NodePadding
-    }
-
-    float computeMinNodeWidth(float headerTextWidth, float contentWidth, float uiScale)
-    {
-        float constexpr PADDING = 40.f;
-        float const measuredWidth = std::max(headerTextWidth, contentWidth) + PADDING * uiScale;
-        return std::max(measuredWidth, sharedNodeMetrics().minimumNodeWidth * uiScale * 1.1f);
-    }
-
-    ImVec4 generateColorFromTypeTag(std::string const & typeTag)
-    {
-        // Deterministic hash → HSV color
-        size_t const hash = std::hash<std::string>{}(typeTag);
-        float const hue = static_cast<float>(hash % 360);
-        float constexpr SATURATION = 0.6f;
-        float constexpr VALUE = 0.5f;
-
-        // HSV → RGB conversion
-        float const c = VALUE * SATURATION;
-        float const x = c * (1.f - std::abs(std::fmod(hue / 60.f, 2.f) - 1.f));
-        float const m = VALUE - c;
-
-        float r, g, b;
-        if (hue < 60.f)
-        {
-            r = c; g = x; b = 0.f;
-        }
-        else if (hue < 120.f)
-        {
-            r = x; g = c; b = 0.f;
-        }
-        else if (hue < 180.f)
-        {
-            r = 0.f; g = c; b = x;
-        }
-        else if (hue < 240.f)
-        {
-            r = 0.f; g = x; b = c;
-        }
-        else if (hue < 300.f)
-        {
-            r = x; g = 0.f; b = c;
-        }
-        else
-        {
-            r = c; g = 0.f; b = x;
-        }
-
-        return ImVec4(r + m, g + m, b + m, 1.f);
-    }
-
 } // namespace gladius

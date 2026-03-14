@@ -3,62 +3,18 @@
 
 #include "imgui.h"
 
-#include <map>
-#include <string>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
 
 namespace gladius::ui
 {
-    struct SharedPinMetrics
-    {
-        float interactionPadding = 6.f;
-        float compactRailSpacing = 4.f;
-        float minimumHitExtent = 18.f;
-    };
-
-    struct SharedNodeMetrics
-    {
-        float borderWidth = 4.f;
-        float rounding = 16.f;
-        float compactRounding = 999.f;
-        float minimumNodeWidth = 120.f;
-        float maximumCompactNodeWidth = 320.f;
-        int maximumCompactNodeRows = 2;
-        SharedPinMetrics pinMetrics{};
-    };
-
     struct NodeStyle
     {
         ImColor color = IM_COL32(20, 120, 20, 255);
         ImColor activeColor = IM_COL32(40, 150, 40, 255);
         ImColor hoveredColor = IM_COL32(60, 180, 60, 255);
-        float borderWidth = 4.f;  ///< Category ring/border thickness
-        float rounding = 16.f;    ///< Corner rounding radius for rounded rectangles
     };
-
-    /// Node render configuration passed to pushNodeStyle/popNodeStyle.
-    struct NodeRenderConfig
-    {
-        float borderWidth = 4.f;
-        float rounding = 16.f;
-    };
-
-    /// Push enhanced node styling (rounding, border width, category color).
-    /// Must be paired with popNodeStyle().
-    void pushNodeStyle(NodeRenderConfig const & config, ImVec4 categoryColor);
-    void popNodeStyle();
-
-    /// Compute the minimum node width that avoids clipping content.
-    float computeMinNodeWidth(float headerTextWidth, float contentWidth, float uiScale);
-
-    /// Shared UI metrics used by the first-pass node-editor redesign.
-    SharedNodeMetrics const & sharedNodeMetrics();
-
-    /// Generate a category color from a type tag string via deterministic hash.
-    /// Uses HSV: hue = hash(tag) % 360, saturation = 0.6, value = 0.5.
-    ImVec4 generateColorFromTypeTag(std::string const & typeTag);
 
     using NodeStyles = std::map<nodes::Category, NodeStyle>;
 
