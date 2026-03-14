@@ -17,14 +17,14 @@ namespace gladius::ui
         ImColor activeColor = IM_COL32(40, 150, 40, 255);
         ImColor hoveredColor = IM_COL32(60, 180, 60, 255);
         float borderWidth = 4.f;  ///< Category ring/border thickness
-        float rounding = 20.f;    ///< Corner rounding radius for heavily rounded rectangles
+        float rounding = 16.f;    ///< Corner rounding radius for rounded rectangles
     };
 
     /// Node render configuration passed to pushNodeStyle/popNodeStyle.
     struct NodeRenderConfig
     {
         float borderWidth = 4.f;
-        float rounding = 20.f;
+        float rounding = 16.f;
     };
 
     /// Push enhanced node styling (rounding, border width, category color).

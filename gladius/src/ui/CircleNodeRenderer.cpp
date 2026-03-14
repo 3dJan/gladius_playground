@@ -1,6 +1,5 @@
 #include "CircleNodeRenderer.h"
 
-#include "LinkColors.h"
 #include "Parameter.h"
 
 namespace gladius::ui::circle_node
@@ -142,34 +141,5 @@ namespace gladius::ui::circle_node
     {
         auto sym = findSymbol(node.name());
         return sym.empty() ? node.name() : sym;
-    }
-
-    ImVec4 portColor(std::type_index typeIndex)
-    {
-        if (typeIndex == nodes::ParameterTypeIndex::Float)
-        {
-            return LinkColors::ColorFloat;
-        }
-        if (typeIndex == nodes::ParameterTypeIndex::Float3)
-        {
-            return LinkColors::ColorFloat3;
-        }
-        if (typeIndex == nodes::ParameterTypeIndex::Matrix4)
-        {
-            return LinkColors::ColorMatrix;
-        }
-        if (typeIndex == nodes::ParameterTypeIndex::ResourceId)
-        {
-            return LinkColors::ColorResource;
-        }
-        if (typeIndex == nodes::ParameterTypeIndex::String)
-        {
-            return LinkColors::ColorString;
-        }
-        if (typeIndex == nodes::ParameterTypeIndex::Int)
-        {
-            return LinkColors::ColorInt;
-        }
-        return {1.f, 1.f, 1.f, 1.f};
     }
 } // namespace gladius::ui::circle_node

@@ -85,13 +85,16 @@ namespace gladius::ui
     {
         ed::PushStyleVar(ed::StyleVar_NodeRounding, config.rounding);
         ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, config.borderWidth);
+        // Ensure content is inset enough to clear the rounded corners.
+        float const pad = std::max(12.f, config.rounding * 0.75f);
+        ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(pad, pad, pad, pad));
         ed::PushStyleColor(ed::StyleColor_NodeBorder, categoryColor);
     }
 
     void popNodeStyle()
     {
         ed::PopStyleColor(1);
-        ed::PopStyleVar(2);
+        ed::PopStyleVar(3); // NodeRounding, NodeBorderWidth, NodePadding
     }
 
     float computeMinNodeWidth(float headerTextWidth, float contentWidth, float uiScale)

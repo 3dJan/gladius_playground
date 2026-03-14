@@ -189,7 +189,7 @@ namespace gladius::ui
                 renderPortPin(output.getId(),
                               false,
                               typeIndex,
-                              reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                              reinterpret_cast<const char *>(ICON_FA_CIRCLE));
                 ImGui::PopID();
             }
             ImGui::EndTable();
@@ -239,15 +239,15 @@ namespace gladius::ui
     void NodeView::visit(nodes::End & endNode)
     {
         header(endNode);
-        if (ImGui::BeginTable("beginNodeTable",
+        if (ImGui::BeginTable("endNodeTable",
                               4,
                               ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(400 * m_uiScale, 100 * m_uiScale)))
+                              ImVec2(280.f * m_uiScale, 0.f)))
         {
-            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 20.f * m_uiScale);
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 200.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 100.f * m_uiScale);
+            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 30.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 120.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 40.f * m_uiScale);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 60.f * m_uiScale);
 
             std::optional<std::string> paramToRemove;
             std::optional<std::pair<std::string, std::string>> paramToRename;
@@ -259,7 +259,7 @@ namespace gladius::ui
                 renderPortPin(input.second.getId(),
                               true,
                               input.second.getTypeIndex(),
-                              reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                              reinterpret_cast<const char *>(ICON_FA_CIRCLE));
                 
                 ImGui::TableNextColumn();
 
@@ -598,11 +598,8 @@ namespace gladius::ui
             ImGui::SetCursorScreenPos(
               pinScreenPos(inputAngle(i, static_cast<int>(inputs.size()))));
 
-            ed::BeginPin(pin.id, ed::PinKind::Input);
-            ImGui::PushStyleColor(ImGuiCol_Text, circle_node::portColor(pin.typeIndex));
-            ImGui::TextUnformatted(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
-            ImGui::PopStyleColor();
-            ed::EndPin();
+            renderPortPin(pin.id, true, pin.typeIndex,
+                          reinterpret_cast<char const *>(ICON_FA_CIRCLE), true);
 
             if (ImGui::IsItemHovered())
             {
@@ -627,11 +624,8 @@ namespace gladius::ui
             ImGui::SetCursorScreenPos(
               pinScreenPos(outputAngle(i, static_cast<int>(outputs.size()))));
 
-            ed::BeginPin(pin.id, ed::PinKind::Output);
-            ImGui::PushStyleColor(ImGuiCol_Text, circle_node::portColor(pin.typeIndex));
-            ImGui::TextUnformatted(reinterpret_cast<char const *>(ICON_FA_CIRCLE));
-            ImGui::PopStyleColor();
-            ed::EndPin();
+            renderPortPin(pin.id, false, pin.typeIndex,
+                          reinterpret_cast<char const *>(ICON_FA_CIRCLE), true);
 
             if (ImGui::IsItemHovered())
             {
@@ -2431,7 +2425,7 @@ namespace gladius::ui
                         m_modelEditor->clearNodeFocus();
                     }
 
-                    if (renderPortPin(pinId.Get(), true, parameter.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT), true, false))
+                    if (renderPortPin(pinId.Get(), true, parameter.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CIRCLE), true, false))
                     {
                         columnWidths[1] = std::max(columnWidths[1], ImGui::GetItemRectSize().x);
                         showLinkAssignmentMenu(parameter);
@@ -2559,7 +2553,7 @@ namespace gladius::ui
 
                     const ed::PinId pinId = output.second.getId();
                     
-                    renderPortPin(pinId.Get(), false, output.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                    renderPortPin(pinId.Get(), false, output.second.getTypeIndex(), reinterpret_cast<const char *>(ICON_FA_CIRCLE), true);
 
                     columnWidths[7] = std::max(columnWidths[7], ImGui::GetItemRectSize().x);
                     ImGui::PopStyleColor();
@@ -2658,33 +2652,17 @@ namespace gladius::ui
         if (asButton)
         {
             ImGui::PushStyleColor(ImGuiCol_Text, color);
-            if (shouldDim)
-            {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
-            }
-            else if (shouldGlow)
-            {
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x, color.y, color.z, 0.4f));
-            }
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(color.x, color.y, color.z, 0.3f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                  shouldDim ? ImVec4(0, 0, 0, 0)
+                                            : ImVec4(color.x, color.y, color.z, 0.25f));
 
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0});
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
-
-            bool btnClicked = ImGui::Button(iconOrText.c_str(), ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f));
-
+            float const pinSize = ImGui::GetFontSize() * 1.5f;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {0, 0});
+            bool btnClicked = ImGui::Button(iconOrText.c_str(), ImVec2(pinSize, pinSize));
             ImGui::PopStyleVar();
-
-            if (shouldDim)
-            {
-                ImGui::PopStyleColor(3);
-            }
-            else if (shouldGlow)
-            {
-                ImGui::PopStyleColor(1);
-            }
-            ImGui::PopStyleColor(); // Col_Text
+            ImGui::PopStyleColor(4);
 
             clicked = btnClicked || isFocused;
         }

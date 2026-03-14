@@ -21,8 +21,5 @@ namespace gladius::ui
 
         /// Get the short operator symbol for a node (e.g. "+" for Addition).
         [[nodiscard]] std::string getOperatorSymbol(nodes::NodeBase const & node);
-
-        /// Get the type-based color for a port.
-        [[nodiscard]] ImVec4 portColor(std::type_index typeIndex);
     } // namespace circle_node
 } // namespace gladius::ui

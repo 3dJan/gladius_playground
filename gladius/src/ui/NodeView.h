@@ -195,7 +195,7 @@ namespace gladius::ui
                            bool isInput,
                            std::type_index typeIndex,
                            const std::string & iconOrText,
-                           bool asButton = false,
+                           bool asButton = true,
                            bool isFocused = false);
 
         bool viewString(nodes::NodeBase const & node,
