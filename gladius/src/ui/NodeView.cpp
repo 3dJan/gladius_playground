@@ -2124,35 +2124,58 @@ namespace gladius::ui
         }
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
-        float const padding = 10.f * m_uiScale;
+        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         constexpr float minWidth = 170.f;
-        // sum of all column widths (with per-column padding)
-        float tableWidth = 0.f;
-        for (auto width : columnWidths)
+
+        // Bootstrap input widths so the outer table has reasonable sizes on
+        // the very first frame (before inputPins/outputPins have measured).
+        if (columnWidths[1] <= 0.f || columnWidths[2] <= 0.f)
         {
-            tableWidth += (width > 0.f) ? (width + padding) : 0.f;
+            auto const & style = ImGui::GetStyle();
+            float const pinButtonWidth = ImGui::GetFontSize() * 1.5f + style.FramePadding.x * 2.0f;
+            float const maxInputLabelWidth =
+              measureMaxPortLabelWidth(node.parameter(), !m_resoureIdNodesVisible);
+            columnWidths[1] = std::max(columnWidths[1], pinButtonWidth);
+            columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
+        }
+        if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
+        {
+            auto const & style = ImGui::GetStyle();
+            float const maxOutputLabelWidth =
+              measureMaxPortLabelWidth(node.getOutputs(), false);
+            float const pinGlyphWidth =
+              ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
+              style.FramePadding.x * 2.0f;
+            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
+            columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
         }
 
-        float const fillSpace = std::max(0.f, minWidth - tableWidth - 20.f * m_uiScale);
+        // Inner table widths (NoPadOuterX on inner tables removes their outer
+        // padding, so their total width equals the sum of column init_widths).
+        float const inputsWidth = (columnWidths[1] + colPad) + (columnWidths[2] + colPad);
+        float const outputsWidth = (columnWidths[6] + colPad) + (columnWidths[7] + colPad);
+        // Outer columns lose colPad to cell padding; add it back so inner
+        // tables have their full width as usable content area.
+        float tableWidth = (inputsWidth + colPad) + (outputsWidth + colPad);
+
+        float const fillSpace = std::max(0.f, minWidth - tableWidth);
         tableWidth = std::max(tableWidth, minWidth);
 
         bool const needsFillSpace = fillSpace > 0.f;
 
         if (ImGui::BeginTable("InputAndOutputs",
                               (needsFillSpace) ? 3 : 2,
-                              ImGuiTableFlags_SizingFixedFit,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
                               ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn(
-              "Inputs", ImGuiTableColumnFlags_WidthFixed,
-              columnWidths[1] + columnWidths[2] + padding);
+              "Inputs", ImGuiTableColumnFlags_WidthFixed, inputsWidth + colPad);
             if (needsFillSpace)
             {
                 ImGui::TableSetupColumn("Seperation", ImGuiTableColumnFlags_WidthFixed, fillSpace);
             }
             ImGui::TableSetupColumn(
-              "Outputs", ImGuiTableColumnFlags_WidthFixed,
-              columnWidths[6] + columnWidths[7] + padding);
+              "Outputs", ImGuiTableColumnFlags_WidthFixed, outputsWidth + colPad);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -2190,7 +2213,10 @@ namespace gladius::ui
         // internally.  Add that back so measured text widths fit.
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         auto const tableWidth = (columnWidths[1] + colPad) + (columnWidths[2] + colPad);
-        if (ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingFixedFit, ImVec2(tableWidth, 0)))
+        if (ImGui::BeginTable(
+              "table", 2,
+              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+              ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn("InputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + colPad);
             ImGui::TableSetupColumn("InputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2] + colPad);
@@ -2342,7 +2368,7 @@ namespace gladius::ui
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
         if (ImGui::BeginTable("outputs",
                               2,
-                              ImGuiTableFlags_SizingFixedFit,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
                               ImVec2((columnWidths[6] + colPad) + (columnWidths[7] + colPad), 0)))
         {
             ImGui::TableSetupColumn(
@@ -2419,11 +2445,11 @@ namespace gladius::ui
 
         ImGui::PushID(node.getId());
         float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
-        auto widthOutputs = columnWidths[6] + columnWidths[7] + colPad;
+        auto widthOutputs = (columnWidths[6] + colPad) + (columnWidths[7] + colPad);
         if (ImGui::BeginTable("InputAndOutputs",
                               2,
-                              ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(columnWidths[0] + colPad + widthOutputs + colPad, 0)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+                              ImVec2((columnWidths[0] + colPad) + (widthOutputs + colPad), 0)))
         {
             ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0] + colPad);
             ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs + colPad);
