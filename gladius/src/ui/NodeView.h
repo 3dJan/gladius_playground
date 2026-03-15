@@ -277,6 +277,7 @@ namespace gladius::ui
         {
             nodes::ParameterName name = {"new"};
             std::type_index typeIndex = typeid(float);
+            bool expanded = false;
         };
 
         std::unordered_map<nodes::NodeId, NewChannelProperties>

@@ -155,14 +155,20 @@ namespace gladius::ui
             }
         }
 
-        if (ImGui::TreeNodeEx("Add Argument", 0))
+        auto & addArgProps = m_newChannelProperties[beginNode.getId()];
+        if (ImGui::Button(addArgProps.expanded
+                           ? reinterpret_cast<char const *>(ICON_FA_CARET_DOWN " Add Argument")
+                           : reinterpret_cast<char const *>(ICON_FA_CARET_RIGHT " Add Argument")))
+        {
+            addArgProps.expanded = !addArgProps.expanded;
+        }
+        if (addArgProps.expanded)
         {
             ImGui::PushID("AddArgument");
-            auto & newParameterName = m_newChannelProperties[beginNode.getId()].name;
+            auto & newParameterName = addArgProps.name;
             ImGui::SetNextItemWidth(100.f * m_uiScale);
             ImGui::InputText("name", &newParameterName);
-            std::type_index & typeIndex =
-              m_newChannelProperties[beginNode.getId()].typeIndex;
+            std::type_index & typeIndex = addArgProps.typeIndex;
             typeControl("type", typeIndex);
             if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
             {
@@ -173,7 +179,6 @@ namespace gladius::ui
                 m_modelChanged = true;
             }
             ImGui::PopID();
-            ImGui::TreePop();
         }
 
         footer(beginNode);
@@ -254,16 +259,21 @@ namespace gladius::ui
             }
             ImGui::EndTable();
 
-            if (ImGui::TreeNodeEx("Add Output", 0))
+            auto & addOutProps = m_newOutputChannelProperties[endNode.getId()];
+            if (ImGui::Button(addOutProps.expanded
+                               ? reinterpret_cast<char const *>(ICON_FA_CARET_DOWN " Add Output")
+                               : reinterpret_cast<char const *>(ICON_FA_CARET_RIGHT " Add Output")))
+            {
+                addOutProps.expanded = !addOutProps.expanded;
+            }
+            if (addOutProps.expanded)
             {
                 ImGui::PushID("AddOutput");
-                auto & newParameterName =
-                  m_newOutputChannelProperties[endNode.getId()].name;
+                auto & newParameterName = addOutProps.name;
 
                 ImGui::SetNextItemWidth(100.f * m_uiScale);
                 ImGui::InputText("name", &newParameterName);
-                std::type_index & typeIndex =
-                  m_newOutputChannelProperties[endNode.getId()].typeIndex;
+                std::type_index & typeIndex = addOutProps.typeIndex;
                 typeControl("type", typeIndex);
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
                 {
@@ -276,7 +286,6 @@ namespace gladius::ui
                     }
                 }
                 ImGui::PopID();
-                ImGui::TreePop();
             }
 
             if (paramToRemove)
