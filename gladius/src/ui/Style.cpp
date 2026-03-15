@@ -16,11 +16,11 @@ namespace gladius::ui
     ImVec4 generateUniqueColor(size_t index)
     {
         // Generate a color using a simple algorithm to ensure uniqueness
-        const size_t numColors = 50;
-        const size_t hueStep = 360 / numColors;
+        size_t const numColors = 50;
+        size_t const hueStep = 360 / numColors;
         size_t hue = (index * hueStep) % 360;
-        size_t saturation = 80 + (index % 20) * 20; // Vary saturation slightly
-        size_t value = 60 + (index % 5) * 20;       // Vary value slightly
+        size_t saturation = 40 + (index % 4) * 10; // Vary saturation: 40-70% (softer)
+        size_t value = 70 + (index % 3) * 10;      // Vary value: 70-90% (lighter)
 
         // Convert HSV to RGB (simple approximation)
         float c = (value / 100.0f) * (saturation / 100.0f);

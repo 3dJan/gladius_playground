@@ -448,7 +448,7 @@ namespace gladius::ui
             const auto color = colorIter->second;
             ed::PushStyleColor(ed::StyleColor_NodeBorder, color);
             ed::PushStyleColor(ed::StyleColor_NodeBg,
-                               ImColor(color.x * 0.1f, color.y * 0.1f, color.z * 0.1f, 0.9f));
+                               ImColor(color.x * 0.18f, color.y * 0.18f, color.z * 0.18f, 0.92f));
             m_popStyle = true;
         }
 

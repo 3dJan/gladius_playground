@@ -95,18 +95,20 @@ namespace gladius::ui
             ed::PushStyleColor(ed::StyleColor_GroupBg, colorWithAlpha(frameBg, 0.32f));
             ed::PushStyleColor(ed::StyleColor_GroupBorder, colorWithAlpha(border, 0.45f));
 
+            ed::PushStyleVar(ed::StyleVar_NodeRounding, 20.f);
+            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 5.f);
             ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f);
             ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f);
             ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f);
             ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f);
             ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f);
-            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 4.f);
-            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 4.5f);
+            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 7.f);
         }
 
         void popNodeEditorTheme()
         {
-            ed::PopStyleVar(7);
+            ed::PopStyleVar(9);
             ed::PopStyleColor(15);
         }
     } // namespace
