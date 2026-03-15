@@ -76,13 +76,12 @@ namespace gladius::ui
         {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.f * m_uiScale);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 55.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 30.f * m_uiScale);
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_WidthFixed, 20.f * m_uiScale);
 
             auto outputs = beginNode.getOutputs();
             std::optional<std::string> paramToRemove;
             std::optional<std::pair<std::string, std::string>> paramToRename;
-            std::optional<std::pair<std::string, std::string>> paramToReorder;
 
             std::vector<std::pair<std::string, nodes::Port *>> sortedOutputs;
             for (auto & out : outputs)
@@ -128,32 +127,6 @@ namespace gladius::ui
                 {
                     paramToRemove = outputName;
                 }
-                ImGui::SameLine();
-                ImGui::Button(reinterpret_cast<const char *>(ICON_FA_GRIP_VERTICAL));
-                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
-                {
-                    ImGui::SetDragDropPayload("DND_ARGUMENT_BEGIN",
-                                              outputName.c_str(),
-                                              outputName.size() + 1);
-                    ImGui::Text("Move %s", outputName.c_str());
-                    ImGui::EndDragDropSource();
-                }
-                if (ImGui::BeginDragDropTarget())
-                {
-                    if (auto const * payload = ImGui::AcceptDragDropPayload(
-                          "DND_ARGUMENT_BEGIN",
-                          ImGuiDragDropFlags_AcceptBeforeDelivery |
-                            ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
-                    {
-                        std::string sourceName(static_cast<char const *>(payload->Data),
-                                               payload->DataSize > 0 ? payload->DataSize - 1 : 0);
-                        if (sourceName != outputName && payload->IsDelivery())
-                        {
-                            paramToReorder = {sourceName, outputName};
-                        }
-                    }
-                    ImGui::EndDragDropTarget();
-                }
 
                 ImGui::TableNextColumn();
                 BeginPin(output.getId(), ed::PinKind::Output);
@@ -178,12 +151,6 @@ namespace gladius::ui
             {
                 m_modelEditor->currentModel()->renameArgument(
                   paramToRename->first, paramToRename->second);
-                m_modelEditor->markModelAsModified();
-            }
-            if (paramToReorder)
-            {
-                m_modelEditor->currentModel()->reorderArgument(
-                  paramToReorder->first, paramToReorder->second);
                 m_modelEditor->markModelAsModified();
             }
         }
