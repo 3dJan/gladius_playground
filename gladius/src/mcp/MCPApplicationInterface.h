@@ -550,6 +550,21 @@ namespace gladius
         virtual nlohmann::json deleteLibraryEntry(std::string const & category,
                                                   std::string const & name) = 0;
 
+#ifdef ENABLE_UI_TESTING
+        /// @brief Perform a UI click on the specified ImGui test engine path.
+        /// @param path The ImGui test path (e.g., "//MainWindow/File/Open").
+        /// @return True if the click was successfully queued.
+        virtual bool uiClick(std::string const & path) = 0;
+
+        /// @brief Dump all items within a parent path.
+        virtual std::vector<std::string> uiDumpItems(std::string const & parentPath) = 0;
+
+        /// @brief Capture a screenshot of the current UI.
+        /// @param outputPath The file path where the screenshot will be saved.
+        /// @return True if the screenshot was saved successfully.
+        virtual bool captureUIScreenshot(std::string const & outputPath) = 0;
+#endif
+
         // Error handling
         virtual std::string getLastErrorMessage() const = 0;
     };

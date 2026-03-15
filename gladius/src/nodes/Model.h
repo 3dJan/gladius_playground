@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <variant>
 
@@ -23,6 +24,13 @@ namespace gladius::nodes
     using PortRegistry = std::unordered_map<int, Port *>;
     using InputParameterRegistry = std::unordered_map<ParameterId, IParameter *>;
     using SharedAssembly = std::shared_ptr<Assembly>;
+
+    enum class NumericWidgetLayoutMode
+    {
+        DialPlusDragFloat = 0,
+        Slider = 1
+    };
+
     NodeBase * createNodeFromName(const std::string & name, Model & nodes);
 
     class Model
@@ -176,6 +184,8 @@ namespace gladius::nodes
 
         InputParameterRegistry const & getConstParameterRegistry() const;
 
+        PortRegistry const & getConstPortRegistry() const;
+
         [[nodiscard]] graph::AdjacencyListDirectedGraph const & getGraph() const;
 
         /// @brief Returns the topologically sorted list of node IDs in the model
@@ -184,9 +194,17 @@ namespace gladius::nodes
 
         auto getPortRegistry() -> PortRegistry &;
 
+        [[nodiscard]] std::unordered_set<int64_t> collectCompatibleLinkCandidates(int64_t sourceEndpointId,
+                                              bool sourceIsOutput);
+
         void addArgument(ParameterName name, VariantParameter parameter);
+        void removeArgument(ParameterName const & name);
+        void renameArgument(ParameterName const & oldName, ParameterName const & newName);
+        void reorderArgument(ParameterName source, ParameterName target);
 
         void addFunctionOutput(ParameterName name, VariantParameter parameter);
+        void removeFunctionOutput(ParameterName const & name);
+        void renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName);
 
         nodes::Begin * getBeginNode();
 
@@ -218,6 +236,10 @@ namespace gladius::nodes
 
         void setDisplayName(std::string const & name);
         [[nodiscard]] std::optional<std::string> getDisplayName() const;
+
+        void setNumericWidgetLayoutMode(ParameterId parameterId, NumericWidgetLayoutMode layoutMode);
+        [[nodiscard]] NumericWidgetLayoutMode getNumericWidgetLayoutMode(ParameterId parameterId) const;
+        [[nodiscard]] bool hasNumericWidgetLayoutMode(ParameterId parameterId) const;
 
         /// @brief Create a FunctionCall node wired to the given function.
         /// @param functionId The resource ID of the function to call.
@@ -297,6 +319,7 @@ namespace gladius::nodes
         bool m_nodesHaveBeenLayouted = false;
 
         bool m_isValid = true;
+        std::unordered_map<ParameterId, NumericWidgetLayoutMode> m_numericWidgetLayoutModes;
     };
 
     using SharedModel = std::shared_ptr<Model>;

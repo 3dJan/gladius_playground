@@ -13,6 +13,7 @@
                 "rhs": "Windows"
             },
             "cacheVariables": {
+                "ENABLE_UI_TESTING": "$env{GLADIUS_ENABLE_UI_TESTING}",
                 "CMAKE_TOOLCHAIN_FILE": {
                     "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                     "type": "FILEPATH"
@@ -102,6 +103,7 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
+                "ENABLE_UI_TESTING": "$env{GLADIUS_ENABLE_UI_TESTING}",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
                 "CMAKE_C_COMPILER": "/usr/bin/clang",
                 "CMAKE_CXX_COMPILER": "/usr/bin/clang++",

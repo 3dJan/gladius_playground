@@ -293,24 +293,16 @@ namespace gladius::ui
                 sliceParameter.zHeight_mm = core.getSliceHeight();
                 if (core.requestContourUpdate(sliceParameter))
                 {
-                    m_contours.reset();
-
-                    drawList->PopClipRect();
-
-                    // Render screen rulers even during contour updates
-                    renderScreenRulers(drawList, fullCanvasStart, fullCanvasSize);
-
-                    ImGui::End();
-                    ImGui::PopStyleVar();
-                    return windowIsActuallyVisible;
+                    m_contoursNeedRefetch = true;
                 }
             }
 
-            if (!m_contours.has_value() && !core.isSlicingInProgress())
+            if ((!m_contours.has_value() || m_contoursNeedRefetch) && !core.isSlicingInProgress())
             {
                 auto const & contourExtractor = core.getContour();
                 std::lock_guard<std::mutex> lockContourExtractor(core.getContourExtractorMutex());
                 m_contours = contourExtractor->getContour();
+                m_contoursNeedRefetch = false;
 
                 // If we just got contours but they're empty, mark as empty
                 if (m_contours.has_value() && m_contours->empty())
@@ -319,7 +311,7 @@ namespace gladius::ui
                 }
             }
 
-            if (!core.isSlicingInProgress() && m_contours.has_value())
+            if (m_contours.has_value())
             {
                 // Check if we should auto-center: contours were empty before and now we have
                 // content

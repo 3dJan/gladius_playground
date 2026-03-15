@@ -12,6 +12,10 @@ Auto-generated from all feature plans. Last updated: 2025-12-29
 - 3MF files (model-level metadata groups), filesystem directories for library categories (018-library-metadata)
 - C++20 (Clang on Linux) + lib3mf (3MF file handling), ImGui (UI), nlohmann::json (MCP protocol), GTest/GMock (testing) (022-mcp-snippet-extensions)
 - In-memory graph model (`nodes::Assembly`, `nodes::Model`) persisted as 3MF files (022-mcp-snippet-extensions)
+- C++20 + ImGui, imgui-node-editor (vcpkg: `unofficial::imgui-node-editor`), lib3mf, OpenCL 1.2+ (023-node-editor-ux)
+- 3MF files (widget layout mode persistence in parameter metadata) (023-node-editor-ux)
+- C++20 + ImGui, imgui-node-editor, OpenGL, OpenCL, lib3mf, fmt (023-node-editor-ux)
+- 3MF document data plus node/parameter metadata persisted with the document; no new external storage (023-node-editor-ux)
 
 - C++20 + OpenCL 1.2+, existing gladius compute infrastructure (001-spatial-sdf)
 
@@ -31,9 +35,9 @@ tests/
 C++20: Follow standard conventions
 
 ## Recent Changes
-- 022-mcp-snippet-extensions: Added C++20 (Clang on Linux) + lib3mf (3MF file handling), ImGui (UI), nlohmann::json (MCP protocol), GTest/GMock (testing)
-- 018-library-metadata: Added C++20 + lib3mf (3MF format), ImGui (UI), OpenCL 1.2+ (GPU compute)
-- 007-event-viewer-ux: Added C++20 + ImGui (UI rendering), fmt (string formatting)
+- 023-node-editor-ux: Added C++20 + ImGui, imgui-node-editor, OpenGL, OpenCL, lib3mf, fmt
+- 023-node-editor-ux: Added C++20 + ImGui, imgui-node-editor (vcpkg: `unofficial::imgui-node-editor`), lib3mf, OpenCL 1.2+
+- 023-node-editor-ux: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 
 
 <!-- MANUAL ADDITIONS START -->

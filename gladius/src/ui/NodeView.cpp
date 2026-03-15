@@ -55,31 +55,6 @@ namespace gladius::ui
         return it->first;
     }
 
-    /// Measure the maximum label width among visible ports in a port map.
-    /// Ports whose \p isVisible() returns false are skipped. When \p skipResourceId
-    /// is true, ports with type index == ResourceId are also skipped.
-    template <typename PortMap>
-    static float measureMaxPortLabelWidth(PortMap & ports, bool skipResourceId)
-    {
-        float maxWidth = 0.f;
-        for (auto & [name, port] : ports)
-        {
-            if (!port.isVisible())
-            {
-                continue;
-            }
-            if (skipResourceId && port.getTypeIndex() == ParameterTypeIndex::ResourceId)
-            {
-                continue;
-            }
-            maxWidth = std::max(maxWidth, ImGui::CalcTextSize(name.c_str()).x);
-            float const typeLabelWidth =
-              ImGui::CalcTextSize(typeToString(port.getTypeIndex()).c_str()).x * 0.5f;
-            maxWidth = std::max(maxWidth, typeLabelWidth);
-        }
-        return maxWidth;
-    }
-
     NodeView::NodeView()
     {
         m_nodeTypeToColor = createNodeTypeToColors();
@@ -93,72 +68,145 @@ namespace gladius::ui
     void NodeView::visit(Begin & beginNode)
     {
         header(beginNode);
+
         if (ImGui::BeginTable("beginNodeTable",
                               4,
-                              ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(400 * m_uiScale, 100 * m_uiScale)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX,
+                              ImVec2(0.f, 0.f)))
         {
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 200.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 100.f * m_uiScale);
-            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 20.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.f * m_uiScale);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 55.f * m_uiScale);
+            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_WidthFixed, 20.f * m_uiScale);
 
             auto outputs = beginNode.getOutputs();
-            for (auto & output : outputs)
+            std::optional<std::string> paramToRemove;
+            std::optional<std::pair<std::string, std::string>> paramToRename;
+            std::optional<std::pair<std::string, std::string>> paramToReorder;
+
+            std::vector<std::pair<std::string, nodes::Port *>> sortedOutputs;
+            for (auto & out : outputs)
             {
+                sortedOutputs.push_back({out.first, &out.second});
+            }
+            std::sort(sortedOutputs.begin(), sortedOutputs.end(),
+                      [](auto const & a, auto const & b)
+                      { return a.second->getSortIndex() < b.second->getSortIndex(); });
+
+            for (auto & outputPair : sortedOutputs)
+            {
+                auto outputName = outputPair.first;
+                auto & output = *outputPair.second;
+
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                std::string outputName = output.first;
-                ImGui::SetNextItemWidth(170.f * m_uiScale);
-                // ImGui::InputText("", &outputName);
-                ImGui::TextUnformatted(output.first.c_str());
-                ImGui::TableNextColumn();
-                // Remove
-                // if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
-                // {
-                //     // ToDo: remove output
-                // }
-                ImGui::SameLine();
-                ImGui::TableNextColumn();
 
-                std::type_index typeIndex = output.second.getTypeIndex();
-                // typeControl("", typeIndex);
+                ImGui::PushID(outputName.c_str());
+                std::string currentName = outputName;
+
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText(
+                      "##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
+                {
+                    if (currentName != outputName && !currentName.empty())
+                    {
+                        paramToRename = {outputName, currentName};
+                    }
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != outputName &&
+                    !currentName.empty())
+                {
+                    paramToRename = {outputName, currentName};
+                }
+
+                ImGui::TableNextColumn();
+                std::type_index typeIndex = output.getTypeIndex();
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
-                ImGui::TableNextColumn();
-                BeginPin(output.second.getId(), ed::PinKind::Output);
 
-                ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(typeIndex));
-                ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                ImGui::TableNextColumn();
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
+                {
+                    paramToRemove = outputName;
+                }
+                ImGui::SameLine();
+                ImGui::Button(reinterpret_cast<const char *>(ICON_FA_GRIP_VERTICAL));
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                {
+                    ImGui::SetDragDropPayload("DND_ARGUMENT_BEGIN",
+                                              outputName.c_str(),
+                                              outputName.size() + 1);
+                    ImGui::Text("Move %s", outputName.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget())
+                {
+                    if (auto const * payload = ImGui::AcceptDragDropPayload(
+                          "DND_ARGUMENT_BEGIN",
+                          ImGuiDragDropFlags_AcceptBeforeDelivery |
+                            ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
+                    {
+                        std::string sourceName(static_cast<char const *>(payload->Data),
+                                               payload->DataSize > 0 ? payload->DataSize - 1 : 0);
+                        if (sourceName != outputName && payload->IsDelivery())
+                        {
+                            paramToReorder = {sourceName, outputName};
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+
+                ImGui::TableNextColumn();
+                BeginPin(output.getId(), ed::PinKind::Output);
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                                      pinColorForDragState(
+                                        output.getId(), false, typeIndex));
+                ImGui::TextUnformatted(
+                  reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                 ImGui::PopStyleColor();
                 ed::EndPin();
-            }
 
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(200.f * m_uiScale * m_uiScale);
-            if (ImGui::CollapsingHeader("Add Argument", ImGuiTreeNodeFlags_Framed))
-            {
-                ImGui::PushID("AddArgument");
-                auto & newParameterName = m_newChannelProperties[beginNode.getId()].name;
-                ImGui::SetNextItemWidth(100.f * m_uiScale);
-                ImGui::InputText("name", &newParameterName);
-                // ImGui::SameLine();
-                std::type_index & typeIndex = m_newChannelProperties[beginNode.getId()].typeIndex;
-                typeControl("type", typeIndex);
-                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
-                {
-                    // TODO: check if name is unique and valid
-
-                    m_modelEditor->currentModel()->addArgument(
-                      newParameterName, createVariantTypeFromTypeIndex(typeIndex));
-                    m_assembly->updateInputsAndOutputs();
-                    m_parameterChanged = true;
-                    m_modelChanged = true;
-                }
                 ImGui::PopID();
             }
-
             ImGui::EndTable();
+
+            if (paramToRemove)
+            {
+                m_modelEditor->currentModel()->removeArgument(*paramToRemove);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToRename)
+            {
+                m_modelEditor->currentModel()->renameArgument(
+                  paramToRename->first, paramToRename->second);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToReorder)
+            {
+                m_modelEditor->currentModel()->reorderArgument(
+                  paramToReorder->first, paramToReorder->second);
+                m_modelEditor->markModelAsModified();
+            }
+        }
+
+        if (ImGui::TreeNodeEx("Add Argument", 0))
+        {
+            ImGui::PushID("AddArgument");
+            auto & newParameterName = m_newChannelProperties[beginNode.getId()].name;
+            ImGui::SetNextItemWidth(100.f * m_uiScale);
+            ImGui::InputText("name", &newParameterName);
+            std::type_index & typeIndex =
+              m_newChannelProperties[beginNode.getId()].typeIndex;
+            typeControl("type", typeIndex);
+            if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
+            {
+                m_modelEditor->currentModel()->addArgument(
+                  newParameterName, createVariantTypeFromTypeIndex(typeIndex));
+                m_assembly->updateInputsAndOutputs();
+                m_parameterChanged = true;
+                m_modelChanged = true;
+            }
+            ImGui::PopID();
+            ImGui::TreePop();
         }
 
         footer(beginNode);
@@ -167,36 +215,62 @@ namespace gladius::ui
     void NodeView::visit(nodes::End & endNode)
     {
         header(endNode);
-        if (ImGui::BeginTable("beginNodeTable",
+        if (ImGui::BeginTable("endNodeTable",
                               4,
-                              ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(400 * m_uiScale, 100 * m_uiScale)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX,
+                              ImVec2(0.f, 0.f)))
         {
-            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_None, 20.f * m_uiScale);
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_None, 200.f * m_uiScale);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 80.f * m_uiScale);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 100.f * m_uiScale);
+            ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_WidthFixed, 20.f * m_uiScale);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.f * m_uiScale);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 55.f * m_uiScale);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.f * m_uiScale);
+
+            std::optional<std::string> paramToRemove;
+            std::optional<std::pair<std::string, std::string>> paramToRename;
 
             for (auto & input : endNode.parameter())
             {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 BeginPin(input.second.getId(), ed::PinKind::Input);
-                ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(input.second.getTypeIndex()));
-                ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                                      pinColorForDragState(
+                                        input.second.getId(),
+                                        true,
+                                        input.second.getTypeIndex()));
+                ImGui::TextUnformatted(
+                  reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                 ImGui::PopStyleColor();
                 ed::EndPin();
+
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(input.first.c_str());
+
+                ImGui::PushID(input.first.c_str());
+                std::string currentName = input.first;
+
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText(
+                      "##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
+                {
+                    if (currentName != input.first && !currentName.empty())
+                    {
+                        paramToRename = {input.first, currentName};
+                    }
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && currentName != input.first &&
+                    !currentName.empty())
+                {
+                    paramToRename = {input.first, currentName};
+                }
+
                 ImGui::TableNextColumn();
-                // Remove
-                // if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
-                // {
-                //     // ToDo: remove input
-                // }
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
+                {
+                    paramToRemove = input.first;
+                }
+
                 ImGui::TableNextColumn();
                 std::type_index typeIndex = input.second.getTypeIndex();
-                // typeControl("", typeIndex);
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
                 if (input.second.getSource().has_value())
                 {
@@ -209,34 +283,46 @@ namespace gladius::ui
                              input.second.getId(),
                              linkColor);
                 }
+                ImGui::PopID();
             }
+            ImGui::EndTable();
 
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(200.f);
-            if (ImGui::CollapsingHeader("Add Output", ImGuiTreeNodeFlags_Framed))
+            if (ImGui::TreeNodeEx("Add Output", 0))
             {
                 ImGui::PushID("AddOutput");
-                auto & newParameterName = m_newOutputChannelProperties[endNode.getId()].name;
+                auto & newParameterName =
+                  m_newOutputChannelProperties[endNode.getId()].name;
 
-                ImGui::SetNextItemWidth(100.f);
+                ImGui::SetNextItemWidth(100.f * m_uiScale);
                 ImGui::InputText("name", &newParameterName);
                 std::type_index & typeIndex =
                   m_newOutputChannelProperties[endNode.getId()].typeIndex;
                 typeControl("type", typeIndex);
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_PLUS)))
                 {
-                    m_modelEditor->currentModel()->addFunctionOutput(
-                      newParameterName, createVariantTypeFromTypeIndex(typeIndex));
-
-                    m_assembly->updateInputsAndOutputs();
-                    m_parameterChanged = true;
-                    m_modelChanged = true;
+                    if (!newParameterName.empty())
+                    {
+                        m_modelEditor->currentModel()->addFunctionOutput(
+                          newParameterName,
+                          nodes::createVariantTypeFromTypeIndex(typeIndex));
+                        m_modelEditor->markModelAsModified();
+                    }
                 }
                 ImGui::PopID();
+                ImGui::TreePop();
             }
-            ImGui::EndTable();
+
+            if (paramToRemove)
+            {
+                m_modelEditor->currentModel()->removeFunctionOutput(*paramToRemove);
+                m_modelEditor->markModelAsModified();
+            }
+            if (paramToRename)
+            {
+                m_modelEditor->currentModel()->renameFunctionOutput(
+                  paramToRename->first, paramToRename->second);
+                m_modelEditor->markModelAsModified();
+            }
         }
 
         footer(endNode);
@@ -1918,7 +2004,12 @@ namespace gladius::ui
             return;
         }
 
-        ImGui::Indent(20 * m_uiScale);
+        float const indent = 20.f * m_uiScale;
+        ImGui::Indent(indent);
+
+        // Track the desired width: CalcItemWidth gives the pushed ItemWidth
+        // which is the true widget width even when the column clips it.
+        float desiredW = 0.f;
         if (parameter.first != FieldNames::Shape)
         {
             if (parameter.second.getTypeIndex() == ParameterTypeIndex::Int)
@@ -1941,11 +2032,14 @@ namespace gladius::ui
             {
                 viewResource(node, parameter, val);
             }
+            // Use the larger of the measured rect and the CalcItemWidth-based width
+            float const itemRectW = std::ceil(ImGui::GetItemRectSize().x);
+            desiredW = std::max(itemRectW, ImGui::CalcItemWidth());
         }
 
-        // update column width
+        // update column width — add indent so the column is wide enough
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
-        columnWidths[0] = std::max(columnWidths[0], ImGui::GetItemRectSize().x);
+        columnWidths[0] = std::max(columnWidths[0], desiredW + indent);
 
         if (m_assembly == nullptr)
         {
@@ -1959,7 +2053,8 @@ namespace gladius::ui
 
         if (viewString(node, parameter, val))
         {
-            columnWidths[0] = std::max(columnWidths[0], ImGui::GetItemRectSize().x);
+            float const w = std::max(std::ceil(ImGui::GetItemRectSize().x), ImGui::CalcItemWidth());
+            columnWidths[0] = std::max(columnWidths[0], w + indent);
             return;
         }
 
@@ -1970,8 +2065,8 @@ namespace gladius::ui
                 ImGui::TextUnformatted(resKey->getDisplayName().c_str());
             }
         }
-        columnWidths[0] = std::max(columnWidths[0], ImGui::GetItemRectSize().x);
-        ImGui::Indent(-20 * m_uiScale);
+        columnWidths[0] = std::max(columnWidths[0], std::ceil(ImGui::GetItemRectSize().x) + indent);
+        ImGui::Indent(-indent);
     }
 
     void NodeView::showLinkAssignmentMenu(ParameterMap::reference parameter)
@@ -2014,129 +2109,115 @@ namespace gladius::ui
         }
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
-        float const padding = 10.f * m_uiScale;
         constexpr float minWidth = 170.f;
-        // sum of all column widths (with per-column padding)
-        float tableWidth = 0.f;
-        for (auto width : columnWidths)
+
+        // --- Validate pins and collect visible ports into flat vectors ---
+        std::vector<ParameterMap::value_type *> visInputs;
         {
-            tableWidth += (width > 0.f) ? (width + padding) : 0.f;
+            std::set<ParameterId> used;
+            for (auto & param : node.parameter())
+            {
+                if (param.second.getId() == -1)
+                    continue;
+                if (used.count(param.second.getId()) != 0)
+                    throw std::runtime_error("Duplicate pin id");
+                used.insert(param.second.getId());
+
+                if (!param.second.isVisible())
+                    continue;
+                if (!m_resoureIdNodesVisible &&
+                    param.second.getTypeIndex() == ParameterTypeIndex::ResourceId)
+                    continue;
+                visInputs.push_back(&param);
+            }
         }
 
-        float const fillSpace = std::max(0.f, minWidth - tableWidth - 20.f * m_uiScale);
-        tableWidth = std::max(tableWidth, minWidth);
+        std::vector<Ports::value_type *> visOutputs;
+        {
+            std::set<ParameterId> used;
+            for (auto & out : node.getOutputs())
+            {
+                if (used.count(out.second.getId()) != 0)
+                    throw std::runtime_error(
+                      fmt::format("Duplicate pin id {}", out.second.getId()).c_str());
+                used.insert(out.second.getId());
 
-        bool const needsFillSpace = fillSpace > 0.f;
+                if (!out.second.isVisible())
+                    continue;
+                visOutputs.push_back(&out);
+            }
+        }
 
-        if (ImGui::BeginTable("InputAndOutputs",
-                              (needsFillSpace) ? 3 : 2,
-                              ImGuiTableFlags_SizingStretchProp,
+        // --- Bootstrap: use generous widths on the first frame so text
+        //     renders unclipped and GetItemRectSize() returns true sizes. ---
+        constexpr float BOOT_LABEL = 200.f;
+        constexpr float BOOT_PIN   = 40.f;
+        if (columnWidths[1] <= 0.f || columnWidths[2] <= 0.f)
+        {
+            columnWidths[1] = BOOT_PIN;
+            columnWidths[2] = BOOT_LABEL;
+        }
+        if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
+        {
+            columnWidths[6] = BOOT_LABEL;
+            columnWidths[7] = BOOT_PIN;
+        }
+
+        // --- Compute flat table layout ---
+        // NoPadOuterX: outer columns lose one side of CellPadding.
+        // Padding overhead = (numCols * 2 - 2) * CellPadding.x
+        float const cellPad  = ImGui::GetStyle().CellPadding.x;
+        float const padOverhead = (4 * 2 - 2) * cellPad; // 30 at CellPadding.x=5
+        float const rawContentW = columnWidths[1] + columnWidths[2] +
+                                  columnWidths[6] + columnWidths[7];
+        float const fillSpace = std::max(0.f, minWidth - (rawContentW + padOverhead));
+        float const tableWidth = std::max(rawContentW + padOverhead + fillSpace, minWidth);
+
+        if (ImGui::BeginTable("IOPins",
+                              4,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
                               ImVec2(tableWidth, 0)))
         {
             ImGui::TableSetupColumn(
-              "Inputs", ImGuiTableColumnFlags_WidthFixed,
-              columnWidths[1] + columnWidths[2] + padding);
-            if (needsFillSpace)
-            {
-                ImGui::TableSetupColumn("Seperation", ImGuiTableColumnFlags_WidthFixed, fillSpace);
-            }
+              "InPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1]);
             ImGui::TableSetupColumn(
-              "Outputs", ImGuiTableColumnFlags_WidthFixed,
-              columnWidths[6] + columnWidths[7] + padding);
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            inputPins(node);
-            if (needsFillSpace)
-            {
-                ImGui::TableNextColumn();
-            }
-            ImGui::TableNextColumn();
-            outputPins(node);
-        }
-        ImGui::EndTable();
-    }
-
-    void NodeView::inputPins(nodes::NodeBase & node)
-    {
-        std::set<ParameterId> usedPins;
-
-        auto & columnWidths = getOrCreateColumnWidths(node.getId());
-
-        // Bootstrap widths from content so labels are not clipped even if
-        // cached widths were reset (e.g. after graph/model sync).
-        if (columnWidths[1] <= 0.f || columnWidths[2] <= 0.f)
-        {
-            auto const & style = ImGui::GetStyle();
-            float const pinButtonWidth = ImGui::GetFontSize() * 1.5f + style.FramePadding.x * 2.0f;
-            float const maxInputLabelWidth =
-              measureMaxPortLabelWidth(node.parameter(), !m_resoureIdNodesVisible);
-
-            columnWidths[1] = std::max(columnWidths[1], pinButtonWidth);
-            columnWidths[2] = std::max(columnWidths[2], maxInputLabelWidth);
-        }
-
-        // Each WidthFixed column loses 2*CellPadding.x of content area
-        // internally.  Add that back so measured text widths fit.
-        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
-        auto const tableWidth = (columnWidths[1] + colPad) + (columnWidths[2] + colPad);
-        if (ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(tableWidth, 0)))
-        {
-            ImGui::TableSetupColumn("InputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[1] + colPad);
-            ImGui::TableSetupColumn("InputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2] + colPad);
+              "InName", ImGuiTableColumnFlags_WidthFixed, columnWidths[2] + fillSpace);
+            ImGui::TableSetupColumn(
+              "OutName", ImGuiTableColumnFlags_WidthFixed, columnWidths[6]);
+            ImGui::TableSetupColumn(
+              "OutPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7]);
 
             columnWidths[1] = 0.f;
             columnWidths[2] = 0.f;
+            columnWidths[6] = 0.f;
+            columnWidths[7] = 0.f;
 
-            for (auto & parameter : node.parameter())
+            auto const rowCount = std::max(visInputs.size(), visOutputs.size());
+            for (size_t row = 0; row < rowCount; ++row)
             {
-                if (parameter.second.getId() == -1)
-                {
-                    // not completly initialized yet
-                    continue;
-                }
-
-                if (usedPins.find(parameter.second.getId()) != std::end(usedPins))
-                {
-                    throw std::runtime_error("Duplicate pin id");
-                }
                 ImGui::TableNextRow();
+
+                // ── Input pin + name (columns 0-1) ──────────────────────
                 ImGui::TableNextColumn();
-
-                usedPins.insert(parameter.second.getId());
-
-                if (!parameter.second.isVisible())
+                if (row < visInputs.size())
                 {
-                    continue;
-                }
+                    auto & [name, port] = *visInputs[row];
+                    bool const inputMissing =
+                      !port.getSource().has_value() && port.isInputSourceRequired();
 
-                // show resource id pins only if the flag is set
-                if (!m_resoureIdNodesVisible &&
-                    parameter.second.getTypeIndex() == ParameterTypeIndex::ResourceId)
-                {
-                    continue;
-                }
+                    ImGui::PushID(port.getId());
+                    ImGui::PushStyleColor(
+                      ImGuiCol_Text,
+                      pinColorForDragState(port.getId(), true, port.getTypeIndex()));
 
-                ImGui::PushID(parameter.second.getId()); // required for reusing the same labels
-                                                         // (that are used as unique ids in ImgUI)
-                {
-                    bool const inputMissing = !parameter.second.getSource().has_value() &&
-                                              parameter.second.isInputSourceRequired();
-
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                                          typeToColor(parameter.second.getTypeIndex()));
-                    const ed::PinId pinId = parameter.second.getId();
-                    BeginPin(pinId, ed::PinKind::Input);
+                    BeginPin(ed::PinId(port.getId()), ed::PinKind::Input);
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0});
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
 
-                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f); // Scale the button width
-
-                    // Check if this node should receive focus (keyboard-driven workflow)
-                    bool shouldFocus =
+                    bool const shouldFocus =
                       m_modelEditor && m_modelEditor->shouldFocusNode(node.getId());
-                    if (shouldFocus && parameter.first == node.constParameter().begin()->first)
+                    if (shouldFocus && name == node.constParameter().begin()->first)
                     {
-                        // Focus on the first input pin/button
                         ImGui::SetKeyboardFocusHere();
                         m_modelEditor->clearNodeFocus();
                     }
@@ -2145,59 +2226,100 @@ namespace gladius::ui
                           reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
                           ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f)))
                     {
-                        columnWidths[1] = std::max(columnWidths[1], ImGui::GetItemRectSize().x);
-                        showLinkAssignmentMenu(parameter);
+                        showLinkAssignmentMenu(*visInputs[row]);
                     }
 
                     ImGui::PopStyleVar();
                     ed::EndPin();
-                    ImGui::PopStyleColor(); // Pop the style color for pin text
+                    ImGui::PopStyleColor();
+                    columnWidths[1] = std::max(columnWidths[1], std::ceil(ImGui::GetItemRectSize().x));
 
-                    columnWidths[1] = std::max(columnWidths[1], ImGui::GetItemRectSize().x);
-                    ImGui::TableNextColumn();
+                    ImGui::TableNextColumn(); // InName
 
                     if (inputMissing)
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, LinkColors::ColorInvalid);
                     }
-                    ImGui::TextUnformatted((parameter.first).c_str());
-                    columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
+                    ImGui::TextUnformatted(name.c_str());
+                    columnWidths[2] = std::max(columnWidths[2], std::ceil(ImGui::GetItemRectSize().x));
 
-                    // Add a label below the button with the type name
+                    ImGui::SetWindowFontScale(0.5f);
                     if (!inputMissing)
                     {
-                        // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f);
                         ImGui::TextUnformatted(
-                          typeToString(parameter.second.getTypeIndex()).c_str());
-                        columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(1.0f);
+                          typeToString(port.getTypeIndex()).c_str());
                     }
-                    if (inputMissing)
+                    else
                     {
-                        // decreaes font size
-                        ImGui::SetWindowFontScale(0.5f);
                         ImGui::TextUnformatted(
                           fmt::format("Add a input of {} type",
-                                      typeToString(parameter.second.getTypeIndex()))
+                                      typeToString(port.getTypeIndex()))
                             .c_str());
-                        ImGui::PopStyleColor(); // Pop style color for missing input
-                        columnWidths[2] = std::max(columnWidths[2], ImGui::GetItemRectSize().x);
-                        ImGui::SetWindowFontScale(1.0f);
+                        ImGui::PopStyleColor();
                     }
+                    columnWidths[2] = std::max(columnWidths[2], std::ceil(ImGui::GetItemRectSize().x));
+                    ImGui::SetWindowFontScale(1.0f);
+
+                    ImGui::PopID();
                 }
-                ImGui::PopID();
-
-                if (parameter.second.getSource().has_value())
+                else
                 {
-                    ImVec4 const linkColor = (parameter.second.isValid())
-                                               ? typeToColor(parameter.second.getTypeIndex())
-                                               : LinkColors::ColorInvalid;
+                    ImGui::TableNextColumn(); // InName (empty)
+                }
 
-                    ed::Link(++m_currentLinkId,
-                             parameter.second.getSource().value().portId,
-                             parameter.second.getId(),
-                             linkColor);
+
+
+                // ── Output name + pin (columns 2/3 - 3/4) ──────────────
+                ImGui::TableNextColumn(); // OutName
+                if (row < visOutputs.size())
+                {
+                    auto & [outName, outPort] = *visOutputs[row];
+
+                    ImGui::PushID(outPort.getId());
+                    ImGui::PushStyleColor(
+                      ImGuiCol_Text,
+                      pinColorForDragState(outPort.getId(), false, outPort.getTypeIndex()));
+
+                    ImGui::TextUnformatted(outName.c_str());
+                    columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
+
+                    ImGui::SetWindowFontScale(0.5f);
+                    ImGui::TextUnformatted(typeToString(outPort.getTypeIndex()).c_str());
+                    ImGui::SetWindowFontScale(1.0f);
+                    columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
+
+                    ImGui::TableNextColumn(); // OutPin
+
+                    BeginPin(ed::PinId(outPort.getId()), ed::PinKind::Output);
+                    ImGui::SetWindowFontScale(1.5f);
+                    ImGui::TextUnformatted(
+                      reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                    ImGui::SetWindowFontScale(1.0f);
+                    ed::EndPin();
+
+                    columnWidths[7] = std::max(columnWidths[7], std::ceil(ImGui::GetItemRectSize().x));
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+                else
+                {
+                    ImGui::TableNextColumn(); // OutPin (empty)
+                }
+
+                // ── Register links for input ports ──────────────────────
+                if (row < visInputs.size())
+                {
+                    auto & [name, port] = *visInputs[row];
+                    if (port.getSource().has_value())
+                    {
+                        ImVec4 const linkColor = port.isValid()
+                                                   ? typeToColor(port.getTypeIndex())
+                                                   : LinkColors::ColorInvalid;
+                        ed::Link(++m_currentLinkId,
+                                 port.getSource().value().portId,
+                                 port.getId(),
+                                 linkColor);
+                    }
                 }
             }
         }
@@ -2210,31 +2332,24 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
-        // Bootstrap widths from output content so long user-defined names are
-        // visible even before a stable two-pass cache has converged.
+        // Bootstrap: generous widths so text renders unclipped on the
+        // measuring pass. Actual sizes converge on the next frame.
         if (columnWidths[6] <= 0.f || columnWidths[7] <= 0.f)
         {
-            auto const & style = ImGui::GetStyle();
-            float const maxOutputLabelWidth =
-              measureMaxPortLabelWidth(node.getOutputs(), false);
-
-            float const pinGlyphWidth =
-              ImGui::CalcTextSize(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT)).x * 1.5f +
-              style.FramePadding.x * 2.0f;
-
-            columnWidths[6] = std::max(columnWidths[6], maxOutputLabelWidth);
-            columnWidths[7] = std::max(columnWidths[7], pinGlyphWidth);
+            columnWidths[6] = 200.f;
+            columnWidths[7] = 40.f;
         }
 
-        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
+        float const cellPad = ImGui::GetStyle().CellPadding.x;
+        float const padOH2  = (2 * 2 - 2) * cellPad; // 2-col NoPadOuterX overhead
         if (ImGui::BeginTable("outputs",
                               2,
-                              ImGuiTableFlags_SizingStretchProp,
-                              ImVec2((columnWidths[6] + colPad) + (columnWidths[7] + colPad), 0)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+                              ImVec2(columnWidths[6] + columnWidths[7] + padOH2, 0)))
         {
             ImGui::TableSetupColumn(
-              "OutputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[6] + colPad);
-            ImGui::TableSetupColumn("OutputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7] + colPad);
+              "OutputName", ImGuiTableColumnFlags_WidthFixed, columnWidths[6]);
+            ImGui::TableSetupColumn("OutputPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7]);
 
             columnWidths[6] = 0.f;
             columnWidths[7] = 0.f;
@@ -2259,9 +2374,13 @@ namespace gladius::ui
                 ImGui::PushID(output.second.getId()); // required for reusing the same labels
                                                       // (that are used as unique ids in ImgUI)
                 {
-                    ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(output.second.getTypeIndex()));
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          pinColorForDragState(
+                                            output.second.getId(),
+                                            false,
+                                            output.second.getTypeIndex()));
                     ImGui::TextUnformatted((output.first).c_str());
-                    columnWidths[6] = std::max(columnWidths[6], ImGui::GetItemRectSize().x);
+                    columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
 
                     // Add a label below the button with the type name
 
@@ -2269,7 +2388,7 @@ namespace gladius::ui
 
                     ImGui::TextUnformatted(typeToString(output.second.getTypeIndex()).c_str());
                     ImGui::SetWindowFontScale(1.0f);
-                    columnWidths[6] = std::max(columnWidths[6], ImGui::GetItemRectSize().x);
+                    columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
 
                     ImGui::TableNextColumn();
 
@@ -2281,7 +2400,7 @@ namespace gladius::ui
 
                     ed::EndPin();
 
-                    columnWidths[7] = std::max(columnWidths[7], ImGui::GetItemRectSize().x);
+                    columnWidths[7] = std::max(columnWidths[7], std::ceil(ImGui::GetItemRectSize().x));
                     ImGui::PopStyleColor();
                 }
                 ImGui::PopID();
@@ -2301,15 +2420,16 @@ namespace gladius::ui
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
         ImGui::PushID(node.getId());
-        float const colPad = ImGui::GetStyle().CellPadding.x * 2.0f;
-        auto widthOutputs = columnWidths[6] + columnWidths[7] + colPad;
+        float const cellPad = ImGui::GetStyle().CellPadding.x;
+        float const padOH2  = (2 * 2 - 2) * cellPad; // 2-col NoPadOuterX overhead
+        auto widthOutputs = columnWidths[6] + columnWidths[7] + padOH2;
         if (ImGui::BeginTable("InputAndOutputs",
                               2,
-                              ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(columnWidths[0] + colPad + widthOutputs + colPad, 0)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+                              ImVec2(columnWidths[0] + widthOutputs + padOH2, 0)))
         {
-            ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0] + colPad);
-            ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs + colPad);
+            ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0]);
+            ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -2328,7 +2448,7 @@ namespace gladius::ui
         footer(node);
     }
 
-    ImVec4 NodeView::typeToColor(std::type_index tyepIndex)
+    ImVec4 NodeView::typeToColor(std::type_index tyepIndex) const
     {
         ImVec4 color = {1.f, 1.f, 1.f, 1.f};
         if (tyepIndex == ParameterTypeIndex::Float)
@@ -2356,6 +2476,44 @@ namespace gladius::ui
             color = LinkColors::ColorInt;
         }
         return color;
+    }
+
+    ImVec4 NodeView::pinColorForDragState(nodes::PortId pinId,
+                                          bool isInput,
+                                          std::type_index typeIndex) const
+    {
+        ImVec4 color = typeToColor(typeIndex);
+
+        if (!m_modelEditor)
+        {
+            return color;
+        }
+
+        auto const & dragState = m_modelEditor->linkDragState();
+        if (!dragState.isDragging || !dragState.hasComputedCompatibility())
+        {
+            return color;
+        }
+
+        // Don't dim the source pin itself
+        if (dragState.sourcePortId == pinId)
+        {
+            return color;
+        }
+
+        // Only opposite-direction pins can be link targets
+        bool const isOppositeDirection = (dragState.sourceIsOutput != isInput);
+        if (isOppositeDirection)
+        {
+            if (dragState.isCompatible(static_cast<int64_t>(pinId)))
+            {
+                return LinkColors::applyPinVisualState(color, PinVisualState::Highlighted);
+            }
+            return LinkColors::applyPinVisualState(color, PinVisualState::Dimmed);
+        }
+
+        // Same-direction pins get dimmed
+        return LinkColors::applyPinVisualState(color, PinVisualState::Dimmed);
     }
 
     ColumnWidths & NodeView::getOrCreateColumnWidths(nodes::NodeId nodeId)

@@ -382,6 +382,23 @@ namespace gladius::tests
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(std::string const & /*path*/) override
+        {
+            return false;
+        }
+
+        std::vector<std::string> uiDumpItems(std::string const & /*parentPath*/) override
+        {
+            return {};
+        }
+
+        bool captureUIScreenshot(std::string const & /*outputPath*/) override
+        {
+            return false;
+        }
+#endif
     };
 
     class JSONRPCTest : public ::testing::Test

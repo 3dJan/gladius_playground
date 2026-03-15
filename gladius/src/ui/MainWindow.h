@@ -18,6 +18,7 @@
 #include "MeshExportDialog.h"
 #include "ModelEditor.h"
 #include "Outline.h"
+#include "ParameterThrottle.h"
 #include "RecentFilesManager.h"
 #include "RenderWindow.h"
 #include "SliceView.h"
@@ -101,6 +102,11 @@ namespace gladius::ui
         bool isComputeAvailable() const
         {
             return m_computeAvailable;
+        }
+
+        GLView & getGLView()
+        {
+            return m_mainView;
         }
 
         /**
@@ -243,6 +249,7 @@ namespace gladius::ui
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
+        ParameterThrottle m_parameterThrottle;
 
         ViewCallBack m_renderCallback;
 

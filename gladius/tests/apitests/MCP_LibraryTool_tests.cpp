@@ -228,6 +228,12 @@ namespace gladius::tests
                     deleteLibraryEntry,
                     (std::string const &, std::string const &),
                     (override));
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(std::string const & /*path*/) override { return false; }
+        std::vector<std::string> uiDumpItems(std::string const & /*parentPath*/) override { return {}; }
+        bool captureUIScreenshot(std::string const & /*outputPath*/) override { return false; }
+#endif
     };
 
     // ────────────────────────────────────────────────────────────────

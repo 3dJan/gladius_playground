@@ -1234,3 +1234,200 @@ nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string con
 {
     return m_functionOperationsTool->setProgramSnippet(snippet);
 }
+
+#ifdef ENABLE_UI_TESTING
+#include <imgui.h>
+#undef KeyPress
+#include <imgui_te_engine.h>
+#include <imgui_te_context.h>
+#include "../ui/MainWindow.h"
+#include "../ui/GLView.h"
+#include "../Application.h"
+#include <future>
+#include <chrono>
+
+/// Thread-safe state shared between the MCP request thread and the ImGui
+/// test engine thread. All access is protected by the internal mutex.
+struct UITestState
+{
+    std::mutex mutex;
+
+    std::string clickPath;
+    std::shared_ptr<std::promise<bool>> clickPromise;
+    ImGuiTest * clickTest = nullptr;
+
+    std::string dumpPath;
+    std::shared_ptr<std::promise<std::vector<std::string>>> dumpPromise;
+    ImGuiTest * dumpTest = nullptr;
+};
+
+static UITestState & getUITestState()
+{
+    static UITestState instance;
+    return instance;
+}
+
+static void static_mcp_ui_click(ImGuiTestContext * ctx)
+{
+    auto & state = getUITestState();
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        path = state.clickPath;
+    }
+
+    ctx->ItemClick(path.c_str(), 0, ImGuiTestOpFlags_NoError);
+    ctx->Yield(3);
+
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.clickPromise)
+    {
+        state.clickPromise->set_value(true);
+        state.clickPromise.reset();
+    }
+}
+
+static void static_mcp_ui_dump(ImGuiTestContext * ctx)
+{
+    std::vector<std::string> results;
+    std::string dumpPath;
+    {
+        std::lock_guard<std::mutex> lock(getUITestState().mutex);
+        dumpPath = getUITestState().dumpPath;
+    }
+
+    ctx->Yield(1);
+
+    if (dumpPath.empty())
+    {
+        ImGuiContext * imgui_ctx = ImGui::GetCurrentContext();
+        for (int i = 0; i < imgui_ctx->Windows.Size; i++)
+        {
+            if (auto * window = imgui_ctx->Windows[i])
+            {
+                if (window->Name)
+                {
+                    ImGuiTestItemList out_list;
+                    ctx->GatherItems(&out_list, ImGuiTestRef(window->Name), -1);
+                    for (int j = 0; j < out_list.GetSize(); j++)
+                    {
+                        ImGuiTestItemInfo const * item = out_list.GetByIndex(j);
+                        if (item && item->DebugLabel[0] != '\0')
+                        {
+                            results.push_back(std::string(window->Name) + "/" + item->DebugLabel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        ImGuiTestItemList out_list;
+        ctx->GatherItems(&out_list, ImGuiTestRef(dumpPath.c_str()), -1);
+        for (int i = 0; i < out_list.GetSize(); i++)
+        {
+            ImGuiTestItemInfo const * item = out_list.GetByIndex(i);
+            if (item && item->DebugLabel[0] != '\0')
+            {
+                results.push_back(item->DebugLabel);
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(getUITestState().mutex);
+    if (getUITestState().dumpPromise)
+    {
+        getUITestState().dumpPromise->set_value(results);
+        getUITestState().dumpPromise.reset();
+    }
+}
+
+std::vector<std::string> gladius::ApplicationMCPAdapter::uiDumpItems(std::string const & parentPath)
+{
+    if (!m_application) return {};
+    auto & mainWindow = m_application->getMainWindow();
+    auto testEngine = mainWindow.getGLView().getTestEngine();
+    if (!testEngine) return {};
+
+    auto & state = getUITestState();
+    std::future<std::vector<std::string>> future;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.dumpPath = parentPath;
+        state.dumpPromise = std::make_shared<std::promise<std::vector<std::string>>>();
+        future = state.dumpPromise->get_future();
+
+        if (!state.dumpTest)
+        {
+            state.dumpTest = ImGuiTestEngine_RegisterTest(testEngine, "MCP", "action_dump");
+            state.dumpTest->TestFunc = static_mcp_ui_dump;
+        }
+    }
+
+    ImGuiTestEngine_QueueTest(testEngine, state.dumpTest, 0);
+
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
+    {
+        return future.get();
+    }
+    std::cerr << "Timeout waiting for UI dump test to complete\n";
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.dumpPromise.reset();
+    return {};
+}
+
+bool gladius::ApplicationMCPAdapter::uiClick(std::string const & path)
+{
+    if (!m_application) return false;
+    auto & mainWindow = m_application->getMainWindow();
+    auto testEngine = mainWindow.getGLView().getTestEngine();
+    if (!testEngine) return false;
+
+    auto & state = getUITestState();
+    std::future<bool> future;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.clickPath = path;
+        state.clickPromise = std::make_shared<std::promise<bool>>();
+        future = state.clickPromise->get_future();
+
+        if (!state.clickTest)
+        {
+            state.clickTest = ImGuiTestEngine_RegisterTest(testEngine, "MCP", "action_click");
+            state.clickTest->TestFunc = static_mcp_ui_click;
+        }
+    }
+
+    ImGuiTestEngine_QueueTest(testEngine, state.clickTest, 0);
+
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
+    {
+        return future.get();
+    }
+    std::cerr << "Timeout waiting for UI click test\n";
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.clickPromise.reset();
+    return false;
+}
+
+bool gladius::ApplicationMCPAdapter::captureUIScreenshot(std::string const & outputPath)
+{
+    if (!m_application) return false;
+    
+    // Actually, captureUIScreenshot is virtual and needs to be returned synchronously.
+    // requestScreenshot returns a future. We will block and wait for it.
+    auto futureSuccess = m_application->getMainWindow().getGLView().requestScreenshot(outputPath);
+    
+    if (futureSuccess.valid()) {
+        // Wait up to some reasonable time, say 5 seconds.
+        if (futureSuccess.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            return futureSuccess.get();
+        } else {
+            return false; // timeout
+        }
+    }
+
+    return false;
+}
+#endif

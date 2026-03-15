@@ -8,12 +8,19 @@
 #include "MCPApplicationInterface.h"
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <thread>
 #include <vector>
+
+#ifdef ENABLE_UI_TESTING
+#include "imgui.h"
+#include "imgui_internal.h"
+#endif
 
 #include "../version.h"
 
@@ -431,7 +438,22 @@ namespace gladius::mcp
 
             json response = {
               {"jsonrpc", "2.0"},
-              {"result", {{"content", {{{"type", "text"}, {"text", result.dump()}}}}}}};
+              {"result", json::object()}
+            };
+
+            if (result.is_object() && result.contains("content") && result["content"].is_array())
+            {
+                response["result"]["content"] = result["content"];
+                // Preserve isError flag if present
+                if (result.contains("isError") && result["isError"].is_boolean())
+                {
+                    response["result"]["isError"] = result["isError"];
+                }
+            }
+            else
+            {
+                response["result"]["content"] = {{{"type", "text"}, {"text", result.dump(2)}}};
+            }
 
             if (request.contains("id"))
             {
@@ -2009,6 +2031,114 @@ namespace gladius::mcp
               std::string description = params["description"];
               return m_application->setLibraryMetadata(functionIds, description);
           });
+
+#ifdef ENABLE_UI_TESTING
+        // UI TESTING TOOLS
+        registerTool(
+          "ui_click",
+          "Perform a UI click on the specified ImGui test engine path",
+          {{"type", "object"},
+           {"properties",
+            {{"path",
+              {{"type", "string"},
+               {"description", "The ImGui test path (e.g., '//MainWindow/File/Open')"}}}}},
+           {"required", json::array({"path"})}},
+          [this](const json & params) -> json
+          {
+              if (!params.contains("path"))
+              {
+                  return {{"success", false}, {"error", "Missing required parameter: path"}};
+              }
+              std::string path = params["path"];
+              bool success = m_application->uiClick(path);
+              return {{"success", success},
+                      {"message", success ? "Click queued successfully" : "Failed to queue click"}};
+          });
+
+        registerTool(
+          "capture_screenshot",
+          "Capture a screenshot of the current UI. If output_path is provided, it saves to disk. Otherwise it returns the image directly as base64 in the MCP response.",
+          {{"type", "object"},
+           {"properties",
+            {{"output_path",
+              {{"type", "string"},
+               {"description", "Optional. The file path where the screenshot will be saved."}}}}}},
+          [this](const json & params) -> json
+          {
+              std::string outputPath;
+              bool returnDirectly = false;
+              if (params.contains("output_path"))
+              {
+                  outputPath = params["output_path"];
+              }
+              else
+              {
+                  auto tmpDir = std::filesystem::temp_directory_path();
+                  outputPath = (tmpDir / "gladius_mcp_screenshot_tmp.png").string();
+                  returnDirectly = true;
+              }
+              
+              bool success = m_application->captureUIScreenshot(outputPath);
+              if (!success) {
+                  return {{"isError", true}, {"content", {{{"type", "text"}, {"text", "Failed to capture screenshot"}}}}};
+              }
+
+              if (returnDirectly)
+              {
+                  auto bytes = readFileBinary(outputPath);
+                  std::remove(outputPath.c_str());
+                  if (!bytes.empty())
+                  {
+                      std::string b64 = base64Encode(bytes);
+                      return {{"content", {
+                          {{"type", "image"}, {"data", b64}, {"mimeType", "image/png"}}
+                      }}};
+                  }
+                  return {{"isError", true}, {"content", {{{"type", "text"}, {"text", "Screenshot captured but failed to read"}}}}};
+              }
+
+              return {{"content", {{{"type", "text"}, {"text", "Screenshot captured successfully to " + outputPath}}}}};
+          });
+
+        registerTool(
+          "ui_dump_windows",
+          "Dump all ImGui window names",
+          {{"type", "object"}, {"properties", json::object()}},
+          [this](const json &) -> json
+          {
+              std::vector<std::string> windows;
+              ImGuiContext* ctx = ImGui::GetCurrentContext();
+              if (ctx)
+              {
+                  for(int i = 0; i < ctx->Windows.Size; i++)
+                  {
+                      if (ctx->Windows[i]->Name != nullptr)
+                        windows.push_back(ctx->Windows[i]->Name);
+                  }
+              }
+              return {{"success", true}, {"windows", windows}};
+          });
+
+        registerTool(
+          "ui_dump_items",
+          "Dump all interactable elements within a specific UI path. If path is empty, dumps from root.",
+          {{"type", "object"},
+           {"properties",
+            {{"path",
+              {{"type", "string"},
+               {"description", "The ImGui test path (e.g., '//Model Editor') or empty string"}}}}}},
+          [this](const json & params) -> json
+          {
+              std::string path = "";
+              if (params.contains("path") && params["path"].is_string())
+              {
+                  path = params["path"].get<std::string>();
+              }
+              std::vector<std::string> items = m_application->uiDumpItems(path);
+              return {{"success", true}, {"items", items}};
+          });
+
+#endif
     }
 
     void MCPServer::runStdioLoop()

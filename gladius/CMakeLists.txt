@@ -13,6 +13,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
+option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
+
+# Allow the environment variable GLADIUS_ENABLE_UI_TESTING to override the cmake option
+if(DEFINED ENV{GLADIUS_ENABLE_UI_TESTING})
+    set(ENABLE_UI_TESTING "$ENV{GLADIUS_ENABLE_UI_TESTING}" CACHE BOOL "Enable UI test automation via Dear ImGui Test Engine" FORCE)
+endif()
+
+if(ENABLE_UI_TESTING)
+    message(STATUS "UI Testing and Automation is ENABLED")
+endif()
 
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "2")

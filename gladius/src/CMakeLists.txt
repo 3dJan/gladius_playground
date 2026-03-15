@@ -14,6 +14,7 @@ add_library(${BINARY}_lib STATIC ${SOURCES})
 add_library(${BINARY}_lib_mcp STATIC ${SOURCES})
 target_compile_definitions(${BINARY}_lib_mcp PUBLIC GLADIUS_ENABLE_MCP)
 
+
 if (MSVC)
     add_executable(${BINARY} WIN32 ${SOURCES} )
     set_property(TARGET ${BINARY} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -122,6 +123,9 @@ target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
     ${CMAKE_CURRENT_SOURCE_DIR}/mcp
 )
 target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
+if(ENABLE_UI_TESTING)
+    target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+endif()
 target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
 # Ensure the MCP-enabled static library is built before linking the executable
 add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
@@ -130,3 +134,9 @@ if (NOT WIN32)
 endif()
 # Install MCP variant if it was built in this build tree; do not fail packaging if absent
 install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)
+
+if (ENABLE_UI_TESTING)
+    target_compile_definitions(${BINARY}_lib PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    target_compile_definitions(${BINARY}_lib_mcp PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    target_compile_definitions(${BINARY} PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+endif()

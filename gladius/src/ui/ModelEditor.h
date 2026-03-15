@@ -10,6 +10,7 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "LibraryDragPayload.h"
+#include "LinkDragState.h"
 #include "NodeClipboard.h"
 #include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
@@ -74,6 +75,12 @@ namespace gladius::ui
         [[nodiscard]] bool modelWasModified() const;
 
         [[nodiscard]] bool isCompileRequested() const;
+
+        /// Access the current link drag state for port compatibility rendering.
+        [[nodiscard]] LinkDragState const & linkDragState() const { return m_linkDragState; }
+
+        /// Non-const access so NodeView can record the drag source pin when the mouse is pressed.
+        [[nodiscard]] LinkDragState & mutableLinkDragState() { return m_linkDragState; }
 
         void markModelAsModified();
         void markModelAsUpToDate();
@@ -290,6 +297,7 @@ namespace gladius::ui
         static void noOp() {};
         PopupMenuFunction m_popupMenuFunction = noOp;
         NodeView m_nodeViewVisitor;
+        LinkDragState m_linkDragState;
 
         bool m_modelWasModified{false};
         bool m_outlineRenaming{true};
@@ -356,8 +364,10 @@ namespace gladius::ui
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
 
-        // One-time auto layout helper state
-        bool m_pendingAutoLayout{false};
+        // One-time auto layout helper state.
+        // Counts down frames before executing layout so that the node editor
+        // has had a chance to compute actual node sizes (frame 0 = inactive).
+        int m_pendingAutoLayoutFrames{0};
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};

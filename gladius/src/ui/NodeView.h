@@ -183,11 +183,16 @@ namespace gladius::ui
         void inputControls(nodes::NodeBase & node, nodes::ParameterMap::reference parameter);
         void showLinkAssignmentMenu(nodes::ParameterMap::reference parameter);
         void showInputAndOutputs(nodes::NodeBase & node);
-        void inputPins(nodes::NodeBase & node);
         void outputPins(nodes::NodeBase & node);
         void viewInputNode(nodes::NodeBase & node);
 
-        ImVec4 typeToColor(std::type_index tyepIndex);
+        ImVec4 typeToColor(std::type_index tyepIndex) const;
+
+        /// Compute the visual color for a pin, applying drag-state
+        /// highlighting/dimming when a link is being dragged.
+        ImVec4 pinColorForDragState(nodes::PortId pinId,
+                                    bool isInput,
+                                    std::type_index typeIndex) const;
 
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
