@@ -2211,12 +2211,6 @@ namespace gladius::ui
             ImGui::TableSetupColumn(
               "OutPin", ImGuiTableColumnFlags_WidthFixed, columnWidths[7]);
 
-            if (node.name().find("Subtraction") != std::string::npos)
-            {
-                fprintf(stderr, "[SETUP] cw6=%.1f cellPad=%.1f => OutName alloc=%.1f | cw7=%.1f => OutPin alloc=%.1f | tableW=%.1f rawContentW=%.1f padOH=%.1f fill=%.1f\n",
-                    columnWidths[6], cellPad, columnWidths[6], columnWidths[7], columnWidths[7], tableWidth, rawContentW, padOverhead, fillSpace);
-            }
-
             columnWidths[1] = 0.f;
             columnWidths[2] = 0.f;
             columnWidths[6] = 0.f;
@@ -2310,26 +2304,8 @@ namespace gladius::ui
                       ImGuiCol_Text,
                       pinColorForDragState(outPort.getId(), false, outPort.getTypeIndex()));
 
-                    if (node.name().find("Subtraction") != std::string::npos)
-                    {
-                        auto ci = ImGui::TableGetColumnIndex();
-                        fprintf(stderr, "[PRE-RENDER] colIdx=%d colWidth=%.1f contentAvail=%.1f cursorX=%.1f windowPosX=%.1f\n",
-                            ci, ImGui::GetColumnWidth(ci), ImGui::GetContentRegionAvail().x,
-                            ImGui::GetCursorPosX(), ImGui::GetWindowPos().x);
-                    }
-
                     ImGui::TextUnformatted(outName.c_str());
-                    {
-                        float const measured = std::ceil(ImGui::GetItemRectSize().x);
-                        auto const calcSize = ImGui::CalcTextSize(outName.c_str());
-                        if (node.name().find("Subtraction") != std::string::npos)
-                        {
-                            fprintf(stderr, "[MEASURE] outName='%s' GetItemRect=%.1f ceil=%.1f CalcTextSize=%.1f colAvail=%.1f itemMin=%.1f itemMax=%.1f\n",
-                                outName.c_str(), ImGui::GetItemRectSize().x, measured, calcSize.x, ImGui::GetContentRegionAvail().x,
-                                ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().x);
-                        }
-                        columnWidths[6] = std::max(columnWidths[6], measured);
-                    }
+                    columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
 
                     ImGui::SetWindowFontScale(0.5f);
                     ImGui::TextUnformatted(typeToString(outPort.getTypeIndex()).c_str());
