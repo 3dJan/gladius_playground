@@ -15,17 +15,17 @@ namespace gladius::ui
     // Function to generate a unique color for each node type
     ImVec4 generateUniqueColor(size_t index)
     {
-        // Generate a color using a simple algorithm to ensure uniqueness
-        size_t const numColors = 50;
-        size_t const hueStep = 360 / numColors;
-        size_t hue = (index * hueStep) % 360;
-        size_t saturation = 40 + (index % 4) * 10; // Vary saturation: 40-70% (softer)
-        size_t value = 70 + (index % 3) * 10;      // Vary value: 70-90% (lighter)
+        // Use the golden angle (~137.5°) to maximize hue distance between
+        // consecutively registered node types (e.g. sin, cos, tan).
+        float constexpr GOLDEN_ANGLE = 137.508f;
+        float hue = std::fmod(static_cast<float>(index) * GOLDEN_ANGLE, 360.f);
+        float saturation = 40.f + static_cast<float>(index % 4) * 10.f; // 40-70%
+        float value = 70.f + static_cast<float>(index % 3) * 10.f;      // 70-90%
 
-        // Convert HSV to RGB (simple approximation)
-        float c = (value / 100.0f) * (saturation / 100.0f);
-        float x = c * (1.0f - abs(fmod(hue / 60.0f, 2.0f) - 1.0f));
-        float m = (value / 100.0f) - c;
+        // Convert HSV to RGB
+        float c = (value / 100.f) * (saturation / 100.f);
+        float x = c * (1.f - std::abs(std::fmod(hue / 60.f, 2.f) - 1.f));
+        float m = (value / 100.f) - c;
 
         float r, g, b;
         if (hue < 60)
