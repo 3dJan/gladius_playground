@@ -67,6 +67,7 @@ namespace gladius::ui
 
     void NodeView::visit(Begin & beginNode)
     {
+        ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, ed::GetStyle().NodeBorderWidth * 2.f);
         header(beginNode);
 
         if (ImGui::BeginTable("beginNodeTable",
@@ -182,10 +183,12 @@ namespace gladius::ui
         }
 
         footer(beginNode);
+        ed::PopStyleVar(1);
     }
 
     void NodeView::visit(nodes::End & endNode)
     {
+        ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, ed::GetStyle().NodeBorderWidth * 2.f);
         header(endNode);
         if (ImGui::BeginTable("endNodeTable",
                               4,
@@ -302,6 +305,7 @@ namespace gladius::ui
         }
 
         footer(endNode);
+        ed::PopStyleVar(1);
     }
 
     void NodeView::visit(nodes::ConstantScalar & constantScalarNode)
