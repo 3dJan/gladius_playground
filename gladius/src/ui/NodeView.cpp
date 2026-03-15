@@ -190,10 +190,14 @@ namespace gladius::ui
     {
         ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, ed::GetStyle().NodeBorderWidth * 2.f);
         header(endNode);
+
+        float const cellPad = ImGui::GetStyle().CellPadding.x;
+        float const tableWidth = (20.f + 120.f + 55.f + 60.f) * m_uiScale + (4 * 2 - 2) * cellPad;
+
         if (ImGui::BeginTable("endNodeTable",
                               4,
-                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX,
-                              ImVec2(0.f, 0.f)))
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+                              ImVec2(tableWidth, 0.f)))
         {
             ImGui::TableSetupColumn("Pin", ImGuiTableColumnFlags_WidthFixed, 20.f * m_uiScale);
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.f * m_uiScale);
@@ -206,23 +210,25 @@ namespace gladius::ui
             for (auto & input : endNode.parameter())
             {
                 ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                BeginPin(input.second.getId(), ed::PinKind::Input);
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                                      pinColorForDragState(
-                                        input.second.getId(),
-                                        true,
-                                        input.second.getTypeIndex()));
-                ImGui::TextUnformatted(
-                  reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                ImGui::PopStyleColor();
-                ed::EndPin();
-
-                ImGui::TableNextColumn();
-
                 ImGui::PushID(input.first.c_str());
-                std::string currentName = input.first;
 
+                                ImGui::TableSetColumnIndex(0); // Pin
+                                BeginPin(input.second.getId(), ed::PinKind::Input);
+                                ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                            pinColorForDragState(
+                                                                                input.second.getId(),
+                                                                                true,
+                                                                                input.second.getTypeIndex()));
+                                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0.f});
+                                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
+                                ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
+                                                            ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f));
+                                ImGui::PopStyleVar();
+                                ImGui::PopStyleColor();
+                                ed::EndPin();
+
+                                ImGui::TableSetColumnIndex(1); // Name
+                std::string currentName = input.first;
                 ImGui::SetNextItemWidth(-1);
                 if (ImGui::InputText(
                       "##name", &currentName, ImGuiInputTextFlags_EnterReturnsTrue))
@@ -238,15 +244,16 @@ namespace gladius::ui
                     paramToRename = {input.first, currentName};
                 }
 
-                ImGui::TableNextColumn();
+                ImGui::TableSetColumnIndex(2); // Actions
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_TRASH)))
                 {
                     paramToRemove = input.first;
                 }
 
-                ImGui::TableNextColumn();
+                ImGui::TableSetColumnIndex(3); // Type
                 std::type_index typeIndex = input.second.getTypeIndex();
                 ImGui::TextUnformatted(typeToString(typeIndex).c_str());
+
                 if (input.second.getSource().has_value())
                 {
                     ImVec4 const linkColor = (input.second.isValid())
