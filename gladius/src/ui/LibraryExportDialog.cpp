@@ -5,7 +5,6 @@
 #include "io/3mf/Writer3mf.h"
 
 #include <algorithm>
-#include <cstring>
 #include <fmt/format.h>
 
 namespace gladius::ui
@@ -35,7 +34,8 @@ namespace gladius::ui
         {
             auto safeName = m_functions[m_selectedFunctionIndex].displayName;
             std::replace(safeName.begin(), safeName.end(), ' ', '_');
-            std::strncpy(m_fileNameBuf, safeName.c_str(), FILENAME_BUF_SIZE - 1);
+            auto const r1 = fmt::format_to_n(m_fileNameBuf, FILENAME_BUF_SIZE - 1, "{}", safeName);
+            *r1.out = '\0';
         }
     }
 
@@ -173,7 +173,8 @@ namespace gladius::ui
                     m_selectedFunctionIndex = i;
                     auto safeName = m_functions[i].displayName;
                     std::replace(safeName.begin(), safeName.end(), ' ', '_');
-                    std::strncpy(m_fileNameBuf, safeName.c_str(), FILENAME_BUF_SIZE - 1);
+                    auto const r2 = fmt::format_to_n(m_fileNameBuf, FILENAME_BUF_SIZE - 1, "{}", safeName);
+                    *r2.out = '\0';
                 }
                 if (selected)
                 {

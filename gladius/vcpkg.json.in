@@ -54,7 +54,8 @@
     "nlohmann-json",
     "muparser",
     "cpp-httplib",
-    "libcoro"
+    "libcoro",
+    "nlopt"
   ],
   "overrides": [
     {
