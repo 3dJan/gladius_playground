@@ -183,7 +183,6 @@ namespace gladius::ui
         void inputControls(nodes::NodeBase & node, nodes::ParameterMap::reference parameter);
         void showLinkAssignmentMenu(nodes::ParameterMap::reference parameter);
         void showInputAndOutputs(nodes::NodeBase & node);
-        void inputPins(nodes::NodeBase & node);
         void outputPins(nodes::NodeBase & node);
         void viewInputNode(nodes::NodeBase & node);
 
