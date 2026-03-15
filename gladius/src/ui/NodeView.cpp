@@ -2030,6 +2030,10 @@ namespace gladius::ui
 
         float const indent = 20.f * m_uiScale;
         ImGui::Indent(indent);
+
+        // Track the desired width: CalcItemWidth gives the pushed ItemWidth
+        // which is the true widget width even when the column clips it.
+        float desiredW = 0.f;
         if (parameter.first != FieldNames::Shape)
         {
             if (parameter.second.getTypeIndex() == ParameterTypeIndex::Int)
@@ -2052,20 +2056,14 @@ namespace gladius::ui
             {
                 viewResource(node, parameter, val);
             }
+            // Use the larger of the measured rect and the CalcItemWidth-based width
+            float const itemRectW = std::ceil(ImGui::GetItemRectSize().x);
+            desiredW = std::max(itemRectW, ImGui::CalcItemWidth());
         }
 
         // update column width — add indent so the column is wide enough
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
-        {
-            float const itemW = std::ceil(ImGui::GetItemRectSize().x);
-            float const needed = itemW + indent;
-            if (node.name().find("ConstantVector") != std::string::npos)
-            {
-                fprintf(stderr, "[CTRL] itemW=%.1f indent=%.1f needed=%.1f prev_cw0=%.1f contentAvail=%.1f cursorX=%.1f\n",
-                    itemW, indent, needed, columnWidths[0], ImGui::GetContentRegionAvail().x, ImGui::GetCursorPosX());
-            }
-            columnWidths[0] = std::max(columnWidths[0], needed);
-        }
+        columnWidths[0] = std::max(columnWidths[0], desiredW + indent);
 
         if (m_assembly == nullptr)
         {
@@ -2079,7 +2077,8 @@ namespace gladius::ui
 
         if (viewString(node, parameter, val))
         {
-            columnWidths[0] = std::max(columnWidths[0], std::ceil(ImGui::GetItemRectSize().x) + indent);
+            float const w = std::max(std::ceil(ImGui::GetItemRectSize().x), ImGui::CalcItemWidth());
+            columnWidths[0] = std::max(columnWidths[0], w + indent);
             return;
         }
 
@@ -2477,12 +2476,6 @@ namespace gladius::ui
                               ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
                               ImVec2(columnWidths[0] + widthOutputs + padOH2, 0)))
         {
-            if (node.name().find("ConstantVector") != std::string::npos)
-            {
-                fprintf(stderr, "[VIN-SETUP] cw0=%.1f widthOut=%.1f cellPad=%.1f padOH2=%.1f => Param alloc=%.1f Out alloc=%.1f tableW=%.1f\n",
-                    columnWidths[0], widthOutputs, cellPad, padOH2, columnWidths[0], widthOutputs,
-                    columnWidths[0] + widthOutputs + padOH2);
-            }
             ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0]);
             ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs);
 
