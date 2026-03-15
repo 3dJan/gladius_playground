@@ -18,10 +18,12 @@ namespace gladius
     constexpr int THEME_COUNT = static_cast<int>(ThemeId::Count);
 
     /// Human-readable names (indexed by ThemeId)
+    inline constexpr std::array<char const *, THEME_COUNT> THEME_NAMES = {"Classic", "Modern"};
+
+    /// @deprecated Use THEME_NAMES directly
     inline std::array<char const *, THEME_COUNT> const & themeNames()
     {
-        static std::array<char const *, THEME_COUNT> const names = {"Classic", "Modern"};
-        return names;
+        return THEME_NAMES;
     }
 
     /// Convert a persisted string back to ThemeId (defaults to Modern)

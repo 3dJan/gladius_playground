@@ -55,31 +55,6 @@ namespace gladius::ui
         return it->first;
     }
 
-    /// Measure the maximum label width among visible ports in a port map.
-    /// Ports whose \p isVisible() returns false are skipped. When \p skipResourceId
-    /// is true, ports with type index == ResourceId are also skipped.
-    template <typename PortMap>
-    static float measureMaxPortLabelWidth(PortMap & ports, bool skipResourceId)
-    {
-        float maxWidth = 0.f;
-        for (auto & [name, port] : ports)
-        {
-            if (!port.isVisible())
-            {
-                continue;
-            }
-            if (skipResourceId && port.getTypeIndex() == ParameterTypeIndex::ResourceId)
-            {
-                continue;
-            }
-            maxWidth = std::max(maxWidth, ImGui::CalcTextSize(name.c_str()).x);
-            float const typeLabelWidth =
-              ImGui::CalcTextSize(typeToString(port.getTypeIndex()).c_str()).x * 0.5f;
-            maxWidth = std::max(maxWidth, typeLabelWidth);
-        }
-        return maxWidth;
-    }
-
     NodeView::NodeView()
     {
         m_nodeTypeToColor = createNodeTypeToColors();
@@ -170,7 +145,8 @@ namespace gladius::ui
                           ImGuiDragDropFlags_AcceptBeforeDelivery |
                             ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
                     {
-                        std::string sourceName = static_cast<char const *>(payload->Data);
+                        std::string sourceName(static_cast<char const *>(payload->Data),
+                                               payload->DataSize > 0 ? payload->DataSize - 1 : 0);
                         if (sourceName != outputName && payload->IsDelivery())
                         {
                             paramToReorder = {sourceName, outputName};
@@ -328,7 +304,7 @@ namespace gladius::ui
                     {
                         m_modelEditor->currentModel()->addFunctionOutput(
                           newParameterName,
-                          nodes::VariantParameter(nodes::VariantType{0.f}));
+                          nodes::createVariantTypeFromTypeIndex(typeIndex));
                         m_modelEditor->markModelAsModified();
                     }
                 }
@@ -2525,8 +2501,9 @@ namespace gladius::ui
             return color;
         }
 
-        // Only highlight opposite-direction pins
-        if (dragState.sourceIsOutput == !isInput)
+        // Only opposite-direction pins can be link targets
+        bool const isOppositeDirection = (dragState.sourceIsOutput != isInput);
+        if (isOppositeDirection)
         {
             if (dragState.isCompatible(static_cast<int64_t>(pinId)))
             {

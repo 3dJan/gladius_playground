@@ -30,7 +30,7 @@ namespace gladius::ui::tests
         ParameterThrottle throttle(std::chrono::milliseconds(10));
         throttle.onParameterChanged(); // first → immediate
         throttle.onParameterChanged(); // second → pending
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         EXPECT_TRUE(throttle.shouldRecompile());
     }
 

@@ -174,13 +174,13 @@ namespace gladius::ui
             if (std::abs(mouseDelta.x) > 0.f || std::abs(mouseDelta.y) > 0.f)
             {
                 ImVec2 const prevPos = {mousePos.x - mouseDelta.x, mousePos.y - mouseDelta.y};
-                                float const prevAngle = numeric_widget_detail::computeAngle(center, prevPos);
-                                float const angleDelta =
-                                    numeric_widget_detail::normalizeAngleDelta(currentAngle - prevAngle);
+                float const prevAngle = numeric_widget_detail::computeAngle(center, prevPos);
+                float const angleDelta =
+                    numeric_widget_detail::normalizeAngleDelta(currentAngle - prevAngle);
 
-                                auto const & io = ImGui::GetIO();
-                                float const step =
-                                    numeric_widget_detail::applyModifierStep(1.f, io.KeyShift, io.KeyCtrl);
+                auto const & io = ImGui::GetIO();
+                float const step =
+                    numeric_widget_detail::applyModifierStep(1.f, io.KeyShift, io.KeyCtrl);
 
                 if (minValue.has_value() && maxValue.has_value())
                 {

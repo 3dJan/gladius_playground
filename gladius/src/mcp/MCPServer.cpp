@@ -4,19 +4,23 @@
  */
 
 #include "MCPServer.h"
-#include "imgui.h"
-#include "imgui_internal.h"
 #include "FunctionArgument.h"
 #include "MCPApplicationInterface.h"
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <thread>
 #include <vector>
+
+#ifdef ENABLE_UI_TESTING
+#include "imgui.h"
+#include "imgui_internal.h"
+#endif
 
 #include "../version.h"
 
@@ -2069,7 +2073,8 @@ namespace gladius::mcp
               }
               else
               {
-                  outputPath = "gladius_mcp_screenshot_tmp.png";
+                  auto tmpDir = std::filesystem::temp_directory_path();
+                  outputPath = (tmpDir / "gladius_mcp_screenshot_tmp.png").string();
                   returnDirectly = true;
               }
               

@@ -223,9 +223,9 @@ namespace gladius::tests
                     (override));
 
 #ifdef ENABLE_UI_TESTING
-        bool uiClick(const std::string & /*path*/) override { return false; }
-        std::vector<std::string> uiDumpItems(const std::string & /*parentPath*/) override { return {}; }
-        bool captureUIScreenshot(const std::string & /*outputPath*/) override { return false; }
+        bool uiClick(std::string const & /*path*/) override { return false; }
+        std::vector<std::string> uiDumpItems(std::string const & /*parentPath*/) override { return {}; }
+        bool captureUIScreenshot(std::string const & /*outputPath*/) override { return false; }
 #endif
     };
 

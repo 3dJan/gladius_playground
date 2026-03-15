@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <mutex>
 
 #include "imgui.h"
 
