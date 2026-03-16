@@ -998,15 +998,19 @@ namespace gladius::ui
         m_pendingClearSelection = true;
 
         // Schedule an initial auto-layout for models that have no meaningful positions yet,
-        // but only once per function to preserve user edits.
+        // but only once per function to preserve user edits. Unlike the previous frame-count
+        // heuristic, the actual execution is gated on measured node sizes being stable.
         if (m_currentModel)
         {
-            m_pendingAutoLayoutFrames = m_currentModel->needsAutoLayout() ? 2 : 0;
+            m_pendingInitialAutoLayout = m_currentModel->needsAutoLayout();
         }
         else
         {
-            m_pendingAutoLayoutFrames = 0;
+            m_pendingInitialAutoLayout = false;
         }
+
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
     }
 
     void ModelEditor::onQueryNewNode()
@@ -1571,24 +1575,6 @@ namespace gladius::ui
                     m_nodeViewVisitor.setExportState(m_exportState);
                     if (m_currentModel)
                     {
-                        // Perform pending initial auto-layout BEFORE visitNodes so
-                        // that nodes are rendered at their layouted positions on
-                        // this very frame. This ensures ed::End() computes correct
-                        // node bounds immediately, which NavigateToContent relies on.
-                        if (m_pendingAutoLayoutFrames > 0)
-                        {
-                            --m_pendingAutoLayoutFrames;
-                            if (m_pendingAutoLayoutFrames == 0)
-                            {
-                                autoLayout();
-
-                                // Keep m_nodePositionsNeedUpdate=true so that
-                                // applyNodePositions() (after ed::End) can reliably
-                                // push the layouted NodeBase::screenPos values into
-                                // the node editor context on first visit.
-                            }
-                        }
-
                         m_currentModel->visitNodes(m_nodeViewVisitor);
 
                         // Update node groups after nodes are rendered and positioned
@@ -1708,6 +1694,8 @@ namespace gladius::ui
 
                 if (m_currentTabMode == TabMode::Graph)
                 {
+                    updateInitialAutoLayoutReadiness();
+
                     if (m_nodePositionsNeedUpdate)
                     {
                         applyNodePositions();
@@ -2502,6 +2490,7 @@ namespace gladius::ui
         // Check if this is the first visit to this function
         auto const funcId = m_currentModel->getResourceId();
         bool const isFirstVisit = m_visitedFunctions.find(funcId) == m_visitedFunctions.end();
+        bool const finalizeFirstVisit = !m_pendingInitialAutoLayout;
 
         // Only set node positions on first visit - subsequent visits preserve the editor's internal state
         if (isFirstVisit)
@@ -2511,12 +2500,108 @@ namespace gladius::ui
                 auto const targetPos = node.second->screenPos();
                 ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
             }
-            // Schedule first-visit centering through the same path as the
-            // manual toolbar action, with a small deterministic frame delay.
-            m_pendingCenterViewRequest = true;
-            m_pendingCenterViewFrames = 2;
-            m_visitedFunctions.insert(funcId);
+
+            if (finalizeFirstVisit)
+            {
+                // Schedule first-visit centering through the same path as the
+                // manual toolbar action, with a small deterministic frame delay.
+                m_pendingCenterViewRequest = true;
+                m_pendingCenterViewFrames = 2;
+                m_visitedFunctions.insert(funcId);
+            }
         }
+    }
+
+    bool ModelEditor::updateInitialAutoLayoutReadiness()
+    {
+        if (!m_pendingInitialAutoLayout || !m_currentModel)
+        {
+            return false;
+        }
+
+        auto * editorContext = ed::GetCurrentEditor();
+        if (editorContext == nullptr)
+        {
+            return false;
+        }
+
+        if (!m_nodeViewVisitor.columnWidthsAreInitialized())
+        {
+            return false;
+        }
+
+        std::unordered_map<nodes::NodeId, ImVec2> currentSnapshot;
+        currentSnapshot.reserve(m_currentModel->getSize());
+
+        for (auto & [nodeId, node] : *m_currentModel)
+        {
+            if (!node)
+            {
+                continue;
+            }
+
+            ImVec2 const size = ed::GetNodeSize(nodeId);
+            if (size.x <= 0.0f || size.y <= 0.0f)
+            {
+                m_initialAutoLayoutStableFrames = 0;
+                return false;
+            }
+
+            currentSnapshot.emplace(nodeId, size);
+        }
+
+        if (currentSnapshot.empty())
+        {
+            return false;
+        }
+
+        auto const snapshotsMatch = [&]()
+        {
+            if (currentSnapshot.size() != m_initialAutoLayoutSizeSnapshot.size())
+            {
+                return false;
+            }
+
+            constexpr float SIZE_EPSILON = 0.5f;
+            for (auto const & [nodeId, size] : currentSnapshot)
+            {
+                auto const previous = m_initialAutoLayoutSizeSnapshot.find(nodeId);
+                if (previous == m_initialAutoLayoutSizeSnapshot.end())
+                {
+                    return false;
+                }
+
+                if (std::abs(size.x - previous->second.x) > SIZE_EPSILON ||
+                    std::abs(size.y - previous->second.y) > SIZE_EPSILON)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }();
+
+        if (!snapshotsMatch)
+        {
+            m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+            m_initialAutoLayoutStableFrames = 0;
+            return false;
+        }
+
+        m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+        ++m_initialAutoLayoutStableFrames;
+
+        if (m_initialAutoLayoutStableFrames < 1)
+        {
+            return false;
+        }
+
+        m_pendingInitialAutoLayout = false;
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
+
+        autoLayout();
+        return true;
     }
 
     void ModelEditor::placeTransformation(nodes::NodeBase & createdNode,
