@@ -368,8 +368,11 @@ namespace gladius::ui
         // One-time initial auto layout helper state.
         // The first auto layout for a function is executed only after node
         // sizes have been measured and remained stable across consecutive frames.
+        // A max-wait frame limit ensures the layout always runs, even if
+        // measured sizes never fully converge.
         bool m_pendingInitialAutoLayout{false};
         int m_initialAutoLayoutStableFrames{0};
+        int m_initialAutoLayoutWaitFrames{0};
         std::unordered_map<nodes::NodeId, ImVec2> m_initialAutoLayoutSizeSnapshot;
 
         // Export state for blocking UI modifications during export

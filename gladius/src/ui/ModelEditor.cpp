@@ -1010,6 +1010,7 @@ namespace gladius::ui
         }
 
         m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
         m_initialAutoLayoutSizeSnapshot.clear();
     }
 
@@ -2519,88 +2520,112 @@ namespace gladius::ui
             return false;
         }
 
-        auto * editorContext = ed::GetCurrentEditor();
-        if (editorContext == nullptr)
-        {
-            return false;
-        }
+        ++m_initialAutoLayoutWaitFrames;
 
-        if (!m_nodeViewVisitor.columnWidthsAreInitialized())
-        {
-            return false;
-        }
+        // Safety net: after enough frames, force auto-layout even if sizes
+        // have not fully converged.  This prevents the layout from never
+        // running (e.g. when sizes oscillate or GetNodeSize keeps returning 0).
+        constexpr int MAX_WAIT_FRAMES = 15;
+        bool const forceLayout = m_initialAutoLayoutWaitFrames >= MAX_WAIT_FRAMES;
 
-        std::unordered_map<nodes::NodeId, ImVec2> currentSnapshot;
-        currentSnapshot.reserve(m_currentModel->getSize());
-
-        for (auto & [nodeId, node] : *m_currentModel)
+        if (!forceLayout)
         {
-            if (!node)
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
             {
-                continue;
+                return false;
             }
 
-            ImVec2 const size = ed::GetNodeSize(nodeId);
-            if (size.x <= 0.0f || size.y <= 0.0f)
+            if (!m_nodeViewVisitor.columnWidthsAreInitialized())
             {
+                return false;
+            }
+
+            std::unordered_map<nodes::NodeId, ImVec2> currentSnapshot;
+            currentSnapshot.reserve(m_currentModel->getSize());
+
+            for (auto & [nodeId, node] : *m_currentModel)
+            {
+                if (!node)
+                {
+                    continue;
+                }
+
+                ImVec2 const size = ed::GetNodeSize(nodeId);
+                if (size.x <= 0.0f || size.y <= 0.0f)
+                {
+                    m_initialAutoLayoutStableFrames = 0;
+                    return false;
+                }
+
+                currentSnapshot.emplace(nodeId, size);
+            }
+
+            if (currentSnapshot.empty())
+            {
+                return false;
+            }
+
+            auto const snapshotsMatch = [&]()
+            {
+                if (currentSnapshot.size() != m_initialAutoLayoutSizeSnapshot.size())
+                {
+                    return false;
+                }
+
+                constexpr float SIZE_EPSILON = 0.5f;
+                for (auto const & [nodeId, size] : currentSnapshot)
+                {
+                    auto const previous = m_initialAutoLayoutSizeSnapshot.find(nodeId);
+                    if (previous == m_initialAutoLayoutSizeSnapshot.end())
+                    {
+                        return false;
+                    }
+
+                    if (std::abs(size.x - previous->second.x) > SIZE_EPSILON ||
+                        std::abs(size.y - previous->second.y) > SIZE_EPSILON)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }();
+
+            if (!snapshotsMatch)
+            {
+                m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
                 m_initialAutoLayoutStableFrames = 0;
                 return false;
             }
 
-            currentSnapshot.emplace(nodeId, size);
-        }
+            m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+            ++m_initialAutoLayoutStableFrames;
 
-        if (currentSnapshot.empty())
-        {
-            return false;
-        }
-
-        auto const snapshotsMatch = [&]()
-        {
-            if (currentSnapshot.size() != m_initialAutoLayoutSizeSnapshot.size())
+            constexpr int REQUIRED_STABLE_FRAMES = 2;
+            if (m_initialAutoLayoutStableFrames < REQUIRED_STABLE_FRAMES)
             {
                 return false;
             }
-
-            constexpr float SIZE_EPSILON = 0.5f;
-            for (auto const & [nodeId, size] : currentSnapshot)
-            {
-                auto const previous = m_initialAutoLayoutSizeSnapshot.find(nodeId);
-                if (previous == m_initialAutoLayoutSizeSnapshot.end())
-                {
-                    return false;
-                }
-
-                if (std::abs(size.x - previous->second.x) > SIZE_EPSILON ||
-                    std::abs(size.y - previous->second.y) > SIZE_EPSILON)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }();
-
-        if (!snapshotsMatch)
-        {
-            m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
-            m_initialAutoLayoutStableFrames = 0;
-            return false;
         }
 
-        m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
-        ++m_initialAutoLayoutStableFrames;
-
-        if (m_initialAutoLayoutStableFrames < 1)
-        {
-            return false;
-        }
-
+        // --- Ready: run the initial auto-layout ---
         m_pendingInitialAutoLayout = false;
         m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
         m_initialAutoLayoutSizeSnapshot.clear();
 
         autoLayout();
+
+        // Schedule the first-visit center-view directly so it does not
+        // depend on the indirect applyNodePositions() path.
+        m_pendingCenterViewRequest = true;
+        m_pendingCenterViewFrames = 2;
+        if (m_currentModel)
+        {
+            m_visitedFunctions.insert(m_currentModel->getResourceId());
+        }
+
         return true;
     }
 
