@@ -131,11 +131,14 @@ namespace gladius::ui
 
                 ImGui::TableNextColumn();
                 BeginPin(output.getId(), ed::PinKind::Output);
+                auto const beginOutState = pinVisualState(output.getId(), false);
                 ImGui::PushStyleColor(ImGuiCol_Text,
-                                      pinColorForDragState(
-                                        output.getId(), false, typeIndex));
+                                      LinkColors::applyPinVisualState(
+                                        typeToColor(typeIndex), beginOutState));
                 ImGui::TextUnformatted(
                   reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
+                                registerCurrentItemAsPinHitbox(false);
+                showPinDragTooltip(outputName, typeIndex, beginOutState);
                 ImGui::PopStyleColor();
                 ed::EndPin();
 
@@ -214,17 +217,19 @@ namespace gladius::ui
 
                                 ImGui::TableSetColumnIndex(0); // Pin
                                 BeginPin(input.second.getId(), ed::PinKind::Input);
+                                auto const endInState = pinVisualState(input.second.getId(), true);
+                                ImVec4 const endInBaseColor = typeToColor(input.second.getTypeIndex());
                                 ImGui::PushStyleColor(ImGuiCol_Text,
-                                                                            pinColorForDragState(
-                                                                                input.second.getId(),
-                                                                                true,
-                                                                                input.second.getTypeIndex()));
+                                                      LinkColors::applyPinVisualState(endInBaseColor, endInState));
+                                int const endInBtnColors = pushPinButtonStyle(endInState, endInBaseColor);
                                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0.f});
                                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
                                 ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
                                                             ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f));
+                                registerCurrentItemAsPinHitbox(true);
+                                showPinDragTooltip(input.first, input.second.getTypeIndex(), endInState);
                                 ImGui::PopStyleVar();
-                                ImGui::PopStyleColor();
+                                ImGui::PopStyleColor(1 + endInBtnColors);
                                 ed::EndPin();
 
                                 ImGui::TableSetColumnIndex(1); // Name
@@ -2193,9 +2198,12 @@ namespace gladius::ui
                       !port.getSource().has_value() && port.isInputSourceRequired();
 
                     ImGui::PushID(port.getId());
+                    auto const inPinState = pinVisualState(port.getId(), true);
                     ImGui::PushStyleColor(
                       ImGuiCol_Text,
-                      pinColorForDragState(port.getId(), true, port.getTypeIndex()));
+                      LinkColors::applyPinVisualState(
+                        typeToColor(port.getTypeIndex()), inPinState));
+                    int const inBtnColors = pushPinButtonStyle(inPinState, typeToColor(port.getTypeIndex()));
 
                     BeginPin(ed::PinId(port.getId()), ed::PinKind::Input);
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0});
@@ -2215,10 +2223,12 @@ namespace gladius::ui
                     {
                         showLinkAssignmentMenu(*visInputs[row]);
                     }
+                    registerCurrentItemAsPinHitbox(true);
+                    showPinDragTooltip(name, port.getTypeIndex(), inPinState);
 
                     ImGui::PopStyleVar();
                     ed::EndPin();
-                    ImGui::PopStyleColor();
+                    ImGui::PopStyleColor(1 + inBtnColors);
                     columnWidths[1] = std::max(columnWidths[1], std::ceil(ImGui::GetItemRectSize().x));
 
                     ImGui::TableNextColumn(); // InName
@@ -2263,9 +2273,11 @@ namespace gladius::ui
                     auto & [outName, outPort] = *visOutputs[row];
 
                     ImGui::PushID(outPort.getId());
+                    auto const outPinState = pinVisualState(outPort.getId(), false);
                     ImGui::PushStyleColor(
                       ImGuiCol_Text,
-                      pinColorForDragState(outPort.getId(), false, outPort.getTypeIndex()));
+                      LinkColors::applyPinVisualState(
+                        typeToColor(outPort.getTypeIndex()), outPinState));
 
                     ImGui::TextUnformatted(outName.c_str());
                     columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
@@ -2282,6 +2294,8 @@ namespace gladius::ui
                     ImGui::TextUnformatted(
                       reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                     ImGui::SetWindowFontScale(1.0f);
+                                        registerCurrentItemAsPinHitbox(false);
+                    showPinDragTooltip(outName, outPort.getTypeIndex(), outPinState);
                     ed::EndPin();
 
                     columnWidths[7] = std::max(columnWidths[7], std::ceil(ImGui::GetItemRectSize().x));
@@ -2361,11 +2375,11 @@ namespace gladius::ui
                 ImGui::PushID(output.second.getId()); // required for reusing the same labels
                                                       // (that are used as unique ids in ImgUI)
                 {
+                    auto const outState = pinVisualState(output.second.getId(), false);
                     ImGui::PushStyleColor(ImGuiCol_Text,
-                                          pinColorForDragState(
-                                            output.second.getId(),
-                                            false,
-                                            output.second.getTypeIndex()));
+                                          LinkColors::applyPinVisualState(
+                                            typeToColor(output.second.getTypeIndex()),
+                                            outState));
                     ImGui::TextUnformatted((output.first).c_str());
                     columnWidths[6] = std::max(columnWidths[6], std::ceil(ImGui::GetItemRectSize().x));
 
@@ -2384,6 +2398,8 @@ namespace gladius::ui
                     ImGui::SetWindowFontScale(1.5f); // Scale up the font by 1.5
                     ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
                     ImGui::SetWindowFontScale(1.0f); // Reset the font scale to default
+                    registerCurrentItemAsPinHitbox(false);
+                    showPinDragTooltip(output.first, output.second.getTypeIndex(), outState);
 
                     ed::EndPin();
 
@@ -2465,42 +2481,102 @@ namespace gladius::ui
         return color;
     }
 
-    ImVec4 NodeView::pinColorForDragState(nodes::PortId pinId,
-                                          bool isInput,
-                                          std::type_index typeIndex) const
+    PinVisualState NodeView::pinVisualState(nodes::PortId pinId, bool isInput) const
     {
-        ImVec4 color = typeToColor(typeIndex);
-
         if (!m_modelEditor)
         {
-            return color;
+            return PinVisualState::Normal;
         }
 
         auto const & dragState = m_modelEditor->linkDragState();
         if (!dragState.isDragging || !dragState.hasComputedCompatibility())
         {
-            return color;
+            return PinVisualState::Normal;
         }
 
-        // Don't dim the source pin itself
         if (dragState.sourcePortId == pinId)
         {
-            return color;
+            return PinVisualState::Normal;
         }
 
-        // Only opposite-direction pins can be link targets
-        bool const isOppositeDirection = (dragState.sourceIsOutput != isInput);
+        bool const isOppositeDirection = (dragState.sourceIsOutput == isInput);
         if (isOppositeDirection)
         {
             if (dragState.isCompatible(static_cast<int64_t>(pinId)))
             {
-                return LinkColors::applyPinVisualState(color, PinVisualState::Highlighted);
+                return PinVisualState::Highlighted;
             }
-            return LinkColors::applyPinVisualState(color, PinVisualState::Dimmed);
+            return PinVisualState::Dimmed;
         }
 
-        // Same-direction pins get dimmed
-        return LinkColors::applyPinVisualState(color, PinVisualState::Dimmed);
+        return PinVisualState::Dimmed;
+    }
+
+    ImVec4 NodeView::pinColorForDragState(nodes::PortId pinId,
+                                          bool isInput,
+                                          std::type_index typeIndex) const
+    {
+        ImVec4 color = typeToColor(typeIndex);
+        return LinkColors::applyPinVisualState(color, pinVisualState(pinId, isInput));
+    }
+
+    int NodeView::pushPinButtonStyle(PinVisualState state, ImVec4 baseColor) const
+    {
+        if (state == PinVisualState::Highlighted)
+        {
+            ImVec4 const bg = {baseColor.x * 0.3f, baseColor.y * 0.3f, baseColor.z * 0.3f, 0.6f};
+            ImVec4 const hover = {baseColor.x * 0.4f, baseColor.y * 0.4f, baseColor.z * 0.4f, 0.8f};
+            ImGui::PushStyleColor(ImGuiCol_Button, bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, hover);
+            return 3;
+        }
+        if (state == PinVisualState::Dimmed)
+        {
+            ImVec4 constexpr dim = {0.15f, 0.15f, 0.15f, 0.15f};
+            ImGui::PushStyleColor(ImGuiCol_Button, dim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
+            return 3;
+        }
+        return 0;
+    }
+
+    void NodeView::showPinDragTooltip(std::string const & name,
+                                      std::type_index typeIndex,
+                                      PinVisualState state) const
+    {
+        if (state != PinVisualState::Highlighted)
+        {
+            return;
+        }
+        if (!ImGui::IsItemHovered())
+        {
+            return;
+        }
+        ImGui::BeginTooltip();
+        ImGui::PushStyleColor(ImGuiCol_Text, typeToColor(typeIndex));
+        ImGui::Text("%s (%s)", name.c_str(), typeToString(typeIndex).c_str());
+        ImGui::PopStyleColor();
+        ImGui::EndTooltip();
+    }
+
+    void NodeView::registerCurrentItemAsPinHitbox(bool isInput) const
+    {
+        ImVec2 rectMin = ImGui::GetItemRectMin();
+        ImVec2 rectMax = ImGui::GetItemRectMax();
+
+        float const horizontalPadding = 6.0f * m_uiScale;
+        float const verticalPadding = 4.0f * m_uiScale;
+
+        rectMin.x -= horizontalPadding;
+        rectMin.y -= verticalPadding;
+        rectMax.x += horizontalPadding;
+        rectMax.y += verticalPadding;
+
+        ed::PinRect(rectMin, rectMax);
+        ed::PinPivotRect(rectMin, rectMax);
+        ed::PinPivotAlignment(isInput ? ImVec2(0.0f, 0.5f) : ImVec2(1.0f, 0.5f));
     }
 
     ColumnWidths & NodeView::getOrCreateColumnWidths(nodes::NodeId nodeId)

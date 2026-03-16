@@ -2,6 +2,7 @@
 
 #include "../nodes/Model.h"
 #include "FileDialogService.h"
+#include "LinkColors.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -193,6 +194,19 @@ namespace gladius::ui
         ImVec4 pinColorForDragState(nodes::PortId pinId,
                                     bool isInput,
                                     std::type_index typeIndex) const;
+
+        /// Return the visual state of a pin during a link drag.
+        PinVisualState pinVisualState(nodes::PortId pinId, bool isInput) const;
+
+        /// Push ImGui button style colors for a pin's drag visual state.
+        /// Returns the number of style colors pushed (call PopStyleColor with this count).
+        int pushPinButtonStyle(PinVisualState state, ImVec4 baseColor) const;
+
+        /// Show a tooltip with port name and type when hovering a compatible pin during drag.
+        void showPinDragTooltip(std::string const & name, std::type_index typeIndex, PinVisualState state) const;
+
+        /// Register the last rendered ImGui item as the hitbox for the active pin.
+        void registerCurrentItemAsPinHitbox(bool isInput) const;
 
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,

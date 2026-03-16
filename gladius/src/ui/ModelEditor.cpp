@@ -868,64 +868,73 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
-            ed::PinId inputPinId, outputPinId;
+            ed::PinId inputPinId{0};
+            ed::PinId outputPinId{0};
             if (ed::QueryNewLink(&inputPinId, &outputPinId))
             {
                 if (m_currentModel)
                 {
-                    if (outputPinId && !inputPinId)
+                    ed::PinId const sourcePinId = outputPinId ? outputPinId : inputPinId;
+                    bool const sourceIsOutput = static_cast<bool>(outputPinId);
+
+                    if (sourcePinId)
                     {
-                        auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
-                        if (auto * sourcePort = m_currentModel->getPort(outId); sourcePort != nullptr)
+                        auto const sourceId = static_cast<nodes::PortId>(sourcePinId.Get());
+                        if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != sourceId)
                         {
-                            if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != outId)
+                            if (sourceIsOutput)
                             {
-                                m_linkDragState.beginDrag(outId, sourcePort->getTypeIndex(), true);
-                                m_linkDragState.computeCompatibility(*m_currentModel);
+                                if (auto * sourcePort = m_currentModel->getPort(sourceId);
+                                    sourcePort != nullptr)
+                                {
+                                    m_linkDragState.beginDrag(sourceId,
+                                                              sourcePort->getTypeIndex(),
+                                                              true);
+                                    m_linkDragState.computeCompatibility(*m_currentModel);
+                                }
+                            }
+                            else
+                            {
+                                auto const & parameterRegistry =
+                                  m_currentModel->getConstParameterRegistry();
+                                if (auto const parameterIter = parameterRegistry.find(sourceId);
+                                    parameterIter != parameterRegistry.end())
+                                {
+                                    auto * sourceParameter = dynamic_cast<nodes::VariantParameter *>(
+                                      parameterIter->second);
+                                    if (sourceParameter != nullptr)
+                                    {
+                                        m_linkDragState.beginDrag(sourceId,
+                                                                  sourceParameter->getTypeIndex(),
+                                                                  false);
+                                        m_linkDragState.computeCompatibility(*m_currentModel);
+                                    }
+                                }
                             }
                         }
                     }
-                    else if (inputPinId && !outputPinId)
+
+                    if (inputPinId && outputPinId)
                     {
                         auto const inputId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                        auto const & parameterRegistry = m_currentModel->getConstParameterRegistry();
-                        if (auto const parameterIter = parameterRegistry.find(inputId);
-                            parameterIter != parameterRegistry.end())
+                        auto const outputId = static_cast<nodes::PortId>(outputPinId.Get());
+
+                        if (inputPinId == outputPinId)
                         {
-                            auto * sourceParameter =
-                              dynamic_cast<nodes::VariantParameter *>(parameterIter->second);
-                            if (sourceParameter != nullptr &&
-                                (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != inputId))
+                            ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                        }
+                        else if (ed::AcceptNewItem())
+                        {
+                            createUndoRestorePoint("Add link");
+                            if (m_currentModel->addLink(outputId, inputId))
                             {
-                                m_linkDragState.beginDrag(inputId,
-                                                         sourceParameter->getTypeIndex(),
-                                                         false);
-                                m_linkDragState.computeCompatibility(*m_currentModel);
+                                markModelAsModified();
+                                m_linkDragState.reset();
                             }
-                        }
-                    }
-                }
-
-                // A new link is being created between two pins.
-                // Attempt to add the link if both pins are valid.
-                if (inputPinId && outputPinId)
-                {
-                    auto const inId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                    auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
-
-                    if (ed::AcceptNewItem())
-                    {
-                        createUndoRestorePoint("Add link");
-                        if (!m_currentModel->addLink(inId, outId) &&
-                            !m_currentModel->addLink(outId, inId))
-                        {
-                            ed::RejectNewItem();
-                            m_linkDragState.reset();
-                        }
-                        else
-                        {
-                            markModelAsModified();
-                            m_linkDragState.reset();
+                            else
+                            {
+                                ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                            }
                         }
                     }
                 }
