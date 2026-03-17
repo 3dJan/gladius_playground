@@ -7,6 +7,7 @@
 #include "LinkColors.h"
 #include "ModelEditor.h"
 #include "Parameter.h"
+#include "NumericWidgets.h"
 #include "Style.h"
 #include "Widgets.h"
 #include "nodes/DerivedNodes.h"
@@ -1628,18 +1629,10 @@ namespace gladius::ui
                 m_modelEditor->clearNodeFocus();
             }
 
-            auto increment = 0.01f;
             bool changed = false;
 
             switch (parameter.second.getContentType())
             {
-            case ContentType::Length:
-            {
-                std::string formatString{"%.3f "};
-                changed = ui::floatEdit(parameter.first, *pval);
-                // changed = ImGui::DragFloat(parameter.first.c_str(), pval, increment);
-                break;
-            }
             case ContentType::Angle:
             {
                 changed = angleEdit(parameter.first.c_str(), pval);
@@ -1647,7 +1640,8 @@ namespace gladius::ui
             }
             default:
             {
-                changed = ImGui::DragFloat(parameter.first.c_str(), pval, increment);
+                changed = ui::adaptiveDragFloat(
+                  parameter.first.c_str(), pval, parameter.second.getContentType());
                 break;
             }
             }
@@ -1684,7 +1678,6 @@ namespace gladius::ui
             ImGui::TextUnformatted("Vector");
             bool changed = false;
             ImGui::PushItemWidth(300 * m_uiScale);
-            const auto increment = 0.1f;
 
             // Check if this node should receive focus (keyboard-driven workflow)
             bool shouldFocus = m_modelEditor && m_modelEditor->shouldFocusNode(node.getId());
@@ -1695,13 +1688,7 @@ namespace gladius::ui
                 m_modelEditor->clearNodeFocus();
             }
 
-            if (parameter.second.getContentType() == ContentType::Length)
-            {
-                changed |= ImGui::DragFloat("x", &pval->x, increment);
-                changed |= ImGui::DragFloat("y", &pval->y, increment);
-                changed |= ImGui::DragFloat("z", &pval->z, increment);
-            }
-            else if (parameter.second.getContentType() == ContentType::Color)
+            if (parameter.second.getContentType() == ContentType::Color)
             {
                 changed = ImGui::ColorEdit3(
                   "",
@@ -1713,9 +1700,10 @@ namespace gladius::ui
             }
             else
             {
-                changed |= ImGui::DragFloat("x", &pval->x, increment);
-                changed |= ImGui::DragFloat("y", &pval->y, increment);
-                changed |= ImGui::DragFloat("z", &pval->z, increment);
+                auto const ct = parameter.second.getContentType();
+                changed |= ui::adaptiveDragFloat("x", &pval->x, ct);
+                changed |= ui::adaptiveDragFloat("y", &pval->y, ct);
+                changed |= ui::adaptiveDragFloat("z", &pval->z, ct);
             }
 
             bool const modifiable = parameter.second.isModifiable();

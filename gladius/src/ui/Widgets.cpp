@@ -1,5 +1,6 @@
 #include <algorithm>
 
+#include "NumericWidgets.h"
 #include "Widgets.h"
 
 #include "Parameter.h"
@@ -171,41 +172,8 @@ namespace gladius::ui
 
     bool floatEdit(std::string const & label, float & value)
     {
-
-        int digitCount = (value != 0.0f) ? (int) log10(fabs(value)) + 3 : 3;
-        float const increment = std::max(powf(10, round(log10(fabs(value)))) * 0.01f, 0.1f);
-        std::string format = "%." + std::to_string(digitCount) + "f";
-
         ImGui::SetNextItemWidth(100.f);
-        bool changed = ImGui::DragFloat(label.c_str(),
-                                        &value,
-                                        0.1f,
-                                        -std::numeric_limits<float>::max(),
-                                        std::numeric_limits<float>::max(),
-                                        format.c_str());
-
-        float const deltaTime = ImGui::GetIO().DeltaTime;
-
-        if (ImGui::IsItemFocused())
-        {
-            int const keyPressCountUp =
-              ImGui::GetKeyPressedAmount(ImGui::GetKeyIndex(ImGuiKey_UpArrow), deltaTime, 0.1f);
-            if (keyPressCountUp > 0)
-            {
-                value += increment * keyPressCountUp;
-                changed = true;
-            }
-
-            int const keyPressCountDown =
-              ImGui::GetKeyPressedAmount(ImGui::GetKeyIndex(ImGuiKey_DownArrow), deltaTime, 0.1f);
-            if (keyPressCountDown > 0)
-            {
-                value -= increment * keyPressCountDown;
-                changed = true;
-            }
-        }
-
-        return changed;
+        return adaptiveDragFloat(label.c_str(), &value);
     }
 
     void frameOverlay(ImVec4 color, std::string const & tooltip)
