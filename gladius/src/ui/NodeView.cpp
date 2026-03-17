@@ -34,6 +34,49 @@ namespace gladius::ui
 {
     using namespace nodes;
 
+    namespace
+    {
+        bool drawDisplayModeTabs(bool & showAsColor)
+        {
+            auto drawModeButton = [](char const * label, bool selected)
+            {
+                if (selected)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_TabHovered));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+                }
+
+                bool const pressed = ImGui::Button(label);
+
+                if (selected)
+                {
+                    ImGui::PopStyleColor(3);
+                }
+
+                return pressed;
+            };
+
+            bool modeChanged = false;
+
+            if (drawModeButton("XYZ", !showAsColor))
+            {
+                showAsColor = false;
+                modeChanged = true;
+            }
+
+            ImGui::SameLine();
+
+            if (drawModeButton("RGB", showAsColor))
+            {
+                showAsColor = true;
+                modeChanged = true;
+            }
+
+            return modeChanged;
+        }
+    }
+
     std::string typeToString(std::type_index typeIndex)
     {
         static std::vector<std::pair<std::string, std::type_index>> const types = {
@@ -328,7 +371,7 @@ namespace gladius::ui
 
     void NodeView::visit(nodes::ConstantVector & constantVectorNode)
     {
-        viewInputNode(constantVectorNode);
+        viewConstantVector(constantVectorNode);
     }
 
     void NodeView::visit(nodes::ConstantMatrix & constantMatrixNode)
@@ -1675,28 +1718,87 @@ namespace gladius::ui
 
         if (const auto pval = std::get_if<float3>(&val))
         {
-            ImGui::TextUnformatted("Vector");
             bool changed = false;
+            nodes::ParameterId const paramId = parameter.second.getId();
+
+            // Determine display mode from persisted preference (default: Vector, or Color for semantic colors)
+            bool const isSemanticColor = (parameter.second.getContentType() == ContentType::Color);
+            bool showAsColor = isSemanticColor;
+            if (m_currentModel)
+            {
+                auto const stored = m_currentModel->getVectorDisplayMode(paramId);
+                if (stored == nodes::VectorDisplayMode::Color)
+                {
+                    showAsColor = true;
+                }
+                else if (!isSemanticColor)
+                {
+                    showAsColor = false;
+                }
+            }
+
+            drawDisplayModeTabs(showAsColor);
+
+            if (m_currentModel)
+            {
+                m_currentModel->setVectorDisplayMode(
+                  paramId,
+                  showAsColor ? nodes::VectorDisplayMode::Color : nodes::VectorDisplayMode::Vector);
+            }
+
             ImGui::PushItemWidth(300 * m_uiScale);
 
             // Check if this node should receive focus (keyboard-driven workflow)
             bool shouldFocus = m_modelEditor && m_modelEditor->shouldFocusNode(node.getId());
             if (shouldFocus && parameter.first == node.constParameter().begin()->first)
             {
-                // Focus on the first input field
                 ImGui::SetKeyboardFocusHere();
                 m_modelEditor->clearNodeFocus();
             }
 
-            if (parameter.second.getContentType() == ContentType::Color)
+            if (showAsColor)
             {
+                // Inline RGB editor (no picker popup — not safe inside node canvas)
                 changed = ImGui::ColorEdit3(
                   "",
                   &pval->x,
                   ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_NoPicker |
-                    ImGuiColorEditFlags_NoTooltip |
-                    ImGuiColorEditFlags_Float); // popups do no not work properly inside the
-                // canvas, so we have to deactivate them
+                    ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_Float);
+
+                // "Pick…" button opens a full color picker via deferred popup
+                ImGui::SameLine();
+                auto const pickBtnLabel =
+                  fmt::format("{}##pick_{}", reinterpret_cast<char const *>(ICON_FA_EYE_DROPPER), paramId);
+                if (ImGui::SmallButton(pickBtnLabel.c_str()))
+                {
+                    m_showContextMenu = true;
+                    auto popupName = fmt::format("ColorPicker_{}", paramId);
+                    auto * colorPtr = &pval->x;
+                    m_modelEditor->showPopupMenu(
+                      [this, popupName, colorPtr]()
+                      {
+                          if (m_showContextMenu)
+                          {
+                              ImGui::OpenPopup(popupName.c_str());
+                              m_showContextMenu = false;
+                          }
+
+                          if (ImGui::BeginPopup(popupName.c_str()))
+                          {
+                              bool pickerChanged = ImGui::ColorPicker3(
+                                "##picker", colorPtr, ImGuiColorEditFlags_Float);
+                              if (pickerChanged)
+                              {
+                                  m_parameterChanged = true;
+                              }
+                              ImGui::EndPopup();
+                          }
+                      });
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("Open color picker");
+                }
             }
             else
             {
@@ -1711,7 +1813,6 @@ namespace gladius::ui
             if (changed && !modifiable)
             {
                 parameter.second.setModifiable(true);
-                m_modelEditor->markModelAsModified();
             }
 
             m_parameterChanged |= changed;
@@ -1723,6 +1824,187 @@ namespace gladius::ui
         {
             ImGui::EndDisabled();
         }
+    }
+
+    void NodeView::viewConstantVector(nodes::ConstantVector & node)
+    {
+        if (!m_currentModel)
+        {
+            return;
+        }
+
+        header(node);
+
+        auto & params = node.parameter();
+        auto itX = params.find(nodes::FieldNames::X);
+        auto itY = params.find(nodes::FieldNames::Y);
+        auto itZ = params.find(nodes::FieldNames::Z);
+        if (itX == params.end() || itY == params.end() || itZ == params.end())
+        {
+            footer(node);
+            return;
+        }
+
+        auto * xVal = std::get_if<float>(&itX->second.Value());
+        auto * yVal = std::get_if<float>(&itY->second.Value());
+        auto * zVal = std::get_if<float>(&itZ->second.Value());
+        if (!xVal || !yVal || !zVal)
+        {
+            footer(node);
+            return;
+        }
+
+        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+        if (exportLocked)
+        {
+            ImGui::BeginDisabled();
+        }
+
+        auto & columnWidths = getOrCreateColumnWidths(node.getId());
+
+        ImGui::PushID(node.getId());
+        float const cellPad = ImGui::GetStyle().CellPadding.x;
+        float const padOH2 = (2 * 2 - 2) * cellPad;
+        auto widthOutputs = columnWidths[6] + columnWidths[7] + padOH2;
+        if (ImGui::BeginTable("InputAndOutputs",
+                              2,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX,
+                              ImVec2(columnWidths[0] + widthOutputs + padOH2, 0)))
+        {
+            ImGui::TableSetupColumn("Parameter", ImGuiTableColumnFlags_WidthFixed, columnWidths[0]);
+            ImGui::TableSetupColumn("Outputs", ImGuiTableColumnFlags_WidthFixed, widthOutputs);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TableNextColumn();
+            outputPins(node);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+
+            // Use the node ID for grouped ConstantVector display mode persistence.
+            // Parameter IDs may be regenerated when node internals are refreshed,
+            // but the grouped UI is conceptually node-scoped.
+            nodes::ParameterId const paramId = static_cast<nodes::ParameterId>(node.getId());
+
+            ImGui::PushID(paramId);
+
+            bool showAsColor = false;
+            if (m_currentModel)
+            {
+                auto const stored = m_currentModel->getVectorDisplayMode(paramId);
+                showAsColor = (stored == nodes::VectorDisplayMode::Color);
+            }
+
+            drawDisplayModeTabs(showAsColor);
+
+            if (m_currentModel)
+            {
+                m_currentModel->setVectorDisplayMode(
+                  paramId,
+                  showAsColor ? nodes::VectorDisplayMode::Color : nodes::VectorDisplayMode::Vector);
+            }
+
+            float const indent = 20.f * m_uiScale;
+            ImGui::Indent(indent);
+            ImGui::PushItemWidth(300 * m_uiScale);
+
+            bool changed = false;
+
+            if (showAsColor)
+            {
+                // Pack into contiguous array for ColorEdit3
+                float vec[3] = {*xVal, *yVal, *zVal};
+                changed = ImGui::ColorEdit3(
+                  "",
+                  vec,
+                  ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_NoPicker |
+                    ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_Float);
+
+                if (changed)
+                {
+                    *xVal = vec[0];
+                    *yVal = vec[1];
+                    *zVal = vec[2];
+                }
+
+                // "Pick…" button opens a full color picker via deferred popup
+                ImGui::SameLine();
+                auto const pickBtnLabel =
+                  fmt::format("{}##pick_{}", reinterpret_cast<char const *>(ICON_FA_EYE_DROPPER), paramId);
+                if (ImGui::SmallButton(pickBtnLabel.c_str()))
+                {
+                    m_showContextMenu = true;
+                    auto popupName = fmt::format("ColorPicker_{}", paramId);
+                    float * px = xVal;
+                    float * py = yVal;
+                    float * pz = zVal;
+                    m_modelEditor->showPopupMenu(
+                      [this, popupName, px, py, pz]()
+                      {
+                          if (m_showContextMenu)
+                          {
+                              ImGui::OpenPopup(popupName.c_str());
+                              m_showContextMenu = false;
+                          }
+
+                          if (ImGui::BeginPopup(popupName.c_str()))
+                          {
+                              float vec[3] = {*px, *py, *pz};
+                              bool pickerChanged = ImGui::ColorPicker3(
+                                "##picker", vec, ImGuiColorEditFlags_Float);
+                              if (pickerChanged)
+                              {
+                                  *px = vec[0];
+                                  *py = vec[1];
+                                  *pz = vec[2];
+                                  m_parameterChanged = true;
+                              }
+                              ImGui::EndPopup();
+                          }
+                      });
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("Open color picker");
+                }
+            }
+            else
+            {
+                auto const ct = itX->second.getContentType();
+                changed |= ui::adaptiveDragFloat("x", xVal, ct);
+                changed |= ui::adaptiveDragFloat("y", yVal, ct);
+                changed |= ui::adaptiveDragFloat("z", zVal, ct);
+            }
+
+            if (changed)
+            {
+                for (auto * it : {&*itX, &*itY, &*itZ})
+                {
+                    if (!it->second.isModifiable())
+                    {
+                        it->second.setModifiable(true);
+                    }
+                }
+                m_parameterChanged = true;
+            }
+
+            ImGui::PopItemWidth();
+            float const desiredW = std::max(std::ceil(ImGui::GetItemRectSize().x), ImGui::CalcItemWidth());
+            columnWidths[0] = std::max(columnWidths[0], desiredW + indent);
+            ImGui::Indent(-indent);
+            ImGui::PopID(); // paramId
+
+            ImGui::EndTable();
+        }
+        ImGui::PopID(); // node.getId()
+
+        if (exportLocked)
+        {
+            ImGui::EndDisabled();
+        }
+
+        footer(node);
     }
 
     void NodeView::viewMatrix(nodes::NodeBase const & node,

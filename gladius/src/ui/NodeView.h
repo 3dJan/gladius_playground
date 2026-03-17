@@ -220,6 +220,9 @@ namespace gladius::ui
                         nodes::ParameterMap::reference parameter,
                         nodes::VariantType & val);
 
+        /// Renders a ConstantVector node's X/Y/Z parameters as a grouped vector/color widget.
+        void viewConstantVector(nodes::ConstantVector & node);
+
         void viewMatrix(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
                         nodes::VariantType & val);

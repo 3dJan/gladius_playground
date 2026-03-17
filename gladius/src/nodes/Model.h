@@ -31,6 +31,13 @@ namespace gladius::nodes
         Slider = 1
     };
 
+    /// Controls whether a float3 parameter is displayed as an XYZ vector or an RGB color.
+    enum class VectorDisplayMode
+    {
+        Vector = 0,
+        Color = 1
+    };
+
     NodeBase * createNodeFromName(const std::string & name, Model & nodes);
 
     class Model
@@ -241,6 +248,9 @@ namespace gladius::nodes
         [[nodiscard]] NumericWidgetLayoutMode getNumericWidgetLayoutMode(ParameterId parameterId) const;
         [[nodiscard]] bool hasNumericWidgetLayoutMode(ParameterId parameterId) const;
 
+        void setVectorDisplayMode(ParameterId parameterId, VectorDisplayMode mode);
+        [[nodiscard]] VectorDisplayMode getVectorDisplayMode(ParameterId parameterId) const;
+
         /// @brief Create a FunctionCall node wired to the given function.
         /// @param functionId The resource ID of the function to call.
         /// @param sourceModel The model providing inputs/outputs.
@@ -320,6 +330,7 @@ namespace gladius::nodes
 
         bool m_isValid = true;
         std::unordered_map<ParameterId, NumericWidgetLayoutMode> m_numericWidgetLayoutModes;
+        std::unordered_map<ParameterId, VectorDisplayMode> m_vectorDisplayModes;
     };
 
     using SharedModel = std::shared_ptr<Model>;
