@@ -95,18 +95,20 @@ namespace gladius::ui
             ed::PushStyleColor(ed::StyleColor_GroupBg, colorWithAlpha(frameBg, 0.32f));
             ed::PushStyleColor(ed::StyleColor_GroupBorder, colorWithAlpha(border, 0.45f));
 
+            ed::PushStyleVar(ed::StyleVar_NodeRounding, 20.f);
+            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 5.f);
             ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f);
             ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f);
             ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f);
             ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f);
             ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f);
-            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 4.f);
-            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 4.5f);
+            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 7.f);
         }
 
         void popNodeEditorTheme()
         {
-            ed::PopStyleVar(7);
+            ed::PopStyleVar(9);
             ed::PopStyleColor(15);
         }
     } // namespace
@@ -866,64 +868,73 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
-            ed::PinId inputPinId, outputPinId;
+            ed::PinId inputPinId{0};
+            ed::PinId outputPinId{0};
             if (ed::QueryNewLink(&inputPinId, &outputPinId))
             {
                 if (m_currentModel)
                 {
-                    if (outputPinId && !inputPinId)
+                    ed::PinId const sourcePinId = outputPinId ? outputPinId : inputPinId;
+                    bool const sourceIsOutput = static_cast<bool>(outputPinId);
+
+                    if (sourcePinId)
                     {
-                        auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
-                        if (auto * sourcePort = m_currentModel->getPort(outId); sourcePort != nullptr)
+                        auto const sourceId = static_cast<nodes::PortId>(sourcePinId.Get());
+                        if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != sourceId)
                         {
-                            if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != outId)
+                            if (sourceIsOutput)
                             {
-                                m_linkDragState.beginDrag(outId, sourcePort->getTypeIndex(), true);
-                                m_linkDragState.computeCompatibility(*m_currentModel);
+                                if (auto * sourcePort = m_currentModel->getPort(sourceId);
+                                    sourcePort != nullptr)
+                                {
+                                    m_linkDragState.beginDrag(sourceId,
+                                                              sourcePort->getTypeIndex(),
+                                                              true);
+                                    m_linkDragState.computeCompatibility(*m_currentModel);
+                                }
+                            }
+                            else
+                            {
+                                auto const & parameterRegistry =
+                                  m_currentModel->getConstParameterRegistry();
+                                if (auto const parameterIter = parameterRegistry.find(sourceId);
+                                    parameterIter != parameterRegistry.end())
+                                {
+                                    auto * sourceParameter = dynamic_cast<nodes::VariantParameter *>(
+                                      parameterIter->second);
+                                    if (sourceParameter != nullptr)
+                                    {
+                                        m_linkDragState.beginDrag(sourceId,
+                                                                  sourceParameter->getTypeIndex(),
+                                                                  false);
+                                        m_linkDragState.computeCompatibility(*m_currentModel);
+                                    }
+                                }
                             }
                         }
                     }
-                    else if (inputPinId && !outputPinId)
+
+                    if (inputPinId && outputPinId)
                     {
                         auto const inputId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                        auto const & parameterRegistry = m_currentModel->getConstParameterRegistry();
-                        if (auto const parameterIter = parameterRegistry.find(inputId);
-                            parameterIter != parameterRegistry.end())
+                        auto const outputId = static_cast<nodes::PortId>(outputPinId.Get());
+
+                        if (inputPinId == outputPinId)
                         {
-                            auto * sourceParameter =
-                              dynamic_cast<nodes::VariantParameter *>(parameterIter->second);
-                            if (sourceParameter != nullptr &&
-                                (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != inputId))
+                            ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                        }
+                        else if (ed::AcceptNewItem())
+                        {
+                            createUndoRestorePoint("Add link");
+                            if (m_currentModel->addLink(outputId, inputId))
                             {
-                                m_linkDragState.beginDrag(inputId,
-                                                         sourceParameter->getTypeIndex(),
-                                                         false);
-                                m_linkDragState.computeCompatibility(*m_currentModel);
+                                markModelAsModified();
+                                m_linkDragState.reset();
                             }
-                        }
-                    }
-                }
-
-                // A new link is being created between two pins.
-                // Attempt to add the link if both pins are valid.
-                if (inputPinId && outputPinId)
-                {
-                    auto const inId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                    auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
-
-                    if (ed::AcceptNewItem())
-                    {
-                        createUndoRestorePoint("Add link");
-                        if (!m_currentModel->addLink(inId, outId) &&
-                            !m_currentModel->addLink(outId, inId))
-                        {
-                            ed::RejectNewItem();
-                            m_linkDragState.reset();
-                        }
-                        else
-                        {
-                            markModelAsModified();
-                            m_linkDragState.reset();
+                            else
+                            {
+                                ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                            }
                         }
                     }
                 }
@@ -996,15 +1007,20 @@ namespace gladius::ui
         m_pendingClearSelection = true;
 
         // Schedule an initial auto-layout for models that have no meaningful positions yet,
-        // but only once per function to preserve user edits.
+        // but only once per function to preserve user edits. Unlike the previous frame-count
+        // heuristic, the actual execution is gated on measured node sizes being stable.
         if (m_currentModel)
         {
-            m_pendingAutoLayoutFrames = m_currentModel->needsAutoLayout() ? 2 : 0;
+            m_pendingInitialAutoLayout = m_currentModel->needsAutoLayout();
         }
         else
         {
-            m_pendingAutoLayoutFrames = 0;
+            m_pendingInitialAutoLayout = false;
         }
+
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
     }
 
     void ModelEditor::onQueryNewNode()
@@ -1569,24 +1585,6 @@ namespace gladius::ui
                     m_nodeViewVisitor.setExportState(m_exportState);
                     if (m_currentModel)
                     {
-                        // Perform pending initial auto-layout BEFORE visitNodes so
-                        // that nodes are rendered at their layouted positions on
-                        // this very frame. This ensures ed::End() computes correct
-                        // node bounds immediately, which NavigateToContent relies on.
-                        if (m_pendingAutoLayoutFrames > 0)
-                        {
-                            --m_pendingAutoLayoutFrames;
-                            if (m_pendingAutoLayoutFrames == 0)
-                            {
-                                autoLayout();
-
-                                // Keep m_nodePositionsNeedUpdate=true so that
-                                // applyNodePositions() (after ed::End) can reliably
-                                // push the layouted NodeBase::screenPos values into
-                                // the node editor context on first visit.
-                            }
-                        }
-
                         m_currentModel->visitNodes(m_nodeViewVisitor);
 
                         // Update node groups after nodes are rendered and positioned
@@ -1706,6 +1704,8 @@ namespace gladius::ui
 
                 if (m_currentTabMode == TabMode::Graph)
                 {
+                    updateInitialAutoLayoutReadiness();
+
                     if (m_nodePositionsNeedUpdate)
                     {
                         applyNodePositions();
@@ -2500,6 +2500,7 @@ namespace gladius::ui
         // Check if this is the first visit to this function
         auto const funcId = m_currentModel->getResourceId();
         bool const isFirstVisit = m_visitedFunctions.find(funcId) == m_visitedFunctions.end();
+        bool const finalizeFirstVisit = !m_pendingInitialAutoLayout;
 
         // Only set node positions on first visit - subsequent visits preserve the editor's internal state
         if (isFirstVisit)
@@ -2509,12 +2510,132 @@ namespace gladius::ui
                 auto const targetPos = node.second->screenPos();
                 ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
             }
-            // Schedule first-visit centering through the same path as the
-            // manual toolbar action, with a small deterministic frame delay.
-            m_pendingCenterViewRequest = true;
-            m_pendingCenterViewFrames = 2;
-            m_visitedFunctions.insert(funcId);
+
+            if (finalizeFirstVisit)
+            {
+                // Schedule first-visit centering through the same path as the
+                // manual toolbar action, with a small deterministic frame delay.
+                m_pendingCenterViewRequest = true;
+                m_pendingCenterViewFrames = 2;
+                m_visitedFunctions.insert(funcId);
+            }
         }
+    }
+
+    bool ModelEditor::updateInitialAutoLayoutReadiness()
+    {
+        if (!m_pendingInitialAutoLayout || !m_currentModel)
+        {
+            return false;
+        }
+
+        ++m_initialAutoLayoutWaitFrames;
+
+        // Safety net: after enough frames, force auto-layout even if sizes
+        // have not fully converged.  This prevents the layout from never
+        // running (e.g. when sizes oscillate or GetNodeSize keeps returning 0).
+        constexpr int MAX_WAIT_FRAMES = 15;
+        bool const forceLayout = m_initialAutoLayoutWaitFrames >= MAX_WAIT_FRAMES;
+
+        if (!forceLayout)
+        {
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return false;
+            }
+
+            if (!m_nodeViewVisitor.columnWidthsAreInitialized())
+            {
+                return false;
+            }
+
+            std::unordered_map<nodes::NodeId, ImVec2> currentSnapshot;
+            currentSnapshot.reserve(m_currentModel->getSize());
+
+            for (auto & [nodeId, node] : *m_currentModel)
+            {
+                if (!node)
+                {
+                    continue;
+                }
+
+                ImVec2 const size = ed::GetNodeSize(nodeId);
+                if (size.x <= 0.0f || size.y <= 0.0f)
+                {
+                    m_initialAutoLayoutStableFrames = 0;
+                    return false;
+                }
+
+                currentSnapshot.emplace(nodeId, size);
+            }
+
+            if (currentSnapshot.empty())
+            {
+                return false;
+            }
+
+            auto const snapshotsMatch = [&]()
+            {
+                if (currentSnapshot.size() != m_initialAutoLayoutSizeSnapshot.size())
+                {
+                    return false;
+                }
+
+                constexpr float SIZE_EPSILON = 0.5f;
+                for (auto const & [nodeId, size] : currentSnapshot)
+                {
+                    auto const previous = m_initialAutoLayoutSizeSnapshot.find(nodeId);
+                    if (previous == m_initialAutoLayoutSizeSnapshot.end())
+                    {
+                        return false;
+                    }
+
+                    if (std::abs(size.x - previous->second.x) > SIZE_EPSILON ||
+                        std::abs(size.y - previous->second.y) > SIZE_EPSILON)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }();
+
+            if (!snapshotsMatch)
+            {
+                m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+                m_initialAutoLayoutStableFrames = 0;
+                return false;
+            }
+
+            m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+            ++m_initialAutoLayoutStableFrames;
+
+            constexpr int REQUIRED_STABLE_FRAMES = 2;
+            if (m_initialAutoLayoutStableFrames < REQUIRED_STABLE_FRAMES)
+            {
+                return false;
+            }
+        }
+
+        // --- Ready: run the initial auto-layout ---
+        m_pendingInitialAutoLayout = false;
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
+
+        autoLayout();
+
+        // Schedule the first-visit center-view directly so it does not
+        // depend on the indirect applyNodePositions() path.
+        m_pendingCenterViewRequest = true;
+        m_pendingCenterViewFrames = 2;
+        if (m_currentModel)
+        {
+            m_visitedFunctions.insert(m_currentModel->getResourceId());
+        }
+
+        return true;
     }
 
     void ModelEditor::placeTransformation(nodes::NodeBase & createdNode,

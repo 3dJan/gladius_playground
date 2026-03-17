@@ -167,4 +167,45 @@ namespace gladius::ui::tests
                   nodes::NumericWidgetLayoutMode::Slider);
     }
 
+    // --- VectorDisplayMode tests ---
+
+    TEST(VectorDisplayMode, MissingPreference_DefaultsToVector)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantVector>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::X);
+        EXPECT_EQ(model.getVectorDisplayMode(parameter.getId()),
+                  nodes::VectorDisplayMode::Vector);
+    }
+
+    TEST(VectorDisplayMode, SetToColor_PersistsPerParameterId)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantVector>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::X);
+        model.setVectorDisplayMode(parameter.getId(), nodes::VectorDisplayMode::Color);
+
+        EXPECT_EQ(model.getVectorDisplayMode(parameter.getId()),
+                  nodes::VectorDisplayMode::Color);
+    }
+
+    TEST(VectorDisplayMode, CopiedModel_RetainsStoredPreference)
+    {
+        nodes::Model model;
+        auto * node = model.create<nodes::ConstantVector>();
+        ASSERT_NE(node, nullptr);
+
+        auto & parameter = node->parameter().at(nodes::FieldNames::X);
+        auto const parameterId = parameter.getId();
+        model.setVectorDisplayMode(parameterId, nodes::VectorDisplayMode::Color);
+
+        nodes::Model copiedModel(model);
+        EXPECT_EQ(copiedModel.getVectorDisplayMode(parameterId),
+                  nodes::VectorDisplayMode::Color);
+    }
+
 } // namespace gladius::ui::tests

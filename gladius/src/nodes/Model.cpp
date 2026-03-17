@@ -63,6 +63,7 @@ namespace gladius::nodes
         , m_nodesHaveBeenLayouted(other.m_nodesHaveBeenLayouted)
         , m_isValid(other.m_isValid)
         , m_numericWidgetLayoutModes(other.m_numericWidgetLayoutModes)
+        , m_vectorDisplayModes(other.m_vectorDisplayModes)
     {
         m_outPorts.clear();
         m_inputParameter.clear();
@@ -337,6 +338,7 @@ namespace gladius::nodes
         if (auto it = params.find(name); it != params.end())
         {
             m_numericWidgetLayoutModes.erase(it->second.getId());
+            m_vectorDisplayModes.erase(it->second.getId());
             m_inputParameter.erase(it->second.getId());
             params.erase(it);
         }
@@ -452,6 +454,7 @@ namespace gladius::nodes
         if (auto it = params.find(name); it != params.end())
         {
             m_numericWidgetLayoutModes.erase(it->second.getId());
+            m_vectorDisplayModes.erase(it->second.getId());
             m_inputParameter.erase(it->second.getId());
             params.erase(it);
         }
@@ -476,6 +479,21 @@ namespace gladius::nodes
     bool Model::hasNumericWidgetLayoutMode(ParameterId parameterId) const
     {
         return m_numericWidgetLayoutModes.find(parameterId) != m_numericWidgetLayoutModes.end();
+    }
+
+    void Model::setVectorDisplayMode(ParameterId parameterId, VectorDisplayMode mode)
+    {
+        m_vectorDisplayModes[parameterId] = mode;
+    }
+
+    VectorDisplayMode Model::getVectorDisplayMode(ParameterId parameterId) const
+    {
+        auto const iter = m_vectorDisplayModes.find(parameterId);
+        if (iter == m_vectorDisplayModes.end())
+        {
+            return VectorDisplayMode::Vector;
+        }
+        return iter->second;
     }
 
     void Model::renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName)
@@ -836,6 +854,7 @@ namespace gladius::nodes
             {
                 auto paramIter = m_inputParameter.find(param.getId());
                 m_numericWidgetLayoutModes.erase(param.getId());
+                m_vectorDisplayModes.erase(param.getId());
                 if (param.getParentId() != nodeToRemove->second->getId())
                 {
                     // Log warning instead of throwing - this can happen in edge cases

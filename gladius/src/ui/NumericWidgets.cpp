@@ -54,10 +54,32 @@ namespace gladius::ui
 
         int computeDisplayPrecision(float value)
         {
-            int const digitCount = (value != 0.f)
-                                     ? static_cast<int>(std::log10(std::abs(value))) + 3
-                                     : 3;
-            return std::clamp(digitCount, 1, 8);
+            int constexpr SIGNIFICANT_DIGITS = 6;
+            if (value == 0.f)
+            {
+                return 3;
+            }
+            int const order = static_cast<int>(std::floor(std::log10(std::abs(value))));
+            int const decimalPlaces = SIGNIFICANT_DIGITS - order - 1;
+            return std::clamp(decimalPlaces, 1, 10);
+        }
+
+        float computeAcceleration(ImGuiID widgetId)
+        {
+            float const currentTime = static_cast<float>(ImGui::GetTime());
+            ImGuiID const storageKey = widgetId ^ ImHashStr("##accel_time");
+            float * lastTime = ImGui::GetStateStorage()->GetFloatRef(storageKey, 0.f);
+            float const timeDelta = currentTime - *lastTime;
+            *lastTime = currentTime;
+
+            float constexpr FAST_THRESHOLD = 0.15f;  // Rapid input window in seconds
+            float constexpr MAX_ACCELERATION = 10.f;
+
+            if (timeDelta > 0.f && timeDelta < FAST_THRESHOLD)
+            {
+                return std::min(MAX_ACCELERATION, FAST_THRESHOLD / timeDelta);
+            }
+            return 1.f;
         }
 
         /// Compute the angle from center to a screen position.
@@ -96,14 +118,11 @@ namespace gladius::ui
         auto const & io = ImGui::GetIO();
         float const step = numeric_widget_detail::applyModifierStep(baseStep, io.KeyShift, io.KeyCtrl);
 
-        // Format string with appropriate precision
-        int const clampedDigits = numeric_widget_detail::computeDisplayPrecision(*value);
-        std::string const format = fmt::format("%.{}f", clampedDigits);
+        // Format string with appropriate significant-digit precision
+        int const decimalPlaces = numeric_widget_detail::computeDisplayPrecision(*value);
+        std::string const format = fmt::format("%.{}f", decimalPlaces);
 
         float const dragSpeed = std::max(step, 0.001f);
-
-        // Check for double-click to enter text input mode
-        // ImGui::DragFloat already supports double-click-to-type natively via InputFloat fallback
 
         changed = ImGui::DragFloat(label,
                                    value,
@@ -112,24 +131,50 @@ namespace gladius::ui
                                    std::numeric_limits<float>::max(),
                                    format.c_str());
 
-        // Keyboard Up/Down arrow support
-        if (ImGui::IsItemFocused())
+        bool const isFocused = ImGui::IsItemFocused();
+        bool const isHovered = ImGui::IsItemHovered();
+        ImGuiID const itemId = ImGui::GetItemID();
+
+        // Claim Up/Down arrow keys when focused so they don't trigger navigation
+        if (isFocused)
         {
-            float const deltaTime = ImGui::GetIO().DeltaTime;
+            ImGui::SetItemKeyOwner(ImGuiKey_UpArrow);
+            ImGui::SetItemKeyOwner(ImGuiKey_DownArrow);
+        }
+
+        // Keyboard Up/Down arrow support with acceleration
+        if (isFocused)
+        {
+            float constexpr REPEAT_DELAY = 0.25f;
+            float constexpr REPEAT_RATE = 0.05f;
 
             int const keyPressCountUp =
-              ImGui::GetKeyPressedAmount(ImGui::GetKeyIndex(ImGuiKey_UpArrow), deltaTime, 0.1f);
+              ImGui::GetKeyPressedAmount(ImGuiKey_UpArrow, REPEAT_DELAY, REPEAT_RATE);
             if (keyPressCountUp > 0)
             {
-                *value += step * static_cast<float>(keyPressCountUp);
+                float const accel = numeric_widget_detail::computeAcceleration(itemId);
+                *value += step * accel * static_cast<float>(keyPressCountUp);
                 changed = true;
             }
 
             int const keyPressCountDown =
-              ImGui::GetKeyPressedAmount(ImGui::GetKeyIndex(ImGuiKey_DownArrow), deltaTime, 0.1f);
+              ImGui::GetKeyPressedAmount(ImGuiKey_DownArrow, REPEAT_DELAY, REPEAT_RATE);
             if (keyPressCountDown > 0)
             {
-                *value -= step * static_cast<float>(keyPressCountDown);
+                float const accel = numeric_widget_detail::computeAcceleration(itemId);
+                *value -= step * accel * static_cast<float>(keyPressCountDown);
+                changed = true;
+            }
+        }
+
+        // Scroll wheel support: only when both focused and hovered (to not interfere with zoom)
+        if (isFocused && isHovered)
+        {
+            float const wheel = io.MouseWheel;
+            if (wheel != 0.f)
+            {
+                float const accel = numeric_widget_detail::computeAcceleration(itemId);
+                *value += step * accel * wheel;
                 changed = true;
             }
         }

@@ -23,8 +23,12 @@ namespace gladius::ui
                                           std::optional<float> minValue,
                                           std::optional<float> maxValue);
 
-        /// Derive a readable decimal precision for the current value magnitude.
+        /// Compute the number of decimal places to show ~6 significant digits.
         [[nodiscard]] int computeDisplayPrecision(float value);
+
+        /// Compute an acceleration factor based on event frequency.
+        /// Returns a multiplier >= 1 that increases when increments happen in rapid succession.
+        [[nodiscard]] float computeAcceleration(ImGuiID widgetId);
     } // namespace numeric_widget_detail
 
     /// Layout mode for numeric parameter widgets.
@@ -70,7 +74,9 @@ namespace gladius::ui
 
     /// Renders an enhanced drag-float with adaptive logarithmic sensitivity.
     /// Supports Shift (fine ×0.01), Ctrl (coarse ×100) modifier keys,
-    /// keyboard Up/Down arrows, and double-click text entry.
+    /// keyboard Up/Down arrows (claimed via SetItemKeyOwner to prevent navigation),
+    /// scroll wheel when focused+hovered, acceleration on rapid repeat,
+    /// and double-click text entry.
     /// @return true if the value was changed.
     bool adaptiveDragFloat(char const * label,
                            float * value,

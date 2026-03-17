@@ -30,7 +30,7 @@ namespace gladius::ui
         static constexpr ImVec4 DarkColorInvalid = {0.5f, 0.f, 0.f, 1.f};
 
         /// Alpha value for dimming incompatible ports during link drag
-        static constexpr float DimmedAlpha = 0.25f;
+        static constexpr float DimmedAlpha = 0.3f;
 
         /// Brightness multiplier for highlighting compatible ports during link drag
         static constexpr float HighlightBrightness = 1.4f;

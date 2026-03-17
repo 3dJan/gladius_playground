@@ -184,6 +184,7 @@ namespace gladius::ui
         void readBackNodePositions();
         void autoLayout();
         void applyNodePositions();
+        bool updateInitialAutoLayoutReadiness();
         void placeTransformation(nodes::NodeBase & createdNode,
                                  std::vector<ed::NodeId> & selection) const;
         void placeBoolOp(nodes::NodeBase & createdNode, std::vector<ed::NodeId> & selection) const;
@@ -364,10 +365,15 @@ namespace gladius::ui
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
 
-        // One-time auto layout helper state.
-        // Counts down frames before executing layout so that the node editor
-        // has had a chance to compute actual node sizes (frame 0 = inactive).
-        int m_pendingAutoLayoutFrames{0};
+        // One-time initial auto layout helper state.
+        // The first auto layout for a function is executed only after node
+        // sizes have been measured and remained stable across consecutive frames.
+        // A max-wait frame limit ensures the layout always runs, even if
+        // measured sizes never fully converge.
+        bool m_pendingInitialAutoLayout{false};
+        int m_initialAutoLayoutStableFrames{0};
+        int m_initialAutoLayoutWaitFrames{0};
+        std::unordered_map<nodes::NodeId, ImVec2> m_initialAutoLayoutSizeSnapshot;
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};
