@@ -329,7 +329,8 @@ namespace gladius::tests
         }
 
         // Library operations
-        nlohmann::json listLibrary(std::string const & /*category*/) const override
+        nlohmann::json listLibrary(std::string const & /*category*/,
+                                   std::string const & /*query*/) const override
         {
             return nlohmann::json{{"success", true}, {"categories", nlohmann::json::array()}};
         }
@@ -368,7 +369,8 @@ namespace gladius::tests
         }
         nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & /*functionIds*/,
-                           std::string const & /*description*/) override
+                           std::string const & /*description*/,
+                           std::vector<std::string> const & /*tags*/) override
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }

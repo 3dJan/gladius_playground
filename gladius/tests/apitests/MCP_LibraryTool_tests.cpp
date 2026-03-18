@@ -183,7 +183,7 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));
 
         // ── Library operations (new) ──
-        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &), (const, override));
+        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &, std::string const &), (const, override));
         MOCK_METHOD(nlohmann::json,
                     getLibraryEntryInfo,
                     (std::string const &, std::string const &),
@@ -218,7 +218,8 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json,
                     setLibraryMetadata,
                     (std::vector<uint32_t> const &,
-                     std::string const &),
+                     std::string const &,
+                     std::vector<std::string> const &),
                     (override));
         MOCK_METHOD(nlohmann::json,
                     importLibraryEntry,
@@ -355,7 +356,7 @@ namespace gladius::tests
           {"library_root", "/tmp/test_library"},
           {"categories", json::array()}
         };
-        EXPECT_CALL(*m_mockApp, listLibrary(std::string("")))
+        EXPECT_CALL(*m_mockApp, listLibrary(std::string(""), std::string("")))
           .WillOnce(::testing::Return(mockResult));
 
         // Act
@@ -385,7 +386,7 @@ namespace gladius::tests
              }}}
           }}
         };
-        EXPECT_CALL(*m_mockApp, listLibrary(std::string("")))
+        EXPECT_CALL(*m_mockApp, listLibrary(std::string(""), std::string("")))
           .WillOnce(::testing::Return(mockResult));
 
         // Act
@@ -408,7 +409,7 @@ namespace gladius::tests
           {"error", "Category 'nonexistent' not found"},
           {"available_categories", {"lattices", "primitives"}}
         };
-        EXPECT_CALL(*m_mockApp, listLibrary(std::string("nonexistent")))
+        EXPECT_CALL(*m_mockApp, listLibrary(std::string("nonexistent"), std::string("")))
           .WillOnce(::testing::Return(mockResult));
 
         // Act
