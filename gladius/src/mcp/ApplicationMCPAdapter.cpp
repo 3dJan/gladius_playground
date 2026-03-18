@@ -1126,6 +1126,10 @@ namespace gladius
         {
             recordChange("added", "levelset", result.second, "levelset for function " + std::to_string(functionId));
         }
+        else
+        {
+            m_lastErrorMessage = m_resourceManagementTool->getLastErrorMessage();
+        }
         return result;
     }
 

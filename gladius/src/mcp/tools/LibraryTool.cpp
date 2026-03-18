@@ -811,22 +811,39 @@ namespace gladius::mcp::tools
                   {{"available_functions", availableIds}});
             }
 
-            // Stamp library metadata on the source model
-            io::LibraryMetadata metadata;
-            metadata.libraryFunctions =
-              io::serializeResourceIds({static_cast<Lib3MF_uint32>(functionId)});
-            metadata.libraryDescription = description;
-            io::writeLibraryMetadata(sourceModel, metadata);
-
-            // Ensure target directory exists and write the full model
+            // Write the live model to the target file first, without touching the
+            // in-memory model's metadata. This avoids a lib3mf issue where stamping
+            // metadata on the live model and then removing it leaves residual state
+            // that causes "Duplicate Model Metadata" on a subsequent export.
             fs::create_directories(targetPath.parent_path());
             {
                 auto writer = sourceModel->QueryWriter("3mf");
                 writer->WriteToFile(targetPath.string());
             }
 
-            // Remove library metadata from the live source model
-            io::removeLibraryMetadata(sourceModel);
+            // Now stamp library metadata on the standalone copy, along with the thumbnail.
+            {
+                auto exportedModel = openStandaloneModel(targetPath);
+
+                io::LibraryMetadata metadata;
+                metadata.libraryFunctions =
+                  io::serializeResourceIds({static_cast<Lib3MF_uint32>(functionId)});
+                metadata.libraryDescription = description;
+                io::writeLibraryMetadata(exportedModel, metadata);
+
+                if (!thumbnailPng.empty())
+                {
+                    if (exportedModel->HasPackageThumbnailAttachment())
+                    {
+                        exportedModel->RemovePackageThumbnailAttachment();
+                    }
+                    auto thumb = exportedModel->CreatePackageThumbnailAttachment();
+                    thumb->ReadFromBuffer(thumbnailPng);
+                }
+
+                auto writer = exportedModel->QueryWriter("3mf");
+                writer->WriteToFile(targetPath.string());
+            }
 
             size_t prunedCount = 0;
             if (!keepScaffold)
@@ -836,19 +853,6 @@ namespace gladius::mcp::tools
                 prunedCount = pruneExportedLibraryFile(
                   targetPath, static_cast<Lib3MF_uint32>(functionId),
                   thumbnailPng, logger);
-            }
-            else if (!thumbnailPng.empty())
-            {
-                // When keeping scaffold, still embed the thumbnail
-                auto model = openStandaloneModel(targetPath);
-                if (model->HasPackageThumbnailAttachment())
-                {
-                    model->RemovePackageThumbnailAttachment();
-                }
-                auto thumb = model->CreatePackageThumbnailAttachment();
-                thumb->ReadFromBuffer(thumbnailPng);
-                auto writer = model->QueryWriter("3mf");
-                writer->WriteToFile(targetPath.string());
             }
 
             auto message = fmt::format(
@@ -876,18 +880,6 @@ namespace gladius::mcp::tools
         }
         catch (std::exception const & e)
         {
-            // Clean up metadata from live model on failure
-            try
-            {
-                auto document = m_application->getCurrentDocument();
-                if (document)
-                {
-                    io::removeLibraryMetadata(document->get3mfModel());
-                }
-            }
-            catch (...)
-            {
-            }
             return createToolError(fmt::format("Export failed: {}", e.what()));
         }
     }

@@ -907,8 +907,10 @@ namespace gladius::nodes
     void Model::createBeginEndWithDefaultInAndOuts()
     {
         createBeginEnd();
-        m_beginNode->addOutputPort(FieldNames::Pos, ParameterTypeIndex::Float3);
-        registerOutputs(*m_beginNode);
+        // Use addArgument instead of directly calling addOutputPort so that
+        // the Begin node's parameter map is also populated. This ensures
+        // getArguments() returns the correct entries (used by MCP snippet tools).
+        addArgument(FieldNames::Pos, VariantParameter(float3{0.0f, 0.0f, 0.0f}));
         m_endNode->parameter()[FieldNames::Shape] = VariantParameter(float{-1.f});
         m_endNode->parameter()[FieldNames::Color] = VariantParameter(float3{0.5f, 0.5f, 0.5f});
 

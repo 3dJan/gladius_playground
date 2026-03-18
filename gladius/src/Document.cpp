@@ -1016,10 +1016,11 @@ namespace gladius
         model.createBeginEnd();
         model.setDisplayName(name);
 
-        // Add pos vector input to begin node
-        model.getBeginNode()->addOutputPort(nodes::FieldNames::Pos,
-                                            nodes::ParameterTypeIndex::Float3);
-        model.registerOutputs(*model.getBeginNode());
+        // Add pos vector input to begin node using addArgument so that both
+        // the output port and parameter entry are created (consistent with
+        // createBeginEndWithDefaultInAndOuts).
+        model.addArgument(nodes::FieldNames::Pos,
+                          nodes::VariantParameter(nodes::float3{0.0f, 0.0f, 0.0f}));
 
         // Add color vector output and shape scalar output to end node
         model.getEndNode()->parameter()[nodes::FieldNames::Color] =

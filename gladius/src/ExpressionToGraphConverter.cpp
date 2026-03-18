@@ -3129,21 +3129,17 @@ namespace gladius
                         }
                     }
                     std::string args;
-                    auto const & params = fc->parameter();
+                    auto argList = fc->getArguments();
                     bool first = true;
-                    for (auto const & [name, param] : params)
+                    for (auto const & [name, paramPtr] : argList)
                     {
-                        if (name == nodes::FieldNames::FunctionId || !param.isArgument())
-                        {
-                            continue;
-                        }
                         if (!first)
                         {
                             args += ", ";
                         }
                         first = false;
                         args += sourceExpression(
-                          model, param, fanOut, assignedVars, statements,
+                          model, *paramPtr, fanOut, assignedVars, statements,
                           varCounter, 0, assembly);
                     }
                     expr = funcName + "(" + args + ")";

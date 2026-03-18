@@ -431,6 +431,8 @@ namespace gladius
                     ? ArgumentType::Vector
                     : ArgumentType::Scalar;
 
+                auto assembly = document->getAssembly();
+
                 auto & model = document->createNewFunction();
                 uint32_t const newFunctionId = model.getResourceId();
                 model.setDisplayName(name);
@@ -439,7 +441,7 @@ namespace gladius
                 try
                 {
                     resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-                      snippet, model, parser, arguments, output);
+                      snippet, model, parser, arguments, output, assembly.get());
                 }
                 catch (const std::exception & e)
                 {
@@ -2426,6 +2428,10 @@ namespace gladius
                 }
 
                 auto model = assembly->findModel(functionId);
+                if (!model && functionId == assembly->getAssemblyModelId())
+                {
+                    model = assembly->assemblyModel();
+                }
                 if (!model)
                 {
                     out["success"] = false;
@@ -2480,6 +2486,23 @@ namespace gladius
                             else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
                             {
                                 effectiveArgs.emplace_back(name, ArgumentType::Scalar);
+                            }
+                        }
+
+                        // Fallback: if getArguments() returned nothing (e.g. legacy model
+                        // with output ports but no parameter entries), infer from outputs
+                        if (effectiveArgs.empty())
+                        {
+                            for (auto const & [name, port] : existingBegin->getOutputs())
+                            {
+                                if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                                {
+                                    effectiveArgs.emplace_back(name, ArgumentType::Vector);
+                                }
+                                else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                                {
+                                    effectiveArgs.emplace_back(name, ArgumentType::Scalar);
+                                }
                             }
                         }
                     }
