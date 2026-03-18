@@ -18,9 +18,11 @@
 #include "../../nodes/Model.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fmt/format.h>
 #include <lib3mf_implicit.hpp>
+#include <sstream>
 #include <unordered_set>
 
 namespace gladius::mcp::tools
@@ -98,6 +100,7 @@ namespace gladius::mcp::tools
               {"is_shipped", isShipped},
               {"has_metadata", false},
               {"description", ""},
+              {"tags", ""},
               {"tagged_function_ids", nlohmann::json::array()}
             };
 
@@ -109,6 +112,7 @@ namespace gladius::mcp::tools
                 {
                     entry["has_metadata"] = true;
                     entry["description"] = metadata->libraryDescription;
+                    entry["tags"] = metadata->libraryTags;
                     auto ids = io::parseResourceIds(metadata->libraryFunctions);
                     entry["tagged_function_ids"] = ids;
                 }
@@ -318,7 +322,8 @@ namespace gladius::mcp::tools
     {
     }
 
-    nlohmann::json LibraryTool::listLibrary(std::string const & category) const
+    nlohmann::json LibraryTool::listLibrary(std::string const & category,
+                                             std::string const & query) const
     {
         // If a category filter is specified, validate it exists
         if (!category.empty())
@@ -385,6 +390,33 @@ namespace gladius::mcp::tools
                       [](auto const & a, auto const & b)
                       { return a["name"] < b["name"]; });
 
+            // Filter by query if provided (case-insensitive substring match)
+            if (!query.empty())
+            {
+                std::string lowerQuery = query;
+                std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+
+                nlohmann::json filtered = nlohmann::json::array();
+                for (auto const & e : entries)
+                {
+                    auto matchField = [&](std::string const & key) -> bool
+                    {
+                        if (!e.contains(key) || !e[key].is_string())
+                            return false;
+                        std::string val = e[key].get<std::string>();
+                        std::transform(val.begin(), val.end(), val.begin(),
+                                       [](unsigned char c) { return std::tolower(c); });
+                        return val.find(lowerQuery) != std::string::npos;
+                    };
+                    if (matchField("name") || matchField("description") || matchField("tags"))
+                    {
+                        filtered.push_back(e);
+                    }
+                }
+                entries = std::move(filtered);
+            }
+
             // Determine if this category is only in shipped library
             bool const catInShipped = fs::exists(shippedCatPath) && fs::is_directory(shippedCatPath);
             bool const catInUser = fs::exists(userCatPath) && fs::is_directory(userCatPath);
@@ -438,19 +470,40 @@ namespace gladius::mcp::tools
             auto metadata = io::readLibraryMetadata(model);
 
             std::string description;
+            std::string tags;
             std::vector<Lib3MF_uint32> taggedIds;
             if (metadata.has_value())
             {
                 description = metadata->libraryDescription;
+                tags = metadata->libraryTags;
                 taggedIds = io::parseResourceIds(metadata->libraryFunctions);
             }
 
             auto functions = extractFunctionInfo(model, taggedIds);
 
+            // Decode tags into array
+            nlohmann::json tagsArray = nlohmann::json::array();
+            if (!tags.empty())
+            {
+                std::istringstream stream(tags);
+                std::string tag;
+                while (std::getline(stream, tag, ','))
+                {
+                    // Trim whitespace
+                    auto const start = tag.find_first_not_of(" \t");
+                    auto const end = tag.find_last_not_of(" \t");
+                    if (start != std::string::npos)
+                    {
+                        tagsArray.push_back(tag.substr(start, end - start + 1));
+                    }
+                }
+            }
+
             return {{"success", true},
                     {"name", name},
                     {"category", category},
                     {"description", description},
+                    {"tags", tagsArray},
                     {"path", entryPath.string()},
                     {"is_shipped", isShipped},
                     {"functions", functions}};
@@ -545,9 +598,12 @@ namespace gladius::mcp::tools
             }
 
             fs::create_directories(targetPath.parent_path());
-            io::saveFunctionTo3mfFile(targetPath, tempModel);
 
-            auto model3mf = openStandaloneModel(targetPath);
+            // Write to temp path first for atomic creation
+            auto const tempPath = targetPath.string() + ".tmp";
+            io::saveFunctionTo3mfFile(tempPath, tempModel);
+
+            auto model3mf = openStandaloneModel(tempPath);
 
             auto funcIter = model3mf->GetFunctions();
             Lib3MF_uint32 funcModelResId = 0;
@@ -562,7 +618,10 @@ namespace gladius::mcp::tools
             io::writeLibraryMetadata(model3mf, metadata);
 
             auto writer = model3mf->QueryWriter("3mf");
-            writer->WriteToFile(targetPath.string());
+            writer->WriteToFile(tempPath);
+
+            // Atomic rename from temp to target
+            fs::rename(tempPath, targetPath);
 
             std::string msg =
               fmt::format("Created library entry '{}' in category '{}'", name, category);
@@ -582,6 +641,7 @@ namespace gladius::mcp::tools
         {
             std::error_code ec;
             fs::remove(targetPath, ec);
+            fs::remove(targetPath.string() + ".tmp", ec);
             return createToolError(
               fmt::format("Failed to create library entry: {}", e.what()));
         }
@@ -671,9 +731,46 @@ namespace gladius::mcp::tools
             // Sync the internal node graph to the 3MF model
             document->update3mfModel();
 
-            // Render a thumbnail PNG for the library entry.
+            // FR-014b: Validate thumbnail and bounding box before writing
             auto logger = document->getSharedLogger();
+
+            // Check bounding box validity
+            try
+            {
+                auto bbox = document->computeBoundingBox();
+                bool const isDegenerate =
+                  std::isnan(bbox.min.x) || std::isnan(bbox.min.y) || std::isnan(bbox.min.z)
+                  || std::isnan(bbox.max.x) || std::isnan(bbox.max.y) || std::isnan(bbox.max.z)
+                  || (bbox.max.x - bbox.min.x <= 0.f)
+                  || (bbox.max.y - bbox.min.y <= 0.f)
+                  || (bbox.max.z - bbox.min.z <= 0.f);
+                if (isDegenerate)
+                {
+                    return {{"success", false},
+                            {"reason", "invalid_bounding_box"},
+                            {"message",
+                             "Function produces a degenerate or zero-volume bounding box. "
+                             "The SDF may not define a valid surface."}};
+                }
+            }
+            catch (std::exception const & e)
+            {
+                return {{"success", false},
+                        {"reason", "invalid_bounding_box"},
+                        {"message",
+                         fmt::format("Failed to compute bounding box: {}", e.what())}};
+            }
+
+            // Render thumbnail
             std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
+            if (thumbnailPng.empty())
+            {
+                return {{"success", false},
+                        {"reason", "thumbnail_render_failed"},
+                        {"message",
+                         "Failed to render thumbnail for the library entry. "
+                         "The function may not produce a visible surface."}};
+            }
 
             auto sourceModel = document->get3mfModel();
             if (!sourceModel)
@@ -955,7 +1052,8 @@ namespace gladius::mcp::tools
 
     nlohmann::json
     LibraryTool::setLibraryMetadata(std::vector<uint32_t> const & functionIds,
-                                    std::string const & description)
+                                    std::string const & description,
+                                    std::vector<std::string> const & tags)
     {
         if (!validateActiveDocument())
         {
@@ -996,11 +1094,22 @@ namespace gladius::mcp::tools
         io::LibraryMetadata metadata;
         metadata.libraryFunctions = io::serializeResourceIds(lib3mfIds);
         metadata.libraryDescription = description;
+        // Encode tags as comma-separated string
+        {
+            std::string tagStr;
+            for (size_t i = 0; i < tags.size(); ++i)
+            {
+                if (i > 0) tagStr += ',';
+                tagStr += tags[i];
+            }
+            metadata.libraryTags = tagStr;
+        }
         io::writeLibraryMetadata(model, metadata);
 
         return {{"success", true},
                 {"function_ids", functionIds},
                 {"description", description},
+                {"tags", tags},
                 {"message",
                  fmt::format("Library metadata set: {} tagged function(s), description='{}'",
                              functionIds.size(),

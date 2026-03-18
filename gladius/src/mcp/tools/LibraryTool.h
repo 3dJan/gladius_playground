@@ -36,8 +36,10 @@ namespace mcp::tools
 
         /// @brief List all library categories and their entries.
         /// @param category Optional filter for a specific category.
+        /// @param query Optional case-insensitive substring to filter entries by name, description, or tags.
         /// @return JSON with categories array containing entries and metadata.
-        nlohmann::json listLibrary(std::string const & category = "") const;
+        nlohmann::json listLibrary(std::string const & category = "",
+                                   std::string const & query = "") const;
 
         /// @brief Get detailed info about a specific library entry.
         /// @param category Category subdirectory name.
@@ -96,9 +98,11 @@ namespace mcp::tools
         /// @brief Set library metadata on the current document without exporting.
         /// @param functionIds Resource IDs of tagged (importable) functions.
         /// @param description Human-readable description of the library entry.
+        /// @param tags Optional keyword tags for searchability.
         /// @return JSON with success status.
         nlohmann::json setLibraryMetadata(std::vector<uint32_t> const & functionIds,
-                                          std::string const & description);
+                                          std::string const & description,
+                                          std::vector<std::string> const & tags = {});
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.

@@ -2681,6 +2681,9 @@ namespace gladius
                 // Sync changes to 3MF model so flattening/compilation works
                 document->update3mfModel();
 
+                // Rebuild resource dependency graph to reflect any changed function references
+                document->rebuildResourceDependencyGraph();
+
                 // Return the normalized program
                 auto normalized =
                   ExpressionToGraphConverter::convertProgramToSnippet(*assembly);

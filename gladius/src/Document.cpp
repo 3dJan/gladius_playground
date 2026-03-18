@@ -227,25 +227,26 @@ namespace gladius
             return;
         }
 
-        nodes::Assembly assemblyToFlat{*m_assembly};
-
-        nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
-        gradientLowering.run();
-
-        nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat, getSharedLogger()};
-        normalizeLowering.run();
-
-        nodes::OptimizeOutputs optimizer{&assemblyToFlat};
-        optimizer.optimize();
-
-        // Pass the dependency graph to the flattener if available
-        nodes::GraphFlattener flattener =
-          m_resourceDependencyGraph
-            ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
-            : nodes::GraphFlattener(assemblyToFlat);
-
         try
         {
+            nodes::Assembly assemblyToFlat{*m_assembly};
+
+            nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
+            gradientLowering.run();
+
+            nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat,
+                                                                  getSharedLogger()};
+            normalizeLowering.run();
+
+            nodes::OptimizeOutputs optimizer{&assemblyToFlat};
+            optimizer.optimize();
+
+            // Pass the dependency graph to the flattener if available
+            nodes::GraphFlattener flattener =
+              m_resourceDependencyGraph
+                ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
+                : nodes::GraphFlattener(assemblyToFlat);
+
             m_flatAssembly = std::make_shared<nodes::Assembly>(flattener.flatten());
         }
         catch (std::exception const & e)
@@ -253,7 +254,7 @@ namespace gladius
             auto logger = getSharedLogger();
             if (logger)
                 logger->addEvent(
-                  {"Error flattening assembly: " + std::string(e.what()), Severity::Error});
+                  {std::string("Error flattening assembly: ") + e.what(), Severity::Error});
         }
     }
 

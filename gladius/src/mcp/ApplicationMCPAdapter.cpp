@@ -9,12 +9,15 @@
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
 #include "../io/3mf/ResourceIdUtil.h"
+#include "../nodes/Assembly.h"
+#include "../nodes/DerivedNodes.h"
 #include "CoroMCPAdapter.h"
 #include "FunctionGraphSerializer.h"
 #include "nodes/NodeFactory.h"
 #include "tools/ApplicationLifecycleTool.h"
 #include "tools/DocumentLifecycleTool.h"
 #include "tools/FunctionOperationsTool.h"
+#include "tools/FunctionEvaluatorTool.h"
 #include "tools/ParameterManagementTool.h"
 #include "tools/RenderingTool.h"
 #include "tools/ResourceManagementTool.h"
@@ -24,6 +27,7 @@
 #include <array>
 #include <filesystem> // Only include here, not in header
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
 
 namespace gladius
@@ -47,6 +51,7 @@ namespace gladius
         m_documentLifecycleTool = std::make_unique<mcp::tools::DocumentLifecycleTool>(app);
         m_parameterManagementTool = std::make_unique<mcp::tools::ParameterManagementTool>(app);
         m_functionOperationsTool = std::make_unique<mcp::tools::FunctionOperationsTool>(app);
+        m_functionEvaluatorTool = std::make_unique<mcp::tools::FunctionEvaluatorTool>(app);
         m_resourceManagementTool = std::make_unique<mcp::tools::ResourceManagementTool>(app);
         m_renderingTool = std::make_unique<mcp::tools::RenderingTool>(app);
         m_validationTool = std::make_unique<mcp::tools::ValidationTool>(app);
@@ -108,7 +113,16 @@ namespace gladius
 
     bool ApplicationMCPAdapter::createNewDocument()
     {
-        return m_documentLifecycleTool->createNewDocument();
+        auto result = m_documentLifecycleTool->createNewDocument();
+        if (result)
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_changeLogMutex);
+                m_changeLog.clear();
+            }
+            recordChange("added", "document", 0, "new document");
+        }
+        return result;
     }
 
     bool ApplicationMCPAdapter::createEmptyDocument()
@@ -118,7 +132,16 @@ namespace gladius
 
     bool ApplicationMCPAdapter::openDocument(const std::string & path)
     {
-        return m_documentLifecycleTool->openDocument(path);
+        auto result = m_documentLifecycleTool->openDocument(path);
+        if (result)
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_changeLogMutex);
+                m_changeLog.clear();
+            }
+            recordChange("added", "document", 0, path);
+        }
+        return result;
     }
 
     bool ApplicationMCPAdapter::saveDocument()
@@ -268,6 +291,10 @@ namespace gladius
         {
             m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
         }
+        else
+        {
+            recordChange("added", "function", result.second, name);
+        }
         return result;
     }
 
@@ -283,6 +310,10 @@ namespace gladius
         if (!result.first)
         {
             m_lastErrorMessage = m_functionOperationsTool->getLastErrorMessage();
+        }
+        else
+        {
+            recordChange("added", "function", result.second, name);
         }
         return result;
     }
@@ -641,6 +672,166 @@ namespace gladius
                         {
                             r["outputs"] = nlohmann::json::array();
                         }
+
+                        // T008: Enrich with snippet metadata (arguments, output_type, snippet_preview)
+                        try
+                        {
+                            auto const resourceId = res->GetModelResourceID();
+                            auto snippetInfo = m_functionOperationsTool->getFunctionSnippet(resourceId);
+                            if (snippetInfo.contains("success") && snippetInfo["success"].get<bool>())
+                            {
+                                if (snippetInfo.contains("arguments"))
+                                {
+                                    r["arguments"] = snippetInfo["arguments"];
+                                }
+                                if (snippetInfo.contains("output_type"))
+                                {
+                                    r["output_type"] = snippetInfo["output_type"];
+                                }
+                                if (snippetInfo.contains("snippet"))
+                                {
+                                    auto const & fullSnippet = snippetInfo["snippet"].get_ref<std::string const &>();
+                                    // First 3 lines as preview
+                                    std::string preview;
+                                    std::istringstream stream(fullSnippet);
+                                    std::string line;
+                                    int lineCount = 0;
+                                    while (std::getline(stream, line) && lineCount < 3)
+                                    {
+                                        if (lineCount > 0)
+                                        {
+                                            preview += '\n';
+                                        }
+                                        preview += line;
+                                        ++lineCount;
+                                    }
+                                    r["snippet_preview"] = preview;
+                                }
+
+                                // Build cross-function call signature
+                                auto const resourceId = res->GetModelResourceID();
+                                std::string displayName;
+                                if (r.contains("display_name") && r["display_name"].is_string())
+                                {
+                                    displayName = r["display_name"].get<std::string>();
+                                }
+                                if (!displayName.empty())
+                                {
+                                    // Build argument list: name_ID(type arg, ...)
+                                    std::string args;
+                                    if (snippetInfo.contains("arguments") && snippetInfo["arguments"].is_array())
+                                    {
+                                        bool first = true;
+                                        for (auto const & arg : snippetInfo["arguments"])
+                                        {
+                                            if (!first)
+                                            {
+                                                args += ", ";
+                                            }
+                                            first = false;
+                                            args += arg.value("type", "float");
+                                            args += " ";
+                                            args += arg.value("name", "?");
+                                        }
+                                    }
+
+                                    // Build return type: single or multi-output
+                                    std::string returnType;
+                                    bool const hasMultipleOutputs =
+                                        snippetInfo.contains("outputs") &&
+                                        snippetInfo["outputs"].is_array() &&
+                                        snippetInfo["outputs"].size() > 1;
+                                    if (hasMultipleOutputs)
+                                    {
+                                        returnType = "(";
+                                        bool first = true;
+                                        for (auto const & out : snippetInfo["outputs"])
+                                        {
+                                            if (!first)
+                                            {
+                                                returnType += ", ";
+                                            }
+                                            first = false;
+                                            returnType += out.value("type", "float");
+                                            returnType += " ";
+                                            returnType += out.value("name", "?");
+                                        }
+                                        returnType += ")";
+                                    }
+                                    else if (snippetInfo.contains("output_type") &&
+                                             snippetInfo["output_type"].is_string())
+                                    {
+                                        returnType = snippetInfo["output_type"].get<std::string>();
+                                    }
+
+                                    std::string sig;
+                                    if (hasMultipleOutputs)
+                                    {
+                                        // Tuple-return syntax: (float shape, vec3 color) name_ID(args)
+                                        sig = returnType + " " + displayName + "_" +
+                                              std::to_string(resourceId) + "(" + args + ")";
+                                    }
+                                    else
+                                    {
+                                        // Standard: name_ID(args) -> float
+                                        sig = displayName + "_" + std::to_string(resourceId) +
+                                              "(" + args + ")";
+                                        if (!returnType.empty())
+                                        {
+                                            sig += " -> " + returnType;
+                                        }
+                                    }
+                                    r["call_signature"] = sig;
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            // Snippet enrichment is best-effort
+                        }
+
+                        // T009: Add constant node parameter values
+                        try
+                        {
+                            auto assembly = document->getAssembly();
+                            if (assembly)
+                            {
+                                auto const resourceId = res->GetModelResourceID();
+                                auto model = assembly->findModel(resourceId);
+                                if (model)
+                                {
+                                    nlohmann::json constants = nlohmann::json::array();
+                                    for (auto & [nodeId, nodePtr] : *model)
+                                    {
+                                        if (auto * cs = dynamic_cast<nodes::ConstantScalar *>(nodePtr.get()))
+                                        {
+                                            constants.push_back({
+                                                {"name", cs->getDisplayName()},
+                                                {"type", "float"},
+                                                {"value", cs->getValue()}
+                                            });
+                                        }
+                                        else if (auto * cv = dynamic_cast<nodes::ConstantVector *>(nodePtr.get()))
+                                        {
+                                            auto const v = cv->getValue();
+                                            constants.push_back({
+                                                {"name", cv->getDisplayName()},
+                                                {"type", "vec3"},
+                                                {"value", {v.x, v.y, v.z}}
+                                            });
+                                        }
+                                    }
+                                    if (!constants.empty())
+                                    {
+                                        r["constants"] = constants;
+                                    }
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            // Constant enrichment is best-effort
+                        }
                     }
                     else if (auto img3d = dynamic_cast<Lib3MF::CImage3D *>(res.get()))
                     {
@@ -930,7 +1121,12 @@ namespace gladius
       std::array<float, 3> minPoint,
       std::array<float, 3> maxPoint)
     {
-        return m_resourceManagementTool->createLevelSet(functionId, minPoint, maxPoint);
+        auto result = m_resourceManagementTool->createLevelSet(functionId, minPoint, maxPoint);
+        if (result.first)
+        {
+            recordChange("added", "levelset", result.second, "levelset for function " + std::to_string(functionId));
+        }
+        return result;
     }
 
     std::pair<bool, uint32_t>
@@ -1002,7 +1198,13 @@ nlohmann::json gladius::ApplicationMCPAdapter::setParameterValue(uint32_t functi
                                                                  const std::string & parameterName,
                                                                  const nlohmann::json & value)
 {
-    return m_functionOperationsTool->setParameterValue(functionId, nodeId, parameterName, value);
+    auto result = m_functionOperationsTool->setParameterValue(functionId, nodeId, parameterName, value);
+    if (result.value("success", false))
+    {
+        recordChange("modified", "parameter", functionId,
+                     "node " + std::to_string(nodeId) + "." + parameterName);
+    }
+    return result;
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::createLink(uint32_t functionId,
@@ -1045,6 +1247,132 @@ gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(
 nlohmann::json gladius::ApplicationMCPAdapter::removeUnusedNodes(uint32_t functionId)
 {
     return m_functionOperationsTool->removeUnusedNodes(functionId);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::evaluateFunction(uint32_t functionId,
+                                                                nlohmann::json const & samples)
+{
+    return m_functionEvaluatorTool->evaluateFunction(functionId, samples);
+}
+
+void gladius::ApplicationMCPAdapter::recordChange(std::string const & type,
+                                                   std::string const & resourceType,
+                                                   uint32_t resourceId,
+                                                   std::string const & displayName)
+{
+    std::lock_guard<std::mutex> lock(m_changeLogMutex);
+    if (m_changeLog.size() >= MAX_CHANGE_LOG_SIZE)
+    {
+        m_changeLog.pop_front();
+    }
+    m_changeLog.push_back(
+      {std::chrono::system_clock::now(), type, resourceType, resourceId, displayName});
+}
+
+namespace
+{
+    /// Format a time_point as ISO-8601 UTC string (e.g. "2026-03-17T10:00:00Z").
+    std::string formatIso8601(std::chrono::system_clock::time_point const & tp)
+    {
+        auto time = std::chrono::system_clock::to_time_t(tp);
+        std::tm utc{};
+        gmtime_r(&time, &utc);
+
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        tp.time_since_epoch()) %
+                      1000;
+
+        char buf[32];
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                      utc.tm_year + 1900,
+                      utc.tm_mon + 1,
+                      utc.tm_mday,
+                      utc.tm_hour,
+                      utc.tm_min,
+                      utc.tm_sec,
+                      static_cast<int>(millis.count()));
+        return buf;
+    }
+
+    /// Parse an ISO-8601 UTC timestamp to a time_point. Returns epoch on failure.
+    std::chrono::system_clock::time_point parseIso8601(std::string const & iso)
+    {
+        std::tm tm{};
+        int millis = 0;
+
+        // Try full format with milliseconds first: "2026-03-17T10:00:00.123Z"
+        if (std::sscanf(iso.c_str(),
+                        "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ",
+                        &tm.tm_year,
+                        &tm.tm_mon,
+                        &tm.tm_mday,
+                        &tm.tm_hour,
+                        &tm.tm_min,
+                        &tm.tm_sec,
+                        &millis) < 6)
+        {
+            // Fallback: try without milliseconds: "2026-03-17T10:00:00Z"
+            if (std::sscanf(iso.c_str(),
+                            "%4d-%2d-%2dT%2d:%2d:%2dZ",
+                            &tm.tm_year,
+                            &tm.tm_mon,
+                            &tm.tm_mday,
+                            &tm.tm_hour,
+                            &tm.tm_min,
+                            &tm.tm_sec) < 6)
+            {
+                return std::chrono::system_clock::time_point{}; // epoch
+            }
+        }
+
+        tm.tm_year -= 1900;
+        tm.tm_mon -= 1;
+        auto time = timegm(&tm);
+        return std::chrono::system_clock::from_time_t(time) +
+               std::chrono::milliseconds(millis);
+    }
+} // anonymous namespace
+
+nlohmann::json gladius::ApplicationMCPAdapter::getChangesSince(
+  std::string const & isoTimestamp) const
+{
+    using json = nlohmann::json;
+
+    // Detect UI-driven changes via Document's dirty flag
+    if (m_application && m_application->getCurrentDocument())
+    {
+        auto const & doc = m_application->getCurrentDocument();
+        bool fileChanged = doc->isFileChanged();
+        if (fileChanged && !m_lastKnownFileChanged)
+        {
+            // Document was modified externally (UI); record a generic change
+            auto * mutableThis = const_cast<ApplicationMCPAdapter *>(this);
+            mutableThis->recordChange("modified", "document", 0, "UI edit detected");
+        }
+        m_lastKnownFileChanged = fileChanged;
+    }
+
+    auto since = parseIso8601(isoTimestamp);
+    json changes = json::array();
+
+    {
+        std::lock_guard<std::mutex> lock(m_changeLogMutex);
+        for (auto const & entry : m_changeLog)
+        {
+            if (entry.timestamp > since)
+            {
+                changes.push_back({{"timestamp", formatIso8601(entry.timestamp)},
+                                   {"type", entry.type},
+                                   {"resource_type", entry.resourceType},
+                                   {"resource_id", entry.resourceId},
+                                   {"display_name", entry.displayName}});
+            }
+        }
+    }
+
+    return {{"success", true}, {"changes", changes}};
 }
 
 bool gladius::ApplicationMCPAdapter::renderToFile(const std::string & outputPath,
@@ -1149,9 +1477,10 @@ nlohmann::json gladius::ApplicationMCPAdapter::performAutoValidation(bool includ
 // Library operations — delegate to LibraryTool
 // ────────────────────────────────────────────────────────────────────────
 
-nlohmann::json gladius::ApplicationMCPAdapter::listLibrary(std::string const & category) const
+nlohmann::json gladius::ApplicationMCPAdapter::listLibrary(std::string const & category,
+                                                           std::string const & query) const
 {
-    return m_libraryTool->listLibrary(category);
+    return m_libraryTool->listLibrary(category, query);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::getLibraryEntryInfo(std::string const & category,
@@ -1194,9 +1523,10 @@ nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t function
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::setLibraryMetadata(
-    std::vector<uint32_t> const & functionIds, std::string const & description)
+    std::vector<uint32_t> const & functionIds, std::string const & description,
+    std::vector<std::string> const & tags)
 {
-    return m_libraryTool->setLibraryMetadata(functionIds, description);
+    return m_libraryTool->setLibraryMetadata(functionIds, description, tags);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::importLibraryEntry(std::string const & category,
@@ -1222,7 +1552,12 @@ nlohmann::json gladius::ApplicationMCPAdapter::setFunctionSnippet(
   std::string const & outputType,
   std::vector<FunctionArgument> const & arguments)
 {
-    return m_functionOperationsTool->setFunctionSnippet(functionId, snippet, outputType, arguments);
+    auto result = m_functionOperationsTool->setFunctionSnippet(functionId, snippet, outputType, arguments);
+    if (result.value("success", false))
+    {
+        recordChange("modified", "function", functionId, "snippet updated");
+    }
+    return result;
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::getProgramSnippet() const
@@ -1232,7 +1567,12 @@ nlohmann::json gladius::ApplicationMCPAdapter::getProgramSnippet() const
 
 nlohmann::json gladius::ApplicationMCPAdapter::setProgramSnippet(std::string const & snippet)
 {
-    return m_functionOperationsTool->setProgramSnippet(snippet);
+    auto result = m_functionOperationsTool->setProgramSnippet(snippet);
+    if (result.value("success", false))
+    {
+        recordChange("modified", "document", 0, "program snippet updated");
+    }
+    return result;
 }
 
 #ifdef ENABLE_UI_TESTING

@@ -3874,8 +3874,18 @@ namespace gladius
                     }
 
                     // Parse arguments from signature: float name(vec3 pos, float b) {
+                    // For multi-output functions like "(float a, vec3 b) name(vec3 pos) {"
+                    // the first (...) is the return type list, so skip to the second pair.
                     auto parenOpen = line.find('(');
                     auto parenClose = line.find(')');
+                    if (trimmedLine.front() == '(' && parenClose != std::string::npos)
+                    {
+                        parenOpen = line.find('(', parenClose + 1);
+                        if (parenOpen != std::string::npos)
+                        {
+                            parenClose = line.find(')', parenOpen + 1);
+                        }
+                    }
                     if (parenOpen != std::string::npos && parenClose != std::string::npos &&
                         parenClose > parenOpen)
                     {
@@ -4055,7 +4065,8 @@ namespace gladius
                     calledId = ndf->getFunctionId();
                 }
 
-                if (calledId != 0 && definedIds.count(calledId) == 0)
+                if (calledId != 0 && definedIds.count(calledId) == 0 &&
+                    !assembly.findModel(calledId))
                 {
                     throw std::runtime_error(
                       "Function '" + block.displayName +

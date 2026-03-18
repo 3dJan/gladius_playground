@@ -263,22 +263,90 @@ namespace gladius::mcp
         return tools;
     }
 
+    /// Build a minimal usage_example JSON from a tool's inputSchema.
+    /// Walks the "properties" object and generates a placeholder value for each
+    /// required property based on its declared type.
+    static nlohmann::json buildUsageExample(nlohmann::json const & schema)
+    {
+        nlohmann::json example = nlohmann::json::object();
+        if (!schema.contains("properties") || !schema["properties"].is_object())
+        {
+            return example;
+        }
+        for (auto const & [key, prop] : schema["properties"].items())
+        {
+            auto const type = prop.value("type", "string");
+            if (type == "integer" || type == "number")
+            {
+                example[key] = 0;
+            }
+            else if (type == "boolean")
+            {
+                example[key] = false;
+            }
+            else if (type == "array")
+            {
+                example[key] = nlohmann::json::array();
+            }
+            else if (type == "object")
+            {
+                example[key] = nlohmann::json::object();
+            }
+            else
+            {
+                auto const desc = prop.value("description", "");
+                example[key] = desc.empty() ? "<" + key + ">" : "<" + desc + ">";
+            }
+        }
+        return example;
+    }
+
+    /// Enrich an error response with `success: false` and `usage_example` if missing.
+    static void enrichErrorResponse(nlohmann::json & result,
+                                    std::string const & toolName,
+                                    std::map<std::string, ToolInfo> const & toolInfo)
+    {
+        bool const isError = (result.contains("error") && !result.value("error", "").empty()) ||
+                             (result.contains("success") && result["success"] == false);
+        if (!isError)
+        {
+            return;
+        }
+        if (!result.contains("success"))
+        {
+            result["success"] = false;
+        }
+        if (!result.contains("usage_example"))
+        {
+            auto infoIt = toolInfo.find(toolName);
+            if (infoIt != toolInfo.end() && !infoIt->second.schema.empty())
+            {
+                result["usage_example"] = buildUsageExample(infoIt->second.schema);
+            }
+        }
+    }
+
     nlohmann::json MCPServer::executeTool(const std::string & toolName,
                                           const nlohmann::json & params)
     {
         auto toolIt = m_tools.find(toolName);
         if (toolIt == m_tools.end())
         {
-            return {{"error", "Tool not found: " + toolName}};
+            return {{"success", false}, {"error", "Tool not found: " + toolName}};
         }
 
         try
         {
-            return toolIt->second(params);
+            auto result = toolIt->second(params);
+            enrichErrorResponse(result, toolName, m_toolInfo);
+            return result;
         }
         catch (const std::exception & e)
         {
-            return {{"error", "Tool execution failed: " + std::string(e.what())}};
+            nlohmann::json result = {
+              {"success", false}, {"error", "Tool execution failed: " + std::string(e.what())}};
+            enrichErrorResponse(result, toolName, m_toolInfo);
+            return result;
         }
     }
 
@@ -491,6 +559,26 @@ namespace gladius::mcp
           {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}},
           [this](const json & params) -> json
           {
+              // Format current UTC time as ISO-8601
+              auto now = std::chrono::system_clock::now();
+              auto time = std::chrono::system_clock::to_time_t(now);
+              std::tm utc{};
+              gmtime_r(&time, &utc);
+              auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now.time_since_epoch()) %
+                            1000;
+              char timeBuf[32];
+              std::snprintf(timeBuf,
+                            sizeof(timeBuf),
+                            "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                            utc.tm_year + 1900,
+                            utc.tm_mon + 1,
+                            utc.tm_mday,
+                            utc.tm_hour,
+                            utc.tm_min,
+                            utc.tm_sec,
+                            static_cast<int>(millis.count()));
+
               return {{"application", m_application->getApplicationName()},
                       {"version", m_application->getVersion()},
                       {"status", m_application->getStatus()},
@@ -498,7 +586,8 @@ namespace gladius::mcp
                       {"has_active_document", m_application->hasActiveDocument()},
                       {"headless", m_application->isHeadlessMode()},
                       {"ui_running", m_application->isUIRunning()},
-                      {"active_document_path", m_application->getActiveDocumentPath()}};
+                      {"active_document_path", m_application->getActiveDocumentPath()},
+                      {"server_time", std::string(timeBuf)}};
           });
 
         // MODEL STRUCTURE INSPECTION
@@ -951,6 +1040,36 @@ namespace gladius::mcp
               {
                   std::string snippet = params["snippet"];
                   return m_application->setProgramSnippet(snippet);
+              });
+
+            // evaluate_function: evaluate a function at sample points via OpenCL
+            json evalFuncSchema;
+            evalFuncSchema["type"] = "object";
+            json evalProps;
+            evalProps["function_id"] = {
+              {"type", "integer"},
+              {"description", "ModelResourceID of the function to evaluate"}};
+            evalProps["samples"] = {
+              {"type", "array"},
+              {"description",
+               "Array of sample point objects mapping argument names to values. "
+               "For vec3 args use [x,y,z], for scalar args use a number."},
+              {"items", {{"type", "object"}}},
+              {"minItems", 1},
+              {"maxItems", 1000}};
+            evalFuncSchema["properties"] = evalProps;
+            evalFuncSchema["required"] = json::array({"function_id", "samples"});
+
+            registerTool(
+              "evaluate_function",
+              "Evaluate a volumetric function at 3D sample points and return numeric results. "
+              "Useful for verifying SDF values without rendering. Uses OpenCL.",
+              evalFuncSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  auto const & samples = params["samples"];
+                  return m_application->evaluateFunction(functionId, samples);
               });
         }
 
@@ -1666,14 +1785,19 @@ namespace gladius::mcp
           "list_library",
           "List all library categories and their entries. Returns category names, entry "
           "names, descriptions, and tagged function IDs. Scans both shipped and user "
-          "library directories.",
+          "library directories. Supports optional keyword search by name, description, or tags.",
           {{"type", "object"},
            {"properties",
             {{"category",
               {{"type", "string"},
                {"description",
                 "Optional: filter to a specific category (subdirectory name). "
-                "If omitted, lists all categories."}}}}},
+                "If omitted, lists all categories."}}},
+             {"query",
+              {{"type", "string"},
+               {"description",
+                "Optional: case-insensitive substring to filter entries by name, "
+                "description, or tags. Returns empty list (not error) when no matches."}}}}},
            {"required", json::array()}},
           [this](const json & params) -> json
           {
@@ -1682,7 +1806,8 @@ namespace gladius::mcp
                   return {{"success", false}, {"error", "No application available"}};
               }
               std::string category = params.value("category", "");
-              return m_application->listLibrary(category);
+              std::string query = params.value("query", "");
+              return m_application->listLibrary(category, query);
           });
 
         // GET LIBRARY ENTRY INFO
@@ -1995,7 +2120,7 @@ namespace gladius::mcp
         // SET LIBRARY METADATA
         registerTool(
           "set_library_metadata",
-          "Stamp library metadata (tagged function IDs and description) onto the "
+          "Stamp library metadata (tagged function IDs, description, and tags) onto the "
           "current document's 3MF model. Use this before save_document / "
           "save_document_as when you want a document to behave as a library entry "
           "without going through export_to_library.",
@@ -2009,7 +2134,12 @@ namespace gladius::mcp
              {"description",
               {{"type", "string"},
                {"description",
-                "Human-readable description of the library entry"}}}}},
+                "Human-readable description of the library entry"}}},
+             {"tags",
+              {{"type", "array"},
+               {"items", {{"type", "string"}}},
+               {"description",
+                "Optional keyword tags for searchability (e.g. [\"gear\", \"mechanical\"])"}}}}},
            {"required", {"function_ids", "description"}}},
           [this](json const & params) -> json
           {
@@ -2024,12 +2154,38 @@ namespace gladius::mcp
                            "Missing required parameters: function_ids and description"},
                           {"usage_example",
                            {{"function_ids", {5}},
-                            {"description", "My library entry"}}}};
+                            {"description", "My library entry"},
+                            {"tags", {"sdf", "primitive"}}}}};
               }
               auto functionIds =
                 params["function_ids"].get<std::vector<uint32_t>>();
               std::string description = params["description"];
-              return m_application->setLibraryMetadata(functionIds, description);
+              std::vector<std::string> tags;
+              if (params.contains("tags") && params["tags"].is_array())
+              {
+                  tags = params["tags"].get<std::vector<std::string>>();
+              }
+              return m_application->setLibraryMetadata(functionIds, description, tags);
+          });
+
+        // CHANGE NOTIFICATIONS
+        registerTool(
+          "get_changes_since",
+          "Return a structured log of document changes (function additions, modifications, "
+          "removals) since a given ISO-8601 timestamp. Enables agents to detect user-driven "
+          "edits and avoid overwriting them. Returns an empty list when no changes occurred.",
+          {{"type", "object"},
+           {"properties",
+            {{"since",
+              {{"type", "string"},
+               {"description",
+                "ISO-8601 UTC timestamp (e.g. '2026-03-17T10:00:00Z'). Only changes made after "
+                "this timestamp are returned."}}}}},
+           {"required", json::array({"since"})}},
+          [this](json const & params) -> json
+          {
+              auto const & since = params["since"].get<std::string>();
+              return m_application->getChangesSince(since);
           });
 
 #ifdef ENABLE_UI_TESTING

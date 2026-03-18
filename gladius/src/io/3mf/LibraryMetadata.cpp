@@ -72,6 +72,7 @@ namespace gladius::io
         // "Referenced resource must not be nullptr" on deserialized models.
         std::string functionsValue;
         std::string descriptionValue;
+        std::string tagsValue;
 
         try
         {
@@ -91,6 +92,10 @@ namespace gladius::io
                 {
                     descriptionValue = meta->GetValue();
                 }
+                else if (meta->GetName() == LIBRARY_TAGS_KEY)
+                {
+                    tagsValue = meta->GetValue();
+                }
             }
         }
         catch (...)
@@ -103,7 +108,8 @@ namespace gladius::io
             return std::nullopt;
         }
 
-        return LibraryMetadata{std::move(functionsValue), std::move(descriptionValue)};
+        return LibraryMetadata{
+            std::move(functionsValue), std::move(descriptionValue), std::move(tagsValue)};
     }
 
     void writeLibraryMetadata(Lib3MF::PModel model, LibraryMetadata const & metadata)
@@ -141,6 +147,7 @@ namespace gladius::io
 
         setOrAdd(LIBRARY_FUNCTIONS_KEY, metadata.libraryFunctions);
         setOrAdd(LIBRARY_DESCRIPTION_KEY, metadata.libraryDescription);
+        setOrAdd(LIBRARY_TAGS_KEY, metadata.libraryTags);
     }
 
     void removeLibraryMetadata(Lib3MF::PModel model)

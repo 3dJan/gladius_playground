@@ -275,6 +275,19 @@ namespace gladius
          */
         virtual nlohmann::json removeUnusedNodes(uint32_t functionId) = 0;
 
+        /// Evaluate a function at sample points via OpenCL. Override to provide implementation.
+        virtual nlohmann::json evaluateFunction(uint32_t /*functionId*/,
+                                                nlohmann::json const & /*samples*/)
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
+
+        /// Return a structured log of document changes since a given ISO-8601 timestamp.
+        virtual nlohmann::json getChangesSince(std::string const & /*isoTimestamp*/) const
+        {
+            return {{"success", true}, {"changes", nlohmann::json::array()}};
+        }
+
         /// Get code snippet for a function. Override to provide implementation.
         virtual nlohmann::json getFunctionSnippet(uint32_t /*functionId*/) const
         {
@@ -479,8 +492,10 @@ namespace gladius
 
         /// @brief List all library categories and their entries.
         /// @param category Optional filter for a specific category.
+        /// @param query Optional case-insensitive substring to filter entries by name, description, or tags.
         /// @return JSON with categories array, each containing entries with metadata.
-        virtual nlohmann::json listLibrary(std::string const & category = "") const = 0;
+        virtual nlohmann::json listLibrary(std::string const & category = "",
+                                           std::string const & query = "") const = 0;
 
         /// @brief Get detailed information about a specific library entry.
         /// @param category Category subdirectory name.
@@ -531,10 +546,12 @@ namespace gladius
         /// @brief Set library metadata (tagged functions and description) on the current document.
         /// @param functionIds Resource IDs of tagged (importable) functions.
         /// @param description Human-readable description of the library entry.
+        /// @param tags Optional keyword tags for searchability.
         /// @return JSON with success status.
         virtual nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & functionIds,
-                           std::string const & description) = 0;
+                           std::string const & description,
+                           std::vector<std::string> const & tags = {}) = 0;
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.
