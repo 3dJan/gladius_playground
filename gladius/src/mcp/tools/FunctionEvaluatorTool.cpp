@@ -15,8 +15,10 @@
 #include "../../nodes/Model.h"
 #include "../../nodes/Parameter.h"
 #include "../../nodes/Port.h"
+#include "../../nodes/ToOCLVisitor.h"
 
 #include <fmt/format.h>
+#include <fstream>
 #include <sstream>
 #include <variant>
 
@@ -301,7 +303,25 @@ namespace gladius::mcp::tools
             return createToolError("Compute core not available.");
         }
 
-        auto const & modelSource = core->getProgramManager().getModelSource();
+        // For assembly (root) evaluation, use the pre-compiled flat assembly source.
+        // For sub-function evaluation, generate OCL from the original assembly so
+        // individual function definitions (function_N) are available — the flat
+        // assembly inlines everything into model() and omits them.
+        std::string modelSource;
+        if (isAssembly)
+        {
+            modelSource = core->getProgramManager().getModelSource();
+        }
+        else
+        {
+            std::stringstream oclStream;
+            nodes::ToOclVisitor visitor;
+            visitor.setStandaloneMode(true);
+            assembly->visitNodes(visitor);
+            visitor.write(oclStream);
+            modelSource = oclStream.str();
+        }
+
         if (modelSource.empty())
         {
             return createToolError(
@@ -433,8 +453,15 @@ namespace gladius::mcp::tools
 
         if (!evalProg.isValid())
         {
+            // Dump source to temp file for debugging
+            {
+                std::ofstream dump("/tmp/gladius_eval_debug.cl");
+                dump << fullDynamic;
+            }
             return createToolError(
-              "OpenCL compilation failed. The function graph may contain unsupported node types.");
+              fmt::format("OpenCL compilation failed. Source dumped to /tmp/gladius_eval_debug.cl. "
+                          "Generated eval kernel:\n{}",
+                          kernelSrc.str()));
         }
 
         // --- Create buffers and dispatch ----------------------------------------------

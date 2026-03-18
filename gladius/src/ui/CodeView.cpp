@@ -21,15 +21,15 @@ namespace gladius::ui
             auto * beginNode = model.getBeginNode();
             if (beginNode)
             {
-                for (auto const & [portName, port] : beginNode->getOutputs())
+                for (auto const & [name, paramPtr] : beginNode->getArguments())
                 {
-                    if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                    if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
                     {
-                        args.emplace_back(portName, ArgumentType::Vector);
+                        args.emplace_back(name, ArgumentType::Vector);
                     }
-                    else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                    else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
                     {
-                        args.emplace_back(portName, ArgumentType::Scalar);
+                        args.emplace_back(name, ArgumentType::Scalar);
                     }
                 }
             }

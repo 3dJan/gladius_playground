@@ -60,6 +60,31 @@ namespace gladius::nodes
             return true;
         }
 
+        using ArgumentList =
+          std::vector<std::pair<ParameterMap::key_type, ParameterMap::mapped_type *>>;
+
+        /// Return arguments sorted by definition order (getSortIndex) rather than
+        /// the alphabetical std::map iteration order.
+        ArgumentList getArguments() const
+        {
+            std::vector<std::pair<int, std::string>> sortable;
+            for (auto const & [name, param] : m_parameter)
+            {
+                sortable.emplace_back(param.getSortIndex(), name);
+            }
+            std::sort(sortable.begin(), sortable.end());
+
+            ArgumentList result;
+            result.reserve(sortable.size());
+            for (auto const & [idx, name] : sortable)
+            {
+                auto it = m_parameter.find(name);
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+                result.push_back({it->first, const_cast<VariantParameter *>(&it->second)});
+            }
+            return result;
+        }
+
         // name does not match, but it is called when the model is updated
         void updateMemoryOffsets(GeneratorContext &) override
         {
@@ -534,13 +559,26 @@ namespace gladius::nodes
         // replace with view when avilable
         ArgumentList getArguments() const
         {
-            ArgumentList result;
-            for (auto parameter : m_parameter)
+            // Collect (sortIndex, name) pairs for all argument parameters, then sort
+            // by sort index to preserve the original definition order rather than the
+            // alphabetical std::map order. This is critical for positional arg binding.
+            std::vector<std::pair<int, std::string>> sortable;
+            for (auto const & [name, param] : m_parameter)
             {
-                if (parameter.second.isArgument())
+                if (param.isArgument())
                 {
-                    result.push_back({parameter.first, &parameter.second});
+                    sortable.emplace_back(param.getSortIndex(), name);
                 }
+            }
+            std::sort(sortable.begin(), sortable.end());
+
+            ArgumentList result;
+            result.reserve(sortable.size());
+            for (auto const & [idx, name] : sortable)
+            {
+                auto it = m_parameter.find(name);
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+                result.push_back({it->first, const_cast<VariantParameter *>(&it->second)});
             }
             return result;
         }

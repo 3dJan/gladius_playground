@@ -312,6 +312,7 @@ namespace gladius::nodes
         parameter.setSortIndex(static_cast<int>(m_beginNode->parameter().size()));
         m_beginNode->parameter()[name] = parameter;
         m_beginNode->addOutputPort(name, parameter.getTypeIndex());
+        m_beginNode->getOutputs()[name].setSortIndex(parameter.getSortIndex());
         registerInput(m_beginNode->parameter()[name]);
         registerOutput(m_beginNode->getOutputs()[name]);
     }

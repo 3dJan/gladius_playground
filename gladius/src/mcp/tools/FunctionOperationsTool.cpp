@@ -2266,20 +2266,20 @@ namespace gladius
                     return out;
                 }
 
-                // Extract actual arguments from Begin node
+                // Extract actual arguments from Begin node (sorted by definition order)
                 std::vector<FunctionArgument> args;
                 auto * beginNode = model->getBeginNode();
                 if (beginNode != nullptr)
                 {
-                    for (auto const & [portName, port] : beginNode->getOutputs())
+                    for (auto const & [name, paramPtr] : beginNode->getArguments())
                     {
-                        if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                        if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
                         {
-                            args.emplace_back(portName, ArgumentType::Vector);
+                            args.emplace_back(name, ArgumentType::Vector);
                         }
-                        else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                        else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
                         {
-                            args.emplace_back(portName, ArgumentType::Scalar);
+                            args.emplace_back(name, ArgumentType::Scalar);
                         }
                     }
                 }
@@ -2471,15 +2471,15 @@ namespace gladius
                     auto * existingBegin = model->getBeginNode();
                     if (existingBegin)
                     {
-                        for (auto const & [portName, port] : existingBegin->getOutputs())
+                        for (auto const & [name, paramPtr] : existingBegin->getArguments())
                         {
-                            if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                            if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
                             {
-                                effectiveArgs.emplace_back(portName, ArgumentType::Vector);
+                                effectiveArgs.emplace_back(name, ArgumentType::Vector);
                             }
-                            else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                            else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
                             {
-                                effectiveArgs.emplace_back(portName, ArgumentType::Scalar);
+                                effectiveArgs.emplace_back(name, ArgumentType::Scalar);
                             }
                         }
                     }

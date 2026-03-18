@@ -270,7 +270,7 @@ namespace gladius::nodes
 
         for (auto & [name, output] : m_currentModel->getOutputs())
         {
-            if (!output.isConsumedByFunction())
+            if (!m_standaloneMode && !output.isConsumedByFunction())
             {
                 continue;
             }
@@ -333,7 +333,7 @@ namespace gladius::nodes
 
         for (auto & [name, output] : m_currentModel->getOutputs())
         {
-            if (!output.isConsumedByFunction())
+            if (!m_standaloneMode && !output.isConsumedByFunction())
             {
                 continue;
             }
@@ -341,7 +341,7 @@ namespace gladius::nodes
             m_definition << fmt::format("*{0} = ({1})({2});\n",
                                         name,
                                         typeIndexToOpenCl(output.getTypeIndex()),
-                                        output.toString());
+                                        resolveParameter(output));
         }
         m_definition << "}\n";
     }
@@ -657,13 +657,13 @@ namespace gladius::nodes
             }
 
             customArguments << fmt::format(
-              "({0})({1})", typeIndexToOpenCl(parameter.getTypeIndex()), parameter.toString());
+              "({0})({1})", typeIndexToOpenCl(parameter.getTypeIndex()), resolveParameter(parameter));
             first = false;
         }
 
         for (auto & [name, port] : functionCall.getOutputs())
         {
-            if (!port.isUsed())
+            if (!m_standaloneMode && !port.isUsed())
             {
                 continue;
             }

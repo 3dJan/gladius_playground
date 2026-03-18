@@ -336,25 +336,23 @@ namespace gladius
                         return 0;
                     }
 
-                    if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
-                    {
-                        auto varIt = std::find_if(variableNodes.begin(), variableNodes.end(),
-                          [exprNodeId](auto const & kv) { return kv.second == exprNodeId; });
-                        if (varIt != variableNodes.end())
-                        {
-                            s_variableContextStack.push_back(varIt->first);
-                        }
-                    }
-
                     if (!connectToEndNode(model, exprNodeId, matchedOutput))
                     {
                         return 0;
                     }
                 }
+
                 else
                 {
                     variableNodes[varName] = exprNodeId;
+                    std::string outPortName = getOutputPortName(model, exprNodeId);
+
+                    if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
+                    {
+                        s_argSnippetToPortName[varName] = outPortName;
+                    }
                 }
+
                 lastResult = exprNodeId;
             }
             else if (std::regex_match(cleanStmt, stmtMatch, return_regex))
@@ -1656,18 +1654,24 @@ namespace gladius
         auto nodeOpt = model.getNode(nodeId);
         if (!nodeOpt.has_value())
         {
+            if (!s_variableContextStack.empty()) s_variableContextStack.pop_back();
             return nodes::FieldNames::Value; // Default fallback
         }
         nodes::NodeBase * node = nodeOpt.value();
 
+        // Always pop one context if it was set for this node evaluation to prevent leaks
+        std::string context;
+        if (!s_variableContextStack.empty())
+        {
+            context = s_variableContextStack.back();
+            s_variableContextStack.pop_back();
+        }
+
         // Check if this is a Begin node - if so, use the current variable context
         if (dynamic_cast<nodes::Begin *>(node) != nullptr)
         {
-            if (!s_variableContextStack.empty())
+            if (!context.empty())
             {
-                // Clear the context after use
-                std::string context = s_variableContextStack.back();
-                s_variableContextStack.pop_back();
                 // Translate snippet identifier (e.g. "in_pos") back to the real
                 // Begin node port name (e.g. "pos") via the lookup table.
                 auto const portIt = s_argSnippetToPortName.find(context);
@@ -3667,30 +3671,30 @@ namespace gladius
                 continue;
             }
 
-            // Build function signature from Begin node outputs
+            // Build function signature from Begin node arguments (sorted by definition order)
             std::string signature = "(";
             auto * beginNode = model->getBeginNode();
             if (beginNode)
             {
                 bool first = true;
-                for (auto const & [portName, port] : beginNode->getOutputs())
+                for (auto const & [name, paramPtr] : beginNode->getArguments())
                 {
                     if (!first)
                     {
                         signature += ", ";
                     }
                     first = false;
-                    if (port.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                    if (paramPtr->getTypeIndex() == std::type_index(typeid(nodes::float3)))
                     {
-                        signature += "vec3 " + portName;
+                        signature += "vec3 " + name;
                     }
-                    else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Matrix4)
+                    else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Matrix4)
                     {
-                        signature += "mat4 " + portName;
+                        signature += "mat4 " + name;
                     }
                     else
                     {
-                        signature += "float " + portName;
+                        signature += "float " + name;
                     }
                 }
             }

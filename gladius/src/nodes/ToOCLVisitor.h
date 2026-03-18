@@ -17,6 +17,11 @@ namespace gladius::nodes
         ToOclVisitor() = default;
         ~ToOclVisitor() override = default;
 
+        /// When enabled, all sub-function outputs get pointer parameters and
+        /// writes regardless of isConsumedByFunction(). This makes individual
+        /// functions callable from an eval kernel (needed by the evaluator tool).
+        void setStandaloneMode(bool enabled) { m_standaloneMode = enabled; }
+
         void setAssembly(Assembly * assembly) override;
         virtual void setModel(Model * const model) override;
 
@@ -181,6 +186,7 @@ namespace gladius::nodes
         std::stringstream m_definition;
         std::stringstream m_declaration;
         bool m_endReached = false;
+        bool m_standaloneMode = false;
         Assembly * m_assembly{};
         std::set<nodes::NodeId> m_visitedNodes;
         Model * m_currentModel = nullptr;
