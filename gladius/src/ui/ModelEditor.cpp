@@ -322,52 +322,57 @@ namespace gladius::ui
 
         if (ImGui::BeginMenuBar())
         {
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_TRASH "\tDelete unused resources")))
+            if (ImGui::BeginMenu(reinterpret_cast<const char *>(ICON_FA_BARS)))
             {
-                m_unusedResources = m_doc->findUnusedResources();
+                if (ImGui::MenuItem(
+                      reinterpret_cast<const char *>(ICON_FA_TRASH " Delete unused resources")))
+                {
+                    m_unusedResources = m_doc->findUnusedResources();
 
-                if (!m_unusedResources.empty())
-                {
-                    m_showDeleteUnusedResourcesConfirmation = true;
-                }
-                else if (auto logger = m_doc->getSharedLogger())
-                {
-                    logger->addEvent(
-                      {"No unused resources found in the model", events::Severity::Info});
-                }
-            }
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_COPY "\tRemove duplicate functions")))
-            {
-                // Store state for undo support (T043)
-                m_history.storeState(*m_assembly, "Remove duplicate functions");
-                
-                auto result = FunctionDeduplicator::deduplicate(*m_assembly);
-                if (auto logger = m_doc->getSharedLogger())
-                {
-                    if (result.removedCount > 0)
+                    if (!m_unusedResources.empty())
+                    {
+                        m_showDeleteUnusedResourcesConfirmation = true;
+                    }
+                    else if (auto logger = m_doc->getSharedLogger())
                     {
                         logger->addEvent(
-                          {fmt::format("Removed {} duplicate function(s), updated {} reference(s)",
-                                       result.removedCount,
-                                       result.updatedReferences),
-                           events::Severity::Info});
-                        markModelAsModified();
-                    }
-                    else
-                    {
-                        logger->addEvent(
-                          {"No duplicate functions found", events::Severity::Info});
+                          {"No unused resources found in the model", events::Severity::Info});
                     }
                 }
-            }
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tShow Library Browser"),
-                  nullptr,
-                  m_libraryBrowser.isVisible()))
-            {
-                toggleLibraryVisibility();
+                if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                      ICON_FA_COPY " Remove duplicate functions")))
+                {
+                    // Store state for undo support (T043)
+                    m_history.storeState(*m_assembly, "Remove duplicate functions");
+
+                    auto result = FunctionDeduplicator::deduplicate(*m_assembly);
+                    if (auto logger = m_doc->getSharedLogger())
+                    {
+                        if (result.removedCount > 0)
+                        {
+                            logger->addEvent(
+                              {fmt::format(
+                                 "Removed {} duplicate function(s), updated {} reference(s)",
+                                 result.removedCount,
+                                 result.updatedReferences),
+                               events::Severity::Info});
+                            markModelAsModified();
+                        }
+                        else
+                        {
+                            logger->addEvent(
+                              {"No duplicate functions found", events::Severity::Info});
+                        }
+                    }
+                }
+                if (ImGui::MenuItem(
+                      reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN " Show Library Browser"),
+                      nullptr,
+                      m_libraryBrowser.isVisible()))
+                {
+                    toggleLibraryVisibility();
+                }
+                ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
         }
