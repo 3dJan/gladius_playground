@@ -1,0 +1,64 @@
+{
+  "tool": "evaluate_function",
+  "description": "Evaluate a volumetric function at one or more 3D sample points and return a float result per point. Useful for verifying SDF values numerically without rendering. Supports functions with a single vec3 input and float output. Returns a structured error for unsupported graph types.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "function_id": {
+        "type": "integer",
+        "description": "ModelResourceID of the function to evaluate"
+      },
+      "samples": {
+        "type": "array",
+        "description": "List of sample points. Each entry is an object mapping argument names to their values. For a function with a single vec3 argument named 'pos', each entry should be {\"pos\": [x, y, z]}. For scalar arguments, use {\"name\": value}.",
+        "items": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "number"},
+              {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+            ]
+          }
+        },
+        "minItems": 1,
+        "maxItems": 1000
+      }
+    },
+    "required": ["function_id", "samples"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": {"type": "boolean"},
+      "function_id": {"type": "integer"},
+      "results": {
+        "type": "array",
+        "description": "One float value per sample point, in the same order as the input samples array.",
+        "items": {"type": "number"}
+      },
+      "error": {
+        "type": "string",
+        "description": "Human-readable error message. Present only when success is false."
+      }
+    },
+    "required": ["success", "function_id"]
+  },
+  "examples": [
+    {
+      "description": "Evaluate a unit sphere SDF at three points",
+      "request": {
+        "function_id": 5,
+        "samples": [
+          {"pos": [0.0, 0.0, 0.0]},
+          {"pos": [1.0, 0.0, 0.0]},
+          {"pos": [2.0, 0.0, 0.0]}
+        ]
+      },
+      "response": {
+        "success": true,
+        "function_id": 5,
+        "results": [-1.0, 0.0, 1.0]
+      }
+    }
+  ]
+}
