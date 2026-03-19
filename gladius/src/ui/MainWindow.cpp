@@ -797,6 +797,11 @@ namespace gladius::ui
                     {
                         if (m_fileChanged)
                         {
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave")))
+                            {
+                                save();
+                            }
                             ImGui::TextUnformatted(
                               fmt::format("*{}", m_currentAssemblyFileName.value().string())
                                 .c_str());
