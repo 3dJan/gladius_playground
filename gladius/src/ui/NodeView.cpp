@@ -268,8 +268,11 @@ namespace gladius::ui
                                 int const endInBtnColors = pushPinButtonStyle(endInState, endInBaseColor);
                                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * m_uiScale, 0.f});
                                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 1.5f);
-                                ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
-                                                            ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f));
+                                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
+                                                            ImVec2(ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.5f)))
+                                {
+                                    showLinkAssignmentMenu(input);
+                                }
                                 registerCurrentItemAsPinHitbox(true);
                                 showPinDragTooltip(input.first, input.second.getTypeIndex(), endInState);
                                 ImGui::PopStyleVar();

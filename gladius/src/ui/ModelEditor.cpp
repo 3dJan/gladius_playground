@@ -103,7 +103,7 @@ namespace gladius::ui
             ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f);
             ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f);
             ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f);
-            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 7.f);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 15.f);
         }
 
         void popNodeEditorTheme()
