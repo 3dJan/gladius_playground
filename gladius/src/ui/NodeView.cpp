@@ -1885,6 +1885,11 @@ namespace gladius::ui
 
         auto & columnWidths = getOrCreateColumnWidths(node.getId());
 
+        // Ensure the parameter column has a DPI-aware minimum width so the
+        // swatch + sliders are never clipped, even on the first frame.
+        float const minParamWidth = 140.f * m_uiScale;
+        columnWidths[0] = std::max(columnWidths[0], minParamWidth);
+
         ImGui::PushID(node.getId());
         float const cellPad = ImGui::GetStyle().CellPadding.x;
         float const padOH2 = (2 * 2 - 2) * cellPad;

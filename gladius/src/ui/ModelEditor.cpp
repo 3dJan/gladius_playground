@@ -73,6 +73,7 @@ namespace gladius::ui
         void pushNodeEditorTheme()
         {
             auto const & style = ImGui::GetStyle();
+            float const uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
             ImVec4 const frameBg = style.Colors[ImGuiCol_FrameBg];
             ImVec4 const border = style.Colors[ImGuiCol_Border];
             ImVec4 const accent = style.Colors[ImGuiCol_TabActive];
@@ -95,15 +96,15 @@ namespace gladius::ui
             ed::PushStyleColor(ed::StyleColor_GroupBg, colorWithAlpha(frameBg, 0.32f));
             ed::PushStyleColor(ed::StyleColor_GroupBorder, colorWithAlpha(border, 0.45f));
 
-            ed::PushStyleVar(ed::StyleVar_NodeRounding, 20.f);
-            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 5.f);
-            ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f);
-            ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f);
-            ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f);
-            ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f);
-            ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f);
-            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f);
-            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 15.f);
+            ed::PushStyleVar(ed::StyleVar_NodeRounding, 20.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 5.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 15.f * uiScale);
         }
 
         void popNodeEditorTheme()
