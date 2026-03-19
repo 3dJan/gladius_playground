@@ -114,13 +114,6 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json, getSceneHierarchy, (), (const, override));
         MOCK_METHOD(nlohmann::json, getDocumentInfo, (), (const, override));
         MOCK_METHOD(nlohmann::json, get3MFStructure, (), (const, override));
-        MOCK_METHOD(nlohmann::json, getFunctionGraph, (uint32_t), (const, override));
-
-        nlohmann::json setFunctionGraph(uint32_t, const nlohmann::json &, bool) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
         MOCK_METHOD(std::vector<std::string>, listAvailableFunctions, (), (const, override));
         MOCK_METHOD(nlohmann::json,
                     validateForManufacturing,
@@ -152,34 +145,11 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json, getModelBoundingBox, (), (const, override));
         MOCK_METHOD(nlohmann::json, removeUnusedResources, (), (override));
 
-        // ── Graph editing ──
-        MOCK_METHOD(nlohmann::json, getNodeInfo, (uint32_t, uint32_t), (const, override));
-        MOCK_METHOD(nlohmann::json,
-                    createNode,
-                    (uint32_t, const std::string &, const std::string &, uint32_t),
-                    (override));
-        MOCK_METHOD(nlohmann::json, deleteNode, (uint32_t, uint32_t), (override));
+        // ── Parameter & validation ──
         MOCK_METHOD(nlohmann::json,
                     setParameterValue,
                     (uint32_t, uint32_t, const std::string &, const nlohmann::json &),
                     (override));
-        MOCK_METHOD(nlohmann::json,
-                    createLink,
-                    (uint32_t, uint32_t, const std::string &, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    deleteLink,
-                    (uint32_t, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createFunctionCallNode,
-                    (uint32_t, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createConstantNodesForMissingParameters,
-                    (uint32_t, uint32_t, bool, std::vector<std::string> const &),
-                    (override));
-        MOCK_METHOD(nlohmann::json, removeUnusedNodes, (uint32_t), (override));
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));
 
         // ── Library operations (new) ──

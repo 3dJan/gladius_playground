@@ -180,22 +180,7 @@ namespace gladius::tests
                                   {"resources", nlohmann::json::array()},
                                   {"counts", {}}};
         }
-        nlohmann::json getFunctionGraph(uint32_t functionId) const override
-        {
-            // Minimal mock: return an empty graph with the given id
-            return nlohmann::json{{"model", {{"resource_id", functionId}}},
-                                  {"nodes", nlohmann::json::array()},
-                                  {"links", nlohmann::json::array()},
-                                  {"counts", {{"nodes", 0}, {"links", 0}}}};
-        }
 
-        nlohmann::json setFunctionGraph(uint32_t /*functionId*/,
-                                        const nlohmann::json & /*graph*/,
-                                        bool /*replace*/) override
-        {
-            // Minimal success response with empty id map
-            return nlohmann::json{{"success", true}, {"id_map", nlohmann::json::object()}};
-        }
         std::vector<std::string> listAvailableFunctions() const override
         {
             return {};
@@ -260,23 +245,7 @@ namespace gladius::tests
                                   {"up_vector", {0.0, 0.0, 1.0}}};
         }
 
-        nlohmann::json getNodeInfo(uint32_t functionId, uint32_t nodeId) const override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
-        nlohmann::json createNode(uint32_t functionId,
-                                  const std::string & nodeType,
-                                  const std::string & displayName,
-                                  uint32_t nodeId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json deleteNode(uint32_t functionId, uint32_t nodeId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
         nlohmann::json setParameterValue(uint32_t functionId,
                                          uint32_t nodeId,
@@ -286,42 +255,7 @@ namespace gladius::tests
             return nlohmann::json{{"success", true}};
         }
 
-        nlohmann::json createLink(uint32_t functionId,
-                                  uint32_t sourceNodeId,
-                                  const std::string & sourcePortName,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
-        nlohmann::json deleteLink(uint32_t functionId,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
-                                              uint32_t referencedFunctionId,
-                                              const std::string & displayName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json createConstantNodesForMissingParameters(
-          uint32_t functionId,
-          uint32_t nodeId,
-          bool autoConnect,
-          std::vector<std::string> const & /*excludeParams*/) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json removeUnusedNodes(uint32_t functionId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
         nlohmann::json validateModel(const nlohmann::json & options) override
         {
