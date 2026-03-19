@@ -19,6 +19,7 @@
 #include "Profiling.h"
 #include "ShortcutManager.h"
 #include "Widgets.h"
+#include "OverflowMenuBar.h"
 #include "compute/ComputeCore.h"
 #include "imgui.h"
 #include <nodes/Model.h>
@@ -325,91 +326,123 @@ namespace gladius::ui
 
         if (ImGui::BeginMenuBar())
         {
+            OverflowMenuBar overflow;
+            overflow.begin("RenderWindowBar");
 
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View")))
-            {
-                bool const asyncActive = isAsyncBackendActive();
-                auto const bbox = tryFetchBoundingBox(true);
-                if (bbox.has_value() || asyncActive)
-                {
-                    centerView();
-                }
-            }
+            overflow.item(ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View",
+                          [&]
+                          {
+                              if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                    ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View")))
+                              {
+                                  bool const asyncActive = isAsyncBackendActive();
+                                  auto const bbox = tryFetchBoundingBox(true);
+                                  if (bbox.has_value() || asyncActive)
+                                  {
+                                      centerView();
+                                  }
+                              }
+                          });
 
-            // Toggle for permanent centering
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_CROSSHAIRS "\tPermanent Centering"),
-                  nullptr,
-                  m_permanentCenteringEnabled))
-            {
-                togglePermanentCentering();
-            }
+            overflow.item(ICON_FA_CROSSHAIRS "\tPermanent Centering",
+                          [&]
+                          {
+                              if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                    ICON_FA_CROSSHAIRS "\tPermanent Centering"),
+                                                  nullptr,
+                                                  m_permanentCenteringEnabled))
+                              {
+                                  togglePermanentCentering();
+                              }
 
-            if (ImGui::IsItemHovered())
-            {
-                std::string shortcutText = "No shortcut assigned";
-                if (m_shortcutManager)
-                {
-                    auto shortcut =
-                      m_shortcutManager->getShortcut("camera.togglePermanentCentering");
-                    if (!shortcut.isEmpty())
-                    {
-                        shortcutText = shortcut.toString();
-                    }
-                }
+                              if (ImGui::IsItemHovered())
+                              {
+                                  std::string shortcutText = "No shortcut assigned";
+                                  if (m_shortcutManager)
+                                  {
+                                      auto shortcut = m_shortcutManager->getShortcut(
+                                        "camera.togglePermanentCentering");
+                                      if (!shortcut.isEmpty())
+                                      {
+                                          shortcutText = shortcut.toString();
+                                      }
+                                  }
 
-                ImGui::SetTooltip("Automatically center view when model changes, camera moves, or "
-                                  "viewport resizes\nShortcut: %s",
-                                  shortcutText.c_str());
-            }
+                                  ImGui::SetTooltip(
+                                    "Automatically center view when model changes, camera moves, "
+                                    "or "
+                                    "viewport resizes\nShortcut: %s",
+                                    shortcutText.c_str());
+                              }
+                          });
 
-            toggleButton({reinterpret_cast<const char *>(ICON_FA_ROBOT "\tHQ")},
-                         &m_enableHQRendering);
+            overflow.item(ICON_FA_ROBOT "\tHQ",
+                          [&]
+                          {
+                              toggleButton(
+                                {reinterpret_cast<const char *>(ICON_FA_ROBOT "\tHQ")},
+                                &m_enableHQRendering);
+                          });
 
-            int renderingFlags = m_core->getResourceContext()->getRenderingSettings().flags;
+            overflow.item("Rendering Options",
+                          [&]
+                          {
+                              int renderingFlags =
+                                m_core->getResourceContext()->getRenderingSettings().flags;
 
-            // submenu for rendering flags
-            bool flagsChanged = false;
-            if (ImGui::BeginMenu("..."))
-            {
-                flagsChanged |=
-                  ImGui::CheckboxFlags("Show Build Plate", &renderingFlags, RF_SHOW_BUILDPLATE);
-                flagsChanged |=
-                  ImGui::CheckboxFlags("Cut Off Object", &renderingFlags, RF_CUT_OFF_OBJECT);
-                flagsChanged |= ImGui::CheckboxFlags("Show Field", &renderingFlags, RF_SHOW_FIELD);
-                flagsChanged |= ImGui::CheckboxFlags("Show Stack", &renderingFlags, RF_SHOW_STACK);
-                flagsChanged |= ImGui::CheckboxFlags(
-                  "Show Coordinate System", &renderingFlags, RF_SHOW_COORDINATE_SYSTEM);
+                              bool flagsChanged = false;
+                              if (ImGui::BeginMenu("..."))
+                              {
+                                  flagsChanged |= ImGui::CheckboxFlags(
+                                    "Show Build Plate", &renderingFlags, RF_SHOW_BUILDPLATE);
+                                  flagsChanged |= ImGui::CheckboxFlags(
+                                    "Cut Off Object", &renderingFlags, RF_CUT_OFF_OBJECT);
+                                  flagsChanged |= ImGui::CheckboxFlags(
+                                    "Show Field", &renderingFlags, RF_SHOW_FIELD);
+                                  flagsChanged |= ImGui::CheckboxFlags(
+                                    "Show Stack", &renderingFlags, RF_SHOW_STACK);
+                                  flagsChanged |= ImGui::CheckboxFlags(
+                                    "Show Coordinate System",
+                                    &renderingFlags,
+                                    RF_SHOW_COORDINATE_SYSTEM);
 
-                ImGui::Separator(); // Quality slider
-                float quality = m_core->getResourceContext()->getRenderingSettings().quality;
-                ImGui::SetNextItemWidth(150.f * m_uiScale);
-                bool qualityChanged = ImGui::SliderFloat("Quality", &quality, 0.1f, 2.0f);
+                                  ImGui::Separator();
+                                  float quality =
+                                    m_core->getResourceContext()->getRenderingSettings().quality;
+                                  ImGui::SetNextItemWidth(150.f * m_uiScale);
+                                  bool qualityChanged =
+                                    ImGui::SliderFloat("Quality", &quality, 0.1f, 2.0f);
 
-                if (ImGui::IsItemHovered())
-                {
-                    ImGui::SetTooltip("Rendering quality (0.1 = Fast, 2.0 = Highest Quality)");
-                }
-                if (qualityChanged)
-                {
-                    m_core->getResourceContext()->getRenderingSettings().quality = quality;
-                    m_renderWindowState.renderQuality = quality;
-                    m_renderWindowState.renderQualityWhileMoving = quality * 0.5f;
-                    invalidateView();
-                }
-                m_renderWindowState.renderQuality = quality;
+                                  if (ImGui::IsItemHovered())
+                                  {
+                                      ImGui::SetTooltip(
+                                        "Rendering quality (0.1 = Fast, 2.0 = Highest Quality)");
+                                  }
+                                  if (qualityChanged)
+                                  {
+                                      m_core->getResourceContext()->getRenderingSettings().quality =
+                                        quality;
+                                      m_renderWindowState.renderQuality = quality;
+                                      m_renderWindowState.renderQualityWhileMoving = quality * 0.5f;
+                                      invalidateView();
+                                  }
+                                  m_renderWindowState.renderQuality = quality;
 
-                ImGui::EndMenu();
-            }
+                                  ImGui::EndMenu();
+                              }
 
-            if (flagsChanged)
-            {
-                invalidateView();
-            }
+                              if (flagsChanged)
+                              {
+                                  invalidateView();
+                              }
 
-            m_core->getResourceContext()->getRenderingSettings().flags = renderingFlags;
+                              m_core->getResourceContext()->getRenderingSettings().flags =
+                                renderingFlags;
+                          });
 
+            overflow.end();
+
+            // Status text and slice height control (always visible, right-aligned)
             if (m_core->isAnyCompilationInProgress())
             {
                 ImGui::TextUnformatted("Compilation in progress");

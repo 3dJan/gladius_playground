@@ -31,6 +31,7 @@
 #include "ValidationUtils.h"
 #include "ValidationOverlay.h"
 #include "Widgets.h"
+#include "OverflowMenuBar.h"
 #include "imgui.h"
 #include "nodesfwd.h"
 #include "nodes/IssueList.h"
@@ -1264,39 +1265,300 @@ namespace gladius::ui
 
                 if (ImGui::BeginMenuBar())
                 {
+                    OverflowMenuBar overflow;
+                    overflow.begin("ModelEditorBar");
+
                     // Function extraction refactoring
-                    {
-                        auto selection = selectedNodes(getCurrentEditorContext());
-                        bool canExtract = !selection.empty();
-                        if (!canExtract)
-                        {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                            ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CODE_BRANCH
-                                                                           "\tExtract Function"));
-                            ImGui::PopStyleColor();
-                        }
-                        else
-                        {
-                            if (ImGui::MenuItem(reinterpret_cast<const char *>(
-                                  ICON_FA_CODE_BRANCH "\tExtract Function")))
-                            {
-                                m_showExtractDialog = true;
-                                m_extractFunctionName = "ExtractedFunction";
-                            }
-                        }
-                    }
+                    overflow.item(ICON_FA_CODE_BRANCH "\tExtract Function",
+                                  [&]
+                                  {
+                                      auto selection = selectedNodes(getCurrentEditorContext());
+                                      bool canExtract = !selection.empty();
+                                      if (!canExtract)
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_CODE_BRANCH "\tExtract Function"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_CODE_BRANCH "\tExtract Function")))
+                                          {
+                                              m_showExtractDialog = true;
+                                              m_extractFunctionName = "ExtractedFunction";
+                                          }
+                                      }
+                                  });
 
-                    ImGui::SameLine();
+                    overflow.item("Autolayout",
+                                  [&]
+                                  {
+                                      if (ImGui::MenuItem("Autolayout"))
+                                      {
+                                          autoLayout();
+                                      }
+                                  });
 
-                    if (ImGui::MenuItem("Autolayout"))
-                    {
-                        autoLayout();
-                    }
-                    if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COMPRESS_ARROWS_ALT
-                                                                       "\tCenter View")))
-                    {
-                        ed::NavigateToContent();
-                    }
+                    overflow.item(ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View",
+                                  [&]
+                                  {
+                                      if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View")))
+                                      {
+                                          ed::NavigateToContent();
+                                      }
+                                  });
+
+                    // Block Undo/Redo/Copy/Paste during export
+                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+
+                    overflow.item(ICON_FA_UNDO "\tUndo",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      m_stateApplyingUndo = false;
+                                      if (m_history.canUnDo())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_UNDO "\tUndo")))
+                                          {
+                                              undo();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_UNDO "\tUndo"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_REDO "\tRedo",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      if (m_history.canReDo())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_REDO "\tRedo")))
+                                          {
+                                              redo();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_REDO "\tRedo"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_COPY "\tCopy",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      auto selectionForCopy =
+                                        selectedNodes(getCurrentEditorContext());
+                                      if (selectionForCopy.empty())
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_COPY "\tCopy"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_COPY "\tCopy")))
+                                          {
+                                              copySelectionToClipboard();
+                                          }
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_PASTE "\tPaste",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      if (!hasClipboard())
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_PASTE "\tPaste"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_PASTE "\tPaste")))
+                                          {
+                                              m_pendingPasteRequest = true;
+                                          }
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_ROBOT "\tCompile automatically",
+                                  [&]
+                                  {
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_ROBOT "\tCompile automatically")},
+                                        &m_autoCompile);
+
+                                      if (!m_autoCompile)
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_HAMMER "\tCompile")))
+                                          {
+                                              m_isManualCompileRequested = true;
+                                          }
+                                      }
+
+                                      if (ImGui::IsItemHovered())
+                                      {
+                                          ImGui::BeginTooltip();
+                                          ImGui::TextUnformatted("Compile the model");
+                                          ImGui::Separator();
+                                          ImGui::TextUnformatted(
+                                            "If this option is enabled, the model will be compiled "
+                                            "automatically "
+                                            "when it is modified.\n"
+                                            "If this option is disabled, you have to compile the "
+                                            "model manually.");
+                                          ImGui::EndTooltip();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_BOXES "\tAuto update bounding box",
+                                  [&]
+                                  {
+                                      auto core = m_doc->getCore();
+                                      bool autoUpdateBoundingBox =
+                                        core->isAutoUpdateBoundingBoxEnabled();
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_BOXES "\tAuto update bounding box")},
+                                        &autoUpdateBoundingBox);
+                                      if (ImGui::IsItemHovered())
+                                      {
+                                          ImGui::BeginTooltip();
+                                          ImGui::TextUnformatted("Auto update bounding box");
+                                          ImGui::Separator();
+                                          ImGui::TextUnformatted(
+                                            "If enabled, the bounding box will be updated "
+                                            "automatically when the "
+                                            "model is modified.\n"
+                                            "Deactivate this option to speed up the preview of "
+                                            "parameter changes.");
+                                          ImGui::EndTooltip();
+                                      }
+                                      core->setAutoUpdateBoundingBox(autoUpdateBoundingBox);
+
+                                      if (!autoUpdateBoundingBox)
+                                      {
+                                          if (ImGui::MenuItem("Update bounding box"))
+                                          {
+                                              core->resetBoundingBox();
+                                              core->updateBBox();
+                                              invalidateEverything();
+                                          }
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_DATABASE "\tResource Nodes",
+                                  [&]
+                                  {
+                                      bool showResourceNodes =
+                                        m_nodeViewVisitor.areResourceNodesVisible();
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_DATABASE "\tResource Nodes")},
+                                        &showResourceNodes);
+                                      m_nodeViewVisitor.setResourceNodesVisible(showResourceNodes);
+                                  });
+
+                    overflow.item(ICON_FA_TAGS "\tAdd to Group",
+                                  [&]
+                                  {
+                                      auto selection = selectedNodes(getCurrentEditorContext());
+                                      if (!selection.empty())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_TAGS "\tAdd to Group")))
+                                          {
+                                              m_showGroupAssignmentDialog = true;
+                                          }
+
+                                          if (ImGui::IsItemHovered())
+                                          {
+                                              ImGui::BeginTooltip();
+                                              ImGui::TextUnformatted(
+                                                "Assign selected nodes to a group/tag");
+                                              ImGui::Separator();
+                                              ImGui::TextUnformatted(
+                                                fmt::format("Selected nodes: {}", selection.size())
+                                                  .c_str());
+                                              ImGui::EndTooltip();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_TAGS "\tAdd to Group"));
+                                          ImGui::PopStyleColor();
+
+                                          if (ImGui::IsItemHovered())
+                                          {
+                                              ImGui::BeginTooltip();
+                                              ImGui::TextUnformatted(
+                                                "Select nodes to assign them to a group");
+                                              ImGui::EndTooltip();
+                                          }
+                                      }
+                                  });
+
+                    overflow.end();
+
+                    // Non-rendering logic that must always execute
                     if (m_pendingCenterViewRequest)
                     {
                         if (m_pendingCenterViewFrames > 0)
@@ -1310,188 +1572,17 @@ namespace gladius::ui
                         }
                     }
 
-                    // Block Undo/Redo/Copy/Paste during export
-                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
-                    if (exportLocked)
                     {
-                        ImGui::BeginDisabled();
-                    }
+                        auto core = m_doc->getCore();
+                        bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
+                        auto optimizedNewState = optimized;
 
-                    m_stateApplyingUndo = false;
-                    if (m_history.canUnDo())
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_UNDO "\tUndo")))
+                        if (optimizedNewState != optimized)
                         {
-                            undo();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_UNDO "\tUndo"));
-                        ImGui::PopStyleColor();
-                    }
-
-                    if (m_history.canReDo())
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_REDO "\tRedo")))
-                        {
-                            redo();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_REDO "\tRedo"));
-                        ImGui::PopStyleColor();
-                    }
-
-                    // Copy / Paste
-                    auto selectionForCopy = selectedNodes(getCurrentEditorContext());
-                    if (selectionForCopy.empty())
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COPY "\tCopy"));
-                        ImGui::PopStyleColor();
-                    }
-                    else
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COPY "\tCopy")))
-                        {
-                            copySelectionToClipboard();
-                        }
-                    }
-
-                    if (!hasClipboard())
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_PASTE "\tPaste"));
-                        ImGui::PopStyleColor();
-                    }
-                    else
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_PASTE "\tPaste")))
-                        {
-                            // Defer paste until editor is active
-                            m_pendingPasteRequest = true;
-                        }
-                    }
-
-                    if (exportLocked)
-                    {
-                        ImGui::EndDisabled();
-                    }
-
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_ROBOT "\tCompile automatically")},
-                      &m_autoCompile);
-
-                    if (!m_autoCompile)
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_HAMMER "\tCompile")))
-                        {
-                            m_isManualCompileRequested = true;
-                        }
-                    }
-
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Compile the model");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "If this option is enabled, the model will be compiled automatically "
-                          "when it is modified.\n"
-                          "If this option is disabled, you have to compile the model manually.");
-                        ImGui::EndTooltip();
-                    }
-
-                    auto core = m_doc->getCore();
-                    bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
-                    auto optimizedNewState = optimized;
-
-                    // The command stream is currently not working
-                    // toggleButton(
-                    //   {reinterpret_cast<const char *>(ICON_FA_STOPWATCH "\tJIT optimized")},
-                    //   &optimizedNewState);
-
-                    if (optimizedNewState != optimized)
-                    {
-                        core->setCodeGenerator((optimizedNewState) ? CodeGenerator::Code
-                                                                   : CodeGenerator::CommandStream);
-                        invalidateEverything();
-                    }
-
-                    // automatic update of the bounding box
-                    bool autoUpdateBoundingBox = core->isAutoUpdateBoundingBoxEnabled();
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_BOXES "\tAuto update bounding box")},
-                      &autoUpdateBoundingBox);
-                    // Tooltip for auto update bounding box
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Auto update bounding box");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "If enabled, the bounding box will be updated automatically when the "
-                          "model is modified.\n"
-                          "Deactivate this option to speed up the preview of parameter changes.");
-                        ImGui::EndTooltip();
-                    }
-                    core->setAutoUpdateBoundingBox(autoUpdateBoundingBox);
-
-                    if (!autoUpdateBoundingBox)
-                    {
-                        if (ImGui::MenuItem("Update bounding box"))
-                        {
-                            core->resetBoundingBox();
-                            core->updateBBox();
+                            core->setCodeGenerator((optimizedNewState)
+                                                     ? CodeGenerator::Code
+                                                     : CodeGenerator::CommandStream);
                             invalidateEverything();
-                        }
-                    }
-
-                    bool showResourceNodes = m_nodeViewVisitor.areResourceNodesVisible();
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_DATABASE "\tResource Nodes")},
-                      &showResourceNodes);
-                    m_nodeViewVisitor.setResourceNodesVisible(showResourceNodes);
-
-                    // Add group assignment functionality
-                    auto selection = selectedNodes(getCurrentEditorContext());
-                    if (!selection.empty())
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_TAGS "\tAdd to Group")))
-                        {
-                            // TODO: Implement group assignment
-                            m_showGroupAssignmentDialog = true;
-                        }
-
-                        if (ImGui::IsItemHovered())
-                        {
-                            ImGui::BeginTooltip();
-                            ImGui::TextUnformatted("Assign selected nodes to a group/tag");
-                            ImGui::Separator();
-                            ImGui::TextUnformatted(
-                              fmt::format("Selected nodes: {}", selection.size()).c_str());
-                            ImGui::EndTooltip();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(
-                          reinterpret_cast<const char *>(ICON_FA_TAGS "\tAdd to Group"));
-                        ImGui::PopStyleColor();
-
-                        if (ImGui::IsItemHovered())
-                        {
-                            ImGui::BeginTooltip();
-                            ImGui::TextUnformatted("Select nodes to assign them to a group");
-                            ImGui::EndTooltip();
                         }
                     }
 
