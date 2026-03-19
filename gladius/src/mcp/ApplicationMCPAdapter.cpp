@@ -1435,26 +1435,17 @@ nlohmann::json gladius::ApplicationMCPAdapter::getLibraryEntryInfo(std::string c
     return m_libraryTool->getLibraryEntryInfo(category, name);
 }
 
-nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntry(std::string const & name,
-                                                                   std::string const & category,
-                                                                   std::string const & expression,
-                                                                   std::string const & description,
-                                                                   bool overwrite)
-{
-    return m_libraryTool->createLibraryEntry(name, category, expression, description, overwrite);
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntryFromSnippet(
+nlohmann::json gladius::ApplicationMCPAdapter::createLibraryEntry(
     std::string const & name,
     std::string const & category,
-    std::string const & snippet,
+    std::string const & programSnippet,
+    uint32_t functionId,
     std::string const & description,
-    std::vector<FunctionArgument> const & arguments,
-    std::string const & outputType,
+    std::vector<std::string> const & tags,
     bool overwrite)
 {
-    return m_libraryTool->createLibraryEntryFromSnippet(
-      name, category, snippet, description, arguments, outputType, overwrite);
+    return m_libraryTool->createLibraryEntry(
+      name, category, programSnippet, functionId, description, tags, overwrite);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t functionId,

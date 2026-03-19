@@ -48,36 +48,30 @@ namespace mcp::tools
         nlohmann::json getLibraryEntryInfo(std::string const & category,
                                            std::string const & name) const;
 
-        /// @brief Create a new library entry from a math expression.
-        /// @param name Entry name (used as filename).
-        /// @param category Category subdirectory name.
-        /// @param expression Math expression defining the SDF function.
+        /// @brief Create a library entry from a full program snippet.
+        ///
+        /// The snippet must include a `main` function that demonstrates the
+        /// library function (used for bounding-box validation and thumbnail
+        /// rendering).  The tool creates a fresh document from the template,
+        /// applies the program snippet, validates the bounding box, renders a
+        /// thumbnail, and exports the result with the full scaffold.
+        ///
+        /// @param name        Entry name (used as filename).
+        /// @param category    Category subdirectory name.
+        /// @param programSnippet  Full program listing including main and the
+        ///                        library function (same format as set_program_snippet).
+        /// @param functionId  Resource ID of the function to tag as the library function.
         /// @param description Human-readable description.
-        /// @param overwrite If true, replace existing entry.
-        /// @return JSON with creation result including path and function ID.
+        /// @param tags        Optional keyword tags for searchability.
+        /// @param overwrite   If true, replace an existing entry.
+        /// @return JSON with creation result including path, function ID and message.
         nlohmann::json createLibraryEntry(std::string const & name,
                                           std::string const & category,
-                                          std::string const & expression,
+                                          std::string const & programSnippet,
+                                          uint32_t functionId,
                                           std::string const & description,
+                                          std::vector<std::string> const & tags = {},
                                           bool overwrite = false);
-
-        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
-        /// @param name Entry name (used as filename).
-        /// @param category Category subdirectory name.
-        /// @param snippet Multi-line GLSL-like snippet defining the SDF function.
-        /// @param description Human-readable description.
-        /// @param arguments Custom function arguments (name + type pairs).
-        /// @param outputType Output type: "float" (default) or "vec3".
-        /// @param overwrite If true, replace existing entry.
-        /// @return JSON with creation result including path and function ID.
-        nlohmann::json createLibraryEntryFromSnippet(
-            std::string const & name,
-            std::string const & category,
-            std::string const & snippet,
-            std::string const & description,
-            std::vector<FunctionArgument> const & arguments,
-            std::string const & outputType = "float",
-            bool overwrite = false);
 
         /// @brief Export a function from the active document to the library.
         /// @param functionId ModelResourceID of the function to export.

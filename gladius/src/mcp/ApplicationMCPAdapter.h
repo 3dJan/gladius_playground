@@ -289,17 +289,11 @@ namespace gladius
                                            std::string const & name) const override;
         nlohmann::json createLibraryEntry(std::string const & name,
                                           std::string const & category,
-                                          std::string const & expression,
+                                          std::string const & programSnippet,
+                                          uint32_t functionId,
                                           std::string const & description,
+                                          std::vector<std::string> const & tags = {},
                                           bool overwrite = false) override;
-        nlohmann::json
-        createLibraryEntryFromSnippet(std::string const & name,
-                                      std::string const & category,
-                                      std::string const & snippet,
-                                      std::string const & description,
-                                      std::vector<FunctionArgument> const & arguments,
-                                      std::string const & outputType = "float",
-                                      bool overwrite = false) override;
         nlohmann::json exportToLibrary(uint32_t functionId,
                                        std::string const & category,
                                        std::string const & name,

@@ -504,28 +504,14 @@ namespace gladius
         virtual nlohmann::json getLibraryEntryInfo(std::string const & category,
                                                    std::string const & name) const = 0;
 
-        /// @brief Create a new library entry from a math expression.
-        /// @param name Entry name (used as filename).
-        /// @param category Category subdirectory name.
-        /// @param expression Math expression defining the SDF function.
-        /// @param description Human-readable description.
-        /// @param overwrite If true, replace an existing entry with the same name.
-        /// @return JSON with creation result including path and function ID.
+        /// @brief Create a library entry from a full program snippet with quality gate.
         virtual nlohmann::json createLibraryEntry(std::string const & name,
                                                   std::string const & category,
-                                                  std::string const & expression,
+                                                  std::string const & programSnippet,
+                                                  uint32_t functionId,
                                                   std::string const & description,
+                                                  std::vector<std::string> const & tags = {},
                                                   bool overwrite = false) = 0;
-
-        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
-        virtual nlohmann::json
-        createLibraryEntryFromSnippet(std::string const & name,
-                                      std::string const & category,
-                                      std::string const & snippet,
-                                      std::string const & description,
-                                      std::vector<FunctionArgument> const & arguments,
-                                      std::string const & outputType = "float",
-                                      bool overwrite = false) = 0;
 
         /// @brief Export a function from the active document to the library.
         /// @param functionId ModelResourceID of the function to export.

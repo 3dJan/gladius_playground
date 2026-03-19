@@ -341,20 +341,11 @@ namespace gladius::tests
         }
         nlohmann::json createLibraryEntry(std::string const & /*name*/,
                                           std::string const & /*category*/,
-                                          std::string const & /*expression*/,
+                                          std::string const & /*programSnippet*/,
+                                          uint32_t /*functionId*/,
                                           std::string const & /*description*/,
+                                          std::vector<std::string> const & /*tags*/,
                                           bool /*overwrite*/) override
-        {
-            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
-        }
-        nlohmann::json
-        createLibraryEntryFromSnippet(std::string const & /*name*/,
-                                      std::string const & /*category*/,
-                                      std::string const & /*snippet*/,
-                                      std::string const & /*description*/,
-                                      std::vector<FunctionArgument> const & /*arguments*/,
-                                      std::string const & /*outputType*/,
-                                      bool /*overwrite*/) override
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }

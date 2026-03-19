@@ -5,6 +5,9 @@
 
 #include "LibraryTool.h"
 
+#include "DocumentLifecycleTool.h"
+#include "FunctionOperationsTool.h"
+
 #include "../../Application.h"
 #include "../../Document.h"
 #include "../../ExpressionParser.h"
@@ -515,54 +518,27 @@ namespace gladius::mcp::tools
         }
     }
 
-    nlohmann::json LibraryTool::createLibraryEntry(std::string const & name,
-                                                    std::string const & category,
-                                                    std::string const & expression,
-                                                    std::string const & description,
-                                                    bool overwrite)
-    {
-        // Legacy path: auto-detect x,y,z and transform to pos.x, pos.y, pos.z
-        ExpressionParser parser;
-        std::vector<FunctionArgument> arguments;
-        std::string snippet = expression;
-
-        if (parser.parseExpression(expression))
-        {
-            auto variables = parser.getVariables();
-            bool usesXYZ = std::any_of(variables.begin(), variables.end(),
-                                       [](auto const & v)
-                                       { return v == "x" || v == "y" || v == "z"; });
-            if (usesXYZ)
-            {
-                arguments.emplace_back("pos", ArgumentType::Vector);
-                snippet = transformVariablesToComponentAccess(expression);
-            }
-        }
-
-        return createLibraryEntryFromSnippet(
-          name, category, snippet, description, arguments, "float", overwrite);
-    }
-
-    nlohmann::json LibraryTool::createLibraryEntryFromSnippet(
+    nlohmann::json LibraryTool::createLibraryEntry(
         std::string const & name,
         std::string const & category,
-        std::string const & snippet,
+        std::string const & programSnippet,
+        uint32_t functionId,
         std::string const & description,
-        std::vector<FunctionArgument> const & arguments,
-        std::string const & outputType,
+        std::vector<std::string> const & tags,
         bool overwrite)
     {
-        if (name.empty() || category.empty() || snippet.empty())
+        if (name.empty() || category.empty() || programSnippet.empty())
         {
             return createToolError(
-              "Name, category, and snippet are required",
-              {{"name", "spur-gear"},
+              "name, category, and program_snippet are required",
+              {{"name", "helix-spring"},
                {"category", "mechanical"},
-               {"snippet", "float r = sqrt(pos.x*pos.x + pos.y*pos.y);\nreturn r - radius;"},
-               {"arguments",
-                {{{"name", "pos"}, {"type", "vec3"}},
-                 {{"name", "radius"}, {"type", "float"}}}},
-               {"description", "Example parametric shape"}});
+               {"function_id", 1},
+               {"program_snippet",
+                "// Function: helix_spring (ID: 1)\nfloat helix_spring_1(vec3 pos) {...}\n\n"
+                "// Function: main (ID: 3) [root]\nfloat main_3(vec3 pos) {\n"
+                "  return helix_spring_1(pos);\n}"},
+               {"description", "A parametric helix spring"}});
         }
 
         auto const targetPath = getUserLibraryDir() / category / (name + ".3mf");
@@ -576,57 +552,157 @@ namespace gladius::mcp::tools
 
         try
         {
+            // Step 1: Create a fresh document from template
+            DocumentLifecycleTool docTool(m_application);
+            if (!docTool.createNewDocument())
+            {
+                return createToolError("Failed to create document from template");
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                return createToolError("Failed to access newly created document");
+            }
+
+            // Step 2: Apply the full program snippet (includes main + library function)
+            auto assembly = document->getAssembly();
+            if (!assembly)
+            {
+                return createToolError("No assembly available in document");
+            }
+
             ExpressionParser parser;
+            ExpressionToGraphConverter::setProgramSnippet(programSnippet, *assembly, parser);
 
-            FunctionOutput output;
-            output.name = "shape";
-            output.type =
-              (outputType == "vec3" || outputType == "vector" || outputType == "float3")
-                ? ArgumentType::Vector
-                : ArgumentType::Scalar;
+            // Sync changes to 3MF model
+            document->update3mfModel();
+            document->rebuildResourceDependencyGraph();
 
-            nodes::Model tempModel;
-            tempModel.setDisplayName(name);
-            tempModel.createBeginEnd();
-
-            auto resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-              snippet, tempModel, parser, arguments, output);
-
-            if (resultNodeId == 0)
+            // Step 3: Verify the tagged function exists
+            auto sourceModel = document->get3mfModel();
+            if (!sourceModel)
             {
-                return createToolError("Failed to convert snippet to node graph");
+                return createToolError("Failed to access 3MF model");
             }
 
+            bool functionFound = false;
+            auto funcIter = sourceModel->GetFunctions();
+            while (funcIter->MoveNext())
+            {
+                if (funcIter->GetCurrentFunction()->GetModelResourceID() == functionId)
+                {
+                    functionFound = true;
+                    break;
+                }
+            }
+
+            if (!functionFound)
+            {
+                auto availableIds = nlohmann::json::array();
+                auto iter2 = sourceModel->GetFunctions();
+                while (iter2->MoveNext())
+                {
+                    auto func = iter2->GetCurrentFunction();
+                    availableIds.push_back(
+                      {{"resource_id", func->GetModelResourceID()},
+                       {"name", func->GetDisplayName()}});
+                }
+                return createToolError(
+                  fmt::format("Function with resource ID {} not found in document. "
+                              "Check your program_snippet function IDs.", functionId),
+                  {{"function_id", 1},
+                   {"category", category},
+                   {"name", name}},
+                  {{"available_functions", availableIds}});
+            }
+
+            // Step 4: Validate bounding box
+            try
+            {
+                auto bbox = document->computeBoundingBox();
+                bool const isDegenerate =
+                  std::isnan(bbox.min.x) || std::isnan(bbox.min.y) || std::isnan(bbox.min.z)
+                  || std::isnan(bbox.max.x) || std::isnan(bbox.max.y) || std::isnan(bbox.max.z)
+                  || (bbox.max.x - bbox.min.x <= 0.f)
+                  || (bbox.max.y - bbox.min.y <= 0.f)
+                  || (bbox.max.z - bbox.min.z <= 0.f);
+                if (isDegenerate)
+                {
+                    return {{"success", false},
+                            {"reason", "invalid_bounding_box"},
+                            {"message",
+                             "The main function produces a degenerate or zero-volume bounding box. "
+                             "Verify that main calls the library function with valid demo parameters "
+                             "and produces a visible surface."}};
+                }
+            }
+            catch (std::exception const & e)
+            {
+                return {{"success", false},
+                        {"reason", "invalid_bounding_box"},
+                        {"message",
+                         fmt::format("Failed to compute bounding box: {}", e.what())}};
+            }
+
+            // Step 5: Render thumbnail
+            std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
+            if (thumbnailPng.empty())
+            {
+                return {{"success", false},
+                        {"reason", "thumbnail_render_failed"},
+                        {"message",
+                         "Failed to render thumbnail. The main function may not produce "
+                         "a visible surface, or the GPU pipeline is unavailable."}};
+            }
+
+            // Step 6: Write model to library with scaffold and metadata
             fs::create_directories(targetPath.parent_path());
-
-            // Write to temp path first for atomic creation
-            auto const tempPath = targetPath.string() + ".tmp";
-            io::saveFunctionTo3mfFile(tempPath, tempModel);
-
-            auto model3mf = openStandaloneModel(tempPath);
-
-            auto funcIter = model3mf->GetFunctions();
-            Lib3MF_uint32 funcModelResId = 0;
-            if (funcIter->MoveNext())
             {
-                funcModelResId = funcIter->GetCurrentFunction()->GetModelResourceID();
+                auto writer = sourceModel->QueryWriter("3mf");
+                writer->WriteToFile(targetPath.string());
             }
 
-            io::LibraryMetadata metadata;
-            metadata.libraryFunctions = io::serializeResourceIds({funcModelResId});
-            metadata.libraryDescription = description;
-            io::writeLibraryMetadata(model3mf, metadata);
+            // Stamp library metadata and thumbnail on the standalone copy
+            {
+                auto exportedModel = openStandaloneModel(targetPath);
 
-            auto writer = model3mf->QueryWriter("3mf");
-            writer->WriteToFile(tempPath);
+                io::LibraryMetadata metadata;
+                metadata.libraryFunctions =
+                  io::serializeResourceIds({static_cast<Lib3MF_uint32>(functionId)});
+                metadata.libraryDescription = description;
+                if (!tags.empty())
+                {
+                    std::string tagStr;
+                    for (size_t i = 0; i < tags.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            tagStr += ",";
+                        }
+                        tagStr += tags[i];
+                    }
+                    metadata.libraryTags = tagStr;
+                }
+                io::writeLibraryMetadata(exportedModel, metadata);
 
-            // Atomic rename from temp to target.
-            // The temp file is in the same directory (targetPath + ".tmp"), so
-            // rename() will not fail with EXDEV on POSIX.
-            fs::rename(tempPath, targetPath);
+                if (!thumbnailPng.empty())
+                {
+                    if (exportedModel->HasPackageThumbnailAttachment())
+                    {
+                        exportedModel->RemovePackageThumbnailAttachment();
+                    }
+                    auto thumb = exportedModel->CreatePackageThumbnailAttachment();
+                    thumb->ReadFromBuffer(thumbnailPng);
+                }
 
-            std::string msg =
-              fmt::format("Created library entry '{}' in category '{}'", name, category);
+                auto writer = exportedModel->QueryWriter("3mf");
+                writer->WriteToFile(targetPath.string());
+            }
+
+            auto msg = fmt::format(
+              "Created library entry '{}' in category '{}' (with scaffold and thumbnail)",
+              name, category);
             if (overwrite)
             {
                 msg += " (overwritten)";
@@ -636,14 +712,13 @@ namespace gladius::mcp::tools
                     {"path", targetPath.string()},
                     {"name", name},
                     {"category", category},
-                    {"function_id", funcModelResId},
+                    {"function_id", functionId},
                     {"message", msg}};
         }
         catch (std::exception const & e)
         {
             std::error_code ec;
             fs::remove(targetPath, ec);
-            fs::remove(targetPath.string() + ".tmp", ec);
             return createToolError(
               fmt::format("Failed to create library entry: {}", e.what()));
         }

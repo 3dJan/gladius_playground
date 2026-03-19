@@ -1829,15 +1829,12 @@ namespace gladius::mcp
         // CREATE LIBRARY ENTRY
         registerTool(
           "create_library_entry",
-          "Create a new library entry from a GLSL-like snippet (or simple expression). "
-          "Either 'snippet' or 'expression' (deprecated, single-line) must be provided. "
-          "Creates a 3MF file with the specified function, library metadata, and saves "
-          "it to the user library directory. The 'snippet' field accepts multi-line code "
-          "with float assignments, if/else, and return statements. For backward "
-          "compatibility, 'expression' is also accepted (single-line, x/y/z auto-"
-          "detected). Supported: operators + - * /; functions sin, cos, tan, acos, "
-          "asin, atan, atan2, sqrt, abs, exp, log, pow, mod, min, max, clamp, mix, "
-          "step, smoothstep, length, dot, cross, normalize; constants pi, e.",
+          "Create a new library entry with quality validation. Requires a full program "
+          "snippet (same format as set_program_snippet) that includes a main function "
+          "demonstrating the library function. The tool creates a document from the "
+          "template, applies the program, validates the bounding box, renders a "
+          "thumbnail, and exports the entry with the full scaffold. This ensures every "
+          "library entry has a working demo, a valid bounding box, and a thumbnail.",
           {{"type", "object"},
            {"properties",
             {{"name",
@@ -1849,44 +1846,39 @@ namespace gladius::mcp
               {{"type", "string"},
                {"description",
                 "Library category (subdirectory name, created if needed)"}}},
-             {"snippet",
+             {"program_snippet",
               {{"type", "string"},
                {"description",
-                "GLSL-like code defining the SDF function. Supports multi-line "
-                "assignments (float x = expr;), if/else, and return. Example: "
-                "'float r = length(pos);\nreturn r - radius;'"}}},
-             {"expression",
-              {{"type", "string"},
+                "Full program listing in set_program_snippet format. MUST include "
+                "the library function AND a main function that demonstrates it. "
+                "Example:\n"
+                "// Function: my_shape (ID: 1)\n"
+                "float my_shape_1(vec3 pos, float radius) {\n"
+                "  return length(pos) - radius;\n"
+                "}\n\n"
+                "// Function: main (ID: 3) [root]\n"
+                "float main_3(vec3 pos) {\n"
+                "  return my_shape_1(pos, 10.0);\n"
+                "}"}}},
+             {"function_id",
+              {{"type", "integer"},
                {"description",
-                "Deprecated: use 'snippet' instead. Single-line math expression "
-                "with x,y,z auto-detection. Example: 'sqrt(x*x+y*y+z*z)-5'"}}},
-             {"arguments",
-              {{"type", "array"},
-               {"description",
-                "Function input arguments. Each has 'name' and 'type' "
-                "(float or vec3). If omitted and snippet uses pos.x/pos.y/pos.z, "
-                "a pos:vec3 argument is auto-inferred."},
-               {"items",
-                {{"type", "object"},
-                 {"properties",
-                  {{"name", {{"type", "string"}}},
-                   {"type",
-                    {{"type", "string"},
-                     {"enum", {"float", "vec3"}}}}}}}}}},
-             {"output_type",
-              {{"type", "string"},
-               {"description", "Output type: 'float' (default) or 'vec3'."},
-               {"default", "float"}}},
+                "Resource ID of the function to tag as the library function "
+                "(not main). This is the function that will be importable."}}},
              {"description",
               {{"type", "string"},
-               {"description", "Human-readable description of the function"}}},
+               {"description", "Human-readable description of the library function"}}},
+             {"tags",
+              {{"type", "array"},
+               {"description", "Optional keyword tags for searchability"},
+               {"items", {{"type", "string"}}}}},
              {"overwrite",
               {{"type", "boolean"},
                {"description",
                 "If true, overwrite an existing entry with the same name. "
                 "Default: false."},
                {"default", false}}}}},
-           {"required", {"name", "category", "description"}}},
+           {"required", {"name", "category", "program_snippet", "function_id", "description"}}},
           [this](const json & params) -> json
           {
               if (!m_application)
@@ -1895,20 +1887,13 @@ namespace gladius::mcp
               }
 
               auto missing = std::vector<std::string>{};
-              for (auto const & key : {"name", "category", "description"})
+              for (auto const & key :
+                   {"name", "category", "program_snippet", "function_id", "description"})
               {
                   if (!params.contains(key))
                   {
                       missing.emplace_back(key);
                   }
-              }
-
-              bool hasSnippet = params.contains("snippet");
-              bool hasExpression = params.contains("expression");
-
-              if (!hasSnippet && !hasExpression)
-              {
-                  missing.emplace_back("snippet");
               }
 
               if (!missing.empty())
@@ -1925,49 +1910,39 @@ namespace gladius::mcp
                   return {{"success", false},
                           {"error", "Missing required parameters: " + missingList},
                           {"usage_example",
-                           {{"name", "spur-gear"},
-                            {"category", "mechanical"},
-                            {"snippet",
-                             "float r = length(pos);\nreturn r - radius;"},
-                            {"arguments",
-                             {{{"name", "pos"}, {"type", "vec3"}},
-                              {{"name", "radius"}, {"type", "float"}}}},
-                            {"description", "Sphere with given radius"}}}};
+                           {{"name", "my-shape"},
+                            {"category", "primitives"},
+                            {"program_snippet",
+                             "// Function: my_shape (ID: 1)\n"
+                             "float my_shape_1(vec3 pos, float radius) {\n"
+                             "  return length(pos) - radius;\n"
+                             "}\n\n"
+                             "// Function: main (ID: 3) [root]\n"
+                             "float main_3(vec3 pos) {\n"
+                             "  return my_shape_1(pos, 10.0);\n"
+                             "}"},
+                            {"function_id", 1},
+                            {"description", "A parametric sphere"}}}};
               }
 
               std::string name = params["name"];
               std::string category = params["category"];
+              std::string programSnippet = params["program_snippet"];
+              uint32_t functionId = params["function_id"].get<uint32_t>();
               std::string description = params["description"];
               bool overwrite = params.value("overwrite", false);
 
-              // 'expression' is a legacy alias: auto-detects x,y,z → pos
-              if (hasExpression && !hasSnippet)
+              std::vector<std::string> tags;
+              if (params.contains("tags") && params["tags"].is_array())
               {
-                  std::string expression = params["expression"];
-                  return m_application->createLibraryEntry(
-                    name, category, expression, description, overwrite);
-              }
-
-              std::string snippet = params["snippet"];
-              std::string outputType = params.value("output_type", "float");
-
-              std::vector<FunctionArgument> arguments;
-              if (params.contains("arguments") && params["arguments"].is_array())
-              {
-                  for (auto const & argJson : params["arguments"])
+                  for (auto const & t : params["tags"])
                   {
-                      std::string argName = argJson["name"];
-                      std::string argType = argJson["type"];
-                      ArgumentType type =
-                        (argType == "float" || argType == "scalar")
-                          ? ArgumentType::Scalar
-                          : ArgumentType::Vector;
-                      arguments.emplace_back(argName, type);
+                      tags.push_back(t.get<std::string>());
                   }
               }
 
-              return m_application->createLibraryEntryFromSnippet(
-                name, category, snippet, description, arguments, outputType, overwrite);
+              return m_application->createLibraryEntry(
+                name, category, programSnippet, functionId, description, tags, overwrite);
           });
 
         // EXPORT TO LIBRARY

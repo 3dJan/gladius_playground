@@ -193,17 +193,9 @@ namespace gladius::tests
                     (std::string const &,
                      std::string const &,
                      std::string const &,
+                     uint32_t,
                      std::string const &,
-                     bool),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createLibraryEntryFromSnippet,
-                    (std::string const &,
-                     std::string const &,
-                     std::string const &,
-                     std::string const &,
-                     std::vector<FunctionArgument> const &,
-                     std::string const &,
+                     std::vector<std::string> const &,
                      bool),
                     (override));
         MOCK_METHOD(nlohmann::json,
@@ -482,25 +474,36 @@ namespace gladius::tests
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Phase 5: US2 Create — create_library_entry
+    // Phase 5: US2 Create — create_library_entry (program snippet + quality gate)
     // ────────────────────────────────────────────────────────────────
 
-    TEST_F(MCPLibraryToolTest, CreateLibraryEntry_ValidExpression_CreatesFileWithMetadata)
+    TEST_F(MCPLibraryToolTest, CreateLibraryEntry_ValidProgram_CreatesFileWithMetadata)
     {
         // Arrange
+        std::string program =
+          "// Function: my_sphere (ID: 1)\n"
+          "float my_sphere_1(vec3 pos, float radius) {\n"
+          "  return length(pos) - radius;\n"
+          "}\n\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return my_sphere_1(pos, 10.0);\n"
+          "}";
         json mockResult = {
           {"success", true},
           {"path", "/home/user/.local/share/gladius/library/primitives/my-sphere.3mf"},
           {"name", "my-sphere"},
           {"category", "primitives"},
           {"function_id", 1},
-          {"message", "Created library entry 'my-sphere' in category 'primitives'"}
+          {"message", "Created library entry 'my-sphere' in category 'primitives' (with scaffold and thumbnail)"}
         };
         EXPECT_CALL(*m_mockApp,
                     createLibraryEntry(std::string("my-sphere"),
                                        std::string("primitives"),
-                                       std::string("sqrt(x*x + y*y + z*z) - 5"),
+                                       program,
+                                       uint32_t(1),
                                        std::string("Sphere with radius 5"),
+                                       std::vector<std::string>{},
                                        false))
           .WillOnce(::testing::Return(mockResult));
 
@@ -508,7 +511,8 @@ namespace gladius::tests
         auto result = callTool("create_library_entry",
                                {{"name", "my-sphere"},
                                 {"category", "primitives"},
-                                {"expression", "sqrt(x*x + y*y + z*z) - 5"},
+                                {"program_snippet", program},
+                                {"function_id", 1},
                                 {"description", "Sphere with radius 5"}});
 
         // Assert
@@ -518,46 +522,6 @@ namespace gladius::tests
         EXPECT_TRUE(result.contains("path"));
         EXPECT_TRUE(result.contains("function_id"));
         EXPECT_TRUE(result.contains("message"));
-    }
-
-    TEST_F(MCPLibraryToolTest, CreateLibraryEntry_InvalidExpression_ReturnsErrorWithSyntaxHelp)
-    {
-        // Arrange
-        json mockResult = {
-          {"success", false},
-          {"error", "Expression parsing failed: unexpected token '@@'"},
-          {"supported_syntax", {
-            {"variables", "x, y, z"},
-            {"operators", "+, -, *, /"},
-            {"functions", "sin, cos, sqrt, abs, min, max, pow"}
-          }},
-          {"usage_example", {
-            {"name", "my-sphere"},
-            {"category", "primitives"},
-            {"expression", "sqrt(x*x + y*y + z*z) - 5"},
-            {"description", "Sphere with radius 5"}
-          }}
-        };
-        EXPECT_CALL(*m_mockApp,
-                    createLibraryEntry(std::string("bad-func"),
-                                       std::string("primitives"),
-                                       std::string("@@invalid@@"),
-                                       std::string("Bad function"),
-                                       false))
-          .WillOnce(::testing::Return(mockResult));
-
-        // Act
-        auto result = callTool("create_library_entry",
-                               {{"name", "bad-func"},
-                                {"category", "primitives"},
-                                {"expression", "@@invalid@@"},
-                                {"description", "Bad function"}});
-
-        // Assert
-        EXPECT_FALSE(result["success"].get<bool>());
-        EXPECT_TRUE(result.contains("error"));
-        EXPECT_TRUE(result.contains("supported_syntax"));
-        EXPECT_TRUE(result.contains("usage_example"));
     }
 
     TEST_F(MCPLibraryToolTest, CreateLibraryEntry_MissingParams_ReturnsErrorWithUsageExample)
@@ -574,6 +538,11 @@ namespace gladius::tests
     TEST_F(MCPLibraryToolTest, CreateLibraryEntry_ExistingFile_ReturnsConflictError)
     {
         // Arrange
+        std::string program =
+          "// Function: sphere (ID: 1)\n"
+          "float sphere_1(vec3 pos) { return length(pos) - 1.0; }\n\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) { return sphere_1(pos); }";
         json mockResult = {
           {"success", false},
           {"error", "Library entry 'sphere' already exists in category 'primitives'"},
@@ -586,8 +555,10 @@ namespace gladius::tests
         EXPECT_CALL(*m_mockApp,
                     createLibraryEntry(std::string("sphere"),
                                        std::string("primitives"),
-                                       std::string("sqrt(x*x + y*y + z*z) - 1"),
+                                       program,
+                                       uint32_t(1),
                                        std::string("Unit sphere"),
+                                       std::vector<std::string>{},
                                        false))
           .WillOnce(::testing::Return(mockResult));
 
@@ -595,7 +566,8 @@ namespace gladius::tests
         auto result = callTool("create_library_entry",
                                {{"name", "sphere"},
                                 {"category", "primitives"},
-                                {"expression", "sqrt(x*x + y*y + z*z) - 1"},
+                                {"program_snippet", program},
+                                {"function_id", 1},
                                 {"description", "Unit sphere"}});
 
         // Assert
@@ -607,19 +579,26 @@ namespace gladius::tests
     TEST_F(MCPLibraryToolTest, CreateLibraryEntry_OverwriteTrue_ReplacesExistingFile)
     {
         // Arrange
+        std::string program =
+          "// Function: sphere (ID: 1)\n"
+          "float sphere_1(vec3 pos) { return length(pos) - 1.0; }\n\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) { return sphere_1(pos); }";
         json mockResult = {
           {"success", true},
           {"path", "/home/user/.local/share/gladius/library/primitives/sphere.3mf"},
           {"name", "sphere"},
           {"category", "primitives"},
           {"function_id", 1},
-          {"message", "Created library entry 'sphere' in category 'primitives' (overwritten)"}
+          {"message", "Created library entry 'sphere' in category 'primitives' (with scaffold and thumbnail) (overwritten)"}
         };
         EXPECT_CALL(*m_mockApp,
                     createLibraryEntry(std::string("sphere"),
                                        std::string("primitives"),
-                                       std::string("sqrt(x*x + y*y + z*z) - 1"),
+                                       program,
+                                       uint32_t(1),
                                        std::string("Unit sphere"),
+                                       std::vector<std::string>{},
                                        true))
           .WillOnce(::testing::Return(mockResult));
 
@@ -627,7 +606,8 @@ namespace gladius::tests
         auto result = callTool("create_library_entry",
                                {{"name", "sphere"},
                                 {"category", "primitives"},
-                                {"expression", "sqrt(x*x + y*y + z*z) - 1"},
+                                {"program_snippet", program},
+                                {"function_id", 1},
                                 {"description", "Unit sphere"},
                                 {"overwrite", true}});
 
