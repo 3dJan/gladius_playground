@@ -40,19 +40,39 @@ namespace gladius::ui
         {
             auto drawModeButton = [](char const * label, bool selected)
             {
+                ImVec4 const frameBg = ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+                ImVec4 const textCol = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                ImVec4 const dimText = ImVec4(textCol.x, textCol.y, textCol.z, 0.45f);
+
                 if (selected)
                 {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_TabHovered));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+                    // Subtle highlighted state: slightly lighter frame
+                    ImVec4 active = ImVec4(
+                      std::min(frameBg.x + 0.15f, 1.f),
+                      std::min(frameBg.y + 0.15f, 1.f),
+                      std::min(frameBg.z + 0.15f, 1.f),
+                      frameBg.w);
+                    ImGui::PushStyleColor(ImGuiCol_Button, active);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active);
+                    ImGui::PushStyleColor(ImGuiCol_Text, textCol);
+                }
+                else
+                {
+                    // Dim inactive state: transparent background
+                    ImVec4 inactive = ImVec4(frameBg.x, frameBg.y, frameBg.z, 0.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, inactive);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                          ImVec4(frameBg.x + 0.08f, frameBg.y + 0.08f,
+                                                 frameBg.z + 0.08f, 0.6f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, inactive);
+                    ImGui::PushStyleColor(ImGuiCol_Text, dimText);
                 }
 
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
                 bool const pressed = ImGui::Button(label);
-
-                if (selected)
-                {
-                    ImGui::PopStyleColor(3);
-                }
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
 
                 return pressed;
             };
@@ -65,7 +85,7 @@ namespace gladius::ui
                 modeChanged = true;
             }
 
-            ImGui::SameLine();
+            ImGui::SameLine(0, 2.f);
 
             if (drawModeButton("RGB", showAsColor))
             {
@@ -1910,32 +1930,23 @@ namespace gladius::ui
 
             float const indent = 20.f * m_uiScale;
             ImGui::Indent(indent);
-            ImGui::PushItemWidth(300 * m_uiScale);
 
             bool changed = false;
 
             if (showAsColor)
             {
-                // Pack into contiguous array for ColorEdit3
-                float vec[3] = {*xVal, *yVal, *zVal};
-                changed = ImGui::ColorEdit3(
-                  "",
-                  vec,
-                  ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_NoPicker |
-                    ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_Float);
+                // ── Color swatch (clickable → opens picker) ──────────
+                float const swatchSize = 28.f * m_uiScale;
+                ImVec4 const col = ImVec4(*xVal, *yVal, *zVal, 1.f);
 
-                if (changed)
-                {
-                    *xVal = vec[0];
-                    *yVal = vec[1];
-                    *zVal = vec[2];
-                }
-
-                // "Pick…" button opens a full color picker via deferred popup
-                ImGui::SameLine();
-                auto const pickBtnLabel =
-                  fmt::format("{}##pick_{}", reinterpret_cast<char const *>(ICON_FA_EYE_DROPPER), paramId);
-                if (ImGui::SmallButton(pickBtnLabel.c_str()))
+                // Draw a rounded color button as the preview swatch
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
+                auto const swatchLabel =
+                  fmt::format("##swatch_{}", paramId);
+                if (ImGui::ColorButton(swatchLabel.c_str(), col,
+                                       ImGuiColorEditFlags_NoBorder |
+                                         ImGuiColorEditFlags_NoTooltip,
+                                       ImVec2(swatchSize * 4.f, swatchSize)))
                 {
                     m_showContextMenu = true;
                     auto popupName = fmt::format("ColorPicker_{}", paramId);
@@ -1967,17 +1978,55 @@ namespace gladius::ui
                           }
                       });
                 }
+                ImGui::PopStyleVar();
                 if (ImGui::IsItemHovered())
                 {
-                    ImGui::SetTooltip("Open color picker");
+                    ImGui::SetTooltip("Click to open color picker");
                 }
+
+                // Draw a thin outline around the swatch for contrast
+                {
+                    ImVec2 const rMin = ImGui::GetItemRectMin();
+                    ImVec2 const rMax = ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddRect(
+                      rMin, rMax,
+                      IM_COL32(255, 255, 255, 40), 6.f, 0, 1.f);
+                }
+
+                // ── Stacked R / G / B sliders ────────────────────────
+                float const sliderW = swatchSize * 4.f;
+                ImGui::PushItemWidth(sliderW);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+
+                // R
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.25f, 0.05f, 0.05f, 0.6f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.9f, 0.2f, 0.2f, 0.9f));
+                changed |= ImGui::DragFloat("R", xVal, 0.005f, 0.f, 1.f, "%.3f");
+                ImGui::PopStyleColor(2);
+
+                // G
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.25f, 0.05f, 0.6f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.2f, 0.9f, 0.2f, 0.9f));
+                changed |= ImGui::DragFloat("G", yVal, 0.005f, 0.f, 1.f, "%.3f");
+                ImGui::PopStyleColor(2);
+
+                // B
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.05f, 0.25f, 0.6f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.2f, 0.2f, 0.9f, 0.9f));
+                changed |= ImGui::DragFloat("B", zVal, 0.005f, 0.f, 1.f, "%.3f");
+                ImGui::PopStyleColor(2);
+
+                ImGui::PopStyleVar();
+                ImGui::PopItemWidth();
             }
             else
             {
+                ImGui::PushItemWidth(140 * m_uiScale);
                 auto const ct = itX->second.getContentType();
                 changed |= ui::adaptiveDragFloat("x", xVal, ct);
                 changed |= ui::adaptiveDragFloat("y", yVal, ct);
                 changed |= ui::adaptiveDragFloat("z", zVal, ct);
+                ImGui::PopItemWidth();
             }
 
             if (changed)
@@ -1992,8 +2041,7 @@ namespace gladius::ui
                 m_parameterChanged = true;
             }
 
-            ImGui::PopItemWidth();
-            float const desiredW = std::max(std::ceil(ImGui::GetItemRectSize().x), ImGui::CalcItemWidth());
+            float const desiredW = std::max(std::ceil(ImGui::GetItemRectSize().x), 140.f * m_uiScale);
             columnWidths[0] = std::max(columnWidths[0], desiredW + indent);
             ImGui::Indent(-indent);
             ImGui::PopID(); // paramId

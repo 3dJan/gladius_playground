@@ -1588,6 +1588,12 @@ namespace gladius::ui
                     auto * currentCtx = getCurrentEditorContext();
                     ed::SetCurrentEditor(currentCtx);
                     pushNodeEditorTheme();
+
+                    // Capture the top-left corner of the editor area before
+                    // ed::Begin() claims the region, so we can place the
+                    // function-name overlay at a fixed screen position later.
+                    ImVec2 const editorOrigin = ImGui::GetCursorScreenPos();
+
                     ed::Begin("Model Editor");
 
                     // Clear selection now that the editor context is active
@@ -1701,6 +1707,38 @@ namespace gladius::ui
 
                     ed::End();
                     popNodeEditorTheme();
+
+                    // ── Function name overlay (fixed top-left corner) ────
+                    if (m_currentModel)
+                    {
+                        auto displayName = m_currentModel->getDisplayName();
+                        if (displayName.has_value() && !displayName->empty())
+                        {
+                            ImFont * font = ImGui::GetFont();
+                            float const fontSize = font->FontSize * 0.8f * m_uiScale;
+
+                            ImVec2 const padding = {12.f, 8.f};
+                            ImVec2 const textPos = {editorOrigin.x + padding.x,
+                                                    editorOrigin.y + padding.y};
+
+                            ImVec2 const textSize =
+                              font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, displayName->c_str());
+
+                            // Semi-transparent background pill
+                            ImVec2 const bgMin = {textPos.x - 6.f, textPos.y - 4.f};
+                            ImVec2 const bgMax = {textPos.x + textSize.x + 6.f,
+                                                  textPos.y + textSize.y + 4.f};
+
+                            ImDrawList * drawList = ImGui::GetWindowDrawList();
+                            drawList->AddRectFilled(
+                              bgMin, bgMax, IM_COL32(30, 30, 30, 180), 8.f);
+
+                            // Text with slight transparency
+                            drawList->AddText(
+                              font, fontSize, textPos, IM_COL32(255, 255, 255, 200),
+                              displayName->c_str());
+                        }
+                    }
                 } // end else (Graph view)
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
