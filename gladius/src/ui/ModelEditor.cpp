@@ -868,44 +868,49 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
-            ed::PinId inputPinId{0};
-            ed::PinId outputPinId{0};
-            if (ed::QueryNewLink(&inputPinId, &outputPinId))
+            // QueryNewLink returns (startId, endId). The imgui-node-editor
+            // library normalises pin order so that startId is the Output pin
+            // and endId is the Input pin, regardless of which direction the
+            // user dragged. We resolve direction from the model to stay
+            // robust against any future library changes.
+            ed::PinId startPinId{0};
+            ed::PinId endPinId{0};
+            if (ed::QueryNewLink(&startPinId, &endPinId))
             {
                 if (m_currentModel)
                 {
-                    ed::PinId const sourcePinId = outputPinId ? outputPinId : inputPinId;
-                    bool const sourceIsOutput = static_cast<bool>(outputPinId);
+                    // Determine which of the two pins is the source for drag
+                    // state tracking: prefer whichever pin is already known.
+                    ed::PinId const dragPinId = startPinId ? startPinId : endPinId;
 
-                    if (sourcePinId)
+                    if (dragPinId)
                     {
-                        auto const sourceId = static_cast<nodes::PortId>(sourcePinId.Get());
-                        if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != sourceId)
+                        auto const dragId = static_cast<int64_t>(dragPinId.Get());
+                        if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != dragId)
                         {
-                            if (sourceIsOutput)
+                            // Look the ID up in both registries to decide direction.
+                            if (auto * port = m_currentModel->getPort(
+                                  static_cast<nodes::PortId>(dragId));
+                                port != nullptr)
                             {
-                                if (auto * sourcePort = m_currentModel->getPort(sourceId);
-                                    sourcePort != nullptr)
-                                {
-                                    m_linkDragState.beginDrag(sourceId,
-                                                              sourcePort->getTypeIndex(),
-                                                              true);
-                                    m_linkDragState.computeCompatibility(*m_currentModel);
-                                }
+                                m_linkDragState.beginDrag(dragId,
+                                                          port->getTypeIndex(),
+                                                          true);
+                                m_linkDragState.computeCompatibility(*m_currentModel);
                             }
                             else
                             {
                                 auto const & parameterRegistry =
                                   m_currentModel->getConstParameterRegistry();
-                                if (auto const parameterIter = parameterRegistry.find(sourceId);
+                                if (auto const parameterIter = parameterRegistry.find(dragId);
                                     parameterIter != parameterRegistry.end())
                                 {
-                                    auto * sourceParameter = dynamic_cast<nodes::VariantParameter *>(
+                                    auto * param = dynamic_cast<nodes::VariantParameter *>(
                                       parameterIter->second);
-                                    if (sourceParameter != nullptr)
+                                    if (param != nullptr)
                                     {
-                                        m_linkDragState.beginDrag(sourceId,
-                                                                  sourceParameter->getTypeIndex(),
+                                        m_linkDragState.beginDrag(dragId,
+                                                                  param->getTypeIndex(),
                                                                   false);
                                         m_linkDragState.computeCompatibility(*m_currentModel);
                                     }
@@ -914,26 +919,45 @@ namespace gladius::ui
                         }
                     }
 
-                    if (inputPinId && outputPinId)
+                    if (startPinId && endPinId)
                     {
-                        auto const inputId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                        auto const outputId = static_cast<nodes::PortId>(outputPinId.Get());
-
-                        if (inputPinId == outputPinId)
+                        if (startPinId == endPinId)
                         {
                             ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
                         }
-                        else if (ed::AcceptNewItem())
+                        else
                         {
-                            createUndoRestorePoint("Add link");
-                            if (m_currentModel->addLink(outputId, inputId))
+                            // Resolve which pin is the output port and which is
+                            // the input parameter by looking both up in the model.
+                            auto const idA = static_cast<int64_t>(startPinId.Get());
+                            auto const idB = static_cast<int64_t>(endPinId.Get());
+
+                            nodes::PortId outputId{0};
+                            nodes::ParameterId inputId{0};
+
+                            if (m_currentModel->getPort(static_cast<nodes::PortId>(idA)) != nullptr)
                             {
-                                markModelAsModified();
-                                m_linkDragState.reset();
+                                outputId = static_cast<nodes::PortId>(idA);
+                                inputId = static_cast<nodes::ParameterId>(idB);
                             }
                             else
                             {
-                                ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                                outputId = static_cast<nodes::PortId>(idB);
+                                inputId = static_cast<nodes::ParameterId>(idA);
+                            }
+
+                            if (ed::AcceptNewItem())
+                            {
+                                createUndoRestorePoint("Add link");
+                                if (m_currentModel->addLink(outputId, inputId))
+                                {
+                                    markModelAsModified();
+                                    m_linkDragState.reset();
+                                }
+                                else
+                                {
+                                    ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                                }
                             }
                         }
                     }
