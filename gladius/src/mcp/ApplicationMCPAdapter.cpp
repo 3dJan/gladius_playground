@@ -931,11 +931,6 @@ namespace gladius
         return out;
     }
 
-    nlohmann::json ApplicationMCPAdapter::getFunctionGraph(uint32_t functionId) const
-    {
-        return m_functionOperationsTool->getFunctionGraph(functionId);
-    }
-
     nlohmann::json
     ApplicationMCPAdapter::validateForManufacturing(const std::vector<std::string> & functionNames,
                                                     const nlohmann::json & constraints) const
@@ -1179,31 +1174,6 @@ namespace gladius
     {
         return m_resourceManagementTool->removeUnusedResources();
     }
-
-    nlohmann::json ApplicationMCPAdapter::getNodeInfo(uint32_t functionId, uint32_t nodeId) const
-    {
-        return m_functionOperationsTool->getNodeInfo(functionId, nodeId);
-    }
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::createNode(uint32_t functionId,
-                                                          const std::string & nodeType,
-                                                          const std::string & displayName,
-                                                          uint32_t /*nodeId*/)
-{
-    return m_functionOperationsTool->createNode(functionId, nodeType, displayName, 0);
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::setFunctionGraph(uint32_t functionId,
-                                                                const nlohmann::json & graph,
-                                                                bool replace)
-{
-    return m_functionOperationsTool->setFunctionGraph(functionId, graph, replace);
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::deleteNode(uint32_t functionId, uint32_t nodeId)
-{
-    return m_functionOperationsTool->deleteNode(functionId, nodeId);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::setParameterValue(uint32_t functionId,
@@ -1218,48 +1188,6 @@ nlohmann::json gladius::ApplicationMCPAdapter::setParameterValue(uint32_t functi
                      "node " + std::to_string(nodeId) + "." + parameterName);
     }
     return result;
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::createLink(uint32_t functionId,
-                                                          uint32_t sourceNodeId,
-                                                          const std::string & sourcePortName,
-                                                          uint32_t targetNodeId,
-                                                          const std::string & targetParameterName)
-{
-    return m_functionOperationsTool->createLink(
-      functionId, sourceNodeId, sourcePortName, targetNodeId, targetParameterName);
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::deleteLink(uint32_t functionId,
-                                                          uint32_t targetNodeId,
-                                                          const std::string & targetParameterName)
-{
-    return m_functionOperationsTool->deleteLink(functionId, targetNodeId, targetParameterName);
-}
-
-nlohmann::json
-gladius::ApplicationMCPAdapter::createFunctionCallNode(uint32_t targetFunctionId,
-                                                       uint32_t referencedFunctionId,
-                                                       const std::string & displayName)
-{
-    return m_functionOperationsTool->createFunctionCallNode(
-      targetFunctionId, referencedFunctionId, displayName);
-}
-
-nlohmann::json
-gladius::ApplicationMCPAdapter::createConstantNodesForMissingParameters(
-  uint32_t functionId,
-  uint32_t nodeId,
-  bool autoConnect,
-  std::vector<std::string> const & excludeParams)
-{
-    return m_functionOperationsTool->createConstantNodesForMissingParameters(
-      functionId, nodeId, autoConnect, excludeParams);
-}
-
-nlohmann::json gladius::ApplicationMCPAdapter::removeUnusedNodes(uint32_t functionId)
-{
-    return m_functionOperationsTool->removeUnusedNodes(functionId);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::evaluateFunction(uint32_t functionId,

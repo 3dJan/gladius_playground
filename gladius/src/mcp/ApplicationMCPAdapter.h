@@ -193,37 +193,10 @@ namespace gladius
         nlohmann::json getDocumentInfo() const override;
         std::vector<std::string> listAvailableFunctions() const override;
         nlohmann::json get3MFStructure() const override;
-        nlohmann::json getFunctionGraph(uint32_t functionId) const override;
-        nlohmann::json getNodeInfo(uint32_t functionId, uint32_t nodeId) const override;
-        nlohmann::json createNode(uint32_t functionId,
-                                  const std::string & nodeType,
-                                  const std::string & displayName,
-                                  uint32_t nodeId) override;
-        nlohmann::json setFunctionGraph(uint32_t functionId,
-                                        const nlohmann::json & graph,
-                                        bool replace = true) override;
-        nlohmann::json deleteNode(uint32_t functionId, uint32_t nodeId) override;
         nlohmann::json setParameterValue(uint32_t functionId,
                                          uint32_t nodeId,
                                          const std::string & parameterName,
                                          const nlohmann::json & value) override;
-        nlohmann::json createLink(uint32_t functionId,
-                                  uint32_t sourceNodeId,
-                                  const std::string & sourcePortName,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override;
-        nlohmann::json deleteLink(uint32_t functionId,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override;
-        nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
-                                              uint32_t referencedFunctionId,
-                                              const std::string & displayName = "") override;
-        nlohmann::json createConstantNodesForMissingParameters(
-          uint32_t functionId,
-          uint32_t nodeId,
-          bool autoConnect = true,
-          std::vector<std::string> const & excludeParams = {}) override;
-        nlohmann::json removeUnusedNodes(uint32_t functionId) override;
 
         // Function evaluation
         nlohmann::json evaluateFunction(uint32_t functionId,
