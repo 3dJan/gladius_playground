@@ -2198,7 +2198,9 @@ namespace gladius::ui
         auto * drawList = ImGui::GetWindowDrawList();
         ImVec2 const bgMin = overlayPos;
         ImVec2 const bgMax = {overlayPos.x + totalWidth, overlayPos.y + overlayHeight};
-        ImU32 const bgColor = IM_COL32(30, 30, 30, 60);
+        auto const & frameBg = ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+        ImU32 const bgColor = ImGui::ColorConvertFloat4ToU32(
+          ImVec4(frameBg.x, frameBg.y, frameBg.z, 0.4f));
         drawList->AddRectFilled(bgMin, bgMax, bgColor, 8.f);
 
         ImGui::SetCursorScreenPos(
@@ -2213,8 +2215,8 @@ namespace gladius::ui
             bool cutOff = (renderingFlags & RF_CUT_OFF_OBJECT) != 0;
             bool showField = (renderingFlags & RF_SHOW_FIELD) != 0;
 
-            ImVec4 const activeColor = ImVec4(0.26f, 0.59f, 0.98f, 0.8f);
-            ImVec4 const inactiveColor = ImVec4(0.4f, 0.4f, 0.4f, 0.5f);
+            ImVec4 const activeColor = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+            ImVec4 const inactiveColor = ImGui::GetStyleColorVec4(ImGuiCol_Button);
 
             // Cut-off toggle
             if (cutOff)

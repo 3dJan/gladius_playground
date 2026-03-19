@@ -75,7 +75,7 @@ namespace gladius
         };
 
         static constexpr size_t MAX_CHANGE_LOG_SIZE = 1000;
-        std::deque<ChangeEntry> m_changeLog;
+        mutable std::deque<ChangeEntry> m_changeLog;
         mutable std::mutex m_changeLogMutex;
         mutable bool m_lastKnownFileChanged{false}; ///< Tracks Document dirty flag for UI-change detection
 
@@ -83,7 +83,7 @@ namespace gladius
         void recordChange(std::string const & type,
                           std::string const & resourceType,
                           uint32_t resourceId,
-                          std::string const & displayName);
+                          std::string const & displayName) const;
 
         // Tool instances - Complete set as per refactoring plan
         // Status: 9/9 tools implemented (ApplicationLifecycle, SceneHierarchy, DocumentLifecycle,

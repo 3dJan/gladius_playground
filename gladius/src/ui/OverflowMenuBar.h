@@ -32,6 +32,7 @@ namespace gladius::ui
         /// @param label   Display label (used for width estimation on the first frame).
         /// @param render  Callback that renders the item. Called exactly once per frame,
         ///                either inline in the bar or inside the overflow dropdown.
+        ///                The callback must remain valid until end() is called (same scope).
         void item(char const * label, std::function<void()> render);
 
         /// Finish the overflow menu bar. Renders the "..." overflow dropdown if needed.
@@ -54,6 +55,9 @@ namespace gladius::ui
         std::vector<ItemEntry> m_items;
         ImGuiID m_barId = 0;
 
+        /// Persistent width measurements keyed by bar id. Static because ImGui
+        /// immediate-mode widgets have no per-instance storage. Only accessed from
+        /// the UI thread (ImGui is inherently single-threaded).
         static std::unordered_map<ImGuiID, BarState> s_barStates;
     };
 

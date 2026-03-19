@@ -6,6 +6,7 @@
 #include "MCPServer.h"
 #include "FunctionArgument.h"
 #include "MCPApplicationInterface.h"
+#include "TimeUtils.h"
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -559,25 +560,7 @@ namespace gladius::mcp
           {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}},
           [this](const json & params) -> json
           {
-              // Format current UTC time as ISO-8601
-              auto now = std::chrono::system_clock::now();
-              auto time = std::chrono::system_clock::to_time_t(now);
-              std::tm utc{};
-              gmtime_r(&time, &utc);
-              auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              now.time_since_epoch()) %
-                            1000;
-              char timeBuf[32];
-              std::snprintf(timeBuf,
-                            sizeof(timeBuf),
-                            "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
-                            utc.tm_year + 1900,
-                            utc.tm_mon + 1,
-                            utc.tm_mday,
-                            utc.tm_hour,
-                            utc.tm_min,
-                            utc.tm_sec,
-                            static_cast<int>(millis.count()));
+              auto const serverTime = formatIso8601Utc(std::chrono::system_clock::now());
 
               return {{"application", m_application->getApplicationName()},
                       {"version", m_application->getVersion()},
@@ -587,7 +570,7 @@ namespace gladius::mcp
                       {"headless", m_application->isHeadlessMode()},
                       {"ui_running", m_application->isUIRunning()},
                       {"active_document_path", m_application->getActiveDocumentPath()},
-                      {"server_time", std::string(timeBuf)}};
+                      {"server_time", serverTime}};
           });
 
         // MODEL STRUCTURE INSPECTION

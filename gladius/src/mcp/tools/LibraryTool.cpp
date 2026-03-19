@@ -620,7 +620,9 @@ namespace gladius::mcp::tools
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(tempPath);
 
-            // Atomic rename from temp to target
+            // Atomic rename from temp to target.
+            // The temp file is in the same directory (targetPath + ".tmp"), so
+            // rename() will not fail with EXDEV on POSIX.
             fs::rename(tempPath, targetPath);
 
             std::string msg =

@@ -6,6 +6,7 @@
 #include "nodesfwd.h"
 
 #include "Primitives.h"
+#include <algorithm>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>

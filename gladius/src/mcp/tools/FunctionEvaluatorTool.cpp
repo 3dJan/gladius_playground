@@ -17,10 +17,17 @@
 #include "../../nodes/Port.h"
 #include "../../nodes/ToOCLVisitor.h"
 
+#include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
 #include <sstream>
 #include <variant>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace gladius::mcp::tools
 {
@@ -88,6 +95,341 @@ namespace gladius::mcp::tools
             int components;
             std::type_index type;
         };
+
+        /// @brief Validate and flatten sample data into a contiguous float buffer.
+        /// @return Error JSON on failure, or empty JSON on success (populates inputBuffer).
+        nlohmann::json flattenSamples(nlohmann::json const & samples,
+                                      std::vector<InputInfo> const & inputs,
+                                      int totalInputComponents,
+                                      std::vector<float> & inputBuffer)
+        {
+            if (!samples.is_array() || samples.empty())
+            {
+                return {{"error", "'samples' must be a non-empty array."}};
+            }
+
+            auto const sampleCount = samples.size();
+            if (sampleCount > 1000)
+            {
+                return {{"error", "Maximum 1000 sample points allowed."}};
+            }
+
+            inputBuffer.reserve(sampleCount * static_cast<size_t>(totalInputComponents));
+
+            for (size_t si = 0; si < sampleCount; ++si)
+            {
+                auto const & sample = samples[si];
+                if (!sample.is_object())
+                {
+                    return {{"error",
+                             fmt::format("Sample {} must be a JSON object mapping argument "
+                                         "names to values.", si)}};
+                }
+
+                for (auto const & inp : inputs)
+                {
+                    std::string key;
+                    if (sample.contains(inp.shortName))
+                    {
+                        key = inp.shortName;
+                    }
+                    else if (sample.contains(inp.name))
+                    {
+                        key = inp.name;
+                    }
+
+                    if (key.empty())
+                    {
+                        std::string expected;
+                        for (auto const & i : inputs)
+                        {
+                            if (!expected.empty())
+                            {
+                                expected += ", ";
+                            }
+                            expected += fmt::format("\"{}\" ({})", i.shortName,
+                                                    typeIndexToUserString(i.type));
+                        }
+                        return {{"error",
+                                 fmt::format("Sample {} is missing argument \"{}\". "
+                                             "Expected arguments: {}",
+                                             si, inp.shortName, expected)}};
+                    }
+
+                    auto const & val = sample[key];
+                    if (inp.components == 1)
+                    {
+                        if (!val.is_number())
+                        {
+                            return {{"error",
+                                     fmt::format("Sample {} argument \"{}\" must be a number.",
+                                                 si, key)}};
+                        }
+                        inputBuffer.push_back(val.get<float>());
+                    }
+                    else if (inp.components == 3)
+                    {
+                        if (!val.is_array() || val.size() != 3)
+                        {
+                            return {{"error",
+                                     fmt::format("Sample {} argument \"{}\" must be an array "
+                                                 "of 3 numbers.", si, key)}};
+                        }
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            if (!val[c].is_number())
+                            {
+                                return {{"error",
+                                         fmt::format("Sample {} argument \"{}\"[{}] must be "
+                                                     "a number.", si, key, c)}};
+                            }
+                            inputBuffer.push_back(val[c].get<float>());
+                        }
+                    }
+                }
+            }
+
+            return {};
+        }
+
+        /// @brief Generate the OpenCL eval kernel source code.
+        std::string generateEvalKernel(std::vector<InputInfo> const & inputs,
+                                       std::vector<OutputInfo> const & outputInfos,
+                                       int totalInputComponents,
+                                       int totalOutputComponents,
+                                       std::string const & oclFuncName,
+                                       bool isAssembly)
+        {
+            std::ostringstream kernelSrc;
+            kernelSrc << "\n// --- gladius_eval kernel (auto-generated) ---\n";
+            kernelSrc << "__kernel void gladius_eval(\n"
+                      << "    __global const float* evalInputBuf,\n"
+                      << "    __global float* evalOutputBuf,\n"
+                      << "    const uint evalSampleCount,\n"
+                      << "    PAYLOAD_ARGS)\n"
+                      << "{\n"
+                      << "    uint const gid = get_global_id(0);\n"
+                      << "    if (gid >= evalSampleCount) return;\n\n";
+
+            int bufferOffset = 0;
+            for (auto const & inp : inputs)
+            {
+                if (inp.components == 3)
+                {
+                    kernelSrc << fmt::format(
+                      "    {0} const {1} = vload3(0, evalInputBuf + gid * {2} + {3});\n",
+                      inp.oclType, inp.name, totalInputComponents, bufferOffset);
+                }
+                else
+                {
+                    kernelSrc << fmt::format(
+                      "    {0} const {1} = evalInputBuf[gid * {2} + {3}];\n",
+                      inp.oclType, inp.name, totalInputComponents, bufferOffset);
+                }
+                bufferOffset += inp.components;
+            }
+
+            kernelSrc << "\n";
+
+            if (isAssembly)
+            {
+                kernelSrc << fmt::format(
+                  "    float4 const evalResult4 = model({}, PASS_PAYLOAD_ARGS);\n",
+                  inputs.front().name);
+                kernelSrc << "    evalOutputBuf[gid] = evalResult4.w;\n";
+            }
+            else
+            {
+                for (auto const & out : outputInfos)
+                {
+                    kernelSrc << fmt::format("    {0} evalOut_{1};\n", out.oclType, out.name);
+                }
+
+                std::ostringstream callArgs;
+                bool first = true;
+                for (auto const & inp : inputs)
+                {
+                    if (!first)
+                    {
+                        callArgs << ", ";
+                    }
+                    callArgs << inp.name;
+                    first = false;
+                }
+                for (auto const & out : outputInfos)
+                {
+                    callArgs << ", &evalOut_" << out.name;
+                }
+                callArgs << ", PASS_PAYLOAD_ARGS";
+                kernelSrc << fmt::format("    {}({});\n", oclFuncName, callArgs.str());
+
+                int outOffset = 0;
+                for (auto const & out : outputInfos)
+                {
+                    if (out.components == 3)
+                    {
+                        kernelSrc << fmt::format(
+                          "    vstore3(evalOut_{0}, 0, evalOutputBuf + gid * {1} + {2});\n",
+                          out.name, totalOutputComponents, outOffset);
+                    }
+                    else
+                    {
+                        kernelSrc << fmt::format(
+                          "    evalOutputBuf[gid * {0} + {1}] = evalOut_{2};\n",
+                          totalOutputComponents, outOffset, out.name);
+                    }
+                    outOffset += out.components;
+                }
+            }
+
+            kernelSrc << "}\n";
+            return kernelSrc.str();
+        }
+
+        /// @brief Format evaluation results into the response JSON.
+        nlohmann::json formatResults(std::vector<float> const & outputData,
+                                     std::vector<OutputInfo> const & outputInfos,
+                                     int totalOutputComponents,
+                                     size_t sampleCount,
+                                     uint32_t functionId)
+        {
+            using json = nlohmann::json;
+            json result;
+            result["success"] = true;
+            result["function_id"] = functionId;
+
+            json warnings = json::array();
+            json results = json::array();
+
+            bool const singleOutput = (outputInfos.size() == 1);
+
+            for (size_t i = 0; i < sampleCount; ++i)
+            {
+                auto const sampleBase =
+                  i * static_cast<size_t>(totalOutputComponents);
+
+                if (singleOutput)
+                {
+                    auto const & out = outputInfos.front();
+                    if (out.components == 1)
+                    {
+                        float const v = outputData[sampleBase];
+                        if (std::isnan(v) || std::isinf(v))
+                        {
+                            results.push_back(nullptr);
+                            warnings.push_back(
+                              {{"sample_index", i},
+                               {"message",
+                                std::isnan(v) ? "NaN result" : "Infinity result"}});
+                        }
+                        else
+                        {
+                            results.push_back(v);
+                        }
+                    }
+                    else
+                    {
+                        bool hasAnomalies = false;
+                        for (int c = 0; c < out.components; ++c)
+                        {
+                            float const v = outputData[sampleBase + c];
+                            if (std::isnan(v) || std::isinf(v))
+                            {
+                                hasAnomalies = true;
+                            }
+                        }
+                        if (hasAnomalies)
+                        {
+                            results.push_back(nullptr);
+                            warnings.push_back(
+                              {{"sample_index", i},
+                               {"message", "NaN/Infinity in vec3 result"}});
+                        }
+                        else
+                        {
+                            results.push_back({outputData[sampleBase],
+                                               outputData[sampleBase + 1],
+                                               outputData[sampleBase + 2]});
+                        }
+                    }
+                }
+                else
+                {
+                    json sampleResult;
+                    int offset = 0;
+                    for (auto const & out : outputInfos)
+                    {
+                        if (out.components == 1)
+                        {
+                            float const v = outputData[sampleBase + offset];
+                            if (std::isnan(v) || std::isinf(v))
+                            {
+                                sampleResult[out.name] = nullptr;
+                                warnings.push_back(
+                                  {{"sample_index", i},
+                                   {"output", out.name},
+                                   {"message",
+                                    std::isnan(v) ? "NaN result" : "Infinity result"}});
+                            }
+                            else
+                            {
+                                sampleResult[out.name] = v;
+                            }
+                        }
+                        else
+                        {
+                            bool hasAnomalies = false;
+                            for (int c = 0; c < out.components; ++c)
+                            {
+                                float const v = outputData[sampleBase + offset + c];
+                                if (std::isnan(v) || std::isinf(v))
+                                {
+                                    hasAnomalies = true;
+                                }
+                            }
+                            if (hasAnomalies)
+                            {
+                                sampleResult[out.name] = nullptr;
+                                warnings.push_back(
+                                  {{"sample_index", i},
+                                   {"output", out.name},
+                                   {"message", "NaN/Infinity in vec3 result"}});
+                            }
+                            else
+                            {
+                                sampleResult[out.name] = {
+                                  outputData[sampleBase + offset],
+                                  outputData[sampleBase + offset + 1],
+                                  outputData[sampleBase + offset + 2]};
+                            }
+                        }
+                        offset += out.components;
+                    }
+                    results.push_back(std::move(sampleResult));
+                }
+            }
+
+            result["results"] = std::move(results);
+            if (!warnings.empty())
+            {
+                result["warnings"] = std::move(warnings);
+            }
+
+            if (singleOutput)
+            {
+                result["output_type"] = typeIndexToUserString(outputInfos.front().type);
+            }
+            else
+            {
+                json outputTypes;
+                for (auto const & out : outputInfos)
+                {
+                    outputTypes[out.name] = typeIndexToUserString(out.type);
+                }
+                result["output_types"] = std::move(outputTypes);
+            }
+            return result;
+        }
 
     } // anonymous namespace
 
@@ -210,94 +552,13 @@ namespace gladius::mcp::tools
         }
 
         // --- Validate and flatten sample data -----------------------------------------
-        if (!samples.is_array() || samples.empty())
-        {
-            return createToolError("'samples' must be a non-empty array.");
-        }
-
-        auto const sampleCount = samples.size();
-        if (sampleCount > 1000)
-        {
-            return createToolError("Maximum 1000 sample points allowed.");
-        }
-
         std::vector<float> inputBuffer;
-        inputBuffer.reserve(sampleCount * static_cast<size_t>(totalInputComponents));
-
-        for (size_t si = 0; si < sampleCount; ++si)
+        auto flattenError = flattenSamples(samples, inputs, totalInputComponents, inputBuffer);
+        if (flattenError.contains("error"))
         {
-            auto const & sample = samples[si];
-            if (!sample.is_object())
-            {
-                return createToolError(
-                  fmt::format("Sample {} must be a JSON object mapping argument names to values.",
-                              si));
-            }
-
-            for (auto const & inp : inputs)
-            {
-                // Try user-friendly short name first (e.g. "pos"), then the full
-                // unique name (e.g. "Input_1_pos") as fallback.
-                std::string key;
-                if (sample.contains(inp.shortName))
-                {
-                    key = inp.shortName;
-                }
-                else if (sample.contains(inp.name))
-                {
-                    key = inp.name;
-                }
-
-                if (key.empty())
-                {
-                    // Build a helpful error listing expected arguments.
-                    std::string expected;
-                    for (auto const & i : inputs)
-                    {
-                        if (!expected.empty())
-                        {
-                            expected += ", ";
-                        }
-                        expected += fmt::format("\"{}\" ({})", i.shortName,
-                                                typeIndexToUserString(i.type));
-                    }
-                    return createToolError(
-                      fmt::format("Sample {} is missing argument \"{}\". "
-                                  "Expected arguments: {}",
-                                  si, inp.shortName, expected));
-                }
-
-                auto const & val = sample[key];
-                if (inp.components == 1)
-                {
-                    if (!val.is_number())
-                    {
-                        return createToolError(
-                          fmt::format("Sample {} argument \"{}\" must be a number.", si, key));
-                    }
-                    inputBuffer.push_back(val.get<float>());
-                }
-                else if (inp.components == 3)
-                {
-                    if (!val.is_array() || val.size() != 3)
-                    {
-                        return createToolError(
-                          fmt::format("Sample {} argument \"{}\" must be an array of 3 numbers.",
-                                      si, key));
-                    }
-                    for (int c = 0; c < 3; ++c)
-                    {
-                        if (!val[c].is_number())
-                        {
-                            return createToolError(
-                              fmt::format("Sample {} argument \"{}\"[{}] must be a number.",
-                                          si, key, c));
-                        }
-                        inputBuffer.push_back(val[c].get<float>());
-                    }
-                }
-            }
+            return createToolError(flattenError["error"].get<std::string>());
         }
+        auto const sampleCount = samples.size();
 
         // --- Ensure model is compiled -------------------------------------------------
         document->refreshModelBlocking();
@@ -352,98 +613,11 @@ namespace gladius::mcp::tools
         std::string const oclFuncName =
           isAssembly ? "model" : functionModel->getModelName();
 
-        std::ostringstream kernelSrc;
-        kernelSrc << "\n// --- gladius_eval kernel (auto-generated) ---\n";
-        kernelSrc << "__kernel void gladius_eval(\n"
-                  << "    __global const float* evalInputBuf,\n"
-                  << "    __global float* evalOutputBuf,\n"
-                  << "    const uint evalSampleCount,\n"
-                  << "    PAYLOAD_ARGS)\n"
-                  << "{\n"
-                  << "    uint const gid = get_global_id(0);\n"
-                  << "    if (gid >= evalSampleCount) return;\n\n";
+        auto const kernelSrcStr = generateEvalKernel(
+          inputs, outputInfos, totalInputComponents, totalOutputComponents,
+          oclFuncName, isAssembly);
 
-        // Unpack inputs from the flat input buffer.
-        int bufferOffset = 0;
-        for (auto const & inp : inputs)
-        {
-            if (inp.components == 3)
-            {
-                kernelSrc << fmt::format(
-                  "    {0} const {1} = vload3(0, evalInputBuf + gid * {2} + {3});\n",
-                  inp.oclType, inp.name, totalInputComponents, bufferOffset);
-            }
-            else
-            {
-                kernelSrc << fmt::format(
-                  "    {0} const {1} = evalInputBuf[gid * {2} + {3}];\n",
-                  inp.oclType, inp.name, totalInputComponents, bufferOffset);
-            }
-            bufferOffset += inp.components;
-        }
-
-        kernelSrc << "\n";
-
-        // Call the function and write the result.
-        if (isAssembly)
-        {
-            // Assembly: float4 model(float3 pos, PAYLOAD_ARGS) — extract .w for SDF
-            kernelSrc << fmt::format(
-              "    float4 const evalResult4 = model({}, PASS_PAYLOAD_ARGS);\n",
-              inputs.front().name);
-            kernelSrc << "    evalOutputBuf[gid] = evalResult4.w;\n";
-        }
-        else
-        {
-            // Sub-function: void function_N(inputs..., output1*, output2*, ..., PAYLOAD_ARGS)
-            // Declare output variables for all outputs.
-            for (auto const & out : outputInfos)
-            {
-                kernelSrc << fmt::format("    {0} evalOut_{1};\n", out.oclType, out.name);
-            }
-
-            // Build call: function_N(inp1, inp2, ..., &out1, &out2, ..., PASS_PAYLOAD_ARGS)
-            std::ostringstream callArgs;
-            bool first = true;
-            for (auto const & inp : inputs)
-            {
-                if (!first)
-                {
-                    callArgs << ", ";
-                }
-                callArgs << inp.name;
-                first = false;
-            }
-            for (auto const & out : outputInfos)
-            {
-                callArgs << ", &evalOut_" << out.name;
-            }
-            callArgs << ", PASS_PAYLOAD_ARGS";
-            kernelSrc << fmt::format("    {}({});\n", oclFuncName, callArgs.str());
-
-            // Write all outputs to the buffer sequentially.
-            int outOffset = 0;
-            for (auto const & out : outputInfos)
-            {
-                if (out.components == 3)
-                {
-                    kernelSrc << fmt::format(
-                      "    vstore3(evalOut_{0}, 0, evalOutputBuf + gid * {1} + {2});\n",
-                      out.name, totalOutputComponents, outOffset);
-                }
-                else
-                {
-                    kernelSrc << fmt::format(
-                      "    evalOutputBuf[gid * {0} + {1}] = evalOut_{2};\n",
-                      totalOutputComponents, outOffset, out.name);
-                }
-                outOffset += out.components;
-            }
-        }
-
-        kernelSrc << "}\n";
-
-        std::string const fullDynamic = modelSource + kernelSrc.str();
+        std::string const fullDynamic = modelSource + kernelSrcStr;
 
         // --- Compile the eval program -------------------------------------------------
         FileNames const sourceFiles = {"arguments.h",
@@ -472,14 +646,18 @@ namespace gladius::mcp::tools
         if (!evalProg.isValid())
         {
             // Dump source to temp file for debugging
+            auto const dumpPath =
+              std::filesystem::temp_directory_path() /
+              fmt::format("gladius_eval_debug_{}.cl", getpid());
             {
-                std::ofstream dump("/tmp/gladius_eval_debug.cl");
+                std::ofstream dump(dumpPath);
                 dump << fullDynamic;
             }
             return createToolError(
-              fmt::format("OpenCL compilation failed. Source dumped to /tmp/gladius_eval_debug.cl. "
+              fmt::format("OpenCL compilation failed. Source dumped to {}. "
                           "Generated eval kernel:\n{}",
-                          kernelSrc.str()));
+                          dumpPath.string(),
+                          kernelSrcStr));
         }
 
         // --- Create buffers and dispatch ----------------------------------------------
@@ -523,144 +701,8 @@ namespace gladius::mcp::tools
             std::vector<float> outputData(outputFloatCount);
             queue.enqueueReadBuffer(*clOutputBuffer, CL_TRUE, 0, outputByteSize, outputData.data());
 
-            // Build response.
-            json result;
-            result["success"] = true;
-            result["function_id"] = functionId;
-
-            json warnings = json::array();
-            json results = json::array();
-
-            bool const singleOutput = (outputInfos.size() == 1);
-
-            for (size_t i = 0; i < sampleCount; ++i)
-            {
-                auto const sampleBase =
-                  i * static_cast<size_t>(totalOutputComponents);
-
-                if (singleOutput)
-                {
-                    auto const & out = outputInfos.front();
-                    if (out.components == 1)
-                    {
-                        float const v = outputData[sampleBase];
-                        if (std::isnan(v) || std::isinf(v))
-                        {
-                            results.push_back(nullptr);
-                            warnings.push_back(
-                              {{"sample_index", i},
-                               {"message",
-                                std::isnan(v) ? "NaN result" : "Infinity result"}});
-                        }
-                        else
-                        {
-                            results.push_back(v);
-                        }
-                    }
-                    else
-                    {
-                        bool hasAnomalies = false;
-                        for (int c = 0; c < out.components; ++c)
-                        {
-                            float const v = outputData[sampleBase + c];
-                            if (std::isnan(v) || std::isinf(v))
-                            {
-                                hasAnomalies = true;
-                            }
-                        }
-                        if (hasAnomalies)
-                        {
-                            results.push_back(nullptr);
-                            warnings.push_back(
-                              {{"sample_index", i},
-                               {"message", "NaN/Infinity in vec3 result"}});
-                        }
-                        else
-                        {
-                            results.push_back({outputData[sampleBase],
-                                               outputData[sampleBase + 1],
-                                               outputData[sampleBase + 2]});
-                        }
-                    }
-                }
-                else
-                {
-                    // Multi-output: return a dict per sample.
-                    json sampleResult;
-                    int offset = 0;
-                    for (auto const & out : outputInfos)
-                    {
-                        if (out.components == 1)
-                        {
-                            float const v = outputData[sampleBase + offset];
-                            if (std::isnan(v) || std::isinf(v))
-                            {
-                                sampleResult[out.name] = nullptr;
-                                warnings.push_back(
-                                  {{"sample_index", i},
-                                   {"output", out.name},
-                                   {"message",
-                                    std::isnan(v) ? "NaN result" : "Infinity result"}});
-                            }
-                            else
-                            {
-                                sampleResult[out.name] = v;
-                            }
-                        }
-                        else
-                        {
-                            bool hasAnomalies = false;
-                            for (int c = 0; c < out.components; ++c)
-                            {
-                                float const v = outputData[sampleBase + offset + c];
-                                if (std::isnan(v) || std::isinf(v))
-                                {
-                                    hasAnomalies = true;
-                                }
-                            }
-                            if (hasAnomalies)
-                            {
-                                sampleResult[out.name] = nullptr;
-                                warnings.push_back(
-                                  {{"sample_index", i},
-                                   {"output", out.name},
-                                   {"message", "NaN/Infinity in vec3 result"}});
-                            }
-                            else
-                            {
-                                sampleResult[out.name] = {
-                                  outputData[sampleBase + offset],
-                                  outputData[sampleBase + offset + 1],
-                                  outputData[sampleBase + offset + 2]};
-                            }
-                        }
-                        offset += out.components;
-                    }
-                    results.push_back(std::move(sampleResult));
-                }
-            }
-
-            result["results"] = std::move(results);
-            if (!warnings.empty())
-            {
-                result["warnings"] = std::move(warnings);
-            }
-
-            // Output type description.
-            if (singleOutput)
-            {
-                result["output_type"] = typeIndexToUserString(outputInfos.front().type);
-            }
-            else
-            {
-                json outputTypes;
-                for (auto const & out : outputInfos)
-                {
-                    outputTypes[out.name] = typeIndexToUserString(out.type);
-                }
-                result["output_types"] = std::move(outputTypes);
-            }
-            return result;
+            return formatResults(outputData, outputInfos, totalOutputComponents,
+                                 sampleCount, functionId);
         }
         catch (std::exception const & e)
         {
