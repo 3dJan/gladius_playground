@@ -442,72 +442,10 @@ namespace gladius::ui
 
             overflow.end();
 
-            // Status text and slice height control (always visible, right-aligned)
+            // Compilation status indicator
             if (m_core->isAnyCompilationInProgress())
             {
                 ImGui::TextUnformatted("Compilation in progress");
-            }
-            else
-            {
-                auto const bb = m_core->getBoundingBox();
-                if (bb.has_value())
-                {
-                    ImGui::TextUnformatted(fmt::format("{:.3f} mm x {:.3f} mm x {:.3f} mm",
-                                                       bb->max.x - bb->min.x,
-                                                       bb->max.y - bb->min.y,
-                                                       bb->max.z - bb->min.z)
-                                             .c_str());
-
-                    ImGui::SameLine();
-
-                    auto const range = 20000.f;
-                    bool const bboxValuesInRange =
-                      fabs(bb->max.x) < range && fabs(bb->max.y) < range &&
-                      fabs(bb->max.z) < range && fabs(bb->min.x) < range &&
-                      fabs(bb->min.y) < range && fabs(bb->min.z) < range;
-
-                    if ((!isinf(bb->max.x) && !isinf(bb->max.y) && !isinf(bb->max.z) &&
-                         !isinf(bb->min.x) && !isinf(bb->min.y) && !isinf(bb->min.z)) &&
-                        bboxValuesInRange)
-                    {
-
-                        ImGui::TextUnformatted(
-                          fmt::format(
-                            "(min = x:{:.3f} y:{:.3f} z:{:.3f} ", bb->min.x, bb->min.y, bb->min.z)
-                            .c_str());
-
-                        ImGui::SameLine();
-
-                        ImGui::TextUnformatted(
-                          fmt::format(
-                            "max = x:{:.3f} y:{:.3f} z:{:.3f})", bb->max.x, bb->max.y, bb->max.z)
-                            .c_str());
-                    }
-                }
-            }
-
-            auto const contentWidth =
-              ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x;
-
-            ImGui::SetCursorPosX(contentWidth - 260.f * m_uiScale);
-            auto z = m_core->getSliceHeight();
-            ImGui::SetNextItemWidth(150.f * m_uiScale);
-            bool zChanged = ImGui::InputFloat("  ", &z, 0.08f, 1.f, "%.2f mm");
-
-            ImGui::SameLine();
-            // button for resetting z to 0
-            if (ImGui::Button("Reset"))
-            {
-                z = 0.f;
-                zChanged = true;
-            }
-
-            m_dirty = m_dirty || zChanged;
-
-            m_core->setSliceHeight(z);
-            if (zChanged)
-            {
-                invalidateView();
             }
 
             ImGui::EndMenuBar();
@@ -516,11 +454,9 @@ namespace gladius::ui
         m_contentAreaMin = ImGui::GetWindowContentRegionMin();
         m_contentAreaMax = ImGui::GetWindowContentRegionMax();
 
-        auto constexpr sliderWidth_px = 30.f;
-
         auto const prevRenderWindowSize = m_renderWindowSize_px;
         m_renderWindowSize_px = {
-          {ImGui::GetWindowWidth() - sliderWidth_px,
+          {ImGui::GetWindowWidth(),
            ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y}};
         
         // Defensive check: ensure minimum viewport dimensions
@@ -568,8 +504,12 @@ namespace gladius::ui
         m_renderWindowState.isMoving = m_camera.update(io.DeltaTime * 1000.f);
         m_dirty = m_dirty || m_renderWindowState.isMoving;
 
-        // Event handling:
-        if (ImGui::IsWindowHovered() && io.MousePos.x < contentMax.x - sliderWidth_px)
+        // Floating cut-height slider overlay (inside the Preview window)
+        slider(contentMin, contentMax);
+
+        // Event handling — skip camera input while slider widgets are being dragged
+        bool const sliderActive = ImGui::IsAnyItemActive();
+        if (ImGui::IsWindowHovered() && !sliderActive)
         {
 
             io.MouseDragThreshold = 1.f;
@@ -602,9 +542,6 @@ namespace gladius::ui
 
             // Wheel zoom is handled via ShortcutManager (camera.zoomInWheel / camera.zoomOutWheel)
         }
-
-        ImGui::SameLine();
-        slider();
 
         ImGui::End();
         ImGui::PopStyleVar();
@@ -2225,31 +2162,159 @@ namespace gladius::ui
         }
     }
 
-    void RenderWindow::slider()
+    void RenderWindow::slider(ImVec2 const & areaMin, ImVec2 const & areaMax)
     {
         ProfileFunction;
-        if (!m_core->getBoundingBox().has_value())
-        {
-            return;
-        }
 
-        auto z = m_core->getSliceHeight();
-        auto const maxZ =
-          m_core->getBoundingBox().has_value() ? m_core->getBoundingBox()->max.z : 200.f;
-        auto const minZ =
-          m_core->getBoundingBox().has_value() ? m_core->getBoundingBox()->min.z : 0.f;
-        const bool zChanged = ImGui::VSliderFloat(
-          " ",
-          ImVec2(15, m_contentAreaMax.y - m_contentAreaMin.y - 10.f * m_uiScale),
-          &z,
-          minZ,
-          maxZ,
-          " ");
+        auto & settings = m_core->getResourceContext()->getRenderingSettings();
+        int renderingFlags = settings.flags;
+
+        auto bbox = m_core->getBoundingBox();
+        bool const hasBbox = bbox.has_value();
+
+        auto z = hasBbox ? m_core->getSliceHeight() : 0.f;
+        auto const maxZ = hasBbox ? bbox->max.z : 1.f;
+        auto const minZ = hasBbox ? bbox->min.z : 0.f;
+
+        // Overlay dimensions
+        float constexpr sliderWidth = 20.f;
+        float constexpr inputWidth = 80.f;
+        float constexpr overlayWidth = std::max(sliderWidth, inputWidth);
+        float constexpr padding = 6.f;
+        float const areaHeight = areaMax.y - areaMin.y;
+        float const inputHeight = ImGui::GetFrameHeightWithSpacing();
+        float const buttonRowHeight = ImGui::GetFrameHeightWithSpacing() * 2.f;
+        float const sliderHeight =
+          std::max(areaHeight - inputHeight - buttonRowHeight - padding * 4.f, 30.f);
+        float const overlayHeight =
+          buttonRowHeight + sliderHeight + inputHeight + padding * 4.f;
+        float const totalWidth = overlayWidth + padding * 2.f;
+
+        // Position at the right edge of the render area
+        ImVec2 const overlayPos = {areaMax.x - totalWidth - padding,
+                                   areaMin.y + (areaHeight - overlayHeight) * 0.5f};
+
+        // Draw semi-transparent background
+        auto * drawList = ImGui::GetWindowDrawList();
+        ImVec2 const bgMin = overlayPos;
+        ImVec2 const bgMax = {overlayPos.x + totalWidth, overlayPos.y + overlayHeight};
+        ImU32 const bgColor = IM_COL32(30, 30, 30, 60);
+        drawList->AddRectFilled(bgMin, bgMax, bgColor, 8.f);
+
+        ImGui::SetCursorScreenPos(
+          ImVec2(overlayPos.x + padding, overlayPos.y + padding));
+
+        bool zChanged = false;
+        bool flagsChanged = false;
+
+        ImGui::BeginGroup();
+        {
+            // Toggle buttons for Cut Off and Show Field
+            bool cutOff = (renderingFlags & RF_CUT_OFF_OBJECT) != 0;
+            bool showField = (renderingFlags & RF_SHOW_FIELD) != 0;
+
+            ImVec4 const activeColor = ImVec4(0.26f, 0.59f, 0.98f, 0.8f);
+            ImVec4 const inactiveColor = ImVec4(0.4f, 0.4f, 0.4f, 0.5f);
+
+            // Cut-off toggle
+            if (cutOff)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, activeColor);
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, inactiveColor);
+            }
+            if (ImGui::Button(ICON_FA_CUT "##CutToggle", ImVec2(0, 0)))
+            {
+                cutOff = !cutOff;
+                flagsChanged = true;
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Cut Off Object");
+            }
+
+            // Show Field toggle
+            if (showField)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, activeColor);
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, inactiveColor);
+            }
+            if (ImGui::Button(ICON_FA_GLOBE "##FieldToggle", ImVec2(0, 0)))
+            {
+                showField = !showField;
+                flagsChanged = true;
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Show Distance Field");
+            }
+
+            if (flagsChanged)
+            {
+                if (cutOff)
+                {
+                    renderingFlags |= RF_CUT_OFF_OBJECT;
+                }
+                else
+                {
+                    renderingFlags &= ~RF_CUT_OFF_OBJECT;
+                }
+                if (showField)
+                {
+                    renderingFlags |= RF_SHOW_FIELD;
+                }
+                else
+                {
+                    renderingFlags &= ~RF_SHOW_FIELD;
+                }
+                settings.flags = renderingFlags;
+                invalidateView();
+            }
+
+            // Vertical slider (thin)
+            float const sliderX = overlayPos.x + padding + (overlayWidth - sliderWidth) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(sliderX, ImGui::GetCursorScreenPos().y));
+            zChanged = ImGui::VSliderFloat(
+              "##CutHeight", ImVec2(sliderWidth, sliderHeight), &z, minZ, maxZ, "");
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%.2f mm\nDouble-click to reset", z);
+            }
+
+            // Double-click resets
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            {
+                z = minZ;
+                zChanged = true;
+            }
+
+            // Numeric input below the slider
+            float const inputX = overlayPos.x + padding + (overlayWidth - inputWidth) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(inputX, ImGui::GetCursorScreenPos().y));
+            ImGui::SetNextItemWidth(inputWidth);
+            if (ImGui::InputFloat("##CutHeightInput", &z, 0.f, 0.f, "%.1f"))
+            {
+                z = std::clamp(z, minZ, maxZ);
+                zChanged = true;
+            }
+        }
+        ImGui::EndGroup();
 
         m_dirty = m_dirty || zChanged;
         m_renderWindowState.isMoving = m_renderWindowState.isMoving || zChanged;
 
-        m_core->setSliceHeight(z);
+        if (hasBbox)
+        {
+            m_core->setSliceHeight(z);
+        }
         if (zChanged)
         {
             m_core->invalidatePreCompSdf("sliderZChanged");

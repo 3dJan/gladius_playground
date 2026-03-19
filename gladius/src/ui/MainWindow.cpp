@@ -2090,6 +2090,21 @@ namespace gladius::ui
                 sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
             }
             
+            // Bounding box dimensions
+            if (m_core)
+            {
+                auto const bb = m_core->getBoundingBox();
+                if (bb.has_value())
+                {
+                    ImGui::Text("%s %.3f x %.3f x %.3f mm",
+                                ICON_FA_CUBE,
+                                bb->max.x - bb->min.x,
+                                bb->max.y - bb->min.y,
+                                bb->max.z - bb->min.z);
+                    ImGui::SameLine();
+                }
+            }
+
             ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 400.0f);
             ImGui::Text("%.0f FPS | %s%s",
                         ImGui::GetIO().Framerate,
