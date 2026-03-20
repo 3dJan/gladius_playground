@@ -295,7 +295,9 @@ namespace gladius::tests
         nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & /*functionIds*/,
                            std::string const & /*description*/,
-                           std::vector<std::string> const & /*tags*/) override
+                           std::vector<std::string> const & /*tags*/,
+                           std::string const & /*category*/,
+                           std::string const & /*name*/) override
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }

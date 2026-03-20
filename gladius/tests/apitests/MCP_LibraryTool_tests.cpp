@@ -181,7 +181,9 @@ namespace gladius::tests
                     setLibraryMetadata,
                     (std::vector<uint32_t> const &,
                      std::string const &,
-                     std::vector<std::string> const &),
+                     std::vector<std::string> const &,
+                     std::string const &,
+                     std::string const &),
                     (override));
         MOCK_METHOD(nlohmann::json,
                     importLibraryEntry,
