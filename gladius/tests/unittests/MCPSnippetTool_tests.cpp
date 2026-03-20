@@ -46,8 +46,16 @@ namespace gladius::tests
             // Validate by parsing into temp model
             nodes::Model tempModel;
             tempModel.createBeginEndWithDefaultInAndOuts();
-            auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-              snippet, tempModel, *m_parser, m_args, m_output);
+            nodes::NodeId nodeId = 0;
+            try
+            {
+                nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                  snippet, tempModel, *m_parser, m_args, m_output);
+            }
+            catch (std::exception const & e)
+            {
+                return {false, e.what()};
+            }
             if (nodeId == 0)
             {
                 return {false, "Failed to parse snippet"};

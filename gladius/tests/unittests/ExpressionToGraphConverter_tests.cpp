@@ -1,6 +1,7 @@
 #include "ExpressionParser.h"
 #include "ExpressionToGraphConverter.h"
 #include "FunctionArgument.h"
+#include "nodes/Assembly.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/Model.h"
 #include "nodes/NodeBase.h"
@@ -1897,11 +1898,12 @@ namespace gladius::tests
         EXPECT_NE(result, 0);
     }
 
-    TEST_F(SnippetToGraphTest, ConvertEmpty_EmptySnippet_ReturnsZero)
+    TEST_F(SnippetToGraphTest, ConvertEmpty_EmptySnippet_Throws)
     {
-        auto result = ExpressionToGraphConverter::convertSnippetToGraph(
-          "", *m_model, *m_parser, {}, FunctionOutput::defaultOutput());
-        EXPECT_EQ(result, 0);
+        EXPECT_THROW(
+          ExpressionToGraphConverter::convertSnippetToGraph(
+            "", *m_model, *m_parser, {}, FunctionOutput::defaultOutput()),
+          std::runtime_error);
     }
 
     TEST_F(SnippetToGraphTest, ConvertFunctions_SnippetWithTrigFunctions_Works)
@@ -2307,6 +2309,96 @@ namespace gladius::tests
           << "Snippet should contain 'pi' not a numeric literal: " << regenerated;
         EXPECT_EQ(regenerated.find("3.14159"), std::string::npos)
           << "Snippet should not contain '3.14159', should use 'pi': " << regenerated;
+    }
+
+    // =====================================================================================
+    // Cross-function call tests: snippet referencing another model in an Assembly
+    // =====================================================================================
+
+    TEST_F(SnippetToGraphTest, CrossFunctionCall_ScalarReturn_CreatesGraph)
+    {
+        // Create an Assembly with a helper function at ID 1
+        nodes::Assembly assembly;
+        assembly.addModelIfNotExisting(1);
+        auto helperModel = assembly.findModel(1);
+        helperModel->createBeginEnd();
+
+        // Build the helper function's graph by converting its snippet
+        std::vector<FunctionArgument> helperArgs = {
+          {"shapeA", ArgumentType::Scalar},
+          {"shapeB", ArgumentType::Scalar},
+          {"k", ArgumentType::Scalar}};
+        FunctionOutput helperOutput("result", ArgumentType::Scalar);
+        std::string helperBody =
+          "float h = max(in_k - abs(in_shapeA - in_shapeB), 0.0) / in_k;\n"
+          "return min(in_shapeA, in_shapeB) - h * h * in_k * 0.25;";
+
+        auto helperResult = ExpressionToGraphConverter::convertSnippetToGraph(
+          helperBody, *helperModel, *m_parser, helperArgs, helperOutput);
+        ASSERT_NE(helperResult, 0) << "Helper function should parse successfully";
+        helperModel->updateGraphAndOrderIfNeeded();
+
+        // Now create model 3 (main) that calls helper_1(sA, sB, 3.0)
+        assembly.addModelIfNotExisting(3);
+        auto mainModel = assembly.findModel(3);
+        mainModel->createBeginEnd();
+
+        std::vector<FunctionArgument> mainArgs = {{"pos", ArgumentType::Vector}};
+        FunctionOutput mainOutput("shape", ArgumentType::Scalar);
+        std::string mainBody =
+          "sA = length(in_pos - vec3(5, 5, 5)) - 10.0;\n"
+          "sB = length(in_pos - vec3(20, 20, 20)) - 10.0;\n"
+          "shape = helper_1(sA, sB, 3.0);";
+
+        auto mainResult = ExpressionToGraphConverter::convertSnippetToGraph(
+          mainBody, *mainModel, *m_parser, mainArgs, {mainOutput}, &assembly);
+        EXPECT_NE(mainResult, 0) << "Cross-function call snippet should parse successfully";
+
+        // Verify a FunctionCall node was created
+        auto fcCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::FunctionCall>(*mainModel);
+        EXPECT_GT(fcCount, 0) << "Should have at least one FunctionCall node";
+    }
+
+    TEST_F(SnippetToGraphTest, SetProgramSnippet_CrossFunctionCallAssembly_Works)
+    {
+        // Simulate the exact flow of create_library_entry:
+        // 1. Create an assembly with a template-like main model (ID 3) that has "shape" output
+        // 2. Call setProgramSnippet with a multi-function program
+        nodes::Assembly assembly;
+        assembly.addModelIfNotExisting(3);
+        auto templateMain = assembly.findModel(3);
+        templateMain->createBeginEnd();
+
+        // Set up the template End node output "shape" (mimicking the template.3mf)
+        {
+            nodes::VariantParameter shapeParam(0.0f);
+            templateMain->addFunctionOutput("shape", shapeParam);
+        }
+
+        std::string program =
+          "// Function: smooth_union_quadratic (ID: 1)\n"
+          "float smooth_union_quadratic_1(float shapeA, float shapeB, float k) {\n"
+          "  float h = max(in_k - abs(in_shapeA - in_shapeB), 0.0) / in_k;\n"
+          "  return min(in_shapeA, in_shapeB) - h * h * in_k * 0.25;\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  sA = length(in_pos - vec3(5, 5, 5)) - 10.0;\n"
+          "  sB = length(in_pos - vec3(20, 20, 20)) - 10.0;\n"
+          "  return smooth_union_quadratic_1(sA, sB, 3.0);\n"
+          "}\n";
+
+        EXPECT_NO_THROW(
+          ExpressionToGraphConverter::setProgramSnippet(program, assembly, *m_parser));
+
+        // Check main model (ID 3) has a FunctionCall node
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+        auto fcCount =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::FunctionCall>(*mainModel);
+        EXPECT_GT(fcCount, 0) << "Main model should call the helper function";
     }
 
 } // namespace gladius::tests
