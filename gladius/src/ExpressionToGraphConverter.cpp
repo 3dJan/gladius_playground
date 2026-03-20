@@ -250,17 +250,57 @@ namespace gladius
             processedSnippet = match.prefix().str() + replacement + match.suffix().str();
         }
 
-        // Only inject implicit "pos" if the snippet references it and it wasn't already declared
+        // Only inject implicit "pos" if the snippet references it and it wasn't already declared.
+        // Match both bare "pos" and the in_-prefixed form "in_pos" (note: \bpos\b alone
+        // doesn't match "in_pos" because '_' is a word character).
         std::vector<FunctionArgument> effectiveArguments = arguments;
         bool const hasPosArg = std::any_of(arguments.begin(), arguments.end(),
           [](auto const & arg) { return arg.name == "pos"; });
         if (!hasPosArg)
         {
-            static std::regex const posWordRegex(R"(\bpos\b)");
+            static std::regex const posWordRegex(R"(\b(?:in_)?pos\b)");
             if (std::regex_search(processedSnippet, posWordRegex))
             {
                 effectiveArguments.insert(
                   effectiveArguments.begin(), FunctionArgument{"pos", ArgumentType::Vector});
+            }
+        }
+
+        // Auto-detect undeclared in_-prefixed arguments from the snippet.
+        // Any "in_<name>" identifier that doesn't match an already-declared
+        // argument is added automatically. Type is inferred as vec3 if
+        // component access (.x/.y/.z) is found, otherwise float.
+        {
+            std::set<std::string> declaredArgs;
+            for (auto const & arg : effectiveArguments)
+            {
+                declaredArgs.insert(arg.name);
+                declaredArgs.insert("in_" + arg.name);
+            }
+
+            std::regex const inArgRegex(R"(\bin_([a-zA-Z_][a-zA-Z0-9_]*)\b)");
+            auto begin = std::sregex_iterator(processedSnippet.begin(),
+                                              processedSnippet.end(),
+                                              inArgRegex);
+            auto end_iter = std::sregex_iterator();
+
+            std::set<std::string> discovered;
+            for (auto it = begin; it != end_iter; ++it)
+            {
+                std::string argName = (*it)[1].str();
+                std::string fullName = "in_" + argName;
+                if (declaredArgs.count(argName) == 0 && declaredArgs.count(fullName) == 0
+                    && discovered.count(argName) == 0)
+                {
+                    discovered.insert(argName);
+                    // Infer type: vec3 if component access is used, float otherwise
+                    std::regex componentRegex(
+                      R"(\bin_)" + argName + R"(\.([xyzXYZ])\b)");
+                    ArgumentType type = std::regex_search(processedSnippet, componentRegex)
+                                          ? ArgumentType::Vector
+                                          : ArgumentType::Scalar;
+                    effectiveArguments.emplace_back(argName, type);
+                }
             }
         }
 
@@ -848,31 +888,34 @@ namespace gladius
             nodes::NodeId innerNode = parseAndBuildGraph(innerExpr, model, variableNodes);
             if (innerNode == 0)
             {
-                return 0; // Failed to parse inner expression
+                return 0;
             }
+
+            // Capture the output port name immediately after parsing, before other
+            // getOutputPortName calls can consume from s_variableContextStack.
+            // This matches the pattern used for binary operators (see leftPortName below).
+            std::string innerOutput = getOutputPortName(model, innerNode);
 
             // Create a multiplication by -1 to represent unary minus
             nodes::NodeId negativeOne = createConstantNode(-1.0, model);
             if (negativeOne == 0)
             {
-                return 0; // Failed to create constant
+                return 0;
             }
 
             nodes::NodeId multiplyNode = createMathOperationNode("Multiplication", model);
             if (multiplyNode == 0)
             {
-                return 0; // Failed to create multiplication node
+                return 0;
             }
 
-            // Connect -1 to first input and inner expression to second input
             std::string negativeOneOutput = getOutputPortName(model, negativeOne);
-            std::string innerOutput = getOutputPortName(model, innerNode);
 
             if (!connectNodes(
                   model, negativeOne, negativeOneOutput, multiplyNode, nodes::FieldNames::A) ||
                 !connectNodes(model, innerNode, innerOutput, multiplyNode, nodes::FieldNames::B))
             {
-                return 0; // Failed to connect nodes
+                return 0;
             }
 
             return multiplyNode;

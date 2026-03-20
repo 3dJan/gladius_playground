@@ -321,6 +321,7 @@ namespace gladius
                 try
                 {
                     document->update3mfModel();
+                    document->rebuildResourceDependencyGraph();
                 }
                 catch (...)
                 {
@@ -475,6 +476,7 @@ namespace gladius
                 try
                 {
                     document->update3mfModel();
+                    document->rebuildResourceDependencyGraph();
                 }
                 catch (...)
                 {
@@ -1502,6 +1504,9 @@ namespace gladius
 
                 // Sync changes to 3MF model so flattening/compilation works
                 document->update3mfModel();
+
+                // Rebuild resource dependency graph to reflect any changed function references
+                document->rebuildResourceDependencyGraph();
 
                 // Return the normalized snippet
                 auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
