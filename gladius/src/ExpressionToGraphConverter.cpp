@@ -195,7 +195,7 @@ namespace gladius
         // awareness; snippets must not contain semicolons inside string literals.
         if (snippet.empty())
         {
-            return 0;
+            throw std::runtime_error("Function body is empty");
         }
 
         // Clear any previous static state (matching convertExpressionToGraph)
@@ -268,7 +268,7 @@ namespace gladius
           createArgumentNodes(effectiveArguments, model);
         if (variableNodes.empty() && !effectiveArguments.empty())
         {
-            return 0;
+            throw std::runtime_error("Failed to create argument nodes for function inputs");
         }
 
         // Split snippet by semicolons
@@ -323,7 +323,9 @@ namespace gladius
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
                 if (exprNodeId == 0)
                 {
-                    return 0; // Failed to parse expression
+                    throw std::runtime_error(
+                      "Failed to parse expression '" + expr +
+                      "' in statement '" + cleanStmt + "'");
                 }
 
                 // Check if this assignment targets an output
@@ -333,12 +335,16 @@ namespace gladius
                     auto const & matchedOutput = *outputIt->second;
                     if (!validateOutputType(model, exprNodeId, matchedOutput.type))
                     {
-                        return 0;
+                        throw std::runtime_error(
+                          "Output type mismatch for '" + varName +
+                          "' in statement '" + cleanStmt + "'");
                     }
 
                     if (!connectToEndNode(model, exprNodeId, matchedOutput))
                     {
-                        return 0;
+                        throw std::runtime_error(
+                          "Failed to connect output '" + varName +
+                          "' to end node in statement '" + cleanStmt + "'");
                     }
                 }
 
@@ -368,13 +374,15 @@ namespace gladius
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
                 if (exprNodeId == 0)
                 {
-                    return 0; // Failed to parse return expression
+                    throw std::runtime_error(
+                      "Failed to parse return expression '" + expr + "'");
                 }
 
                 // Validate output type and connect to End node
                 if (!validateOutputType(model, exprNodeId, singleOutput.type))
                 {
-                    return 0; // Type validation failed
+                    throw std::runtime_error(
+                      "Output type mismatch in return statement '" + cleanStmt + "'");
                 }
 
                 // For Begin nodes: validateOutputType consumed the variable context,
@@ -391,7 +399,8 @@ namespace gladius
 
                 if (!connectToEndNode(model, exprNodeId, singleOutput))
                 {
-                    return 0; // Failed to connect to End node
+                    throw std::runtime_error(
+                      "Failed to connect return value to end node in '" + cleanStmt + "'");
                 }
 
                 return exprNodeId;
@@ -401,10 +410,20 @@ namespace gladius
                 // Try to parse as a single expression if it's the only statement
                 if (statements.size() == 1 && !outputs.empty())
                 {
-                    return convertExpressionToGraph(
+                    auto result = convertExpressionToGraph(
                       cleanStmt, model, parser, arguments, outputs.front());
+                    if (result == 0)
+                    {
+                        auto parserError = parser.getLastError();
+                        throw std::runtime_error(
+                          "Failed to parse single expression '" + cleanStmt + "'" +
+                          (parserError.empty() ? "" : ": " + parserError));
+                    }
+                    return result;
                 }
-                return 0; // Unrecognized statement format
+                throw std::runtime_error(
+                  "Unrecognized statement (not an assignment, return, or single expression): '" +
+                  cleanStmt + "'");
             }
         }
 
@@ -3910,6 +3929,42 @@ namespace gladius
 
                     inFunction = true;
                     braceDepth = 1;
+
+                    // Process any body content after the opening '{' on the same line
+                    // to support single-line function bodies like: float foo(vec3 p) { return 1.0; }
+                    auto afterBrace = line.substr(bracePos + 1);
+                    for (char c : afterBrace)
+                    {
+                        if (c == '{') ++braceDepth;
+                        if (c == '}') --braceDepth;
+                    }
+                    if (braceDepth <= 0)
+                    {
+                        // Entire body was on the signature line — strip trailing '}'
+                        auto bodyEnd = afterBrace.rfind('}');
+                        if (bodyEnd != std::string::npos)
+                        {
+                            afterBrace = afterBrace.substr(0, bodyEnd);
+                        }
+                        // Trim whitespace
+                        auto first = afterBrace.find_first_not_of(" \t");
+                        auto last = afterBrace.find_last_not_of(" \t");
+                        current.body = (first != std::string::npos)
+                                         ? afterBrace.substr(first, last - first + 1)
+                                         : "";
+                        blocks.push_back(current);
+                        current = {};
+                        inFunction = false;
+                    }
+                    else
+                    {
+                        // Body continues on subsequent lines; accumulate what we have
+                        auto first = afterBrace.find_first_not_of(" \t");
+                        if (first != std::string::npos)
+                        {
+                            bodyAccum = afterBrace.substr(first);
+                        }
+                    }
                     continue;
                 }
             }
@@ -4030,13 +4085,23 @@ namespace gladius
             model->clear();
             model->createBeginEnd();
 
-            auto nodeId = convertSnippetToGraph(
-              block.body, *model, parser, block.args, effectiveOutputs, &assembly);
+            nodes::NodeId nodeId = 0;
+            try
+            {
+                nodeId = convertSnippetToGraph(
+                  block.body, *model, parser, block.args, effectiveOutputs, &assembly);
+            }
+            catch (std::exception const & e)
+            {
+                lastParseError = "Failed to parse function '" + block.displayName +
+                  "' (ID: " + std::to_string(block.resourceId) + "): " + e.what();
+                continue;
+            }
 
             if (nodeId == 0)
             {
                 lastParseError = "Failed to parse function body for '" + block.displayName +
-                  "' (ID: " + std::to_string(block.resourceId) + ")";
+                  "' (ID: " + std::to_string(block.resourceId) + "): convertSnippetToGraph returned 0";
                 continue;
             }
 

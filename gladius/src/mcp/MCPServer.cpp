@@ -1851,14 +1851,15 @@ namespace gladius::mcp
                {"description",
                 "Full program listing in set_program_snippet format. MUST include "
                 "the library function AND a main function that demonstrates it. "
+                "IMPORTANT: main MUST use named-output syntax '(float shape)' not 'float'. "
                 "Example:\n"
                 "// Function: my_shape (ID: 1)\n"
                 "float my_shape_1(vec3 pos, float radius) {\n"
                 "  return length(pos) - radius;\n"
                 "}\n\n"
                 "// Function: main (ID: 3) [root]\n"
-                "float main_3(vec3 pos) {\n"
-                "  return my_shape_1(pos, 10.0);\n"
+                "(float shape) main_3(vec3 pos) {\n"
+                "  shape = my_shape_1(pos, 10.0);\n"
                 "}"}}},
              {"function_id",
               {{"type", "integer"},
@@ -1918,8 +1919,8 @@ namespace gladius::mcp
                              "  return length(pos) - radius;\n"
                              "}\n\n"
                              "// Function: main (ID: 3) [root]\n"
-                             "float main_3(vec3 pos) {\n"
-                             "  return my_shape_1(pos, 10.0);\n"
+                             "(float shape) main_3(vec3 pos) {\n"
+                             "  shape = my_shape_1(pos, 10.0);\n"
                              "}"},
                             {"function_id", 1},
                             {"description", "A parametric sphere"}}}};

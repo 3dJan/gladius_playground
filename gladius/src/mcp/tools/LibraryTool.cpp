@@ -21,6 +21,7 @@
 #include "../../nodes/Model.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fmt/format.h>
@@ -126,6 +127,111 @@ namespace gladius::mcp::tools
             }
 
             return entry;
+        }
+
+        /// @brief Check if a 3MF function has an output with the given identifier.
+        bool functionHasOutput(Lib3MF::PModel const & model,
+                              Lib3MF_uint32 functionId,
+                              std::string const & outputName)
+        {
+            auto funcIter = model->GetFunctions();
+            while (funcIter->MoveNext())
+            {
+                auto func = funcIter->GetCurrentFunction();
+                if (func->GetModelResourceID() != functionId)
+                {
+                    continue;
+                }
+                auto outIt = func->GetOutputs();
+                while (outIt->MoveNext())
+                {
+                    if (outIt->GetCurrent()->GetIdentifier() == outputName)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            return false;
+        }
+
+        /// @brief Validate that all resource references in the 3MF model can be resolved.
+        ///
+        /// Checks each levelset's function + channel reference and any volumetric color
+        /// references, mirroring what the Importer/Builder would verify during loading.
+        /// Returns an empty string on success, or an error message on failure.
+        std::string validate3mfReferences(Lib3MF::PModel const & model)
+        {
+            auto resIt = model->GetResources();
+            while (resIt->MoveNext())
+            {
+                auto resource = resIt->GetCurrent();
+                auto * levelSet = dynamic_cast<Lib3MF::CLevelSet *>(resource.get());
+                if (levelSet == nullptr)
+                {
+                    continue;
+                }
+
+                // Check levelset -> function -> channel output
+                auto fn = levelSet->GetFunction();
+                if (!fn)
+                {
+                    return fmt::format("Levelset (ID: {}) references no function.",
+                                       resource->GetModelResourceID());
+                }
+                auto funcId = fn->GetModelResourceID();
+                auto channel = levelSet->GetChannelName();
+                if (channel.empty())
+                {
+                    channel = "shape";
+                }
+                if (!functionHasOutput(model, funcId, channel))
+                {
+                    return fmt::format(
+                      "Levelset references function (ID: {}) with channel '{}', "
+                      "but that function has no output named '{}'. "
+                      "Ensure main uses the multi-output syntax: "
+                      "(float shape) main_3(vec3 pos) {{ ... }}",
+                      funcId, channel, channel);
+                }
+
+                // Check volumetric color reference
+                try
+                {
+                    auto volumeData = levelSet->GetVolumeData();
+                    if (volumeData)
+                    {
+                        auto color = volumeData->GetColor();
+                        if (color)
+                        {
+                            auto colorFuncUniqueId = color->GetFunctionResourceID();
+                            auto colorRes = model->GetResourceByID(colorFuncUniqueId);
+                            if (!colorRes)
+                            {
+                                return fmt::format(
+                                  "Volumetric color references function (unique ID: {}), "
+                                  "but that resource does not exist.",
+                                  colorFuncUniqueId);
+                            }
+                            auto colorFuncId = colorRes->GetModelResourceID();
+                            if (!functionHasOutput(model, colorFuncId, "color"))
+                            {
+                                return fmt::format(
+                                  "Volumetric color references function (ID: {}), "
+                                  "but it has no output named 'color'. "
+                                  "Either add a color output to main or remove the "
+                                  "volumetric color reference from the template.",
+                                  colorFuncId);
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // GetVolumeData may throw if not present; that's OK
+                }
+            }
+            return {};
         }
 
         /// @brief Prune an exported library 3MF file to only contain the tagged function,
@@ -536,8 +642,8 @@ namespace gladius::mcp::tools
                {"function_id", 1},
                {"program_snippet",
                 "// Function: helix_spring (ID: 1)\nfloat helix_spring_1(vec3 pos) {...}\n\n"
-                "// Function: main (ID: 3) [root]\nfloat main_3(vec3 pos) {\n"
-                "  return helix_spring_1(pos);\n}"},
+                "// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n"
+                "  shape = helix_spring_1(pos);\n}"},
                {"description", "A parametric helix spring"}});
         }
 
@@ -552,6 +658,15 @@ namespace gladius::mcp::tools
 
         try
         {
+            auto stepStart = std::chrono::steady_clock::now();
+            auto logStep = [&stepStart](char const * label) {
+                auto now = std::chrono::steady_clock::now();
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - stepStart).count();
+                fprintf(stderr, "[createLibraryEntry] %s took %lld ms\n", label, static_cast<long long>(ms));
+                fflush(stderr);
+                stepStart = now;
+            };
+
             // Step 1: Create a fresh document from template
             DocumentLifecycleTool docTool(m_application);
             if (!docTool.createNewDocument())
@@ -564,6 +679,7 @@ namespace gladius::mcp::tools
             {
                 return createToolError("Failed to access newly created document");
             }
+            logStep("Step 1: create document from template");
 
             // Step 2: Apply the full program snippet (includes main + library function)
             auto assembly = document->getAssembly();
@@ -572,12 +688,96 @@ namespace gladius::mcp::tools
                 return createToolError("No assembly available in document");
             }
 
+            // Verify the snippet includes a main function definition.
+            // Without main, the template's default main survives and the library
+            // function has no demo / thumbnail.
+            if (programSnippet.find("// Function: main (ID: 3)") == std::string::npos)
+            {
+                return createToolError(
+                  "program_snippet must include a main function definition "
+                  "(\"// Function: main (ID: 3) [root]\") that demonstrates the library "
+                  "function with concrete example parameters.",
+                  {{"program_snippet_example",
+                    "// Function: my_func (ID: 1)\n"
+                    "float my_func_1(float a, float b) { ... }\n\n"
+                    "// Function: main (ID: 3) [root]\n"
+                    "(float shape) main_3(vec3 pos) {\n"
+                    "  float sA = length(in_pos) - 8.0;\n"
+                    "  float sB = length(in_pos - vec3(10,0,0)) - 6.0;\n"
+                    "  shape = my_func_1(sA, sB);\n}"}});
+            }
+
             ExpressionParser parser;
             ExpressionToGraphConverter::setProgramSnippet(programSnippet, *assembly, parser);
+            logStep("Step 2: setProgramSnippet");
+
+            // If the template references a volumetric color on a function that
+            // doesn't have a "color" output (because the snippet only declared
+            // "shape"), add a default constant color so the reference stays valid.
+            // Note: We iterate assembly models (not 3MF resources) because
+            // setProgramSnippet invalidates the 3MF resource pointers.
+            {
+                // The template uses functionid=3 (main) for its color reference.
+                // Check the main function's End node for a "color" output.
+                static constexpr nodes::ResourceId MAIN_FUNCTION_ID = 3;
+                auto funcModel = assembly->findModel(MAIN_FUNCTION_ID);
+                if (funcModel)
+                {
+                    auto * endNode = funcModel->getEndNode();
+                    if (endNode != nullptr
+                        && endNode->getParameter(nodes::FieldNames::Color) == nullptr)
+                    {
+                        // Add a constant default color and wire it to the end node.
+                        auto * constVec = funcModel->create<nodes::ConstantVector>();
+                        constVec->parameter().at(nodes::FieldNames::X) =
+                            nodes::VariantParameter(0.5f);
+                        constVec->parameter().at(nodes::FieldNames::Y) =
+                            nodes::VariantParameter(0.5f);
+                        constVec->parameter().at(nodes::FieldNames::Z) =
+                            nodes::VariantParameter(0.5f);
+                        funcModel->addFunctionOutput(
+                            nodes::FieldNames::Color,
+                            nodes::VariantParameter(nodes::float3{0.5f, 0.5f, 0.5f}));
+                        funcModel->addLink(
+                            constVec->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                            endNode->parameter().at(nodes::FieldNames::Color).getId(),
+                            /*skipCheck=*/true);
+                        funcModel->updateGraphAndOrderIfNeeded();
+                    }
+                }
+            }
 
             // Sync changes to 3MF model
+            logStep("Step 2a: default color fixup");
             document->update3mfModel();
             document->rebuildResourceDependencyGraph();
+            logStep("Step 2a: update3mfModel + rebuildDependencyGraph");
+
+            // Step 2b: Force a fresh compilation and check for errors
+            document->refreshModelBlocking();
+            logStep("Step 2b: refreshModelBlocking (GPU compile)");
+
+            auto const core = document->getCore();
+            if (!core)
+            {
+                return createToolError("Failed to access compute core");
+            }
+
+            auto const slicerProgram = core->getSlicerProgram();
+            if (!slicerProgram || !slicerProgram->isValid())
+            {
+                return createToolError(
+                  "Compilation failed: the slicer program is invalid. "
+                  "Check the program_snippet for syntax errors or unsupported constructs.");
+            }
+
+            if (!slicerProgram->compilationSucceeded())
+            {
+                return createToolError(
+                  "Compilation failed. The program_snippet contains errors. "
+                  "Check for unsupported functions, missing parameters, or syntax issues.");
+            }
+            logStep("Step 2b: compilation check");
 
             // Step 3: Verify the tagged function exists
             auto sourceModel = document->get3mfModel();
@@ -617,7 +817,7 @@ namespace gladius::mcp::tools
                   {{"available_functions", availableIds}});
             }
 
-            // Step 4: Validate bounding box
+            // Step 4: Validate bounding box (must be meaningful and smaller than eval domain)
             try
             {
                 auto bbox = document->computeBoundingBox();
@@ -636,6 +836,29 @@ namespace gladius::mcp::tools
                              "Verify that main calls the library function with valid demo parameters "
                              "and produces a visible surface."}};
                 }
+
+                // The bbox must be strictly smaller than the evaluation domain (build volume).
+                // If it matches the build volume, the function likely has no real surface and
+                // the bbox is just the fallback eval domain.
+                auto const & buildVolume =
+                  core->getResourceContext()->getBuildVolume();
+                float constexpr MARGIN = 1.f; // mm
+                bool const matchesBuildVolume =
+                  (bbox.min.x <= buildVolume.min.x + MARGIN)
+                  && (bbox.min.y <= buildVolume.min.y + MARGIN)
+                  && (bbox.min.z <= buildVolume.min.z + MARGIN)
+                  && (bbox.max.x >= buildVolume.max.x - MARGIN)
+                  && (bbox.max.y >= buildVolume.max.y - MARGIN)
+                  && (bbox.max.z >= buildVolume.max.z - MARGIN);
+                if (matchesBuildVolume)
+                {
+                    return {{"success", false},
+                            {"reason", "bounding_box_matches_eval_domain"},
+                            {"message",
+                             "The bounding box matches the evaluation domain, which means the "
+                             "function likely has no real surface or the SDF is always negative. "
+                             "Verify that the main function produces a visible, bounded shape."}};
+                }
             }
             catch (std::exception const & e)
             {
@@ -644,6 +867,7 @@ namespace gladius::mcp::tools
                         {"message",
                          fmt::format("Failed to compute bounding box: {}", e.what())}};
             }
+            logStep("Step 4: bounding box validation");
 
             // Step 5: Render thumbnail
             std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
@@ -655,6 +879,7 @@ namespace gladius::mcp::tools
                          "Failed to render thumbnail. The main function may not produce "
                          "a visible surface, or the GPU pipeline is unavailable."}};
             }
+            logStep("Step 5: render thumbnail");
 
             // Step 6: Write model to library with scaffold and metadata
             fs::create_directories(targetPath.parent_path());
@@ -698,6 +923,18 @@ namespace gladius::mcp::tools
 
                 auto writer = exportedModel->QueryWriter("3mf");
                 writer->WriteToFile(targetPath.string());
+
+                // Step 7: Validate the written file's 3MF references.
+                // Re-read the final file and check that all levelset channel and
+                // volumetric color references resolve to existing function outputs.
+                auto finalModel = openStandaloneModel(targetPath);
+                auto refError = validate3mfReferences(finalModel);
+                if (!refError.empty())
+                {
+                    fs::remove(targetPath);
+                    return createToolError(
+                      fmt::format("3MF reference validation failed: {}", refError));
+                }
             }
 
             auto msg = fmt::format(
