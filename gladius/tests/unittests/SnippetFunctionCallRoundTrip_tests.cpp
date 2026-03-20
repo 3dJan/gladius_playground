@@ -266,6 +266,57 @@ namespace gladius::tests
           << "Should parse box_4(vec3(10, 15, 10), pos - vec3(5, 5, 5))";
     }
 
+    TEST_F(FunctionCallSnippetToGraphTest, UnaryMinus_NegatedVariable_Parses)
+    {
+        std::vector<FunctionArgument> args = {
+          {"pos", ArgumentType::Vector}, {"length", ArgumentType::Scalar}};
+
+        nodes::Model m;
+        m.createBeginEndWithDefaultInAndOuts();
+        EXPECT_NO_THROW(ExpressionToGraphConverter::convertSnippetToGraph(
+          "return -length;", m, *m_parser, args, defaultOutput()));
+    }
+
+    TEST_F(FunctionCallSnippetToGraphTest, UnaryMinus_NegatedVariableTimesConstant_Parses)
+    {
+        std::vector<FunctionArgument> args = {
+          {"pos", ArgumentType::Vector}, {"length", ArgumentType::Scalar}};
+
+        nodes::Model m;
+        m.createBeginEndWithDefaultInAndOuts();
+        EXPECT_NO_THROW(ExpressionToGraphConverter::convertSnippetToGraph(
+          "return -length * 0.5;", m, *m_parser, args, defaultOutput()));
+    }
+
+    TEST_F(FunctionCallSnippetToGraphTest, FunctionCall_NegatedVarInsideVec3_Parses)
+    {
+        std::vector<FunctionArgument> args = {
+          {"pos", ArgumentType::Vector}, {"length", ArgumentType::Scalar}};
+
+        nodes::Model m;
+        m.createBeginEndWithDefaultInAndOuts();
+        EXPECT_NO_THROW(ExpressionToGraphConverter::convertSnippetToGraph(
+          "return box_4(pos - vec3(0, 0, -length * 0.5));",
+          m, *m_parser, args, defaultOutput(), m_assembly.get()));
+    }
+
+    TEST_F(FunctionCallSnippetToGraphTest, FunctionCall_MultiStatementWithNestedCrossCalls_Works)
+    {
+        // Multi-statement snippet with two cross-function calls and nested vec3()
+        // in argument expressions — the pattern from hex screw composition.
+        nodes::Model model;
+        model.createBeginEnd();
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "float head = max(box_4(in_pos, in_size), abs(in_pos.z - in_height * 0.5) - in_height * 0.5);\n"
+          "float shaft = box_4(in_pos - vec3(0, 0, -in_length * 0.5), in_diameter);\n"
+          "return min(head, shaft);",
+          model, *m_parser, {}, defaultOutput(), m_assembly.get());
+
+        EXPECT_NE(nodeId, 0)
+          << "Multi-statement snippet with nested vec3 in cross-function call args should parse";
+    }
+
     // =====================================================================================
     // FunctionCall: Full roundtrip (graph → snippet → graph → snippet)
     // =====================================================================================

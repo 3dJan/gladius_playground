@@ -1371,4 +1371,53 @@ namespace gladius::tests
           << "Assembly should flatten after partial setProgramSnippet update";
     }
 
+    // =====================================================================================
+    // Auto-detected in_-prefixed arguments: pos should always come first
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, AutoDetect_InPosPrefix_PosIsFirstArgument)
+    {
+        // When all arguments use the in_ prefix (no bare "pos"),
+        // the auto-detection should still place pos first.
+        std::vector<FunctionArgument> noArgs; // empty: triggers auto-detection
+        m_model->createBeginEnd();            // no default pos argument
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "float v = in_radius * 2;\nreturn length(in_pos) - v;",
+          *m_model, *m_parser, noArgs, m_output);
+        EXPECT_NE(nodeId, 0u);
+
+        auto * beginNode = m_model->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+
+        auto argList = beginNode->getArguments();
+        ASSERT_GE(argList.size(), 2u);
+        EXPECT_EQ(argList[0].first, "pos")
+          << "pos must be the first argument even when only in_pos appears in snippet";
+        EXPECT_EQ(argList[0].second->getTypeIndex(), nodes::ParameterTypeIndex::Float3)
+          << "pos should be inferred as vec3";
+        EXPECT_EQ(argList[1].first, "radius");
+    }
+
+    TEST_F(MCPSnippetToolTest, AutoDetect_InPosComponent_PosIsVec3)
+    {
+        // in_pos.z component access should cause pos to be detected as vec3
+        std::vector<FunctionArgument> noArgs;
+        m_model->createBeginEnd();
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return abs(in_pos.z) - in_height;",
+          *m_model, *m_parser, noArgs, m_output);
+        EXPECT_NE(nodeId, 0u);
+
+        auto * beginNode = m_model->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+
+        auto argList = beginNode->getArguments();
+        ASSERT_GE(argList.size(), 2u);
+        EXPECT_EQ(argList[0].first, "pos");
+        EXPECT_EQ(argList[0].second->getTypeIndex(), nodes::ParameterTypeIndex::Float3);
+        EXPECT_EQ(argList[1].first, "height");
+    }
+
 } // namespace gladius::tests

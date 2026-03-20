@@ -351,6 +351,19 @@ set_library_metadata(
 )
 ```
 
+You can also update tags on an **existing** library entry without opening it, by
+passing `category` and `name`:
+
+```
+set_library_metadata(
+    function_ids=[1],
+    description="hexagon (2d)",
+    tags=["primitive", "hexagon", "2d", "polygon", "nut", "bolt", "honeycomb"],
+    category="primitives",
+    name="hexagon"
+)
+```
+
 Verify the entry:
 
 ```
@@ -424,6 +437,139 @@ list_library(query="twist")             # search by name, description, or tags
 
 The query performs case-insensitive substring matching across entry names,
 descriptions, and tags.
+
+## Composing Library Entries
+
+Complex objects are best built by combining existing library entries rather
+than writing everything from scratch. For example, a metric nut = hexagonal
+prism (from `primitives/hexagon`) + ISO internal thread (from
+`mechanical/iso-metric-internal-thread`).
+
+### Composition Workflow
+
+#### Step 1 — Discover Components
+
+Search the library for relevant building blocks. Use multiple queries to cast
+a wide net — search by function type, domain terms, and related keywords:
+
+```
+list_library(query="thread")       # → mechanical/iso-metric-internal-thread
+list_library(query="hexagon")      # → primitives/hexagon
+list_library(query="union smooth") # → csg/smooth_union, csg/soft_union
+```
+
+**Tip:** Descriptions and tags are searched too, so queries like "lattice",
+"2d", "boolean", or "decorative" work even if the name doesn't match.
+
+#### Step 2 — Inspect Signatures
+
+For each candidate, inspect its function signature to understand inputs and
+outputs:
+
+```
+get_library_entry_info(category="primitives", name="hexagon")
+```
+
+This returns:
+- **`functions`** — all functions in the entry, each with `name`, `resource_id`,
+  `inputs` (name + type), `outputs` (name + type), and `is_tagged` (whether
+  it's the importable function).
+- **`description`** — what the entry does and what parameters mean.
+
+Look at the **tagged function** (`is_tagged: true`) — that's what gets imported.
+Note its parameter names and types; you'll call it by `name_ID(args)` after
+import.
+
+#### Step 3 — Import Components
+
+Create a fresh document and import each component:
+
+```
+create_document()
+import_library_entry(category="mechanical", name="iso-metric-internal-thread")
+# → imported as isoInternalThread at resource ID 21
+import_library_entry(category="primitives", name="hexagon")
+# → imported as hexagon at resource ID 17
+```
+
+Each import returns the function name and assigned resource ID. Dependencies
+(sub-functions like `isoThreadProfile`) are imported automatically.
+
+**Important:** Resource IDs are assigned dynamically — always use the IDs
+from the import response, not from `get_library_entry_info`.
+
+#### Step 4 — Check Available Functions
+
+After all imports, inspect the full assembly:
+
+```
+get_program_snippet()
+```
+
+This shows every function with its ID and signature. Find the imported
+functions and note their `name_ID` call syntax (e.g. `hexagon_17(pos, size)`,
+`isoInternalThread_21(pos, diameter, pitch, thread_length, wall_thickness)`).
+
+#### Step 5 — Compose in Main
+
+Write a `main` function that calls the imported components. Use standard SDF
+composition patterns:
+
+```
+set_program_snippet(snippet="""
+// Function: main (ID: 3) [root]
+(float shape, vec3 color) main_3(vec3 pos) {
+  float hex = max(hexagon_17(pos, 5.5), abs(pos.z) - 2.4);
+  float thread = isoInternalThread_21(pos, 3.0, 0.5, 4.8, 1.0);
+  shape = max(hex, thread);
+  color = vec3(0.6, 0.6, 0.65);
+}
+""")
+```
+
+#### Step 6 — Validate, Render, Export
+
+```
+validate_model()
+render_to_file(output_path="/tmp/preview.png", width=512, height=512)
+export_to_library(function_id=..., category="mechanical", name="metric_nut",
+    description="...", keep_scaffold=true)
+```
+
+### SDF Composition Patterns
+
+When composing shapes in `main`, use these standard patterns:
+
+| Pattern | Code | Use case |
+|---------|------|----------|
+| Union (join) | `min(a, b)` | Combine two shapes into one |
+| Intersection (trim) | `max(a, b)` | Keep only where both overlap |
+| Subtraction (cut) | `max(a, -b)` | Remove shape B from shape A |
+| 2D → 3D extrusion | `max(sdf2d, abs(pos.z) - h)` | Extrude a 2D SDF along Z axis |
+| Shell/hollow | `abs(sdf) - thickness` | Hollow out a solid shape |
+| Offset | `sdf - radius` | Grow a shape by radius |
+
+For smooth/decorative booleans, import a CSG operator from the library
+(e.g. `smooth_union`, `chamfer_subtraction`, `stairs_union`) and call it
+instead of using raw `min`/`max`.
+
+### Tips for Composition
+
+- **Search broadly first.** Before writing any SDF math from scratch, check
+  if the library already has it: `list_library(query="cylinder")`,
+  `list_library(query="prism")`, etc.
+- **2D primitives need extrusion.** Library entries in `2d_primitives` and
+  some entries like `hexagon` return 2D SDFs. Extrude them with
+  `max(sdf2d(pos), abs(pos.z) - halfHeight)` to make a solid.
+- **Template functions are available too.** After `create_document()`, the
+  template includes `box_4`, `sphere_5`, `torus_6`, `capsule_7`, `circle_8`,
+  `difference_9`, `union_10`, `intersection_11`, and more. Use
+  `get_program_snippet()` to see them all.
+- **Combine imported + inline functions.** You can write new helper functions
+  in the snippet alongside imported ones. Use a fresh ID (higher than any
+  existing) for new functions.
+- **One main, many components.** Keep the `main` function as the only `[root]`
+  — it should orchestrate all the imported components.
 
 ## Guidelines
 
@@ -549,7 +695,7 @@ descriptions, and tags.
 | `import_library_entry` | Import a library entry into the current document |
 | `list_library` | List categories/entries with optional query filter |
 | `get_library_entry_info` | Inspect entry metadata, function info, tags, and snippet |
-| `set_library_metadata` | Update entry description and tags |
+| `set_library_metadata` | Update entry description and tags (pass `category`/`name` to target a library entry directly) |
 | `delete_library_entry` | Remove a library entry |
 
 ### Change Tracking
