@@ -9,7 +9,7 @@ description: >-
   scaffold and metadata.
 metadata:
   author: gladius
-  version: "3.0"
+  version: "4.0"
   requires: gladius-mcp-server
 ---
 
@@ -61,16 +61,22 @@ Regular `pkill` without `-9` does not work because the process ignores
 create_library_entry(
     category="modifiers",
     name="twist",
-    snippet="vec3 twist_1(vec3 pos, float twist_rate) {\n  float angle = pos.z * twist_rate;\n  float c = cos(angle);\n  float s = sin(angle);\n  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n}",
+    program_snippet="// Function: twist (ID: 1)\nvec3 twist_1(vec3 pos, float twist_rate) {\n  float angle = pos.z * twist_rate;\n  float c = cos(angle);\n  float s = sin(angle);\n  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n}\n\n// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n  shape = length(twist_1(pos, 0.1)) - 15.0;\n}",
+    function_id=1,
     description="Twists a shape around the Z axis",
     tags=["modifier", "transform", "twist"]
 )
 ```
 
-This single call creates the document, compiles the snippet, generates a
-scaffold (`main` + mesh + levelset + build item), renders a thumbnail,
-validates the bounding box, and exports to the library. It fails with a
-helpful error if the thumbnail or bounding box is invalid.
+This single call creates the document, applies the full program snippet
+(including a `main` function that demonstrates the library function),
+validates compilation and bounding box, renders a thumbnail, and exports
+to the library. It fails with a helpful error if compilation, thumbnail,
+or bounding box validation fails.
+
+**Important:** The `program_snippet` must include both the library function
+AND a `main` function. The main function must use named-output syntax:
+`(float shape) main_3(vec3 pos)` — not `float main_3(vec3 pos)`.
 
 ### Full-control Path
 
@@ -83,14 +89,21 @@ Use the full-control path when you need to:
 
 ## Quick Path Details
 
-`create_library_entry` accepts a snippet body for a single function. The tool:
+`create_library_entry` accepts a full program snippet (same format as
+`set_program_snippet`) that must include both the library function and a
+`main` function demonstrating it. The tool:
 
 1. Creates a fresh document from the template
-2. Creates the function via `create_function_from_snippet`
-3. Wires `main` to call it with sensible defaults
-4. Validates the model (graph + OpenCL compilation)
-5. Renders a thumbnail and checks the bounding box
-6. Exports with `keep_scaffold=true`
+2. Applies the program snippet via `set_program_snippet`
+3. Adds a default color output to `main` if missing (so the 3MF template's
+   volumetric color reference stays valid)
+4. Validates compilation (graph + OpenCL) and bounding box
+5. Renders a thumbnail
+6. Exports with scaffold, metadata, and thumbnail
+7. Validates the written file's 3MF references
+
+Required parameters: `name`, `category`, `program_snippet`, `function_id`,
+`description`. Optional: `tags` (array of strings), `overwrite` (boolean).
 
 If validation, thumbnail generation, or bounding box checks fail, the tool
 returns an error with `usage_example` showing the correct call format.
@@ -162,8 +175,8 @@ float box_4(vec3 b, vec3 pos) {
 }
 
 // Function: main (ID: 3) [root]
-float main_3(vec3 pos) {
-  return box_4(vec3(30, 30, 60), twist_1(pos, 0.1));
+(float shape) main_3(vec3 pos) {
+  shape = box_4(vec3(30, 30, 60), twist_1(pos, 0.1));
 }
 ```
 
@@ -173,6 +186,11 @@ Functions not mentioned in the snippet are preserved unchanged.
 **Important:** Use IDs from the template. The template has `main` at ID 3 and
 `box` at ID 4. Check `get_program_snippet()` output for available IDs. New
 functions can reuse IDs of template functions you want to replace.
+
+**Important:** The `main` function must use named-output syntax
+`(float shape) main_3(vec3 pos)` — not `float main_3(vec3 pos)`. The 3MF
+template references the output channel "shape" by name. Using the wrong
+syntax causes a "function has no output named 'shape'" error on export.
 
 #### Alternative: Single function (`create_function_from_snippet`)
 
@@ -216,10 +234,24 @@ Use `evaluate_function` to numerically verify a function before exporting:
 ```
 evaluate_function(
     function_id=1,
-    sample_points=[
-        {"x": 0, "y": 0, "z": 0},
-        {"x": 10, "y": 0, "z": 0},
-        {"x": 0, "y": 0, "z": 20}
+    samples=[
+        {"pos": [0, 0, 0]},
+        {"pos": [10, 0, 0]},
+        {"pos": [0, 0, 20]}
+    ]
+)
+```
+
+Each sample is a JSON object mapping argument names to values. Use `[x,y,z]`
+arrays for `vec3` arguments and plain numbers for `float` arguments. For
+functions with multiple arguments:
+
+```
+evaluate_function(
+    function_id=1,
+    samples=[
+        {"pos": [0, 0, 0], "radius": 5.0},
+        {"pos": [10, 0, 0], "radius": 5.0}
     ]
 )
 ```
@@ -233,9 +265,9 @@ evaluate_function(
   "function_name": "twist",
   "output_type": "vec3",
   "results": [
-    {"point": {"x": 0, "y": 0, "z": 0}, "value": {"x": 0, "y": 0, "z": 0}},
-    {"point": {"x": 10, "y": 0, "z": 0}, "value": {"x": 10, "y": 0, "z": 0}},
-    {"point": {"x": 0, "y": 0, "z": 20}, "value": {"x": 0, "y": 0, "z": 20}}
+    {"inputs": {"pos": [0, 0, 0]}, "outputs": {"Vector": [0, 0, 0]}},
+    {"inputs": {"pos": [10, 0, 0]}, "outputs": {"Vector": [10, 0, 0]}},
+    {"inputs": {"pos": [0, 0, 20]}, "outputs": {"Vector": [0, 0, 20]}}
   ]
 }
 ```
@@ -292,13 +324,15 @@ export_to_library(
     category="modifiers",
     name="twist",
     description="Twists a shape around the Z axis by rotating XY coordinates based on Z position and twist rate.",
-    keep_scaffold=true
+    keep_scaffold=true,
+    overwrite=false
 )
 ```
 
 The `function_id` is the resource ID of the tagged function (not `main`).
 `keep_scaffold=true` preserves the full document structure so the entry can
-render standalone.
+render standalone. `overwrite=true` replaces an existing entry with the same
+name (default: false).
 
 This automatically embeds a thumbnail and stamps library metadata. The export
 validates the bounding box (rejects degenerate/zero-volume/NaN shapes) and
@@ -418,8 +452,10 @@ descriptions, and tags.
 
 ### Snippet Authoring Tips
 
-- **Arguments use `in_` prefix in the body** — if a parameter is named `pos`,
-  refer to it as `in_pos` inside the function body.
+- **`get_program_snippet` emits `in_` prefix for arguments** — the output shows
+  `in_pos`, `in_radius` etc. in function bodies. When writing snippets, you can
+  use either form: both `pos` and `in_pos` are accepted by the parser. The `in_`
+  prefix exists to prevent collisions between argument and output names.
 - **Only use functions that exist in the assembly.** There are no built-in
   SDF primitives like `fBox`, `fSphere`, etc. Write box/sphere SDFs using raw
   math (e.g., `length(pos) - radius` for sphere, `abs(pos) - halfSize` for
@@ -472,6 +508,7 @@ descriptions, and tags.
 | `set_function_snippet` | Write one function's code by ID |
 | `create_function_from_snippet` | Create new function from multi-line code |
 | `create_function_from_expression` | Create from a single math expression |
+| `create_image3d_function` | Create a function from 3D image data (FunctionFromImage3D) |
 | `create_levelset` | Create a new levelset resource |
 | `modify_levelset` | Modify levelset properties |
 | `set_parameter` | Set a function parameter value |
