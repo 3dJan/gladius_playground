@@ -2080,9 +2080,9 @@ namespace gladius::mcp
         registerTool(
           "set_library_metadata",
           "Stamp library metadata (tagged function IDs, description, and tags) onto the "
-          "current document's 3MF model. Use this before save_document / "
-          "save_document_as when you want a document to behave as a library entry "
-          "without going through export_to_library.",
+          "current document or an existing library entry. When 'category' and 'name' are "
+          "provided, updates the library entry file directly without affecting the current "
+          "document. Otherwise, updates the current document's 3MF model.",
           {{"type", "object"},
            {"properties",
             {{"function_ids",
@@ -2098,7 +2098,15 @@ namespace gladius::mcp
               {{"type", "array"},
                {"items", {{"type", "string"}}},
                {"description",
-                "Optional keyword tags for searchability (e.g. [\"gear\", \"mechanical\"])"}}}}},
+                "Optional keyword tags for searchability (e.g. [\"gear\", \"mechanical\"])"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Optional library category to target an existing entry (e.g. \"primitives\")"}}},
+             {"name",
+              {{"type", "string"},
+               {"description",
+                "Optional entry name to target an existing library entry (e.g. \"sphere\")"}}}}},
            {"required", {"function_ids", "description"}}},
           [this](json const & params) -> json
           {
@@ -2124,7 +2132,18 @@ namespace gladius::mcp
               {
                   tags = params["tags"].get<std::vector<std::string>>();
               }
-              return m_application->setLibraryMetadata(functionIds, description, tags);
+              std::string category;
+              if (params.contains("category") && params["category"].is_string())
+              {
+                  category = params["category"].get<std::string>();
+              }
+              std::string name;
+              if (params.contains("name") && params["name"].is_string())
+              {
+                  name = params["name"].get<std::string>();
+              }
+              return m_application->setLibraryMetadata(
+                functionIds, description, tags, category, name);
           });
 
         // CHANGE NOTIFICATIONS

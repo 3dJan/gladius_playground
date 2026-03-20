@@ -276,7 +276,9 @@ namespace gladius
         nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & functionIds,
                            std::string const & description,
-                           std::vector<std::string> const & tags = {}) override;
+                           std::vector<std::string> const & tags = {},
+                           std::string const & category = "",
+                           std::string const & name = "") override;
         nlohmann::json importLibraryEntry(std::string const & category,
                                           std::string const & name) override;
         nlohmann::json deleteLibraryEntry(std::string const & category,

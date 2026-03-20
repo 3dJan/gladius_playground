@@ -1389,9 +1389,10 @@ nlohmann::json gladius::ApplicationMCPAdapter::exportToLibrary(uint32_t function
 
 nlohmann::json gladius::ApplicationMCPAdapter::setLibraryMetadata(
     std::vector<uint32_t> const & functionIds, std::string const & description,
-    std::vector<std::string> const & tags)
+    std::vector<std::string> const & tags, std::string const & category,
+    std::string const & name)
 {
-    return m_libraryTool->setLibraryMetadata(functionIds, description, tags);
+    return m_libraryTool->setLibraryMetadata(functionIds, description, tags, category, name);
 }
 
 nlohmann::json gladius::ApplicationMCPAdapter::importLibraryEntry(std::string const & category,

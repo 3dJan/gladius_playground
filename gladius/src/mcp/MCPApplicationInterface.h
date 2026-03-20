@@ -399,11 +399,15 @@ namespace gladius
         /// @param functionIds Resource IDs of tagged (importable) functions.
         /// @param description Human-readable description of the library entry.
         /// @param tags Optional keyword tags for searchability.
+        /// @param category Optional category to target a library entry directly.
+        /// @param name Optional entry name to target a library entry directly.
         /// @return JSON with success status.
         virtual nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & functionIds,
                            std::string const & description,
-                           std::vector<std::string> const & tags = {}) = 0;
+                           std::vector<std::string> const & tags = {},
+                           std::string const & category = "",
+                           std::string const & name = "") = 0;
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.

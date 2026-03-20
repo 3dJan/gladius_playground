@@ -1359,14 +1359,79 @@ namespace gladius::mcp::tools
     nlohmann::json
     LibraryTool::setLibraryMetadata(std::vector<uint32_t> const & functionIds,
                                     std::string const & description,
-                                    std::vector<std::string> const & tags)
+                                    std::vector<std::string> const & tags,
+                                    std::string const & category,
+                                    std::string const & name)
     {
+        // Encode tags as comma-separated string
+        std::string tagStr;
+        for (size_t i = 0; i < tags.size(); ++i)
+        {
+            if (i > 0) tagStr += ',';
+            tagStr += tags[i];
+        }
+
+        // If category and name are provided, update the library entry file directly
+        if (!category.empty() && !name.empty())
+        {
+            bool isShipped = false;
+            auto const entryPath = resolveEntryPath(category, name, isShipped);
+            if (entryPath.empty())
+            {
+                return createToolError(
+                  fmt::format("Library entry '{}' not found in category '{}'", name, category));
+            }
+            if (isShipped)
+            {
+                return createToolError(
+                  fmt::format("Cannot modify shipped library entry '{}/{}'", category, name));
+            }
+
+            try
+            {
+                auto model = openStandaloneModel(entryPath);
+
+                std::vector<Lib3MF_uint32> lib3mfIds(functionIds.begin(), functionIds.end());
+                io::LibraryMetadata metadata;
+                metadata.libraryFunctions = io::serializeResourceIds(lib3mfIds);
+                metadata.libraryDescription = description;
+                metadata.libraryTags = tagStr;
+                io::writeLibraryMetadata(model, metadata);
+
+                auto writer = model->QueryWriter("3mf");
+                writer->WriteToFile(entryPath.string());
+
+                return {{"success", true},
+                        {"category", category},
+                        {"name", name},
+                        {"function_ids", functionIds},
+                        {"description", description},
+                        {"tags", tags},
+                        {"message",
+                         fmt::format("Updated metadata on library entry '{}/{}': {} tagged "
+                                     "function(s), description='{}'",
+                                     category,
+                                     name,
+                                     functionIds.size(),
+                                     description)}};
+            }
+            catch (std::exception const & e)
+            {
+                return createToolError(
+                  fmt::format("Failed to update library entry metadata: {}", e.what()));
+            }
+        }
+
+        // Otherwise, update the currently active document
         if (!validateActiveDocument())
         {
             return createToolError(
-              "No active document. Open or create a document first.",
+              "No active document. Open or create a document first, or specify "
+              "category and name to target a library entry.",
               {{"function_ids", nlohmann::json::array({5})},
-               {"description", "My library entry"}});
+               {"description", "My library entry"},
+               {"category", "primitives"},
+               {"name", "my_entry"}});
         }
 
         auto document = m_application->getCurrentDocument();
@@ -1400,16 +1465,7 @@ namespace gladius::mcp::tools
         io::LibraryMetadata metadata;
         metadata.libraryFunctions = io::serializeResourceIds(lib3mfIds);
         metadata.libraryDescription = description;
-        // Encode tags as comma-separated string
-        {
-            std::string tagStr;
-            for (size_t i = 0; i < tags.size(); ++i)
-            {
-                if (i > 0) tagStr += ',';
-                tagStr += tags[i];
-            }
-            metadata.libraryTags = tagStr;
-        }
+        metadata.libraryTags = tagStr;
         io::writeLibraryMetadata(model, metadata);
 
         return {{"success", true},
