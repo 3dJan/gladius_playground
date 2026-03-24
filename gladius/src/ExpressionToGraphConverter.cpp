@@ -1418,6 +1418,12 @@ namespace gladius
                                 // Sync argument ports from the referenced model
                                 fc->updateInputsAndOutputs(*referencedModel);
 
+                                // Set display name from the referenced function
+                                if (referencedModel->getDisplayName().has_value())
+                                {
+                                    fc->setDisplayName(referencedModel->getDisplayName().value());
+                                }
+
                                 // Re-register ports/params that were dynamically added
                                 model.registerOutputs(*fcNode);
                                 model.registerInputs(*fcNode);
