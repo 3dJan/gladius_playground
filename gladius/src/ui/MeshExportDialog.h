@@ -140,6 +140,12 @@ namespace gladius::ui
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
         bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
 
+        // Compatibility tuning options
+        io::QuantizationMode m_quantizationMode = io::QuantizationMode::Adaptive;
+        bool m_overridePaletteSize = false;  ///< Whether user has overridden palette size
+        int m_maxPaletteSize = 16;           ///< Maximum palette colors (when overridden)
+        io::TargetApplication m_targetApplication = io::TargetApplication::None;
+
         ColorToThicknessDialog m_colorToThicknessDialog;
 
         // Async palette derivation

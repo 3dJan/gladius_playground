@@ -1,7 +1,11 @@
 #include "ManifoldDualContouringStlExporter.h"
 
+#include "3mf/ColorCompatibilityPlanner.h"
+#include "3mf/ColorQuantizer.h"
+#include "3mf/ColorRegionizer.h"
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
+#include "3mf/MmuSegmentationWriter.h"
 #include "MeshExporter.h"
 #include "MeshExporter3mf.h"
 #include "WindingRepair.h"
@@ -104,6 +108,21 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setColorMode(ColorMode mode)
     {
         m_colorMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setQuantizationMode(QuantizationMode mode)
+    {
+        m_quantizationMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setMaxPaletteSize(std::optional<std::uint32_t> maxPaletteSize)
+    {
+        m_maxPaletteSize = maxPaletteSize;
+    }
+
+    void ManifoldDualContouringStlExporter::setTargetApplication(TargetApplication targetApplication)
+    {
+        m_targetApplication = targetApplication;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -435,37 +454,109 @@ namespace gladius::io
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    if (m_colorMode == ColorMode::PerVertex)
+                    // Always sample face colors for compatibility planning
+                    auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
+                        positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+
+                    // Run compatibility planner
+                    MeshColorExportSettings const settings{
+                        m_exportWithColors,
+                        m_convertToSrgb,
+                        m_colorMode,
+                        m_quantizationMode,
+                        m_targetApplication,
+                        m_maxPaletteSize,
+                    };
+
+                    auto const uniqueColors = ColorQuantizer::countUniqueOpaqueColors(faceColors);
+                    bool const hasTransparency = ColorQuantizer::hasTransparency(faceColors);
+
+                    ColorCompatibilityPlanner planner;
+                    auto const decision = planner.decide(settings, uniqueColors, hasTransparency);
+
+                    // Log warnings from the planner
+                    if (m_logger)
                     {
-                        auto vertexColors = FaceColorSampler::sampleVertexColors(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        m_progress.store(0.90, std::memory_order_relaxed);
-                        writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
-                        m_progress.store(1.0, std::memory_order_relaxed);
-                        
-                        if (m_logger)
+                        for (auto const& warning : decision.warnings)
                         {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with per-vertex colors"),
-                               events::Severity::Info});
+                            m_logger->addEvent({warning, events::Severity::Warning});
                         }
                     }
-                    else
+
+                    m_progress.store(0.90, std::memory_order_relaxed);
+
+                    switch (decision.finalRepresentation)
                     {
-                        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        m_progress.store(0.90, std::memory_order_relaxed);
-                        writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                        m_progress.store(1.0, std::memory_order_relaxed);
-                        
-                        if (m_logger)
+                    case ExportRepresentation::StandardTriangleColor:
+                    {
+                        if (settings.preferredColorMode == ColorMode::PerVertex)
                         {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
-                               events::Severity::Info});
+                            auto vertexColors = FaceColorSampler::sampleVertexColors(
+                                positions, facesForSampling, *samplingProgram, *primitives,
+                                nullptr, m_convertToSrgb);
+                            writer.exportMeshWithVertexColors(
+                                m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
                         }
+                        else
+                        {
+                            writer.exportMeshWithColors(
+                                m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                        }
+                        break;
+                    }
+                    case ExportRepresentation::StandardDiscreteComponents:
+                    case ExportRepresentation::StandardDiscreteObjects:
+                    case ExportRepresentation::StandardBuildItems:
+                    {
+                        std::uint32_t const maxPalette =
+                            settings.maxPaletteSize.value_or(
+                                static_cast<std::uint32_t>(std::min(uniqueColors, std::size_t{256})));
+
+                        auto palette = ColorQuantizer::quantize(faceColors, maxPalette);
+
+                        PrintableRegionKind regionKind = PrintableRegionKind::Component;
+                        if (decision.finalRepresentation == ExportRepresentation::StandardDiscreteObjects)
+                        {
+                            regionKind = PrintableRegionKind::Object;
+                        }
+                        else if (decision.finalRepresentation == ExportRepresentation::StandardBuildItems)
+                        {
+                            regionKind = PrintableRegionKind::BuildItem;
+                        }
+
+                        auto regions = ColorRegionizer::regionize(palette, regionKind);
+                        writer.exportMeshWithRegions(
+                            m_targetFile, convertedMesh, "Mesh", palette, regions, m_document, true);
+                        break;
+                    }
+                    case ExportRepresentation::ProprietaryMmuSegmentation:
+                    {
+                        std::uint32_t const maxPalette =
+                            settings.maxPaletteSize.value_or(
+                                static_cast<std::uint32_t>(
+                                    std::min(uniqueColors,
+                                             static_cast<std::size_t>(
+                                                 MmuSegmentationWriter::MAX_EXTRUDERS))));
+
+                        auto palette = ColorQuantizer::quantize(faceColors, maxPalette);
+                        writer.exportMeshWithMmuSegmentation(
+                            m_targetFile, convertedMesh, "Mesh", palette, m_document, true);
+                        break;
+                    }
+                    default:
+                        writer.exportMeshWithColors(
+                            m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
+                        break;
+                    }
+
+                    m_progress.store(1.0, std::memory_order_relaxed);
+
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {fmt::format("Exported 3MF mesh with colors (representation: {})",
+                                       static_cast<int>(decision.finalRepresentation)),
+                           events::Severity::Info});
                     }
                 }
                 else

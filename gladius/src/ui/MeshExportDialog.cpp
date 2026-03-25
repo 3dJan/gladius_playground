@@ -859,6 +859,69 @@ namespace gladius::ui
         ImGui::Spacing();
         ImGui::Spacing();
 
+        // Compatibility tuning section
+        ImGui::Text("Compatibility");
+        ImGui::Separator();
+
+        ImGui::BeginDisabled(!colorExportAvailable || !m_exportWithColors);
+
+        // Target application selector
+        ImGui::Text("Target Application:");
+        ImGui::SameLine();
+        int targetIdx = static_cast<int>(m_targetApplication);
+        char const* targetLabels[] = {"None (portable)", "PrusaSlicer", "OrcaSlicer"};
+        if (ImGui::Combo("##TargetApp", &targetIdx, targetLabels, 3))
+        {
+            m_targetApplication = static_cast<io::TargetApplication>(targetIdx);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Select a target slicer for optimized export.\n"
+                "'None' produces standard-only output portable to any 3MF viewer.");
+        }
+        if (m_targetApplication != io::TargetApplication::None)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                "Warning: Portability to other slicers may be reduced.");
+        }
+
+        // Quantization mode
+        ImGui::Text("Quantization:");
+        ImGui::SameLine();
+        int quantMode = static_cast<int>(m_quantizationMode);
+        char const* quantLabels[] = {"Disabled", "Adaptive"};
+        if (ImGui::Combo("##QuantMode", &quantMode, quantLabels, 2))
+        {
+            m_quantizationMode = static_cast<io::QuantizationMode>(quantMode);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Adaptive: Automatically reduce colors to fit a palette for slicer compatibility.\n"
+                "Disabled: Preserve all unique colors (may not produce printable regions).");
+        }
+
+        // Optional palette size override
+        ImGui::Checkbox("Override palette size", &m_overridePaletteSize);
+        if (m_overridePaletteSize)
+        {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            ImGui::SliderInt("##PaletteSize", &m_maxPaletteSize, 2, 256, "%d colors");
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Limit the number of distinct colors in the export.\n"
+                "When unchecked, the palette is sized automatically.");
+        }
+
+        ImGui::EndDisabled();
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
         // HueForge-style color → thickness exploration dialog
         ImGui::BeginDisabled(!colorExportAvailable);
         if (ImGui::Button("Color \u2192 Shell Thickness..."))
@@ -1289,6 +1352,17 @@ namespace gladius::ui
                 m_layeredExporter3mf.setExportWithColors(exportColors);
                 m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
                 m_layeredExporter3mf.setColorMode(m_colorMode);
+                m_layeredExporter3mf.setQuantizationMode(m_quantizationMode);
+                m_layeredExporter3mf.setTargetApplication(m_targetApplication);
+                if (m_overridePaletteSize)
+                {
+                    m_layeredExporter3mf.setMaxPaletteSize(
+                        static_cast<std::uint32_t>(m_maxPaletteSize));
+                }
+                else
+                {
+                    m_layeredExporter3mf.setMaxPaletteSize(std::nullopt);
+                }
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -1374,6 +1448,17 @@ namespace gladius::ui
             m_manifoldExporter.setExportWithColors(exportColors);
             m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
             m_manifoldExporter.setColorMode(m_colorMode);
+            m_manifoldExporter.setQuantizationMode(m_quantizationMode);
+            m_manifoldExporter.setTargetApplication(m_targetApplication);
+            if (m_overridePaletteSize)
+            {
+                m_manifoldExporter.setMaxPaletteSize(
+                    static_cast<std::uint32_t>(m_maxPaletteSize));
+            }
+            else
+            {
+                m_manifoldExporter.setMaxPaletteSize(std::nullopt);
+            }
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;

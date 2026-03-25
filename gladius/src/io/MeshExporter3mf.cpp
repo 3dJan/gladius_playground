@@ -3,8 +3,12 @@
 #include "../Document.h"
 #include "../compute/ComputeCore.h"
 #include "../compute/ProgramManager.h"
+#include "3mf/ColorCompatibilityPlanner.h"
+#include "3mf/ColorQuantizer.h"
+#include "3mf/ColorRegionizer.h"
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
+#include "3mf/MmuSegmentationWriter.h"
 #include "MeshExporter.h"
 #include "vdb.h"
 
@@ -32,6 +36,26 @@ namespace gladius::vdb
         m_colorMode = mode;
     }
 
+    void MeshExporter3mf::setQuantizationMode(io::QuantizationMode mode)
+    {
+        m_quantizationMode = mode;
+    }
+
+    void MeshExporter3mf::setMaxPaletteSize(std::optional<std::uint32_t> maxPaletteSize)
+    {
+        m_maxPaletteSize = maxPaletteSize;
+    }
+
+    void MeshExporter3mf::setTargetApplication(io::TargetApplication targetApplication)
+    {
+        m_targetApplication = targetApplication;
+    }
+
+    ColoredMeshExportResult const& MeshExporter3mf::getExportResult() const
+    {
+        return m_exportResult;
+    }
+
     void MeshExporter3mf::beginExport(std::filesystem::path const & fileName,
                                       ComputeCore & generator)
     {
@@ -56,18 +80,31 @@ namespace gladius::vdb
             return;
         }
 
+        // Reset export result
+        m_exportResult = ColoredMeshExportResult{};
+
         try
         {
             // Convert grid to mesh using the existing function
             auto mesh = gridToMesh(m_grid, *m_computeCore->getComputeContext());
 
+            // Build immutable settings snapshot
+            io::MeshColorExportSettings const settings{
+                m_exportWithColors,
+                m_convertToSrgb,
+                m_colorMode,
+                m_quantizationMode,
+                m_targetApplication,
+                m_maxPaletteSize,
+            };
+
             // Export the mesh using MeshWriter3mf
             gladius::io::MeshWriter3mf writer(m_logger);
             std::string meshName = "Mesh";
             
-            if (m_exportWithColors)
+            if (settings.exportWithColors)
             {
-                // Extract vertices and faces in the format required by FaceColorSampler
+                // Extract vertices and faces for color sampling
                 std::size_t const numFaces = mesh.getNumberOfFaces();
                 std::vector<Eigen::Vector3f> vertices;
                 vertices.reserve(numFaces * 3);
@@ -92,35 +129,108 @@ namespace gladius::vdb
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    if (m_colorMode == ColorMode::PerVertex)
+                    // Always sample face colors for compatibility planning
+                    auto faceColors = io::FaceColorSampler::sampleFaceColorsAsColor8(
+                        vertices, faces, *samplingProgram, *primitives, nullptr, settings.convertToSrgb);
+
+                    // Run compatibility planner
+                    auto const uniqueColors = io::ColorQuantizer::countUniqueOpaqueColors(faceColors);
+                    bool const hasTransparency = io::ColorQuantizer::hasTransparency(faceColors);
+
+                    io::ColorCompatibilityPlanner planner;
+                    auto const decision = planner.decide(settings, uniqueColors, hasTransparency);
+
+                    // Record export result
+                    m_exportResult.representation = decision.finalRepresentation;
+                    m_exportResult.standardsOnly = !decision.needsProprietaryTags;
+                    m_exportResult.transparencyIgnored = hasTransparency;
+                    m_exportResult.warnings = decision.warnings;
+
+                    // Dispatch based on decision
+                    switch (decision.finalRepresentation)
                     {
-                        auto vertexColors = io::FaceColorSampler::sampleVertexColors(
-                            vertices, faces, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        writer.exportMeshWithVertexColors(m_fileName, mesh, meshName, vertexColors, m_sourceDocument, true);
-                        
-                        if (m_logger)
+                    case io::ExportRepresentation::StandardTriangleColor:
+                    {
+                        // Direct triangle-color path (existing behavior)
+                        if (settings.preferredColorMode == io::ColorMode::PerVertex)
                         {
-                            m_logger->addEvent(
-                              {fmt::format("Successfully exported 3MF mesh with per-vertex colors to {}", 
-                                           m_fileName.string()),
-                               events::Severity::Info});
+                            auto vertexColors = io::FaceColorSampler::sampleVertexColors(
+                                vertices, faces, *samplingProgram, *primitives, nullptr,
+                                settings.convertToSrgb);
+                            writer.exportMeshWithVertexColors(
+                                m_fileName, mesh, meshName, vertexColors, m_sourceDocument, true);
                         }
+                        else
+                        {
+                            writer.exportMeshWithColors(
+                                m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
+                        }
+                        break;
                     }
-                    else
+                    case io::ExportRepresentation::StandardDiscreteComponents:
+                    case io::ExportRepresentation::StandardDiscreteObjects:
+                    case io::ExportRepresentation::StandardBuildItems:
                     {
-                        auto faceColors = io::FaceColorSampler::sampleFaceColorsAsColor8(
-                            vertices, faces, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        writer.exportMeshWithColors(m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
-                        
-                        if (m_logger)
+                        // Discrete regionized path
+                        std::uint32_t const maxPalette =
+                            settings.maxPaletteSize.value_or(
+                                static_cast<std::uint32_t>(std::min(uniqueColors, std::size_t{256})));
+
+                        auto palette = io::ColorQuantizer::quantize(faceColors, maxPalette);
+
+                        io::PrintableRegionKind regionKind = io::PrintableRegionKind::Component;
+                        if (decision.finalRepresentation == io::ExportRepresentation::StandardDiscreteObjects)
                         {
-                            m_logger->addEvent(
-                              {fmt::format("Successfully exported 3MF mesh with per-face colors to {}", 
-                                           m_fileName.string()),
-                               events::Severity::Info});
+                            regionKind = io::PrintableRegionKind::Object;
                         }
+                        else if (decision.finalRepresentation == io::ExportRepresentation::StandardBuildItems)
+                        {
+                            regionKind = io::PrintableRegionKind::BuildItem;
+                        }
+
+                        auto regions = io::ColorRegionizer::regionize(palette, regionKind);
+
+                        // Export as multiple meshes with solid material colors
+                        writer.exportMeshWithRegions(
+                            m_fileName, mesh, meshName, palette, regions,
+                            m_sourceDocument, true);
+                        break;
+                    }
+                    case io::ExportRepresentation::ProprietaryMmuSegmentation:
+                    {
+                        // Per-triangle MMU segmentation for PrusaSlicer/OrcaSlicer
+                        std::uint32_t const maxPalette =
+                            settings.maxPaletteSize.value_or(
+                                static_cast<std::uint32_t>(
+                                    std::min(uniqueColors,
+                                             static_cast<std::size_t>(
+                                                 io::MmuSegmentationWriter::MAX_EXTRUDERS))));
+
+                        auto palette = io::ColorQuantizer::quantize(faceColors, maxPalette);
+
+                        writer.exportMeshWithMmuSegmentation(
+                            m_fileName, mesh, meshName, palette, m_sourceDocument, true);
+                        break;
+                    }
+                    default:
+                        // Fallback: export as face colors
+                        writer.exportMeshWithColors(
+                            m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
+                        break;
+                    }
+                    
+                    if (m_logger)
+                    {
+                        // Log warnings from the planner
+                        for (auto const& warning : decision.warnings)
+                        {
+                            m_logger->addEvent({warning, events::Severity::Warning});
+                        }
+
+                        m_logger->addEvent(
+                          {fmt::format("Successfully exported 3MF mesh with colors to {}", 
+                                       m_fileName.string()),
+                           events::Severity::Info});
                     }
                 }
                 else
