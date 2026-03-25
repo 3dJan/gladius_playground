@@ -3,6 +3,8 @@
  * @brief Unit tests for per-face color export in 3MF mesh writer
  */
 
+#include "io/3mf/ColorQuantizer.h"
+#include "io/3mf/ColorRegionizer.h"
 #include "io/3mf/FaceColors.h"
 #include "io/3mf/MeshWriter3mf.h"
 
@@ -325,6 +327,133 @@ namespace gladius_tests
             EXPECT_EQ(prop.m_PropertyIDs[0], prop.m_PropertyIDs[1]);
             EXPECT_EQ(prop.m_PropertyIDs[1], prop.m_PropertyIDs[2]);
         }
+    }
+
+    // ========================================================================
+    // ExportMeshWithRegions tests (discrete printable regions)
+    // ========================================================================
+
+    TEST_F(MeshWriter3mfColorTest, ExportMeshWithRegions_CreatesMultipleBuildItems)
+    {
+        // 4-face tetrahedron with 3 palette entries → 3 regions
+        FaceColors faceColors(4);
+        faceColors[0] = Color8(255, 0, 0, 255);   // Red  → palette 0
+        faceColors[1] = Color8(0, 255, 0, 255);   // Green → palette 1
+        faceColors[2] = Color8(0, 0, 255, 255);   // Blue  → palette 2
+        faceColors[3] = Color8(255, 0, 0, 255);   // Red  → palette 0 (duplicate)
+
+        auto palette = ColorQuantizer::quantize(faceColors, 3);
+        auto regions = ColorRegionizer::regionize(palette, PrintableRegionKind::BuildItem);
+
+        ASSERT_EQ(regions.size(), 3u);
+
+        auto const outputPath = m_outputDir / "regions_build_items.3mf";
+        MeshWriter3mf writer(nullptr);
+        EXPECT_NO_THROW(writer.exportMeshWithRegions(
+            outputPath, *m_mesh, "RegionMesh", palette, regions));
+
+        // Read back and verify multiple build items
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto buildItems = model->GetBuildItems();
+        std::uint64_t buildItemCount = 0;
+        while (buildItems->MoveNext())
+        {
+            ++buildItemCount;
+        }
+        EXPECT_EQ(buildItemCount, 3u) << "One build item per palette color";
+    }
+
+    TEST_F(MeshWriter3mfColorTest, ExportMeshWithRegions_AllTrianglesAccountedFor)
+    {
+        // 4-face mesh with 2 colors → 2 regions, total faces must be 4
+        FaceColors faceColors(4);
+        faceColors[0] = Color8(255, 0, 0, 255);
+        faceColors[1] = Color8(0, 255, 0, 255);
+        faceColors[2] = Color8(255, 0, 0, 255);
+        faceColors[3] = Color8(0, 255, 0, 255);
+
+        auto palette = ColorQuantizer::quantize(faceColors, 2);
+        auto regions = ColorRegionizer::regionize(palette, PrintableRegionKind::BuildItem);
+
+        auto const outputPath = m_outputDir / "regions_all_tris.3mf";
+        MeshWriter3mf writer(nullptr);
+        writer.exportMeshWithRegions(outputPath, *m_mesh, "FullMesh", palette, regions);
+
+        // Read back and count total triangles across all mesh objects
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto meshes = model->GetMeshObjects();
+        std::uint64_t totalTriangles = 0;
+        while (meshes->MoveNext())
+        {
+            totalTriangles += meshes->GetCurrentMeshObject()->GetTriangleCount();
+        }
+        EXPECT_EQ(totalTriangles, 4u);
+    }
+
+    TEST_F(MeshWriter3mfColorTest, ExportMeshWithRegions_EachMeshHasMaterialColor)
+    {
+        // 4-face mesh with 2 colors; each region mesh should have color properties
+        FaceColors faceColors(4);
+        faceColors[0] = Color8(255, 0, 0, 255);
+        faceColors[1] = Color8(0, 0, 255, 255);
+        faceColors[2] = Color8(255, 0, 0, 255);
+        faceColors[3] = Color8(0, 0, 255, 255);
+
+        auto palette = ColorQuantizer::quantize(faceColors, 2);
+        auto regions = ColorRegionizer::regionize(palette, PrintableRegionKind::BuildItem);
+
+        auto const outputPath = m_outputDir / "regions_materials.3mf";
+        MeshWriter3mf writer(nullptr);
+        writer.exportMeshWithRegions(outputPath, *m_mesh, "MatMesh", palette, regions);
+
+        // Read back and verify a base material group exists (regions use basematerials for slicer compat)
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto baseMaterials = model->GetBaseMaterialGroups();
+        EXPECT_TRUE(baseMaterials->MoveNext()) << "Should have a base material group for region colors";
+    }
+
+    TEST_F(MeshWriter3mfColorTest, ExportMeshWithRegions_SingleColor_ProducesSingleBuildItem)
+    {
+        // All same color → 1 region
+        FaceColors faceColors(4);
+        faceColors[0] = Color8(200, 200, 200, 255);
+        faceColors[1] = Color8(200, 200, 200, 255);
+        faceColors[2] = Color8(200, 200, 200, 255);
+        faceColors[3] = Color8(200, 200, 200, 255);
+
+        auto palette = ColorQuantizer::quantize(faceColors, 1);
+        auto regions = ColorRegionizer::regionize(palette, PrintableRegionKind::BuildItem);
+
+        ASSERT_EQ(regions.size(), 1u);
+
+        auto const outputPath = m_outputDir / "regions_single.3mf";
+        MeshWriter3mf writer(nullptr);
+        writer.exportMeshWithRegions(outputPath, *m_mesh, "SingleColor", palette, regions);
+
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto buildItems = model->GetBuildItems();
+        std::uint64_t count = 0;
+        while (buildItems->MoveNext())
+        {
+            ++count;
+        }
+        EXPECT_EQ(count, 1u);
     }
 
 } // namespace gladius_tests

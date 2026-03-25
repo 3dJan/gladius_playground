@@ -19,6 +19,9 @@
 #include "io/3mf/FaceColorSampler.h"
 #include "io/3mf/FaceColors.h"
 #include "io/3mf/MeshWriter3mf.h"
+#include "io/3mf/ColorCompatibilityPlanner.h"
+#include "io/3mf/ColorQuantizer.h"
+#include "io/3mf/ColorRegionizer.h"
 
 #include "nodes/Assembly.h"
 #include "nodes/Model.h"
@@ -447,6 +450,159 @@ namespace gladius_tests::color_export
         }
 
         EXPECT_TRUE(hasNonWhite) << "Should have non-white colors in export";
+    }
+
+    // =========================================================================
+    // T014: Printable-region export produces multiple build items
+    // =========================================================================
+
+    TEST_F(ColorExport_Integration_Test, WebcamMountColor_RegionExportProducesMultipleBuildItems)
+    {
+        auto bundle = loadDocument("testdata/webcam_mount_color.3mf");
+
+        auto [vertices, faces] = extractMesh(*bundle.core);
+        ASSERT_GT(faces.size(), 0U);
+
+        auto* samplingProgram =
+            bundle.core->getProgramManager().getDualContouringSamplingProgram();
+        ASSERT_NE(samplingProgram, nullptr);
+
+        auto primitives = bundle.core->getPrimitives();
+        ASSERT_NE(primitives, nullptr);
+
+        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
+            vertices, faces, *samplingProgram, *primitives);
+
+        // Quantize to a small palette to force regions
+        auto palette = ColorQuantizer::quantize(faceColors, 4);
+        auto regions = ColorRegionizer::regionize(palette, PrintableRegionKind::BuildItem);
+
+        EXPECT_GT(regions.size(), 1U) << "Colored model should produce multiple regions";
+
+        // Build mesh from extracted geometry
+        Mesh mesh(*m_context);
+        for (auto const& face : faces)
+        {
+            mesh.addFace(vertices[face[0]], vertices[face[1]], vertices[face[2]]);
+        }
+
+        // Export with regions
+        auto const outputPath = m_outputDir / "webcam_mount_regions.3mf";
+        MeshWriter3mf writer(nullptr);
+        writer.exportMeshWithRegions(
+            outputPath, mesh, "region_mesh", palette, regions);
+
+        // Read back: should have multiple build items
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto buildItems = model->GetBuildItems();
+        std::uint64_t buildItemCount = 0;
+        while (buildItems->MoveNext())
+        {
+            ++buildItemCount;
+        }
+        EXPECT_GT(buildItemCount, 1U) << "Region export should produce multiple build items";
+    }
+
+    // =========================================================================
+    // T014: Uncolored model fallback still exports a valid single mesh
+    // =========================================================================
+
+    TEST_F(ColorExport_Integration_Test, UncoloredModel_ExportsNormally)
+    {
+        // Use the existing webcam_mount_color model but don't add colors
+        auto bundle = loadDocument("testdata/webcam_mount_color.3mf");
+
+        auto [vertices, faces] = extractMesh(*bundle.core);
+        ASSERT_GT(faces.size(), 0U);
+
+        Mesh mesh(*m_context);
+        for (auto const& face : faces)
+        {
+            mesh.addFace(vertices[face[0]], vertices[face[1]], vertices[face[2]]);
+        }
+
+        // Export without colors
+        auto const outputPath = m_outputDir / "uncolored_mesh.3mf";
+        MeshWriter3mf writer(nullptr);
+        EXPECT_NO_THROW(writer.exportMesh(outputPath, mesh, "plain_mesh"));
+
+        // Read back: should have exactly 1 build item and 1 mesh, no color groups
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        auto reader = model->QueryReader("3mf");
+        reader->ReadFromFile(outputPath.string());
+
+        auto meshes = model->GetMeshObjects();
+        ASSERT_TRUE(meshes->MoveNext());
+        EXPECT_EQ(meshes->GetCurrentMeshObject()->GetTriangleCount(), faces.size());
+
+        auto colorGroups = model->GetColorGroups();
+        EXPECT_FALSE(colorGroups->MoveNext()) << "No color groups for uncolored export";
+    }
+
+    // =========================================================================
+    // T021: Highest-fidelity compatible path is selected by planner
+    // =========================================================================
+
+    TEST_F(ColorExport_Integration_Test, WebcamMountColor_PlannerSelectsBestFidelity)
+    {
+        auto bundle = loadDocument("testdata/webcam_mount_color.3mf");
+
+        auto [vertices, faces] = extractMesh(*bundle.core);
+        ASSERT_GT(faces.size(), 0U);
+
+        auto* samplingProgram =
+            bundle.core->getProgramManager().getDualContouringSamplingProgram();
+        ASSERT_NE(samplingProgram, nullptr);
+
+        auto primitives = bundle.core->getPrimitives();
+        ASSERT_NE(primitives, nullptr);
+
+        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
+            vertices, faces, *samplingProgram, *primitives);
+
+        auto const uniqueColors = ColorQuantizer::countUniqueOpaqueColors(faceColors);
+        bool const hasTransparency = ColorQuantizer::hasTransparency(faceColors);
+
+        // Default settings (no target application)
+        MeshColorExportSettings settings;
+        ColorCompatibilityPlanner planner;
+        auto const decision = planner.decide(settings, uniqueColors, hasTransparency);
+
+        // For this model, discrete components should be the default path
+        EXPECT_EQ(decision.finalRepresentation,
+                  ExportRepresentation::StandardDiscreteComponents);
+        EXPECT_FALSE(decision.needsProprietaryTags);
+    }
+
+    // =========================================================================
+    // T027: Default colored export does NOT route through shell export
+    // =========================================================================
+
+    TEST_F(ColorExport_Integration_Test, DefaultColorExport_UsesDirectMeshPipeline)
+    {
+        // The compatibility planner should never return a representation that
+        // would require shell export. All standard representations are mesh-based.
+        MeshColorExportSettings settings;  // Default settings
+        ColorCompatibilityPlanner planner;
+
+        // Test with various color counts
+        for (std::size_t colorCount : {1, 5, 50, 256, 1000})
+        {
+            auto const decision = planner.decide(settings, colorCount, false);
+
+            // The planner should never route to a non-standard representation by default
+            EXPECT_NE(decision.finalRepresentation,
+                      ExportRepresentation::ProprietaryTargetTagged)
+                << "Default export with " << colorCount
+                << " colors should not use proprietary tags";
+            EXPECT_FALSE(decision.needsProprietaryTags)
+                << "Default export should always be standards-only";
+        }
     }
 
 } // namespace gladius_tests::color_export
