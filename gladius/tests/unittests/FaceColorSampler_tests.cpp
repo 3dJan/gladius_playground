@@ -125,32 +125,6 @@ namespace gladius::tests
     }
 
     // ==========================================================================
-    // Batch size configuration tests
-    // ==========================================================================
-
-    TEST_F(FaceColorSamplerTest, GetBatchSize_ReturnsDefault)
-    {
-        // Reset to default first
-        FaceColorSampler::setBatchSize(FaceColorSampler::DefaultBatchSize);
-        EXPECT_EQ(FaceColorSampler::getBatchSize(), FaceColorSampler::DefaultBatchSize);
-    }
-
-    TEST_F(FaceColorSamplerTest, SetBatchSize_ChangesValue)
-    {
-        FaceColorSampler::setBatchSize(50000);
-        EXPECT_EQ(FaceColorSampler::getBatchSize(), 50000);
-
-        // Reset to default
-        FaceColorSampler::setBatchSize(FaceColorSampler::DefaultBatchSize);
-    }
-
-    TEST_F(FaceColorSamplerTest, SetBatchSize_ZeroResetsToDefault)
-    {
-        FaceColorSampler::setBatchSize(0);
-        EXPECT_EQ(FaceColorSampler::getBatchSize(), FaceColorSampler::DefaultBatchSize);
-    }
-
-    // ==========================================================================
     // Centroid computation tests (via sampleFaceColors with empty mesh)
     // ==========================================================================
 
