@@ -8,8 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <map>
 #include <numeric>
+#include <set>
 
 namespace gladius::io
 {
@@ -209,10 +209,10 @@ namespace gladius::io
 
     std::size_t ColorQuantizer::countUniqueOpaqueColors(FaceColors const& faceColors)
     {
-        std::map<std::uint32_t, bool> seen;
+        std::set<std::uint32_t> seen;
         for (std::size_t i = 0; i < faceColors.size(); ++i)
         {
-            seen[packRgb(faceColors[i])] = true;
+            seen.insert(packRgb(faceColors[i]));
         }
         return seen.size();
     }

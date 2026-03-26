@@ -102,6 +102,11 @@ namespace gladius::io
 
             entries.push_back(std::move(entry));
             status = unzGoToNextFile(archive);
+            if (status != UNZ_OK && status != UNZ_END_OF_LIST_OF_FILE)
+            {
+                unzClose(archive);
+                throw std::runtime_error("Failed to iterate ZIP entries");
+            }
         }
 
         unzClose(archive);
@@ -111,14 +116,15 @@ namespace gladius::io
     void ThreeMfPostProcessor::writeZip(std::filesystem::path const& filePath,
                                          std::vector<ZipEntry> const& entries)
     {
-        // Remove existing file first — zipOpen with APPEND_STATUS_CREATE won't overwrite
-        std::filesystem::remove(filePath);
+        // Write to a temp file first, then rename to avoid data loss on failure
+        auto const tempPath = filePath.string() + ".tmp";
+        std::filesystem::remove(tempPath);
 
-        zipFile archive = zipOpen(filePath.string().c_str(), APPEND_STATUS_CREATE);
+        zipFile archive = zipOpen(tempPath.c_str(), APPEND_STATUS_CREATE);
         if (!archive)
         {
             throw std::runtime_error(
-                fmt::format("Failed to open ZIP for writing: {}", filePath.string()));
+                fmt::format("Failed to open ZIP for writing: {}", tempPath));
         }
 
         for (auto const& entry : entries)
@@ -150,6 +156,9 @@ namespace gladius::io
         }
 
         zipClose(archive, nullptr);
+
+        // Atomically replace the original file
+        std::filesystem::rename(tempPath, filePath);
     }
 
     std::string ThreeMfPostProcessor::injectTriangleAttributes(
@@ -160,7 +169,7 @@ namespace gladius::io
         std::string result = modelXml;
 
         // Find the <model element and inject namespace declaration
-        static char const* const NS_DECL = "xmlns:slic3rpe=\"http://schemas.slic3r.org/3mf/2017/06\"";
+        constexpr char const* NS_DECL = "xmlns:slic3rpe=\"http://schemas.slic3r.org/3mf/2017/06\"";
         auto modelTagPos = result.find("<model");
         if (modelTagPos != std::string::npos && result.find("xmlns:slic3rpe") == std::string::npos)
         {

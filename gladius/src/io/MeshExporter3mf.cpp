@@ -4,11 +4,10 @@
 #include "../compute/ComputeCore.h"
 #include "../compute/ProgramManager.h"
 #include "3mf/ColorCompatibilityPlanner.h"
+#include "3mf/ColorExportDispatcher.h"
 #include "3mf/ColorQuantizer.h"
-#include "3mf/ColorRegionizer.h"
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
-#include "3mf/MmuSegmentationWriter.h"
 #include "MeshExporter.h"
 #include "vdb.h"
 
@@ -137,8 +136,7 @@ namespace gladius::vdb
                     auto const uniqueColors = io::ColorQuantizer::countUniqueOpaqueColors(faceColors);
                     bool const hasTransparency = io::ColorQuantizer::hasTransparency(faceColors);
 
-                    io::ColorCompatibilityPlanner planner;
-                    auto const decision = planner.decide(settings, uniqueColors, hasTransparency);
+                    auto const decision = io::ColorCompatibilityPlanner::decide(settings, uniqueColors, hasTransparency);
 
                     // Record export result
                     m_exportResult.representation = decision.finalRepresentation;
@@ -147,82 +145,24 @@ namespace gladius::vdb
                     m_exportResult.warnings = decision.warnings;
 
                     // Dispatch based on decision
-                    switch (decision.finalRepresentation)
+                    auto vertexColorSupplier = [&]() -> io::VertexColors
                     {
-                    case io::ExportRepresentation::StandardTriangleColor:
-                    {
-                        // Direct triangle-color path (existing behavior)
-                        if (settings.preferredColorMode == io::ColorMode::PerVertex)
-                        {
-                            auto vertexColors = io::FaceColorSampler::sampleVertexColors(
-                                vertices, faces, *samplingProgram, *primitives, nullptr,
-                                settings.convertToSrgb);
-                            writer.exportMeshWithVertexColors(
-                                m_fileName, mesh, meshName, vertexColors, m_sourceDocument, true);
-                        }
-                        else
-                        {
-                            writer.exportMeshWithColors(
-                                m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
-                        }
-                        break;
-                    }
-                    case io::ExportRepresentation::StandardDiscreteComponents:
-                    case io::ExportRepresentation::StandardDiscreteObjects:
-                    case io::ExportRepresentation::StandardBuildItems:
-                    {
-                        // Discrete regionized path
-                        std::uint32_t const maxPalette =
-                            settings.maxPaletteSize.value_or(
-                                static_cast<std::uint32_t>(std::min(uniqueColors, std::size_t{256})));
-
-                        auto palette = io::ColorQuantizer::quantize(faceColors, maxPalette);
-
-                        io::PrintableRegionKind regionKind = io::PrintableRegionKind::Component;
-                        if (decision.finalRepresentation == io::ExportRepresentation::StandardDiscreteObjects)
-                        {
-                            regionKind = io::PrintableRegionKind::Object;
-                        }
-                        else if (decision.finalRepresentation == io::ExportRepresentation::StandardBuildItems)
-                        {
-                            regionKind = io::PrintableRegionKind::BuildItem;
-                        }
-
-                        auto regions = io::ColorRegionizer::regionize(palette, regionKind);
-
-                        // Export as multiple meshes with solid material colors
-                        writer.exportMeshWithRegions(
-                            m_fileName, mesh, meshName, palette, regions,
-                            m_sourceDocument, true);
-                        break;
-                    }
-                    case io::ExportRepresentation::ProprietaryMmuSegmentation:
-                    {
-                        // Per-triangle MMU segmentation for PrusaSlicer/OrcaSlicer
-                        std::uint32_t const maxPalette =
-                            settings.maxPaletteSize.value_or(
-                                static_cast<std::uint32_t>(
-                                    std::min(uniqueColors,
-                                             static_cast<std::size_t>(
-                                                 io::MmuSegmentationWriter::MAX_EXTRUDERS))));
-
-                        // Use multi-point oversampling for sharper material boundaries
-                        auto sampleSets = io::FaceColorSampler::sampleFaceColorsMultipoint(
+                        return io::FaceColorSampler::sampleVertexColors(
                             vertices, faces, *samplingProgram, *primitives,
                             nullptr, settings.convertToSrgb);
-                        auto palette = io::ColorQuantizer::quantizeOversampled(
-                            sampleSets, maxPalette);
+                    };
+                    auto multipointSupplier = [&]() -> std::vector<io::FaceColors>
+                    {
+                        return io::FaceColorSampler::sampleFaceColorsMultipoint(
+                            vertices, faces, *samplingProgram, *primitives,
+                            nullptr, settings.convertToSrgb);
+                    };
 
-                        writer.exportMeshWithMmuSegmentation(
-                            m_fileName, mesh, meshName, palette, m_sourceDocument, true);
-                        break;
-                    }
-                    default:
-                        // Fallback: export as face colors
-                        writer.exportMeshWithColors(
-                            m_fileName, mesh, meshName, faceColors, m_sourceDocument, true);
-                        break;
-                    }
+                    io::dispatchColorExport(
+                        writer, m_fileName, mesh, meshName,
+                        faceColors, decision, settings, uniqueColors,
+                        m_sourceDocument, true,
+                        vertexColorSupplier, multipointSupplier);
                     
                     if (m_logger)
                     {

@@ -107,29 +107,29 @@ namespace gladius::io
             ProgressCallback progressCallback = nullptr,
             bool convertToSrgb = true);
 
-    /**
-     * @brief Sample colors at vertex positions for per-vertex coloring
-     *
-     * Evaluates the volumetric color function at each vertex position of each
-     * face. This enables proper color interpolation in 3MF exports using
-     * p1, p2, p3 property indices.
-     *
-     * @param vertices Mesh vertices
-     * @param faces Triangle indices (3 indices per face)
-     * @param samplingProgram Compiled sampling program for GPU evaluation
-     * @param primitives Compiled model primitives for evaluation
+        /**
+         * @brief Sample colors at vertex positions for per-vertex coloring
+         *
+         * Evaluates the volumetric color function at each vertex position of each
+         * face. This enables proper color interpolation in 3MF exports using
+         * p1, p2, p3 property indices.
+         *
+         * @param vertices Mesh vertices
+         * @param faces Triangle indices (3 indices per face)
+         * @param samplingProgram Compiled sampling program for GPU evaluation
+         * @param primitives Compiled model primitives for evaluation
      * @param progressCallback Optional callback for progress updates
      * @param convertToSrgb If true (default), convert from linear RGB to sRGB
      * @return Per-vertex colors for each face
      * @throws std::runtime_error if GPU evaluation fails
      */
-    static VertexColors sampleVertexColors(
-        std::vector<Eigen::Vector3f> const& vertices,
-        std::vector<std::array<std::uint32_t, 3>> const& faces,
-        DualContouringSamplingProgram& samplingProgram,
-        Primitives const& primitives,
-        ProgressCallback progressCallback = nullptr,
-        bool convertToSrgb = true);
+        static VertexColors sampleVertexColors(
+            std::vector<Eigen::Vector3f> const& vertices,
+            std::vector<std::array<std::uint32_t, 3>> const& faces,
+            DualContouringSamplingProgram& samplingProgram,
+            Primitives const& primitives,
+            ProgressCallback progressCallback = nullptr,
+            bool convertToSrgb = true);
 
         /**
          * @brief Sample face colors at multiple sub-face points for better boundary accuracy
@@ -156,12 +156,6 @@ namespace gladius::io
 
         /// Number of sub-face sample points used by sampleFaceColorsMultipoint
         static constexpr std::size_t MultipointSampleCount = 4;
-
-        /// Configure batch size for GPU evaluation (faces per dispatch)
-        static void setBatchSize(std::size_t batchSize);
-
-        /// Get current batch size
-        static std::size_t getBatchSize();
 
         // Color conversion utilities
 
@@ -196,9 +190,6 @@ namespace gladius::io
 
         /// Convert entire color array from linear RGB to sRGB
         static void convertToSrgb(std::vector<Eigen::Vector3f>& colors);
-
-        /// Current batch size (global setting)
-        static std::size_t s_batchSize;
     };
 
 } // namespace gladius::io

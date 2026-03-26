@@ -105,6 +105,25 @@ namespace gladius::ui
         }
     }
 
+    template <typename Exporter>
+    void MeshExportDialog::applyColorSettings(Exporter& exporter, bool exportColors)
+    {
+        exporter.setExportWithColors(exportColors);
+        exporter.setConvertToSrgb(m_convertToSrgb);
+        exporter.setColorMode(m_colorMode);
+        exporter.setQuantizationMode(m_quantizationMode);
+        exporter.setTargetApplication(m_targetApplication);
+        if (m_overridePaletteSize)
+        {
+            exporter.setMaxPaletteSize(
+                static_cast<std::uint32_t>(m_maxPaletteSize));
+        }
+        else
+        {
+            exporter.setMaxPaletteSize(std::nullopt);
+        }
+    }
+
     void MeshExportDialog::show(std::filesystem::path suggestedFilename)
     {
         if (!m_visible)
@@ -908,7 +927,9 @@ namespace gladius::ui
         {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(100);
-            ImGui::SliderInt("##PaletteSize", &m_maxPaletteSize, 2, 256, "%d colors");
+            int const maxSlider = (m_targetApplication != io::TargetApplication::None) ? 16 : 256;
+            m_maxPaletteSize = std::min(m_maxPaletteSize, maxSlider);
+            ImGui::SliderInt("##PaletteSize", &m_maxPaletteSize, 2, maxSlider, "%d colors");
         }
         if (ImGui::IsItemHovered())
         {
@@ -1349,20 +1370,7 @@ namespace gladius::ui
                 m_layeredExporter3mf.setQualityLevel(quality);
                 // Enable color export if checkbox is checked and model has color
                 bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
-                m_layeredExporter3mf.setExportWithColors(exportColors);
-                m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
-                m_layeredExporter3mf.setColorMode(m_colorMode);
-                m_layeredExporter3mf.setQuantizationMode(m_quantizationMode);
-                m_layeredExporter3mf.setTargetApplication(m_targetApplication);
-                if (m_overridePaletteSize)
-                {
-                    m_layeredExporter3mf.setMaxPaletteSize(
-                        static_cast<std::uint32_t>(m_maxPaletteSize));
-                }
-                else
-                {
-                    m_layeredExporter3mf.setMaxPaletteSize(std::nullopt);
-                }
+                applyColorSettings(m_layeredExporter3mf, exportColors);
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -1445,20 +1453,7 @@ namespace gladius::ui
             m_manifoldExporter.setDocument(m_document);
             // Enable color export if checkbox is checked and model has color (3MF only)
             bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
-            m_manifoldExporter.setExportWithColors(exportColors);
-            m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
-            m_manifoldExporter.setColorMode(m_colorMode);
-            m_manifoldExporter.setQuantizationMode(m_quantizationMode);
-            m_manifoldExporter.setTargetApplication(m_targetApplication);
-            if (m_overridePaletteSize)
-            {
-                m_manifoldExporter.setMaxPaletteSize(
-                    static_cast<std::uint32_t>(m_maxPaletteSize));
-            }
-            else
-            {
-                m_manifoldExporter.setMaxPaletteSize(std::nullopt);
-            }
+            applyColorSettings(m_manifoldExporter, exportColors);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;

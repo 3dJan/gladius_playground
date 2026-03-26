@@ -80,6 +80,9 @@ namespace gladius::ui
         void resetState();
         void resetExportState();
 
+        template <typename Exporter>
+        void applyColorSettings(Exporter& exporter, bool exportColors);
+
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
         vdb::MeshExporter3mf m_layeredExporter3mf;

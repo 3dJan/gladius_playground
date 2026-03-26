@@ -1,11 +1,10 @@
 #include "ManifoldDualContouringStlExporter.h"
 
 #include "3mf/ColorCompatibilityPlanner.h"
+#include "3mf/ColorExportDispatcher.h"
 #include "3mf/ColorQuantizer.h"
-#include "3mf/ColorRegionizer.h"
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
-#include "3mf/MmuSegmentationWriter.h"
 #include "MeshExporter.h"
 #include "MeshExporter3mf.h"
 #include "WindingRepair.h"
@@ -471,8 +470,7 @@ namespace gladius::io
                     auto const uniqueColors = ColorQuantizer::countUniqueOpaqueColors(faceColors);
                     bool const hasTransparency = ColorQuantizer::hasTransparency(faceColors);
 
-                    ColorCompatibilityPlanner planner;
-                    auto const decision = planner.decide(settings, uniqueColors, hasTransparency);
+                    auto const decision = ColorCompatibilityPlanner::decide(settings, uniqueColors, hasTransparency);
 
                     // Log warnings from the planner
                     if (m_logger)
@@ -485,74 +483,24 @@ namespace gladius::io
 
                     m_progress.store(0.90, std::memory_order_relaxed);
 
-                    switch (decision.finalRepresentation)
+                    auto vertexColorSupplier = [&]() -> VertexColors
                     {
-                    case ExportRepresentation::StandardTriangleColor:
-                    {
-                        if (settings.preferredColorMode == ColorMode::PerVertex)
-                        {
-                            auto vertexColors = FaceColorSampler::sampleVertexColors(
-                                positions, facesForSampling, *samplingProgram, *primitives,
-                                nullptr, m_convertToSrgb);
-                            writer.exportMeshWithVertexColors(
-                                m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
-                        }
-                        else
-                        {
-                            writer.exportMeshWithColors(
-                                m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                        }
-                        break;
-                    }
-                    case ExportRepresentation::StandardDiscreteComponents:
-                    case ExportRepresentation::StandardDiscreteObjects:
-                    case ExportRepresentation::StandardBuildItems:
-                    {
-                        std::uint32_t const maxPalette =
-                            settings.maxPaletteSize.value_or(
-                                static_cast<std::uint32_t>(std::min(uniqueColors, std::size_t{256})));
-
-                        auto palette = ColorQuantizer::quantize(faceColors, maxPalette);
-
-                        PrintableRegionKind regionKind = PrintableRegionKind::Component;
-                        if (decision.finalRepresentation == ExportRepresentation::StandardDiscreteObjects)
-                        {
-                            regionKind = PrintableRegionKind::Object;
-                        }
-                        else if (decision.finalRepresentation == ExportRepresentation::StandardBuildItems)
-                        {
-                            regionKind = PrintableRegionKind::BuildItem;
-                        }
-
-                        auto regions = ColorRegionizer::regionize(palette, regionKind);
-                        writer.exportMeshWithRegions(
-                            m_targetFile, convertedMesh, "Mesh", palette, regions, m_document, true);
-                        break;
-                    }
-                    case ExportRepresentation::ProprietaryMmuSegmentation:
-                    {
-                        std::uint32_t const maxPalette =
-                            settings.maxPaletteSize.value_or(
-                                static_cast<std::uint32_t>(
-                                    std::min(uniqueColors,
-                                             static_cast<std::size_t>(
-                                                 MmuSegmentationWriter::MAX_EXTRUDERS))));
-
-                        // Use multi-point oversampling for sharper material boundaries
-                        auto sampleSets = FaceColorSampler::sampleFaceColorsMultipoint(
+                        return FaceColorSampler::sampleVertexColors(
                             positions, facesForSampling, *samplingProgram, *primitives,
                             nullptr, m_convertToSrgb);
-                        auto palette = ColorQuantizer::quantizeOversampled(sampleSets, maxPalette);
+                    };
+                    auto multipointSupplier = [&]() -> std::vector<FaceColors>
+                    {
+                        return FaceColorSampler::sampleFaceColorsMultipoint(
+                            positions, facesForSampling, *samplingProgram, *primitives,
+                            nullptr, m_convertToSrgb);
+                    };
 
-                        writer.exportMeshWithMmuSegmentation(
-                            m_targetFile, convertedMesh, "Mesh", palette, m_document, true);
-                        break;
-                    }
-                    default:
-                        writer.exportMeshWithColors(
-                            m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                        break;
-                    }
+                    dispatchColorExport(
+                        writer, m_targetFile, convertedMesh, "Mesh",
+                        faceColors, decision, settings, uniqueColors,
+                        m_document, true,
+                        vertexColorSupplier, multipointSupplier);
 
                     m_progress.store(1.0, std::memory_order_relaxed);
 

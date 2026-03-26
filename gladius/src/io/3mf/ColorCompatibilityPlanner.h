@@ -98,9 +98,9 @@ namespace gladius::io
         static CompatibilityProfile buildProfile(TargetApplication target);
 
         /// Decide which export representation to use
-        CompatibilityDecision decide(MeshColorExportSettings const& settings,
-                                     std::size_t uniqueColorCount,
-                                     bool hasTransparency) const;
+        static CompatibilityDecision decide(MeshColorExportSettings const& settings,
+                                            std::size_t uniqueColorCount,
+                                            bool hasTransparency);
     };
 
 } // namespace gladius::io

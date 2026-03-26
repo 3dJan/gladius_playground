@@ -18,9 +18,6 @@
 namespace gladius::io
 {
 
-    // Initialize static batch size
-    std::size_t FaceColorSampler::s_batchSize = DefaultBatchSize;
-
     bool FaceColorSampler::hasVolumetricColor(nodes::Model const& model)
     {
         auto* endNode = const_cast<nodes::Model&>(model).getEndNode();
@@ -76,7 +73,7 @@ namespace gladius::io
         std::size_t processed = 0;
         while (processed < numFaces)
         {
-            std::size_t const batchCount = std::min(s_batchSize, numFaces - processed);
+            std::size_t const batchCount = std::min(DefaultBatchSize, numFaces - processed);
 
             // Extract batch of positions
             std::vector<Eigen::Vector3f> batchPositions(centroids.begin() + static_cast<std::ptrdiff_t>(processed),
@@ -86,11 +83,11 @@ namespace gladius::io
             std::vector<Eigen::Vector3f> batchColors;
             samplingProgram.sampleColors(batchPositions, batchColors, primitives);
 
-                        if (batchColors.size() != batchPositions.size())
-                        {
-                                throw std::runtime_error(
-                                    "FaceColorSampler::sampleFaceColors: GPU sampling returned unexpected number of colors");
-                        }
+            if (batchColors.size() != batchPositions.size())
+            {
+                throw std::runtime_error(
+                    "FaceColorSampler::sampleFaceColors: GPU sampling returned unexpected number of colors");
+            }
 
             // Copy results to output
             for (std::size_t i = 0; i < batchCount; ++i)
@@ -184,7 +181,7 @@ namespace gladius::io
         std::size_t processed = 0;
         while (processed < numVertices)
         {
-            std::size_t const batchCount = std::min(s_batchSize, numVertices - processed);
+            std::size_t const batchCount = std::min(DefaultBatchSize, numVertices - processed);
 
             std::vector<Eigen::Vector3f> batchPositions(
                 positions.begin() + static_cast<std::ptrdiff_t>(processed),
@@ -193,11 +190,11 @@ namespace gladius::io
             std::vector<Eigen::Vector3f> batchColors;
             samplingProgram.sampleColors(batchPositions, batchColors, primitives);
 
-                        if (batchColors.size() != batchPositions.size())
-                        {
-                                throw std::runtime_error(
-                                    "FaceColorSampler::sampleVertexColors: GPU sampling returned unexpected number of colors");
-                        }
+            if (batchColors.size() != batchPositions.size())
+            {
+                throw std::runtime_error(
+                    "FaceColorSampler::sampleVertexColors: GPU sampling returned unexpected number of colors");
+            }
 
             for (std::size_t i = 0; i < batchCount; ++i)
             {
@@ -231,16 +228,6 @@ namespace gladius::io
         }
 
         return result;
-    }
-
-    void FaceColorSampler::setBatchSize(std::size_t batchSize)
-    {
-        s_batchSize = batchSize > 0 ? batchSize : DefaultBatchSize;
-    }
-
-    std::size_t FaceColorSampler::getBatchSize()
-    {
-        return s_batchSize;
     }
 
     std::vector<FaceColors> FaceColorSampler::sampleFaceColorsMultipoint(
@@ -293,7 +280,7 @@ namespace gladius::io
         std::size_t processed = 0;
         while (processed < totalSamples)
         {
-            std::size_t const batchCount = std::min(s_batchSize, totalSamples - processed);
+            std::size_t const batchCount = std::min(DefaultBatchSize, totalSamples - processed);
 
             std::vector<Eigen::Vector3f> batchPositions(
                 allPositions.begin() + static_cast<std::ptrdiff_t>(processed),

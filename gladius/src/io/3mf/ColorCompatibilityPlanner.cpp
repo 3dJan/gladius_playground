@@ -15,17 +15,7 @@ namespace gladius::io
         switch (target)
         {
         case TargetApplication::PrusaSlicer:
-            profile.requiresPrintableRegions = true;
-            profile.supportsTextureForPrintableRegions = false;
-            profile.supportsVertexColorForPrintableRegions = false;
-            profile.supportsTriangleColorForPrintableRegions = false;
-            profile.supportsDiscreteComponents = true;
-            profile.supportsDiscreteObjects = true;
-            profile.supportsBuildItems = true;
-            profile.supportsMmuSegmentation = true;
-            profile.allowsProprietaryTags = true;
-            break;
-
+            [[fallthrough]];
         case TargetApplication::Orca:
             profile.requiresPrintableRegions = true;
             profile.supportsTextureForPrintableRegions = false;
@@ -56,7 +46,7 @@ namespace gladius::io
 
     CompatibilityDecision ColorCompatibilityPlanner::decide(MeshColorExportSettings const& settings,
                                                             std::size_t uniqueColorCount,
-                                                            bool hasTransparency) const
+                                                            bool hasTransparency)
     {
         CompatibilityDecision decision;
 
