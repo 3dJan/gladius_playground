@@ -223,4 +223,64 @@ namespace gladius::io
             [](Color8 const& c) { return c.a < 255; });
     }
 
+    QuantizedPalette ColorQuantizer::quantizeOversampled(
+        std::vector<FaceColors> const& sampleSets,
+        std::uint32_t maxColors)
+    {
+        if (sampleSets.empty() || sampleSets[0].empty() || maxColors == 0)
+        {
+            return {};
+        }
+
+        // Build palette from the first sample set (centroids)
+        auto basePalette = quantize(sampleSets[0], maxColors);
+        auto const& palette = basePalette.colors;
+        std::size_t const numFaces = sampleSets[0].size();
+        std::size_t const numSets = sampleSets.size();
+        std::size_t const numPaletteColors = palette.size();
+
+        if (numSets <= 1 || numPaletteColors <= 1)
+        {
+            return basePalette;
+        }
+
+        // For each face, classify every sub-sample to the nearest palette color,
+        // then assign the face to the palette entry that wins the majority vote.
+        basePalette.maxApproximationError = 0.0f;
+
+        for (std::size_t fi = 0; fi < numFaces; ++fi)
+        {
+            // Count votes per palette entry
+            std::vector<std::size_t> votes(numPaletteColors, 0);
+            for (std::size_t si = 0; si < numSets; ++si)
+            {
+                auto const& color = sampleSets[si][fi];
+                // Find nearest palette color
+                std::uint32_t bestIdx = 0;
+                float bestDist = colorDistanceSq(color, palette[0]);
+                for (std::size_t pi = 1; pi < numPaletteColors; ++pi)
+                {
+                    float const d = colorDistanceSq(color, palette[pi]);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        bestIdx = static_cast<std::uint32_t>(pi);
+                    }
+                }
+                ++votes[bestIdx];
+            }
+
+            // Pick the palette entry with the most votes
+            auto const winner = static_cast<std::uint32_t>(
+                std::distance(votes.begin(), std::max_element(votes.begin(), votes.end())));
+            basePalette.sourceToPaletteMap[fi] = winner;
+
+            float const dist = std::sqrt(colorDistanceSq(sampleSets[0][fi], palette[winner]));
+            basePalette.maxApproximationError =
+                std::max(basePalette.maxApproximationError, dist);
+        }
+
+        return basePalette;
+    }
+
 } // namespace gladius::io

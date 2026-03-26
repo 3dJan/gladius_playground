@@ -243,6 +243,101 @@ namespace gladius::io
         return s_batchSize;
     }
 
+    std::vector<FaceColors> FaceColorSampler::sampleFaceColorsMultipoint(
+        std::vector<Eigen::Vector3f> const& vertices,
+        std::vector<std::array<std::uint32_t, 3>> const& faces,
+        DualContouringSamplingProgram& samplingProgram,
+        Primitives const& primitives,
+        ProgressCallback progressCallback,
+        bool convertToSrgbFlag)
+    {
+        if (faces.empty())
+        {
+            return {};
+        }
+
+        for (auto const& face : faces)
+        {
+            if (face[0] >= vertices.size() || face[1] >= vertices.size() || face[2] >= vertices.size())
+            {
+                throw std::runtime_error(
+                    "FaceColorSampler::sampleFaceColorsMultipoint: face index out of bounds");
+            }
+        }
+
+        // Compute all sample positions: centroids + 3 edge midpoints per face
+        auto centroids = computeCentroids(vertices, faces);
+        auto edgeMids = computeEdgeMidpoints(vertices, faces); // 3 * numFaces
+
+        std::size_t const numFaces = faces.size();
+
+        // Concatenate all positions into one big batch for GPU evaluation
+        // Layout: [centroids | edgeMid01 | edgeMid12 | edgeMid20]
+        std::size_t const totalSamples = numFaces * MultipointSampleCount;
+        std::vector<Eigen::Vector3f> allPositions;
+        allPositions.reserve(totalSamples);
+
+        allPositions.insert(allPositions.end(), centroids.begin(), centroids.end());
+        // Edge midpoints are interleaved (mid01_0, mid12_0, mid20_0, mid01_1, ...),
+        // de-interleave into 3 blocks
+        for (std::size_t e = 0; e < 3; ++e)
+        {
+            for (std::size_t i = 0; i < numFaces; ++i)
+            {
+                allPositions.push_back(edgeMids[i * 3 + e]);
+            }
+        }
+
+        // GPU-sample all positions in batches
+        std::vector<Eigen::Vector3f> allColors(totalSamples);
+        std::size_t processed = 0;
+        while (processed < totalSamples)
+        {
+            std::size_t const batchCount = std::min(s_batchSize, totalSamples - processed);
+
+            std::vector<Eigen::Vector3f> batchPositions(
+                allPositions.begin() + static_cast<std::ptrdiff_t>(processed),
+                allPositions.begin() + static_cast<std::ptrdiff_t>(processed + batchCount));
+
+            std::vector<Eigen::Vector3f> batchColors;
+            samplingProgram.sampleColors(batchPositions, batchColors, primitives);
+
+            if (batchColors.size() != batchPositions.size())
+            {
+                throw std::runtime_error(
+                    "FaceColorSampler::sampleFaceColorsMultipoint: GPU returned unexpected count");
+            }
+
+            std::copy(batchColors.begin(), batchColors.end(),
+                      allColors.begin() + static_cast<std::ptrdiff_t>(processed));
+            processed += batchCount;
+
+            if (progressCallback)
+            {
+                progressCallback(static_cast<float>(processed) / static_cast<float>(totalSamples));
+            }
+        }
+
+        if (convertToSrgbFlag)
+        {
+            convertToSrgb(allColors);
+        }
+
+        // Split results into MultipointSampleCount sets of FaceColors
+        std::vector<FaceColors> result(MultipointSampleCount);
+        for (std::size_t s = 0; s < MultipointSampleCount; ++s)
+        {
+            result[s] = FaceColors(numFaces);
+            std::size_t const offset = s * numFaces;
+            for (std::size_t i = 0; i < numFaces; ++i)
+            {
+                result[s][i] = Color8::fromVector3f(allColors[offset + i]);
+            }
+        }
+
+        return result;
+    }
+
     float FaceColorSampler::linearToSrgb(float linear)
     {
         // Standard sRGB transfer function
@@ -275,6 +370,28 @@ namespace gladius::io
         }
 
         return centroids;
+    }
+
+    std::vector<Eigen::Vector3f> FaceColorSampler::computeEdgeMidpoints(
+        std::vector<Eigen::Vector3f> const& vertices,
+        std::vector<std::array<std::uint32_t, 3>> const& faces)
+    {
+        // Returns 3 midpoints per face, interleaved: [mid01_0, mid12_0, mid20_0, mid01_1, ...]
+        std::vector<Eigen::Vector3f> midpoints;
+        midpoints.reserve(faces.size() * 3);
+
+        for (auto const& face : faces)
+        {
+            Eigen::Vector3f const& v0 = vertices[face[0]];
+            Eigen::Vector3f const& v1 = vertices[face[1]];
+            Eigen::Vector3f const& v2 = vertices[face[2]];
+
+            midpoints.push_back((v0 + v1) * 0.5F);
+            midpoints.push_back((v1 + v2) * 0.5F);
+            midpoints.push_back((v2 + v0) * 0.5F);
+        }
+
+        return midpoints;
     }
 
     void FaceColorSampler::convertToSrgb(std::vector<Eigen::Vector3f>& colors)

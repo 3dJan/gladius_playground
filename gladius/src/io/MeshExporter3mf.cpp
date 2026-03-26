@@ -206,7 +206,12 @@ namespace gladius::vdb
                                              static_cast<std::size_t>(
                                                  io::MmuSegmentationWriter::MAX_EXTRUDERS))));
 
-                        auto palette = io::ColorQuantizer::quantize(faceColors, maxPalette);
+                        // Use multi-point oversampling for sharper material boundaries
+                        auto sampleSets = io::FaceColorSampler::sampleFaceColorsMultipoint(
+                            vertices, faces, *samplingProgram, *primitives,
+                            nullptr, settings.convertToSrgb);
+                        auto palette = io::ColorQuantizer::quantizeOversampled(
+                            sampleSets, maxPalette);
 
                         writer.exportMeshWithMmuSegmentation(
                             m_fileName, mesh, meshName, palette, m_sourceDocument, true);

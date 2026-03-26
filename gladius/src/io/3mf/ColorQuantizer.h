@@ -40,6 +40,14 @@ namespace gladius::io
         /// Quantize face colors into at most maxColors distinct palette entries
         static QuantizedPalette quantize(FaceColors const& faceColors, std::uint32_t maxColors);
 
+        /// Quantize using multi-point oversampling for sharper material boundaries.
+        /// Takes multiple sample sets per face (e.g. centroid + edge midpoints).
+        /// Builds the palette from the first sample set, then assigns each face
+        /// to the palette entry that wins a majority vote across all samples.
+        static QuantizedPalette quantizeOversampled(
+            std::vector<FaceColors> const& sampleSets,
+            std::uint32_t maxColors);
+
         /// Count the number of unique opaque colors (ignoring alpha)
         static std::size_t countUniqueOpaqueColors(FaceColors const& faceColors);
 

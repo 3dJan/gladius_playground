@@ -131,6 +131,32 @@ namespace gladius::io
         ProgressCallback progressCallback = nullptr,
         bool convertToSrgb = true);
 
+        /**
+         * @brief Sample face colors at multiple sub-face points for better boundary accuracy
+         *
+         * Samples at the centroid plus 3 edge midpoints (4 samples per face), returning
+         * all sample sets. This enables majority-vote assignment for discrete material
+         * boundaries, producing cleaner color transitions than single-centroid sampling.
+         *
+         * @param vertices Mesh vertices
+         * @param faces Triangle indices (3 indices per face)
+         * @param samplingProgram Compiled sampling program for GPU evaluation
+         * @param primitives Compiled model primitives for evaluation
+         * @param progressCallback Optional callback for progress updates
+         * @param convertToSrgb If true (default), convert from linear RGB to sRGB
+         * @return Vector of FaceColors, one per sample point (centroid + 3 edge midpoints)
+         */
+        static std::vector<FaceColors> sampleFaceColorsMultipoint(
+            std::vector<Eigen::Vector3f> const& vertices,
+            std::vector<std::array<std::uint32_t, 3>> const& faces,
+            DualContouringSamplingProgram& samplingProgram,
+            Primitives const& primitives,
+            ProgressCallback progressCallback = nullptr,
+            bool convertToSrgb = true);
+
+        /// Number of sub-face sample points used by sampleFaceColorsMultipoint
+        static constexpr std::size_t MultipointSampleCount = 4;
+
         /// Configure batch size for GPU evaluation (faces per dispatch)
         static void setBatchSize(std::size_t batchSize);
 
@@ -160,6 +186,11 @@ namespace gladius::io
       private:
         /// Compute face centroids from vertices and faces
         static std::vector<Eigen::Vector3f> computeCentroids(
+            std::vector<Eigen::Vector3f> const& vertices,
+            std::vector<std::array<std::uint32_t, 3>> const& faces);
+
+        /// Compute edge midpoints for each face (3 midpoints per face, interleaved)
+        static std::vector<Eigen::Vector3f> computeEdgeMidpoints(
             std::vector<Eigen::Vector3f> const& vertices,
             std::vector<std::array<std::uint32_t, 3>> const& faces);
 
