@@ -263,6 +263,9 @@ namespace gladius::io
             case SimplificationMethod::None:
                 config.simplificationMethod = compute::SimplificationMethod::None;
                 break;
+            case SimplificationMethod::QemFast:
+                config.simplificationMethod = compute::SimplificationMethod::QemFast;
+                break;
             case SimplificationMethod::QemSdfAware:
                 config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
                 break;
@@ -279,6 +282,9 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
+        config.simplificationTerminationMode = static_cast<compute::SimplificationTerminationMode>(
+            static_cast<int>(m_options.simplificationTerminationMode));
+        config.simplificationMaxGeometricError = m_options.simplificationMaxError;
         gpuPipeline.setConfig(std::move(config));
         
         // Wire progress callback to update exporter's atomic progress
@@ -453,9 +459,18 @@ namespace gladius::io
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    // Always sample face colors for compatibility planning
-                    auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
-                        positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+                    // Use multipoint majority vote for face colors when simplification is active,
+                    // as larger triangles after simplification may span color boundaries. The
+                    // majority vote samples at centroid + 3 edge midpoints per face and picks
+                    // the most frequent color, producing cleaner color transitions.
+                    bool const useMultipointSampling =
+                        m_options.simplificationMethod != SimplificationMethod::None;
+
+                    auto faceColors = useMultipointSampling
+                        ? FaceColorSampler::sampleFaceColorsMajorityVote(
+                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb)
+                        : FaceColorSampler::sampleFaceColorsAsColor8(
+                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
 
                     // Run compatibility planner
                     MeshColorExportSettings const settings{

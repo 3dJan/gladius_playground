@@ -325,6 +325,52 @@ namespace gladius::io
         return result;
     }
 
+    FaceColors FaceColorSampler::sampleFaceColorsMajorityVote(
+        std::vector<Eigen::Vector3f> const& vertices,
+        std::vector<std::array<std::uint32_t, 3>> const& faces,
+        DualContouringSamplingProgram& samplingProgram,
+        Primitives const& primitives,
+        ProgressCallback progressCallback,
+        bool convertToSrgbFlag)
+    {
+        auto sampleSets = sampleFaceColorsMultipoint(
+            vertices, faces, samplingProgram, primitives, progressCallback, convertToSrgbFlag);
+
+        // Resolve per-face color via majority vote across the 4 sample points
+        FaceColors result(faces.size());
+        for (std::size_t i = 0; i < faces.size(); ++i)
+        {
+            // Collect sample colors for this face
+            std::array<Color8, MultipointSampleCount> samples;
+            for (std::size_t s = 0; s < MultipointSampleCount; ++s)
+            {
+                samples[s] = sampleSets[s][i];
+            }
+
+            // Find the color appearing most often; ties go to centroid (samples[0])
+            Color8 bestColor = samples[0];
+            std::size_t bestCount = 0U;
+            for (std::size_t s = 0; s < MultipointSampleCount; ++s)
+            {
+                std::size_t count = 0U;
+                for (std::size_t s2 = 0; s2 < MultipointSampleCount; ++s2)
+                {
+                    if (samples[s] == samples[s2])
+                    {
+                        ++count;
+                    }
+                }
+                if (count > bestCount)
+                {
+                    bestCount = count;
+                    bestColor = samples[s];
+                }
+            }
+            result[i] = bestColor;
+        }
+        return result;
+    }
+
     float FaceColorSampler::linearToSrgb(float linear)
     {
         // Standard sRGB transfer function

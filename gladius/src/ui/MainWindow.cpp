@@ -77,6 +77,7 @@ namespace gladius::ui
 
         m_renderWindow.initialize(m_core.get(), &m_mainView, m_shortcutManager, m_configManager);
         m_renderWindow.setDocument(m_doc.get());
+        m_renderWindow.setExportState(&m_exportState);
         LOG_LOCATION
         m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack([&]()
                                                                     { onPreviewProgramSwap(); });

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <optional>
 
 namespace gladius::io
@@ -16,7 +17,16 @@ namespace gladius::io
     enum class SimplificationMethod
     {
         None,           ///< No simplification
+        QemFast,        ///< Fast geometric QEM, CPU-only, single-pass with priority queue
         QemSdfAware     ///< QEM with GPU SDF error evaluation (SDF-aware)
+    };
+
+    /// Termination criterion for mesh simplification
+    enum class SimplificationTerminationMode
+    {
+        TargetTriangleCount,    ///< Stop at specified triangle count
+        TargetReductionPercent, ///< Stop at specified reduction percentage
+        ErrorBounded            ///< Stop when all remaining collapses exceed error threshold
     };
 
     /// Quality presets for dual contouring mesh generation
@@ -95,6 +105,9 @@ namespace gladius::io
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
         std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
+        SimplificationTerminationMode simplificationTerminationMode{
+            SimplificationTerminationMode::TargetReductionPercent};              ///< When to stop simplification
+        float simplificationMaxError{std::numeric_limits<float>::max()};         ///< Maximum geometric error for edge collapse (squared world units)
 
         void applyPreset();
     };

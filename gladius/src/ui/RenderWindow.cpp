@@ -15,6 +15,7 @@
 #include "../ImageRGBA.h"
 #include "../TimeMeasurement.h"
 #include "../io/MeshExporter.h"
+#include "ExportState.h"
 #include "GLView.h"
 #include "Profiling.h"
 #include "ShortcutManager.h"
@@ -142,6 +143,11 @@ namespace gladius::ui
     void RenderWindow::setDocument(Document * doc)
     {
         m_document = doc;
+    }
+
+    void RenderWindow::setExportState(ExportState const * exportState)
+    {
+        m_exportState = exportState;
     }
 
     void RenderWindow::initializeAsyncRendering()
@@ -1215,6 +1221,12 @@ namespace gladius::ui
     {
         ProfileFunction;
 
+        // Skip all GPU rendering work while an export is in progress
+        if (m_exportState != nullptr && m_exportState->isExportInProgress())
+        {
+            return;
+        }
+
         // Update camera now that we know core is ready
         m_core->applyCamera(m_camera);
 
@@ -1397,6 +1409,14 @@ namespace gladius::ui
     void RenderWindow::renderAsync(RenderWindowState & state)
     {
         ProfileFunction;
+
+        // Skip all GPU rendering work while an export is in progress.
+        // The export pipeline uses the same OpenCL context and contending for it
+        // causes the UI to block on synchronous image reads.
+        if (m_exportState != nullptr && m_exportState->isExportInProgress())
+        {
+            return;
+        }
 
         // Update camera now that we know core is ready
         m_core->applyCamera(m_camera);

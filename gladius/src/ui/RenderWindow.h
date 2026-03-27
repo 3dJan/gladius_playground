@@ -15,6 +15,7 @@
 
 namespace gladius::ui
 {
+    class ExportState;
     class ShortcutManager;
 }
 
@@ -57,6 +58,10 @@ namespace gladius::ui
          * @param doc Pointer to the document (can be nullptr)
          */
         void setDocument(Document * doc);
+
+        /// @brief Set the export state reference. Preview rendering is suppressed while
+        /// an export is in progress to avoid GPU contention.
+        void setExportState(ExportState const * exportState);
 
         void renderWindow();
         void updateCamera();
@@ -183,6 +188,7 @@ namespace gladius::ui
 
         ComputeCore * m_core;
         Document * m_document{nullptr};
+        ExportState const * m_exportState{nullptr};
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         gladius::ConfigManager * m_configManager;
 

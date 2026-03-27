@@ -718,8 +718,8 @@ namespace gladius::ui
             ImGui::Text("Mesh Simplification");
             
             // Simplification method selection
-            char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
-            int const numMethods = 2;
+            char const * const simplificationMethods[] = {"None", "Fast (Geometric)", "QEM (SDF-aware)"};
+            int const numMethods = 3;
             if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
             {
                 for (int i = 0; i < numMethods; ++i)
@@ -737,7 +737,27 @@ namespace gladius::ui
                 ImGui::EndCombo();
             }
             
-            if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
+            if (m_manifoldSimplificationMethod == 1)  // Fast (Geometric)
+            {
+                ImGui::Indent();
+                
+                char const * const terminationModes[] = {"Target Count", "Reduction %", "Error-Bounded"};
+                ImGui::Combo("Termination##simplterm", &m_manifoldSimplificationTerminationMode,
+                             terminationModes, 3);
+                
+                if (m_manifoldSimplificationTerminationMode == 2)  // Error-bounded
+                {
+                    ImGui::SliderFloat("Max error##simplerr",
+                                       &m_manifoldSimplificationMaxError,
+                                       0.001F, 10.0F,
+                                       "%.3f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("squared world units");
+                }
+                
+                ImGui::Unindent();
+            }
+            else if (m_manifoldSimplificationMethod == 2)  // QEM SDF-aware
             {
                 ImGui::Indent();
                 
@@ -1205,6 +1225,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+        options.simplificationMaxError = m_manifoldSimplificationMaxError;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1286,6 +1308,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+        options.simplificationMaxError = m_manifoldSimplificationMaxError;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1438,6 +1462,8 @@ namespace gladius::ui
             // Mesh simplification options
             options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
             options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
+            options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+            options.simplificationMaxError = m_manifoldSimplificationMaxError;
             // QEM SDF-aware options
             options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
             options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;

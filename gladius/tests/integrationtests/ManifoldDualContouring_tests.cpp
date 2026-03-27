@@ -3739,4 +3739,208 @@ namespace gladius::compute::tests
         std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
                   << (reversedRatio * 100.0) << "%)" << std::endl;
     }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_QemFastSimplification_Export3mfWithColors)
+    {
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // Fine preset with fast QEM simplification and colors.
+        // Using Fine (depth 6/8) instead of UltraFine (7/9) to keep runtime
+        // manageable while still testing the full export + simplification + color pipeline.
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::Fine;
+        exportOptions.applyPreset(); // initialDepth=6, maxDepth=8
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto temp3mf = makeUniqueTempFile("mdc_union_color_simplify_", ".3mf");
+        TempFileGuard cleanup3mf(temp3mf);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.setOutputFormat(gladius::io::MeshOutputFileFormat::ThreeMF);
+        exporter.setDocument(bundle.document.get());
+        exporter.setExportWithColors(true);
+
+        exporter.beginExport(temp3mf, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+
+        ASSERT_FALSE(exporter.hasError()) << "3MF export failed: " << exporter.errorMessage();
+        ASSERT_TRUE(std::filesystem::exists(temp3mf)) << "3MF file should exist";
+        ASSERT_GT(std::filesystem::file_size(temp3mf), static_cast<std::uintmax_t>(0))
+            << "3MF file should not be empty";
+
+        // Read back and validate
+        {
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+            reader->ReadFromFile(temp3mf.string());
+
+            // Count mesh objects and triangles.
+            // With TargetApplication::None the compatibility planner selects
+            // StandardDiscreteComponents, which produces separate mesh objects per
+            // color region.  Individual region meshes may have open boundary edges
+            // at the cut between regions; this is expected.
+            std::size_t meshObjectsSeen = 0U;
+            std::size_t totalTriangles = 0U;
+            auto objectIterator = model->GetObjects();
+            while (objectIterator->MoveNext())
+            {
+                auto const object = objectIterator->GetCurrentObject();
+                if (!object->IsMeshObject())
+                {
+                    continue;
+                }
+                ++meshObjectsSeen;
+
+                auto const meshObject =
+                    model->GetMeshObjectByID(object->GetUniqueResourceID());
+                totalTriangles += meshObject->GetTriangleCount();
+            }
+            ASSERT_GT(meshObjectsSeen, 0U) << "No mesh objects found in exported 3MF";
+            ASSERT_GT(totalTriangles, 0U) << "Exported mesh should have triangles";
+
+            // The model has two colors (red sphere + blue box), so we expect
+            // multiple mesh objects / build items representing the color regions.
+            EXPECT_GT(meshObjectsSeen, 1U)
+                << "Color model should produce multiple mesh objects (one per color region)";
+
+            // Validate that color information is present via base material groups
+            // (StandardDiscreteComponents uses basematerials, not color groups).
+            auto baseMaterials = model->GetBaseMaterialGroups();
+            EXPECT_TRUE(baseMaterials->MoveNext())
+                << "Exported 3MF should contain a base material group for color regions";
+
+            // Verify multiple build items (one per color region)
+            auto buildItems = model->GetBuildItems();
+            std::size_t buildItemCount = 0U;
+            while (buildItems->MoveNext())
+            {
+                ++buildItemCount;
+            }
+            EXPECT_GT(buildItemCount, 1U)
+                << "Colored model should have multiple build items";
+
+            std::cout << "UnionWithColor Fine+QemFast export:" << std::endl;
+            std::cout << "  Mesh objects: " << meshObjectsSeen << std::endl;
+            std::cout << "  Total triangles: " << totalTriangles << std::endl;
+            std::cout << "  Build items: " << buildItemCount << std::endl;
+        }
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_UltraFineQemFast_Export3mfWithColors)
+    {
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // UltraFine preset (depth 7/9) with fast QEM simplification.
+        // This test verifies that the vtx2tri pruning keeps the algorithm
+        // fast enough for large meshes (~2.3M triangles).
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto temp3mf = makeUniqueTempFile("mdc_union_color_ultrafine_", ".3mf");
+        TempFileGuard cleanup3mf(temp3mf);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.setOutputFormat(gladius::io::MeshOutputFileFormat::ThreeMF);
+        exporter.setDocument(bundle.document.get());
+        exporter.setExportWithColors(true);
+
+        auto const start = std::chrono::steady_clock::now();
+
+        exporter.beginExport(temp3mf, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+
+        auto const elapsed = std::chrono::steady_clock::now() - start;
+        auto const elapsedSec =
+            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+
+        std::cout << "UnionWithColor UltraFine+QemFast elapsed: " << elapsedSec << "s"
+                  << std::endl;
+
+        // With the vtx2tri pruning fix this should complete in well under 5 minutes.
+        EXPECT_LT(elapsedSec, 300) << "UltraFine QemFast should complete within 5 minutes";
+
+        ASSERT_FALSE(exporter.hasError()) << "3MF export failed: " << exporter.errorMessage();
+        ASSERT_TRUE(std::filesystem::exists(temp3mf)) << "3MF file should exist";
+        ASSERT_GT(std::filesystem::file_size(temp3mf), static_cast<std::uintmax_t>(0))
+            << "3MF file should not be empty";
+
+        // Read back and validate
+        {
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+            reader->ReadFromFile(temp3mf.string());
+
+            std::size_t meshObjectsSeen = 0U;
+            std::size_t totalTriangles = 0U;
+            auto objectIterator = model->GetObjects();
+            while (objectIterator->MoveNext())
+            {
+                auto const object = objectIterator->GetCurrentObject();
+                if (!object->IsMeshObject())
+                {
+                    continue;
+                }
+                ++meshObjectsSeen;
+
+                auto const meshObject =
+                    model->GetMeshObjectByID(object->GetUniqueResourceID());
+                totalTriangles += meshObject->GetTriangleCount();
+            }
+            ASSERT_GT(meshObjectsSeen, 0U) << "No mesh objects found in exported 3MF";
+            ASSERT_GT(totalTriangles, 0U) << "Exported mesh should have triangles";
+            EXPECT_GT(meshObjectsSeen, 1U)
+                << "Color model should produce multiple mesh objects";
+
+            auto baseMaterials = model->GetBaseMaterialGroups();
+            EXPECT_TRUE(baseMaterials->MoveNext())
+                << "Exported 3MF should contain a base material group";
+
+            auto buildItems = model->GetBuildItems();
+            std::size_t buildItemCount = 0U;
+            while (buildItems->MoveNext())
+            {
+                ++buildItemCount;
+            }
+            EXPECT_GT(buildItemCount, 1U)
+                << "Colored model should have multiple build items";
+
+            std::cout << "UnionWithColor UltraFine+QemFast export:" << std::endl;
+            std::cout << "  Mesh objects: " << meshObjectsSeen << std::endl;
+            std::cout << "  Total triangles: " << totalTriangles << std::endl;
+            std::cout << "  Build items: " << buildItemCount << std::endl;
+            std::cout << "  Elapsed: " << elapsedSec << "s" << std::endl;
+        }
+    }
 }

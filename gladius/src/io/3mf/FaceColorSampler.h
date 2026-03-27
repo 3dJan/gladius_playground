@@ -157,6 +157,30 @@ namespace gladius::io
         /// Number of sub-face sample points used by sampleFaceColorsMultipoint
         static constexpr std::size_t MultipointSampleCount = 4;
 
+        /**
+         * @brief Sample face colors using multipoint majority voting
+         *
+         * Samples at centroid + 3 edge midpoints per face, then assigns each face
+         * the most frequent color among its 4 samples. This produces cleaner color
+         * boundaries on large triangles (e.g. after mesh simplification), where a
+         * single centroid sample may not be representative of the whole face.
+         *
+         * @param vertices Mesh vertices
+         * @param faces Triangle indices (3 indices per face)
+         * @param samplingProgram Compiled sampling program for GPU evaluation
+         * @param primitives Compiled model primitives for evaluation
+         * @param progressCallback Optional callback for progress updates
+         * @param convertToSrgb If true (default), convert from linear RGB to sRGB
+         * @return FaceColors with majority-vote resolved colors
+         */
+        static FaceColors sampleFaceColorsMajorityVote(
+            std::vector<Eigen::Vector3f> const& vertices,
+            std::vector<std::array<std::uint32_t, 3>> const& faces,
+            DualContouringSamplingProgram& samplingProgram,
+            Primitives const& primitives,
+            ProgressCallback progressCallback = nullptr,
+            bool convertToSrgb = true);
+
         // Color conversion utilities
 
         /**
