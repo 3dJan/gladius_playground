@@ -1464,7 +1464,7 @@ namespace gladius
             }
 
             // write to file for debugging
-            dumpSource("debug.cl");
+            //dumpSource("debug.cl");
             m_program->build({m_ComputeContext->GetDevice()}, arguments.c_str(), nullptr, nullptr);
             if (isOclDumpEnabled())
             {
