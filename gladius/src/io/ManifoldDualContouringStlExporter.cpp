@@ -18,10 +18,13 @@
 #include <Eigen/Geometry>
 #include <fmt/format.h>
 
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -284,8 +287,19 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
-        config.simplificationTerminationMode = static_cast<compute::SimplificationTerminationMode>(
-            static_cast<int>(m_options.simplificationTerminationMode));
+        // Map io → compute termination mode via explicit switch (keeps enums in sync)
+        switch (m_options.simplificationTerminationMode)
+        {
+            case SimplificationTerminationMode::TargetTriangleCount:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetTriangleCount;
+                break;
+            case SimplificationTerminationMode::TargetReductionPercent:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetReductionPercent;
+                break;
+            case SimplificationTerminationMode::ErrorBounded:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::ErrorBounded;
+                break;
+        }
         config.simplificationMaxGeometricError = m_options.simplificationMaxError;
         gpuPipeline.setConfig(std::move(config));
         
@@ -392,7 +406,7 @@ namespace gladius::io
         verticesVec.resize(numFaces * 3U);
         vertexNormalsVec.resize(numFaces * 3U);
 
-        bool hasOutOfRangeIndex = false;
+        std::atomic<bool> hasOutOfRangeIndex{false};
 
         #pragma omp parallel for schedule(static)
         for (std::size_t fi = 0U; fi < numFaces; ++fi)
@@ -403,7 +417,7 @@ namespace gladius::io
 
             if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
             {
-                hasOutOfRangeIndex = true;
+                hasOutOfRangeIndex.store(true, std::memory_order_relaxed);
                 continue;
             }
 
@@ -445,7 +459,7 @@ namespace gladius::io
             }
         }
 
-        if (hasOutOfRangeIndex)
+        if (hasOutOfRangeIndex.load(std::memory_order_relaxed))
         {
             throw std::runtime_error(
               "Manifold dual contouring mesh references out-of-range vertex indices");

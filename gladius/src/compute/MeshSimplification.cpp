@@ -1337,7 +1337,7 @@ namespace gladius::compute
         std::pair<std::uint32_t, std::uint32_t> triEdgeVerts(
             std::uint32_t t, std::uint8_t e, std::vector<std::uint32_t> const & indices)
         {
-            static constexpr std::uint8_t E[3][2] = {{0, 1}, {1, 2}, {2, 0}};
+            constexpr std::uint8_t E[3][2] = {{0, 1}, {1, 2}, {2, 0}};
             return {indices[t * 3U + E[e][0]], indices[t * 3U + E[e][1]]};
         }
 

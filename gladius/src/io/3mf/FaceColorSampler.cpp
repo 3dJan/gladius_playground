@@ -331,10 +331,10 @@ namespace gladius::io
         DualContouringSamplingProgram& samplingProgram,
         Primitives const& primitives,
         ProgressCallback progressCallback,
-        bool convertToSrgbFlag)
+        bool convertToSrgb)
     {
         auto sampleSets = sampleFaceColorsMultipoint(
-            vertices, faces, samplingProgram, primitives, progressCallback, convertToSrgbFlag);
+            vertices, faces, samplingProgram, primitives, progressCallback, convertToSrgb);
 
         // Resolve per-face color via majority vote across the 4 sample points
         FaceColors result(faces.size());

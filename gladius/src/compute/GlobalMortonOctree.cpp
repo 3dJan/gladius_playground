@@ -22,7 +22,9 @@
 #include <set>
 #include <unordered_set>
 
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 // NOTE: This GlobalMortonOctree implementation is EXPERIMENTAL and DISABLED by default.
 // It uses path-based Morton codes to build a hierarchical octree structure.

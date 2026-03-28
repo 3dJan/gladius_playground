@@ -40,7 +40,7 @@ namespace
     }
 
     /// Pack two uint32 vertex indices into a single uint64 edge key.
-    [[nodiscard]] inline std::uint64_t makeEdgeKey(std::uint32_t a, std::uint32_t b)
+    [[nodiscard]] std::uint64_t makeEdgeKey(std::uint32_t a, std::uint32_t b)
     {
         std::uint32_t const lo = std::min(a, b);
         std::uint32_t const hi = std::max(a, b);
@@ -50,7 +50,7 @@ namespace
     /// High-quality hash for uint64 edge keys (splitmix64 finalizer).
     /// std::hash<uint64_t> is often the identity on libstdc++, which causes
     /// massive clustering with power-of-two table sizes.
-    [[nodiscard]] inline std::size_t hashEdgeKey(std::uint64_t key)
+    [[nodiscard]] std::size_t hashEdgeKey(std::uint64_t key)
     {
         key ^= key >> 30U;
         key *= 0xbf58476d1ce4e5b9ULL;
