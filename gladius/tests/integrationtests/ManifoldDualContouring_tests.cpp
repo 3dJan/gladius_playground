@@ -3943,4 +3943,80 @@ namespace gladius::compute::tests
             std::cout << "  Elapsed: " << elapsedSec << "s" << std::endl;
         }
     }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_UltraFineQemFast_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // UltraFine preset (depth 7 / 9) with QemFast simplification — the combination
+        // that previously produced holes in the mesh after simplification.
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+
+        // After simplification we expect a watertight mesh:
+        // zero disconnected facets, zero degenerate facets, zero edges fixed.
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets before admesh repair"
+            << " (original had " << metrics.totalDisconnectedFacets.original << ")";
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+            << "Simplified mesh should have no disconnected facets after admesh processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0)
+            << "Simplified mesh should have no degenerate facets";
+        EXPECT_EQ(metrics.edgesFixed, 0)
+            << "Simplified mesh should require no edge fixes";
+
+        // The STL exporter merges all bodies into one file, so the number of parts
+        // depends on whether the bodies share geometry.  Just verify we have at least 1.
+        EXPECT_GE(metrics.numberOfParts, 1)
+            << "Simplified mesh should contain at least 1 part";
+
+        // No backwards edges — winding repair should have taken care of this.
+        EXPECT_EQ(metrics.backwardsEdges, 0)
+            << "Simplified mesh should have no backwards edges";
+
+        // Reversed facets should be negligible (< 1%).
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        EXPECT_LE(reversedRatio, 0.01)
+            << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+            << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
+
+        // Positive volume ⇒ normals point outward.
+        EXPECT_GT(metrics.volume, 0.0)
+            << "Volume should be positive for outward-facing normals";
+
+        std::cout << "UnionWithColor UltraFine+QemFast Admesh validation:" << std::endl;
+        std::cout << "  Original facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Final facets:    " << metrics.numberOfFacets.final << std::endl;
+        std::cout << "  Volume:          " << metrics.volume << std::endl;
+        std::cout << "  Parts:           " << metrics.numberOfParts << std::endl;
+        std::cout << "  Degenerate:      " << metrics.degenerateFacets << std::endl;
+        std::cout << "  Edges fixed:     " << metrics.edgesFixed << std::endl;
+        std::cout << "  Facets reversed: " << metrics.facetsReversed
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Disconnected (orig): "
+                  << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Disconnected (final): "
+                  << metrics.totalDisconnectedFacets.final << std::endl;
+    }
 }
