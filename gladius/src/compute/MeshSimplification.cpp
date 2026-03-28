@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <queue>
@@ -1626,6 +1627,60 @@ namespace gladius::compute
 
         std::size_t const collapsesNeeded = initialTriCount - targetTriCount;
 
+        // Weld duplicate vertices: merge vertices at the same position into a
+        // single canonical index.  This fixes cracks from dual contouring where
+        // different octree cells emit separate vertices at the same location.
+        {
+            struct Float3Hash
+            {
+                std::size_t operator()(Eigen::Vector3f const & v) const
+                {
+                    std::uint32_t hx, hy, hz;
+                    std::memcpy(&hx, &v.x(), sizeof(float));
+                    std::memcpy(&hy, &v.y(), sizeof(float));
+                    std::memcpy(&hz, &v.z(), sizeof(float));
+                    // splitmix64-style mixing
+                    auto mix = [](std::size_t x)
+                    {
+                        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+                        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+                        return x ^ (x >> 31);
+                    };
+                    return mix(hx) ^ (mix(hy) * 2654435761ULL) ^ (mix(hz) * 40503ULL);
+                }
+            };
+            struct Float3Eq
+            {
+                bool operator()(Eigen::Vector3f const & a, Eigen::Vector3f const & b) const
+                {
+                    return std::memcmp(&a, &b, sizeof(float) * 3) == 0;
+                }
+            };
+
+            std::unordered_map<Eigen::Vector3f, std::uint32_t, Float3Hash, Float3Eq> posToIdx;
+            posToIdx.reserve(positions.size());
+            std::vector<std::uint32_t> remap(positions.size());
+            std::size_t mergedCount = 0U;
+
+            for (std::uint32_t i = 0U; i < static_cast<std::uint32_t>(positions.size()); ++i)
+            {
+                auto const [it, inserted] = posToIdx.emplace(positions[i], i);
+                remap[i] = it->second;
+                if (!inserted && it->second != i) ++mergedCount;
+            }
+
+            if (mergedCount > 0U)
+            {
+                for (auto & idx : indices)
+                {
+                    idx = remap[idx];
+                }
+                // Degenerate triangles (with two or more identical indices after
+                // welding) are handled downstream: the quadric init marks zero-area
+                // triangles as deleted, and compactMeshFast skips them.
+            }
+        }
+
         // Build vertex-to-triangle adjacency (vector of vectors for dynamic updates)
         std::vector<std::vector<std::uint32_t>> vtx2tri(positions.size());
         {
@@ -1764,6 +1819,81 @@ namespace gladius::compute
                 if (sharedTriCount(id0, id1, indices, vtx2tri, tris) != 2U) continue;
                 if (!linkConditionSatisfied(id0, id1, indices, vtx2tri, tris)) continue;
                 if (wouldCreateDuplicateFaces(id0, id1, indices, vtx2tri, tris)) continue;
+
+                // Valence guard: the non-surviving vertex (id1) must have at least 3
+                // non-deleted triangles. With sharedTriCount == 2, this guarantees at least
+                // 1 non-shared triangle exists to fill the gap left by the deleted shared
+                // triangles. Without this, collapsing a "tip" vertex whose entire fan
+                // consists of only the 2 shared triangles would create boundary edges (a hole).
+                // Additionally, the post-collapse valence of the surviving vertex (id0)
+                // must be at least 3 to form a valid closed fan.
+                {
+                    std::uint32_t id0LiveCount = 0U;
+                    std::uint32_t id1LiveCount = 0U;
+                    for (auto const t : vtx2tri[id0])
+                    {
+                        if (!tris[t].deleted) ++id0LiveCount;
+                    }
+                    for (auto const t : vtx2tri[id1])
+                    {
+                        if (!tris[t].deleted) ++id1LiveCount;
+                    }
+                    if (id1LiveCount <= 2U) continue;
+                    if (id0LiveCount + id1LiveCount < 7U) continue;
+                }
+
+                // Wing vertex connectivity guard: for each wing vertex (the third vertex
+                // of each shared triangle), verify that the post-collapse edge count at
+                // (id0, wing) will be >= 2. The count is: (triangles of id0 with wing - 1
+                // for the deleted shared triangle) + (non-shared triangles of id1 with wing).
+                // If id0's side has lost triangles from prior collapses, even having a
+                // non-shared triangle from id1 may not suffice.
+                {
+                    bool wingOk = true;
+                    for (auto const st : vtx2tri[id1])
+                    {
+                        if (tris[st].deleted) continue;
+                        auto const sv0 = indices[st * 3U + 0U];
+                        auto const sv1 = indices[st * 3U + 1U];
+                        auto const sv2 = indices[st * 3U + 2U];
+                        if (!(sv0 == id0 || sv1 == id0 || sv2 == id0)) continue;
+                        // Shared triangle: find the wing vertex
+                        std::uint32_t w = UINT32_MAX;
+                        for (auto const v : {sv0, sv1, sv2})
+                        {
+                            if (v != id0 && v != id1) { w = v; break; }
+                        }
+                        if (w == UINT32_MAX) continue;
+                        // Count triangles of id0 containing the wing vertex
+                        std::uint32_t id0wCount = 0U;
+                        for (auto const t : vtx2tri[id0])
+                        {
+                            if (tris[t].deleted) continue;
+                            auto const x0 = indices[t * 3U + 0U];
+                            auto const x1 = indices[t * 3U + 1U];
+                            auto const x2 = indices[t * 3U + 2U];
+                            if (x0 == w || x1 == w || x2 == w) ++id0wCount;
+                        }
+                        // Count non-shared triangles of id1 containing the wing vertex
+                        std::uint32_t id1wCount = 0U;
+                        for (auto const t : vtx2tri[id1])
+                        {
+                            if (tris[t].deleted) continue;
+                            auto const x0 = indices[t * 3U + 0U];
+                            auto const x1 = indices[t * 3U + 1U];
+                            auto const x2 = indices[t * 3U + 2U];
+                            if (x0 == id0 || x1 == id0 || x2 == id0) continue;
+                            if (x0 == w || x1 == w || x2 == w) ++id1wCount;
+                        }
+                        // Post-collapse count for edge (id0, w)
+                        if (id0wCount + id1wCount < 3U)
+                        {
+                            wingOk = false;
+                            break;
+                        }
+                    }
+                    if (!wingOk) continue;
+                }
 
                 // Compute optimal position
                 Eigen::Vector3f newPos;
