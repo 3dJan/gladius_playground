@@ -139,7 +139,14 @@ namespace gladius::ui
         m_modelEditor.setExportState(&m_exportState);
 
         nodeEditor();
-        newModel();
+        // Defer the initial template load while the welcome screen is visible.
+        // Starting it now would set isLoadingInProgress(), causing a click on a
+        // thumbnail to be silently dropped by open().  The template is loaded
+        // later when the welcome screen closes without a file selection.
+        if (!m_welcomeScreen.isVisible())
+        {
+            newModel();
+        }
         loadRenderSettings();
     }
 
@@ -552,8 +559,15 @@ namespace gladius::ui
                        events::Severity::Error});
                 }
             }
-            // No pending file is normal for "New Project", "Open Existing", 
-            // backup restore, or manual close - no action needed
+            else if (m_asyncLoadState == AsyncLoadState::Idle &&
+                     !m_asyncFileDialog.isActive())
+            {
+                // Welcome screen closed without selecting a file and no other
+                // operation was already started (e.g. "New Project" or "Open
+                // Existing").  Load the default template so the user has a
+                // blank model to work with.
+                newModel();
+            }
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
 
