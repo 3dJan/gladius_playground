@@ -11,14 +11,6 @@
 
 namespace
 {
-    struct EdgeRef
-    {
-        std::uint32_t a{0U};
-        std::uint32_t b{0U};
-        std::uint32_t triId{0U};
-        std::uint8_t dir{0U}; // 0: min->max, 1: max->min
-    };
-
     [[nodiscard]] double computeSignedVolume(
         std::vector<Eigen::Vector3f> const& positions,
         std::vector<std::uint32_t> const& indices)
@@ -46,6 +38,27 @@ namespace
         }
         return volume6 / 6.0;
     }
+
+    /// Pack two uint32 vertex indices into a single uint64 edge key.
+    [[nodiscard]] inline std::uint64_t makeEdgeKey(std::uint32_t a, std::uint32_t b)
+    {
+        std::uint32_t const lo = std::min(a, b);
+        std::uint32_t const hi = std::max(a, b);
+        return (static_cast<std::uint64_t>(lo) << 32U) | hi;
+    }
+
+    /// High-quality hash for uint64 edge keys (splitmix64 finalizer).
+    /// std::hash<uint64_t> is often the identity on libstdc++, which causes
+    /// massive clustering with power-of-two table sizes.
+    [[nodiscard]] inline std::size_t hashEdgeKey(std::uint64_t key)
+    {
+        key ^= key >> 30U;
+        key *= 0xbf58476d1ce4e5b9ULL;
+        key ^= key >> 27U;
+        key *= 0x94d049bb133111ebULL;
+        key ^= key >> 31U;
+        return static_cast<std::size_t>(key);
+    }
 } // anonymous namespace
 
 namespace gladius::io
@@ -62,57 +75,6 @@ namespace gladius::io
 
         std::size_t const triCount = indices.size() / 3U;
         stats.triangleCount = triCount;
-
-        std::vector<EdgeRef> edgeRefs;
-        edgeRefs.reserve(triCount * 3U);
-
-        for (std::size_t triId = 0U; triId < triCount; ++triId)
-        {
-            std::uint32_t const i0 = indices[triId * 3U + 0U];
-            std::uint32_t const i1 = indices[triId * 3U + 1U];
-            std::uint32_t const i2 = indices[triId * 3U + 2U];
-            if (i0 == i1 || i1 == i2 || i2 == i0)
-            {
-                continue;
-            }
-
-            auto pushEdge = [&edgeRefs, triId](std::uint32_t from, std::uint32_t to)
-            {
-                if (from == to)
-                {
-                    return;
-                }
-
-                std::uint32_t const lo = std::min(from, to);
-                std::uint32_t const hi = std::max(from, to);
-                std::uint8_t const dir = (from == lo) ? 0U : 1U;
-                edgeRefs.push_back(EdgeRef{lo, hi, static_cast<std::uint32_t>(triId), dir});
-            };
-
-            pushEdge(i0, i1);
-            pushEdge(i1, i2);
-            pushEdge(i2, i0);
-        }
-
-        if (edgeRefs.empty())
-        {
-            return stats;
-        }
-
-        std::sort(edgeRefs.begin(),
-                  edgeRefs.end(),
-                  [](EdgeRef const& lhs, EdgeRef const& rhs)
-                  {
-                      if (lhs.a != rhs.a)
-                      {
-                          return lhs.a < rhs.a;
-                      }
-                      if (lhs.b != rhs.b)
-                      {
-                          return lhs.b < rhs.b;
-                      }
-                      return lhs.triId < rhs.triId;
-                  });
 
         std::vector<std::array<std::uint32_t, 3>> neighbors(triCount, {
             std::numeric_limits<std::uint32_t>::max(),
@@ -135,34 +97,88 @@ namespace gladius::io
             ++d;
         };
 
-        // Build triangle adjacency with XOR constraints.
-        std::size_t idx = 0U;
-        while (idx < edgeRefs.size())
+        // Build triangle adjacency using a flat open-addressing hash table.
+        // This reduces complexity from O(N log N) (sort-based) to amortized O(N)
+        // with cache-friendly linear probing and zero per-element heap allocations.
+        constexpr std::uint64_t EMPTY_KEY = std::numeric_limits<std::uint64_t>::max();
+
+        struct EdgeSlot
         {
-            std::size_t const start = idx;
-            std::uint32_t const a = edgeRefs[idx].a;
-            std::uint32_t const b = edgeRefs[idx].b;
-            while (idx < edgeRefs.size() && edgeRefs[idx].a == a && edgeRefs[idx].b == b)
+            std::uint64_t key = EMPTY_KEY;
+            std::uint32_t triId = 0U;
+            std::uint8_t dir = 0U;
+            bool matched = false;
+        };
+
+        // Size the table to the next power of 2 >= 2 * expected unique edges.
+        // For a manifold mesh: unique edges ≈ triCount * 3 / 2.
+        std::size_t tableSize = 1U;
+        std::size_t const targetSize = std::max<std::size_t>(triCount * 3U, 64U);
+        while (tableSize < targetSize)
+        {
+            tableSize <<= 1U;
+        }
+
+        std::vector<EdgeSlot> hashTable(tableSize);
+
+        auto findSlot = [&hashTable, tableSize](std::uint64_t key) -> std::size_t
+        {
+            std::size_t idx = hashEdgeKey(key) & (tableSize - 1U);
+            while (hashTable[idx].key != EMPTY_KEY && hashTable[idx].key != key)
             {
-                ++idx;
+                idx = (idx + 1U) & (tableSize - 1U);
             }
-            std::size_t const count = idx - start;
-            if (count != 2U)
+            return idx;
+        };
+
+        for (std::size_t triId = 0U; triId < triCount; ++triId)
+        {
+            std::uint32_t const i0 = indices[triId * 3U + 0U];
+            std::uint32_t const i1 = indices[triId * 3U + 1U];
+            std::uint32_t const i2 = indices[triId * 3U + 2U];
+            if (i0 == i1 || i1 == i2 || i2 == i0)
             {
                 continue;
             }
 
-            EdgeRef const& e0 = edgeRefs[start + 0U];
-            EdgeRef const& e1 = edgeRefs[start + 1U];
-            if (e0.triId == e1.triId)
+            auto processEdge = [&](std::uint32_t from, std::uint32_t to)
             {
-                continue;
-            }
+                if (from == to)
+                {
+                    return;
+                }
 
-            std::uint8_t const requiredXor = (e0.dir == e1.dir) ? 1U : 0U;
-            addConstraint(e0.triId, e1.triId, requiredXor);
-            addConstraint(e1.triId, e0.triId, requiredXor);
-            ++stats.adjacencyConstraints;
+                std::uint64_t const key = makeEdgeKey(from, to);
+                std::uint8_t const dir = (from <= to) ? 0U : 1U;
+
+                std::size_t const idx = findSlot(key);
+                EdgeSlot& slot = hashTable[idx];
+
+                if (slot.key == EMPTY_KEY)
+                {
+                    // First time seeing this edge — insert.
+                    slot.key = key;
+                    slot.triId = static_cast<std::uint32_t>(triId);
+                    slot.dir = dir;
+                }
+                else if (!slot.matched)
+                {
+                    // Second occurrence — record adjacency constraint.
+                    if (slot.triId != static_cast<std::uint32_t>(triId))
+                    {
+                        std::uint8_t const requiredXor = (slot.dir == dir) ? 1U : 0U;
+                        addConstraint(slot.triId, static_cast<std::uint32_t>(triId), requiredXor);
+                        addConstraint(static_cast<std::uint32_t>(triId), slot.triId, requiredXor);
+                        ++stats.adjacencyConstraints;
+                    }
+                    slot.matched = true;
+                }
+                // Third+ occurrence (non-manifold edge): silently ignored.
+            };
+
+            processEdge(i0, i1);
+            processEdge(i1, i2);
+            processEdge(i2, i0);
         }
 
         // Assign flips per connected component.

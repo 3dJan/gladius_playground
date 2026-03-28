@@ -18,6 +18,8 @@
 #include <Eigen/Geometry>
 #include <fmt/format.h>
 
+#include <omp.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -381,16 +383,28 @@ namespace gladius::io
 
         Mesh convertedMesh(*computeContext);
 
-        for (std::size_t i = 0U; i + 2U < repairedIndices.size(); i += 3U)
+        // Pre-allocate and fill the Mesh buffers in parallel using OpenMP.
+        std::size_t const numFaces = repairedIndices.size() / 3U;
+        auto& faceNormalsVec = convertedMesh.getFaceNormals().getData();
+        auto& verticesVec = convertedMesh.getVertices().getData();
+        auto& vertexNormalsVec = convertedMesh.getVertexNormals().getData();
+        faceNormalsVec.resize(numFaces);
+        verticesVec.resize(numFaces * 3U);
+        vertexNormalsVec.resize(numFaces * 3U);
+
+        bool hasOutOfRangeIndex = false;
+
+        #pragma omp parallel for schedule(static)
+        for (std::size_t fi = 0U; fi < numFaces; ++fi)
         {
-            auto const idxA = static_cast<std::size_t>(repairedIndices[i + 0U]);
-            auto const idxB = static_cast<std::size_t>(repairedIndices[i + 1U]);
-            auto const idxC = static_cast<std::size_t>(repairedIndices[i + 2U]);
+            auto const idxA = static_cast<std::size_t>(repairedIndices[fi * 3U + 0U]);
+            auto const idxB = static_cast<std::size_t>(repairedIndices[fi * 3U + 1U]);
+            auto const idxC = static_cast<std::size_t>(repairedIndices[fi * 3U + 2U]);
 
             if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
             {
-                throw std::runtime_error(
-                  "Manifold dual contouring mesh references out-of-range vertex indices");
+                hasOutOfRangeIndex = true;
+                continue;
             }
 
             Eigen::Vector3f const a = positions[idxA];
@@ -400,34 +414,41 @@ namespace gladius::io
             Eigen::Vector3f normal = (b - a).cross(c - a);
             if (normal.squaredNorm() <= 1e-12F)
             {
-                if (idxA < normals.size())
-                {
-                    normal = normals[idxA];
-                }
-                else
-                {
-                    normal = Eigen::Vector3f{0.0F, 0.0F, 1.0F};
-                }
+                normal = (idxA < normals.size()) ? normals[idxA]
+                                                 : Eigen::Vector3f{0.0F, 0.0F, 1.0F};
             }
             else
             {
                 normal.normalize();
             }
 
-            Face faceData{};
-            faceData.normal = toVector3(normal);
-            faceData.vertices = {toVector3(a), toVector3(b), toVector3(c)};
+            faceNormalsVec[fi] = {normal.x(), normal.y(), normal.z(), 0.F};
+
+            verticesVec[fi * 3U + 0U] = {a.x(), a.y(), a.z(), 0.F};
+            verticesVec[fi * 3U + 1U] = {b.x(), b.y(), b.z(), 0.F};
+            verticesVec[fi * 3U + 2U] = {c.x(), c.y(), c.z(), 0.F};
+
             if (idxA < normals.size() && idxB < normals.size() && idxC < normals.size())
             {
-                faceData.vertexNormals = {
-                  toVector3(normals[idxA]), toVector3(normals[idxB]), toVector3(normals[idxC])};
+                auto const& nA = normals[idxA];
+                auto const& nB = normals[idxB];
+                auto const& nC = normals[idxC];
+                vertexNormalsVec[fi * 3U + 0U] = {nA.x(), nA.y(), nA.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 1U] = {nB.x(), nB.y(), nB.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 2U] = {nC.x(), nC.y(), nC.z(), 0.F};
             }
             else
             {
-                faceData.vertexNormals = {faceData.normal, faceData.normal, faceData.normal};
+                vertexNormalsVec[fi * 3U + 0U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 1U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 2U] = faceNormalsVec[fi];
             }
+        }
 
-            convertedMesh.addFace(faceData);
+        if (hasOutOfRangeIndex)
+        {
+            throw std::runtime_error(
+              "Manifold dual contouring mesh references out-of-range vertex indices");
         }
 
         if (convertedMesh.getNumberOfFaces() == 0U)
