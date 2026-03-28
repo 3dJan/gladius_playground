@@ -15,6 +15,32 @@ namespace gladius::compute::tests
 {
     namespace
     {
+        /// Count boundary edges (shared by 1 tri) and non-manifold edges (shared by >2 tris)
+        std::pair<std::size_t, std::size_t> countEdgeDefects(std::vector<std::uint32_t> const & idx)
+        {
+            std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> edgeTris;
+            auto const tc = idx.size() / 3U;
+            for (std::size_t t = 0U; t < tc; ++t)
+            {
+                std::uint32_t const v[3] = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
+                for (int e = 0; e < 3; ++e)
+                {
+                    auto a = v[e];
+                    auto b = v[(e + 1) % 3];
+                    if (a > b) std::swap(a, b);
+                    edgeTris[{a, b}]++;
+                }
+            }
+            std::size_t boundary = 0U;
+            std::size_t nonManifold = 0U;
+            for (auto const & [edge, count] : edgeTris)
+            {
+                if (count == 1U) ++boundary;
+                else if (count > 2U) ++nonManifold;
+            }
+            return {boundary, nonManifold};
+        }
+
         /// Generate a UV sphere mesh for testing
         struct SphereMesh
         {
@@ -543,32 +569,6 @@ namespace gladius::compute::tests
     {
         auto sphere = generateSphere(1.0F, 16, 32);
 
-        // First check input manifoldness
-        auto countEdgeDefects = [](std::vector<std::uint32_t> const & idx)
-        {
-            std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> edgeTris;
-            auto const tc = idx.size() / 3U;
-            for (std::size_t t = 0U; t < tc; ++t)
-            {
-                std::uint32_t const v[3] = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
-                for (int e = 0; e < 3; ++e)
-                {
-                    auto a = v[e];
-                    auto b = v[(e + 1) % 3];
-                    if (a > b) std::swap(a, b);
-                    edgeTris[{a, b}]++;
-                }
-            }
-            std::size_t boundary = 0U;
-            std::size_t nonManifold = 0U;
-            for (auto const & [edge, count] : edgeTris)
-            {
-                if (count == 1U) ++boundary;
-                else if (count > 2U) ++nonManifold;
-            }
-            return std::pair{boundary, nonManifold};
-        };
-
         auto [inputBoundary, inputNonManifold] = countEdgeDefects(sphere.indices);
 
         FastQemConfig config;
@@ -594,31 +594,6 @@ namespace gladius::compute::tests
     {
         auto sphere = generateClosedSphere(1.0F, 16, 32);
 
-        auto countEdgeDefects = [](std::vector<std::uint32_t> const & idx)
-        {
-            std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> edgeTris;
-            auto const tc = idx.size() / 3U;
-            for (std::size_t t = 0U; t < tc; ++t)
-            {
-                std::uint32_t const v[3] = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
-                for (int e = 0; e < 3; ++e)
-                {
-                    auto a = v[e];
-                    auto b = v[(e + 1) % 3];
-                    if (a > b) std::swap(a, b);
-                    edgeTris[{a, b}]++;
-                }
-            }
-            std::size_t boundary = 0U;
-            std::size_t nonManifold = 0U;
-            for (auto const & [edge, count] : edgeTris)
-            {
-                if (count == 1U) ++boundary;
-                else if (count > 2U) ++nonManifold;
-            }
-            return std::pair{boundary, nonManifold};
-        };
-
         // Verify input is a closed manifold
         auto [inputBoundary, inputNonManifold] = countEdgeDefects(sphere.indices);
         ASSERT_EQ(inputBoundary, 0U) << "Input sphere should have no boundary edges";
@@ -642,31 +617,6 @@ namespace gladius::compute::tests
     TEST(FastQemSimplifyTest, ClosedMesh_AggressiveReduction_RemainsWatertight)
     {
         auto sphere = generateClosedSphere(1.0F, 24, 48); // larger mesh for aggressive test
-
-        auto countEdgeDefects = [](std::vector<std::uint32_t> const & idx)
-        {
-            std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> edgeTris;
-            auto const tc = idx.size() / 3U;
-            for (std::size_t t = 0U; t < tc; ++t)
-            {
-                std::uint32_t const v[3] = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
-                for (int e = 0; e < 3; ++e)
-                {
-                    auto a = v[e];
-                    auto b = v[(e + 1) % 3];
-                    if (a > b) std::swap(a, b);
-                    edgeTris[{a, b}]++;
-                }
-            }
-            std::size_t boundary = 0U;
-            std::size_t nonManifold = 0U;
-            for (auto const & [edge, count] : edgeTris)
-            {
-                if (count == 1U) ++boundary;
-                else if (count > 2U) ++nonManifold;
-            }
-            return std::pair{boundary, nonManifold};
-        };
 
         FastQemConfig config;
         config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
