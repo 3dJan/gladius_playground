@@ -4019,4 +4019,260 @@ namespace gladius::compute::tests
         std::cout << "  Disconnected (final): "
                   << metrics.totalDisconnectedFacets.final << std::endl;
     }
+
+    /// @test Export filamentholder5_standalone with error-bounded QemFast simplification
+    /// and validate with admesh + bounding box. maxError = 0.440 (user-reported problematic value).
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithFilamentholder5_ErrorBoundedQemFast_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder5_standalone.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const modelBBox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(modelBBox.has_value()) << "Model bounding box must be available";
+
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::ErrorBounded;
+        exportOptions.simplificationMaxError = 0.440F;
+
+        // Export to STL with bounds checking
+        auto tempFile = makeUniqueTempFile("filholder5_eb_", ".stl");
+        TempFileGuard guard(tempFile);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.beginExport(tempFile, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+        ASSERT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
+
+        // Read binary STL and check vertex bounds
+        {
+            std::ifstream stl(tempFile, std::ios::binary);
+            ASSERT_TRUE(stl.is_open());
+
+            std::array<char, 80> header{};
+            stl.read(header.data(), 80);
+
+            std::uint32_t triCount = 0U;
+            stl.read(reinterpret_cast<char *>(&triCount), sizeof(triCount));
+            ASSERT_GT(triCount, 0U);
+
+            float const margin = 5.0F; // allow 5mm beyond model bbox
+            float const bboxMinX = modelBBox->min.x - margin;
+            float const bboxMinY = modelBBox->min.y - margin;
+            float const bboxMinZ = modelBBox->min.z - margin;
+            float const bboxMaxX = modelBBox->max.x + margin;
+            float const bboxMaxY = modelBBox->max.y + margin;
+            float const bboxMaxZ = modelBBox->max.z + margin;
+
+            Eigen::Vector3f meshMin(std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max());
+            Eigen::Vector3f meshMax(std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest());
+
+            std::size_t outOfBoundsVerts = 0U;
+            for (std::uint32_t i = 0; i < triCount; ++i)
+            {
+                float normal[3];
+                stl.read(reinterpret_cast<char *>(normal), sizeof(normal));
+                for (int v = 0; v < 3; ++v)
+                {
+                    float xyz[3];
+                    stl.read(reinterpret_cast<char *>(xyz), sizeof(xyz));
+                    meshMin.x() = std::min(meshMin.x(), xyz[0]);
+                    meshMin.y() = std::min(meshMin.y(), xyz[1]);
+                    meshMin.z() = std::min(meshMin.z(), xyz[2]);
+                    meshMax.x() = std::max(meshMax.x(), xyz[0]);
+                    meshMax.y() = std::max(meshMax.y(), xyz[1]);
+                    meshMax.z() = std::max(meshMax.z(), xyz[2]);
+                    if (xyz[0] < bboxMinX || xyz[0] > bboxMaxX ||
+                        xyz[1] < bboxMinY || xyz[1] > bboxMaxY ||
+                        xyz[2] < bboxMinZ || xyz[2] > bboxMaxZ)
+                    {
+                        ++outOfBoundsVerts;
+                    }
+                }
+                std::uint16_t attr;
+                stl.read(reinterpret_cast<char *>(&attr), sizeof(attr));
+            }
+
+            std::cout << "Filamentholder5 ErrorBounded QemFast (maxError=0.440):" << std::endl;
+            std::cout << "  Model bbox: (" << modelBBox->min.x << ", " << modelBBox->min.y
+                      << ", " << modelBBox->min.z << ") - (" << modelBBox->max.x << ", "
+                      << modelBBox->max.y << ", " << modelBBox->max.z << ")" << std::endl;
+            std::cout << "  Mesh bounds: (" << meshMin.x() << ", " << meshMin.y() << ", "
+                      << meshMin.z() << ") - (" << meshMax.x() << ", " << meshMax.y() << ", "
+                      << meshMax.z() << ")" << std::endl;
+            std::cout << "  Facets: " << triCount << std::endl;
+            std::cout << "  Out-of-bounds vertices: " << outOfBoundsVerts << std::endl;
+
+            EXPECT_EQ(outOfBoundsVerts, 0U)
+                << "Vertices must stay within model bounding box + margin. "
+                << "Mesh bounds: (" << meshMin.x() << ", " << meshMin.y() << ", " << meshMin.z()
+                << ") - (" << meshMax.x() << ", " << meshMax.y() << ", " << meshMax.z() << ")";
+        }
+
+        // Also run admesh validation
+        int exitCode = 0;
+        std::string const admeshOutput =
+            runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+        ASSERT_EQ(exitCode, 0) << "admesh failed\n" << admeshOutput;
+
+        auto const metrics = parseAdmeshMetrics(admeshOutput);
+
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.degenerateFacets, 0);
+        EXPECT_EQ(metrics.edgesFixed, 0);
+        EXPECT_EQ(metrics.backwardsEdges, 0);
+        EXPECT_GT(metrics.volume, 0.0);
+    }
+
+    /// @test Export filamentholder5_standalone with error-bounded QemFast simplification
+    /// AND sharp edge refinement, then validate with admesh + bounding box.
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithFilamentholder5_ErrorBoundedSharpEdge_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder5_standalone.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const modelBBox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(modelBBox.has_value()) << "Model bounding box must be available";
+
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = true;
+        exportOptions.sharpFeatureAngleThreshold = 0.5F;
+        exportOptions.subdivisionIterations = 1U;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::ErrorBounded;
+        exportOptions.simplificationMaxError = 0.440F;
+
+        // Export to STL with bounds checking
+        auto tempFile = makeUniqueTempFile("filholder5_eb_sharp_", ".stl");
+        TempFileGuard guard(tempFile);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.beginExport(tempFile, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+        ASSERT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
+
+        // Read binary STL and check vertex bounds
+        {
+            std::ifstream stl(tempFile, std::ios::binary);
+            ASSERT_TRUE(stl.is_open());
+
+            std::array<char, 80> header{};
+            stl.read(header.data(), 80);
+
+            std::uint32_t triCount = 0U;
+            stl.read(reinterpret_cast<char *>(&triCount), sizeof(triCount));
+            ASSERT_GT(triCount, 0U);
+
+            float const margin = 5.0F;
+            float const bboxMinX = modelBBox->min.x - margin;
+            float const bboxMinY = modelBBox->min.y - margin;
+            float const bboxMinZ = modelBBox->min.z - margin;
+            float const bboxMaxX = modelBBox->max.x + margin;
+            float const bboxMaxY = modelBBox->max.y + margin;
+            float const bboxMaxZ = modelBBox->max.z + margin;
+
+            Eigen::Vector3f meshMin(std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max());
+            Eigen::Vector3f meshMax(std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest());
+
+            std::size_t outOfBoundsVerts = 0U;
+            for (std::uint32_t i = 0; i < triCount; ++i)
+            {
+                float normal[3];
+                stl.read(reinterpret_cast<char *>(normal), sizeof(normal));
+                for (int v = 0; v < 3; ++v)
+                {
+                    float xyz[3];
+                    stl.read(reinterpret_cast<char *>(xyz), sizeof(xyz));
+                    meshMin.x() = std::min(meshMin.x(), xyz[0]);
+                    meshMin.y() = std::min(meshMin.y(), xyz[1]);
+                    meshMin.z() = std::min(meshMin.z(), xyz[2]);
+                    meshMax.x() = std::max(meshMax.x(), xyz[0]);
+                    meshMax.y() = std::max(meshMax.y(), xyz[1]);
+                    meshMax.z() = std::max(meshMax.z(), xyz[2]);
+                    if (xyz[0] < bboxMinX || xyz[0] > bboxMaxX ||
+                        xyz[1] < bboxMinY || xyz[1] > bboxMaxY ||
+                        xyz[2] < bboxMinZ || xyz[2] > bboxMaxZ)
+                    {
+                        ++outOfBoundsVerts;
+                    }
+                }
+                std::uint16_t attr;
+                stl.read(reinterpret_cast<char *>(&attr), sizeof(attr));
+            }
+
+            std::cout << "Filamentholder5 ErrorBounded+SharpEdge QemFast (maxError=0.440):" << std::endl;
+            std::cout << "  Model bbox: (" << modelBBox->min.x << ", " << modelBBox->min.y
+                      << ", " << modelBBox->min.z << ") - (" << modelBBox->max.x << ", "
+                      << modelBBox->max.y << ", " << modelBBox->max.z << ")" << std::endl;
+            std::cout << "  Mesh bounds: (" << meshMin.x() << ", " << meshMin.y() << ", "
+                      << meshMin.z() << ") - (" << meshMax.x() << ", " << meshMax.y() << ", "
+                      << meshMax.z() << ")" << std::endl;
+            std::cout << "  Facets: " << triCount << std::endl;
+            std::cout << "  Out-of-bounds vertices: " << outOfBoundsVerts << std::endl;
+
+            EXPECT_EQ(outOfBoundsVerts, 0U)
+                << "Vertices must stay within model bounding box + margin. "
+                << "Mesh bounds: (" << meshMin.x() << ", " << meshMin.y() << ", " << meshMin.z()
+                << ") - (" << meshMax.x() << ", " << meshMax.y() << ", " << meshMax.z() << ")";
+        }
+
+        // Also run admesh validation
+        int exitCode = 0;
+        std::string const admeshOutput =
+            runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+        ASSERT_EQ(exitCode, 0) << "admesh failed\n" << admeshOutput;
+
+        auto const metrics = parseAdmeshMetrics(admeshOutput);
+
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.degenerateFacets, 0);
+        EXPECT_EQ(metrics.edgesFixed, 0);
+        EXPECT_EQ(metrics.backwardsEdges, 0);
+        EXPECT_GT(metrics.volume, 0.0);
+    }
 }

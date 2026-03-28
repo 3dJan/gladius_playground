@@ -1269,17 +1269,27 @@ namespace gladius::compute
         {
             SymMat const combined = qi + qj;
 
+            Eigen::Vector3f const mid = (pi + pj) * 0.5F;
+            float const edgeLen = (pi - pj).norm();
+
             auto opt = combined.optimalVertex();
             if (opt.has_value())
             {
-                outPos = *opt;
-                return static_cast<float>(combined.evaluate(outPos));
+                // Sanity check: if the optimal position is farther from the edge
+                // midpoint than the edge length, the quadric is ill-conditioned
+                // and the result is unreliable.  Fall through to the endpoint/
+                // midpoint fallback instead.
+                float const dist = (*opt - mid).norm();
+                if (dist <= edgeLen)
+                {
+                    outPos = *opt;
+                    return static_cast<float>(combined.evaluate(outPos));
+                }
             }
 
             // Fallback: best of both endpoints and midpoint
             float const errI = static_cast<float>(combined.evaluate(pi));
             float const errJ = static_cast<float>(combined.evaluate(pj));
-            Eigen::Vector3f const mid = (pi + pj) * 0.5F;
             float const errM = static_cast<float>(combined.evaluate(mid));
 
             if (errI <= errJ && errI <= errM)
