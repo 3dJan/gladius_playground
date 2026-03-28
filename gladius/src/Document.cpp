@@ -388,12 +388,12 @@ namespace gladius
         loadNonBlocking(templateFiletName);
     }
 
-    void Document::updateParameter()
+    bool Document::updateParameter()
     {
         ProfileFunction;
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
 
         updatePayload();
@@ -435,6 +435,7 @@ namespace gladius
         }
 
         m_parameterDirty = !updateSucceeded;
+        return updateSucceeded;
     }
 
     void Document::updateParameterRegistration()

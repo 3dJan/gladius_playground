@@ -69,6 +69,10 @@ namespace gladius::ui
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
         void invalidateViewDueToParameterChange();
+
+        /// Suppress HQ front-buffer display until the next full invalidation.
+        /// Lightweight alternative to invalidateView() that does not bump the epoch.
+        void suppressHQDisplay();
         void renderScene(RenderWindowState & state);
 
         void hide();
@@ -194,6 +198,7 @@ namespace gladius::ui
 
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
+        std::atomic<bool> m_suppressHQDisplay{false};
         std::atomic<bool> m_preComputedSdfDirty{true};
         std::atomic<bool> m_forceLowResRenderOnNextFrame{false};
 
@@ -303,7 +308,7 @@ namespace gladius::ui
         std::atomic<bool> m_asyncSdfJobInFlight{false};
 
         /// Debounce delay before recomputing a stale bounding box
-        static constexpr auto kBboxDebounceDelay = std::chrono::milliseconds(500);
+        static constexpr auto kBboxDebounceDelay = std::chrono::milliseconds(1000);
         std::chrono::steady_clock::time_point m_lastParameterChangeTime{};
         std::atomic<uint64_t> m_asyncSdfInFlightEpoch{0};
         std::atomic<bool> m_lowResFeedbackPending{false};

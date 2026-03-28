@@ -93,6 +93,7 @@ namespace gladius::ui
 
         m_mainView.clearViewCallback();
         m_mainView.addViewCallBack([&]() { render(); });
+        nodeEditor();
 
         m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
 
@@ -138,7 +139,6 @@ namespace gladius::ui
         m_meshExporterDialog.setExportState(&m_exportState);
         m_modelEditor.setExportState(&m_exportState);
 
-        nodeEditor();
         // Defer the initial template load while the welcome screen is visible.
         // Starting it now would set isLoadingInProgress(), causing a click on a
         // thumbnail to be silently dropped by open().  The template is loaded
@@ -1114,19 +1114,26 @@ namespace gladius::ui
               bool const modelWasModified = m_modelEditor.modelWasModified();
               bool const compileRequested = m_modelEditor.isCompileRequested();
 
-              if (modelWasModified || parameterModifiedByModelEditor)
+              // Structural changes require updating the graph topology and parameter mapping.
+              // Parameter-only changes skip this — updatePayload() handles registration
+              // on the fast path, and refreshWorker() handles it on the compilation path.
+              if (modelWasModified)
               {
                   try
                   {
                       m_doc->getAssembly()->updateInputsAndOutputs();
                       m_doc->updateParameterRegistration();
-                      markFileAsChanged();
                   }
                   catch (const std::exception & e)
                   {
                       m_logger->addEvent({fmt::format("Error updating model: {}", e.what()),
                                           events::Severity::Error});
                   }
+              }
+
+              if (modelWasModified || parameterModifiedByModelEditor)
+              {
+                  markFileAsChanged();
               }
 
               // Refresh model when compile is explicitly requested (structural changes)
@@ -1146,8 +1153,6 @@ namespace gladius::ui
               // For parameter-only changes, m_parameterDirty is already set above.
               // updateModel() will handle it using the fast updateParameter() path
               // and call invalidateViewDueToParameterChange() which bumps the epoch.
-              // Do NOT call invalidateView() here — it would bump the epoch a second
-              // time, causing in-flight SDF results to be discarded as outdated.
 
               // Only clear the modified flags when no compile request is
               // pending.  If refreshModel() was skipped because a
@@ -2483,6 +2488,16 @@ namespace gladius::ui
             return;
         }
 
+        // Suppress HQ front-buffer display when a parameter change is pending.
+        // This runs before renderWindow() (in displayUI()) so the stale HQ image
+        // (with shadows) is not shown while the parameter push is in progress.
+        // Unlike invalidateView(), this does not bump the epoch or disrupt
+        // in-flight SDF/preview work.
+        if (m_parameterDirty)
+        {
+            m_renderWindow.suppressHQDisplay();
+        }
+
         auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
         auto const rateLimit = std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f));
         
@@ -2529,13 +2544,21 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
-            // T047: Only update parameters when throttle allows (debounce interval expired)
-            if (m_parameterThrottle.shouldRecompile())
+            // T047: Only update parameters when throttle allows (debounce interval expired).
+            // When the throttle has no pending recompile it means it already fired but the
+            // previous push failed (compute lock held by background worker).  In that case
+            // bypass the throttle — the debounce already elapsed, we just need to retry.
+            if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
             {
-                m_doc->updateParameter();
-                m_renderWindow.invalidateViewDueToParameterChange();
-                m_parameterDirty = false;
-                m_contoursDirty = true;
+                // updateParameter() returns false when the compute lock is held by
+                // the background compilation worker.  In that case we keep
+                // m_parameterDirty=true so the push is retried once the lock is released.
+                if (m_doc->updateParameter())
+                {
+                    m_renderWindow.invalidateViewDueToParameterChange();
+                    m_parameterDirty = false;
+                    m_contoursDirty = true;
+                }
             }
         }
         updateContours();

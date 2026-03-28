@@ -293,7 +293,8 @@ namespace gladius::ui
             bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
             bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
                                         !m_renderWindowState.isRendering &&
-                                        !m_renderWindowState.isMoving;
+                                        !m_renderWindowState.isMoving &&
+                                        !m_suppressHQDisplay.load(std::memory_order_acquire);
 
             if (useFrontBuffer)
             {
@@ -610,6 +611,7 @@ namespace gladius::ui
         m_renderWindowState.isRendering = false;
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
+        m_suppressHQDisplay.store(false, std::memory_order_release);
         
         // Skip epoch increment if preserving content during resize
         // This keeps the old frame visible while scheduling new preview
@@ -651,6 +653,11 @@ namespace gladius::ui
         {
             m_asyncBboxUpdatePending.store(true, std::memory_order_release);
         }
+    }
+
+    void RenderWindow::suppressHQDisplay()
+    {
+        m_suppressHQDisplay.store(true, std::memory_order_release);
     }
 
     void RenderWindow::invalidateViewDueToParameterChange()
@@ -1434,7 +1441,17 @@ namespace gladius::ui
             bool const bboxPending = m_asyncBboxUpdatePending.load(std::memory_order_acquire);
             bool const bboxJobActive = m_asyncBboxJobInFlight.load(std::memory_order_acquire);
 
-            if (sdfDirty && !sdfJobActive)
+            // Debounce SDF scheduling when bbox is stale (parameter drag in progress).
+            // During rapid slider changes the precomputed SDF is invalidated on every
+            // tick.  Computing a new SDF only to have it immediately discarded wastes
+            // GPU time.  Low-res preview already works via direct function evaluation,
+            // so we can safely wait until the drag stops (same debounce as bbox).
+            bool const bboxStale = m_core->isBoundingBoxStale();
+            bool const sdfDebounceElapsed =
+              !bboxStale ||
+              (std::chrono::steady_clock::now() - m_lastParameterChangeTime >= kBboxDebounceDelay);
+
+            if (sdfDirty && !sdfJobActive && sdfDebounceElapsed)
             {
                 async_rendering::RenderJob sdfJob{};
                 sdfJob.type = async_rendering::RenderJobType::SDFPrecomputation;
@@ -1703,7 +1720,7 @@ namespace gladius::ui
         {
             auto const timeSinceLastLowResRender =
               std::chrono::system_clock::now() - m_lastLowResRenderTime;
-            if (timeSinceLastLowResRender < std::chrono::seconds(1))
+            if (timeSinceLastLowResRender < std::chrono::milliseconds(kBboxDebounceDelay.count() + 1000))
             {
                 return;
             }
@@ -2698,7 +2715,13 @@ namespace gladius::ui
         {
             auto computeToken = m_core->waitForComputeToken();
             m_core->setSdfValid(true);
-            m_core->updateBBox();
+            // Skip bbox recomputation when bbox is stale (parameter drag in progress).
+            // The debounced recomputeStaleBoundingBox() in renderAsync() handles it
+            // once the drag stops, avoiding expensive bbox work on every parameter tick.
+            if (!m_core->isBoundingBoxStale())
+            {
+                m_core->updateBBox();
+            }
         };
 
         // Check cancellation before starting - just return without invalidating

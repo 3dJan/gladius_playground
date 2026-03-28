@@ -151,7 +151,8 @@ namespace gladius
         void newEmptyModel();
         void newFromTemplate();
 
-        void updateParameter();
+        /// @return true if the parameter values were successfully pushed to the GPU
+        bool updateParameter();
         void updateParameterRegistration();
         void updatePayload();
         void refreshModelBlocking();
