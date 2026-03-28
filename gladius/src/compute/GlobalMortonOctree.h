@@ -105,6 +105,14 @@ namespace gladius::compute
         std::uint8_t edgeIndex{0U}; ///< Which edge (0-11)
     };
 
+    /// Intermediate QEF solution stored per-node for deferred vertex registration.
+    struct ComputedVertex
+    {
+        Eigen::Vector3f position;
+        Eigen::Vector3f normal;
+        std::uint8_t component{0U};
+    };
+
     /**
      * @brief Octree node with global Morton indexing.
      * 
@@ -141,6 +149,9 @@ namespace gladius::compute
 
         /// Hermite samples for QEF solving
         std::vector<HermiteSample> hermiteSamples;
+
+        /// QEF-solved vertex data awaiting registration (used during parallel vertex generation).
+        std::vector<ComputedVertex> computedVertices;
 
         /**
          * @brief Compute bounding box from Morton code and depth.

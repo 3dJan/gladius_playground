@@ -22,6 +22,8 @@
 #include <set>
 #include <unordered_set>
 
+#include <omp.h>
+
 // NOTE: This GlobalMortonOctree implementation is EXPERIMENTAL and DISABLED by default.
 // It uses path-based Morton codes to build a hierarchical octree structure.
 // Currently disabled because edge-to-cells mapping fails when neighbor cells don't
@@ -1271,33 +1273,36 @@ namespace gladius::compute
             std::cout << "  Generating vertices for " << intersectingLeaves << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
         }
 
-        std::size_t processedIntersecting = 0U;
-        std::size_t nextProgress = 0U;
-        if (debugProgress)
+        // Phase 1 (parallel): Gather Hermite samples and solve QEF for each
+        // intersecting leaf. Each node's work is fully independent — the SDF
+        // buffer is read-only and all writes go to per-node fields
+        // (hermiteSamples, computedVertices, edgeComponents).
+        auto const nodeCount = static_cast<std::ptrdiff_t>(m_nodes.size());
+        #pragma omp parallel for schedule(dynamic, 64)
+        for (std::ptrdiff_t i = 0; i < nodeCount; ++i)
         {
-            // Print progress roughly 20 times across the run (minimum interval guard).
-            nextProgress = std::max<std::size_t>(intersectingLeaves / 20U, 25000U);
-        }
-
-        for (auto& node : m_nodes)
-        {
+            auto& node = m_nodes[static_cast<std::size_t>(i)];
             if (!node.isLeaf || !node.isIntersecting)
             {
                 continue;
             }
 
-            ++processedIntersecting;
-            if (debugProgress && (processedIntersecting % nextProgress == 0U))
-            {
-                float const pct = intersectingLeaves > 0U ? (100.0F * static_cast<float>(processedIntersecting) / static_cast<float>(intersectingLeaves)) : 100.0F;
-                std::cout << "    vertexGen progress: " << processedIntersecting << "/" << intersectingLeaves << " (" << pct << "%)" << std::endl;
-            }
-
-            // Gather Hermite samples for this cell
             gatherHermiteSamples(node);
-
-            // Solve QEF to get vertex position
             solveQefForNode(node);
+        }
+
+        // Phase 2 (sequential): Register computed vertices into the global
+        // registry to get deterministic vertex indices.
+        for (auto& node : m_nodes)
+        {
+            for (auto const& cv : node.computedVertices)
+            {
+                std::uint32_t const vertexIndex = m_vertexRegistry.registerCellVertex(
+                    node.mortonCode, node.depth, cv.position, cv.normal, cv.component);
+                node.vertexIndices.push_back(vertexIndex);
+            }
+            node.computedVertices.clear();
+            node.computedVertices.shrink_to_fit();
         }
 
         m_stats.vertexCount = m_vertexRegistry.getVertexCount();
@@ -1774,8 +1779,7 @@ namespace gladius::compute
         for (std::uint8_t comp = 0U; comp < componentCount; ++comp)
         {
             auto const [vertex, normal] = solveComponent(comp);
-            std::uint32_t const vertexIndex = m_vertexRegistry.registerCellVertex(node.mortonCode, node.depth, vertex, normal, comp);
-            node.vertexIndices.push_back(vertexIndex);
+            node.computedVertices.push_back({vertex, normal, comp});
         }
     }
 

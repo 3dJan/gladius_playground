@@ -79,6 +79,7 @@ set(DEPENDENCIES_CORE
     NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
+    OpenMP::OpenMP_CXX
 )
 
 # MCP-only dependencies
