@@ -570,7 +570,8 @@ shadingMetal(float3 pos, float3 col, float3 normalOfSurface, float3 rayDirection
     float dom = smoothstep(-0.2f, 0.2f, ref.y);
     float const fresnel = pow(clamp(1.f + dot(normalOfSurface, rayDirection), 0.f, 1.f), 2.f);
 
-    if (!(renderingSettings.approximation & AM_ONLY_PRECOMPSDF))
+    if (!(renderingSettings.approximation & AM_ONLY_PRECOMPSDF) &&
+        !(renderingSettings.flags & RF_DISABLE_SHADOWS))
     {
         dif *= calcSoftshadow(pos, lightDirection, 0.002f, 25.f, PASS_PAYLOAD_ARGS);
         dom *= calcSoftshadow(pos, ref, 0.002f, 25.f, PASS_PAYLOAD_ARGS);
