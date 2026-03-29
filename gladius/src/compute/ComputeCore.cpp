@@ -1685,16 +1685,16 @@ namespace gladius
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
-        // Disable shadows for low-res preview — consistent with precomp-SDF path
-        // and avoids expensive shadow rays during interactive parameter editing
-        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS;
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        // and avoids expensive shadow rays and AO samples during interactive editing
+        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,
                                             m_sliceHeight_mm,
                                             0,
                                             m_lowResPreviewImage->getHeight());
-        m_resources->getRenderingSettings().flags &= ~RF_DISABLE_SHADOWS;
+        m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         getBestRenderProgram()->resample(
           *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
@@ -1727,8 +1727,8 @@ namespace gladius
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
-        // Disable shadows for low-res preview — consistent with precomp-SDF path
-        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS;
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
                                                                          *m_primitives,
@@ -1741,7 +1741,7 @@ namespace gladius
         // This is important for proper event completion signaling
         queue.flush();
 
-        m_resources->getRenderingSettings().flags &= ~RF_DISABLE_SHADOWS;
+        m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         return renderEvent;
@@ -1775,8 +1775,8 @@ namespace gladius
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
-        // Disable shadows for low-res preview — consistent with precomp-SDF path
-        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS;
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneWithDistanceOutputAsync(
             queue,
@@ -1789,7 +1789,7 @@ namespace gladius
 
         queue.flush();
 
-        m_resources->getRenderingSettings().flags &= ~RF_DISABLE_SHADOWS;
+        m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         return renderEvent;

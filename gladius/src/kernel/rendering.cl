@@ -560,7 +560,9 @@ shadingMetal(float3 pos, float3 col, float3 normalOfSurface, float3 rayDirection
 
     float3 ref = reflect(rayDirection, normalOfSurface);
 
-    float occlusion = calcAmbientOcclusion(pos, normalOfSurface, PASS_PAYLOAD_ARGS);
+    float occlusion = (renderingSettings.flags & RF_DISABLE_AO)
+        ? (0.5f + 0.5f * normalOfSurface.y)
+        : calcAmbientOcclusion(pos, normalOfSurface, PASS_PAYLOAD_ARGS);
     float3 lightDirection = normalize((float3)(-0.4f, -0.7f, 1.f));
     float3 hal = normalize(lightDirection - rayDirection);
     float const ambient = clamp(0.7f - 0.3f * normalOfSurface.y, 0.f, 1.f);
