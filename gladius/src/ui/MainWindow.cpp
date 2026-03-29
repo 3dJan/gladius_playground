@@ -2550,15 +2550,14 @@ namespace gladius::ui
             // bypass the throttle — the debounce already elapsed, we just need to retry.
             if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
             {
-                // updateParameter() returns false when the compute lock is held by
-                // the background compilation worker.  In that case we keep
-                // m_parameterDirty=true so the push is retried once the lock is released.
-                if (m_doc->updateParameter())
-                {
-                    m_renderWindow.invalidateViewDueToParameterChange();
-                    m_parameterDirty = false;
-                    m_contoursDirty = true;
-                }
+                // Streaming preview mode: the worker coroutine becomes the sole GPU
+                // writer, reading the latest Assembly values and pushing them to the
+                // parameter buffer in a tight loop.  This eliminates the UI-frame
+                // round-trip latency that limits one-shot preview scheduling.
+                m_renderWindow.invalidateViewDueToParameterChange();
+                m_renderWindow.startStreamingPreview();
+                m_parameterDirty = false;
+                m_contoursDirty = true;
             }
         }
         updateContours();

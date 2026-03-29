@@ -73,6 +73,15 @@ namespace gladius::ui
         /// Suppress HQ front-buffer display until the next full invalidation.
         /// Lightweight alternative to invalidateView() that does not bump the epoch.
         void suppressHQDisplay();
+
+        /// Start/stop the streaming preview loop for interactive parameter editing.
+        /// While active, a worker coroutine pushes the latest parameter values to the
+        /// GPU and renders low-res previews in a tight loop, bypassing the per-frame
+        /// scheduling round-trip through the UI thread.
+        void startStreamingPreview();
+        void stopStreamingPreview();
+        [[nodiscard]] bool isStreamingPreviewActive() const;
+
         void renderScene(RenderWindowState & state);
 
         void hide();
@@ -187,6 +196,12 @@ namespace gladius::ui
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void processAsyncPreviewResults();
+
+        // Streaming preview loop (tight render loop during parameter drag)
+        bool scheduleStreamingPreviewJob();
+        coro::task<async_rendering::FrameResultMeta> executeStreamingPreviewJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
         GLView * m_view{};
 
@@ -326,6 +341,10 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncPreviewFrameId{0};     ///< Latest completed preview frame ID
         uint64_t m_asyncPreviewFrameCounter{0};             ///< Counter for generating unique frame IDs
         std::chrono::steady_clock::time_point m_asyncPreviewEnqueueTime{}; ///< For latency tracking
+
+        // Streaming preview state (tight render loop during parameter drag)
+        std::atomic<bool> m_streamingPreviewActive{false}; ///< True while streaming loop should run
+        std::atomic<bool> m_streamingJobInFlight{false};   ///< True while streaming coroutine is executing
 
         // Framebuffer preservation during resize (prevents flicker)
         bool m_preserveContentDuringResize{false}; ///< Keep displaying old texture during resize

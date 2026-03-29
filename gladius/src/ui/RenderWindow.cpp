@@ -182,6 +182,10 @@ namespace gladius::ui
                   {
                       co_return co_await executeAsyncPreviewJob(job, cancelCheck);
                   }
+                  else if (job.type == async_rendering::RenderJobType::StreamingPreview)
+                  {
+                      co_return co_await executeStreamingPreviewJob(job, cancelCheck);
+                  }
 
                   co_return co_await executeAsyncRenderJob(job, cancelCheck);
               });
@@ -662,17 +666,25 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDueToParameterChange()
     {
-        // Lightweight invalidation for parameter changes (e.g. slider drags).
-        // Preserves the cached bounding box and marks it stale instead of clearing it.
-        // This avoids a full GPU bbox recomputation (~325ms) on every parameter tick.
+        // Streaming invalidation for parameter changes (e.g. slider drags).
+        // Does NOT call invalidateView() — avoids epoch bumps that would:
+        //   1. Prevent async preview results from being displayed
+        //   2. Cause unnecessary churn in the render pipeline
+        // The epoch is bumped later when the bbox debounce fires after drag stops,
+        // starting the fresh SDF → HQ pipeline.
         m_core->setSdfValid(false);
-        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
 
-        invalidateView();
+        m_dirty = true;
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+        m_lastLowResRenderTime = std::chrono::system_clock::now();
+
+        // Cancel any in-progress progressive render (stale parameters)
+        m_renderWindowState.currentLine = 0;
+        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
+        m_renderWindowState.isRendering = false;
 
         m_preComputedSdfDirty.store(true, std::memory_order_release);
         m_parameterDirty.store(true, std::memory_order_release);
-        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_lowResFeedbackPending.store(true, std::memory_order_release);
         m_modelModifiedSinceLastCenter = true;
 
@@ -1486,9 +1498,19 @@ namespace gladius::ui
                 auto const now = std::chrono::steady_clock::now();
                 if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
                 {
+                    // Stop the streaming preview loop — drag has ended.
+                    // The streaming coroutine's last iteration already pushed the
+                    // final parameter values to the GPU buffer.
+                    stopStreamingPreview();
+
                     m_core->recomputeStaleBoundingBox();
                     m_core->setSdfValid(false);
                     m_preComputedSdfDirty = true;
+
+                    // Parameter drag has stopped — bump epoch to invalidate the stale
+                    // HQ front buffer from before the drag and start fresh.
+                    notifyAsyncEpochIncrement();
+                    m_suppressHQDisplay.store(false, std::memory_order_release);
                 }
             }
 
@@ -1647,7 +1669,8 @@ namespace gladius::ui
             bool const hadActiveProgressive =
               state.isRendering || m_asyncJobInFlight.load(std::memory_order_acquire);
 
-            if (lowResPending && hadActiveProgressive)
+            if (lowResPending && hadActiveProgressive &&
+                !m_streamingPreviewActive.load(std::memory_order_acquire))
             {
                 notifyAsyncEpochIncrement();
                 state.currentLine = 0;
@@ -1656,14 +1679,27 @@ namespace gladius::ui
             }
 
             // Decide whether to use async or sync preview:
-            // - Async preview works well when SDF is valid (uses fast precomputed SDF path)
-            // - When SDF is invalid, use sync preview to avoid GPU contention with SDF job
+            // - Async preview keeps the UI thread non-blocking for smooth parameter drag
+            // - Sync preview is the fallback when async is unavailable
+            // During parameter drag, SDF jobs are debounced so there's no GPU contention.
             bool const sdfValid = m_core->isSdfValid();
-            bool const useAsyncPreview = sdfValid && !previewJobInFlight;
+            bool const sdfJobRunning = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
+            bool const streamingActive = m_streamingPreviewActive.load(std::memory_order_acquire);
+            bool const useAsyncPreview = !previewJobInFlight && (sdfValid || !sdfJobRunning);
 
-            if (useAsyncPreview)
+            if (streamingActive)
             {
-                // Use async preview rendering (non-blocking, fast with precomputed SDF)
+                // Streaming loop handles preview rendering continuously.
+                // If the job just exited (timeout/error), reschedule it here
+                // rather than falling through to one-shot scheduling.
+                if (!previewJobInFlight)
+                {
+                    scheduleStreamingPreviewJob();
+                }
+            }
+            else if (useAsyncPreview)
+            {
+                // Use async preview rendering (non-blocking)
                 if (scheduleAsyncPreviewJob())
                 {
                     m_lastLowResRenderTime = std::chrono::system_clock::now();
@@ -1679,10 +1715,9 @@ namespace gladius::ui
                       std::memory_order_release);
                 }
             }
-            else
+            else if (!previewJobInFlight)
             {
-                // Use synchronous preview when SDF is invalid or job in flight
-                // This avoids GPU contention with the async SDF recomputation job
+                // Sync fallback when SDF job is running (GPU contention)
                 auto token = m_core->requestComputeToken();
                 if (token.has_value())
                 {
@@ -3114,6 +3149,228 @@ namespace gladius::ui
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
+    }
+
+    void RenderWindow::startStreamingPreview()
+    {
+        m_streamingPreviewActive.store(true, std::memory_order_release);
+
+        // (Re-)schedule the streaming job if none is currently running.
+        // This handles both first start and restart after the loop exited
+        // (e.g. GPU timeout or transient error).
+        if (!m_streamingJobInFlight.load(std::memory_order_acquire) &&
+            !m_asyncPreviewJobInFlight.load(std::memory_order_acquire))
+        {
+            scheduleStreamingPreviewJob();
+        }
+    }
+
+    void RenderWindow::stopStreamingPreview()
+    {
+        m_streamingPreviewActive.store(false, std::memory_order_release);
+    }
+
+    bool RenderWindow::isStreamingPreviewActive() const
+    {
+        return m_streamingPreviewActive.load(std::memory_order_acquire);
+    }
+
+    bool RenderWindow::scheduleStreamingPreviewJob()
+    {
+        if (!m_asyncController || !m_asyncController->isRunning())
+        {
+            return false;
+        }
+
+        auto lowResImage = m_core->getLowResPreviewImage();
+        if (!lowResImage)
+        {
+            return false;
+        }
+
+        size_t const width = static_cast<size_t>(lowResImage->getWidth());
+        size_t const height = static_cast<size_t>(lowResImage->getHeight());
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+
+        m_asyncController->initializeAsyncResources(*m_core->getComputeContext(), width, height);
+
+        async_rendering::RenderJob job{};
+        job.type = async_rendering::RenderJobType::StreamingPreview;
+        job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+        if (job.epoch == 0)
+        {
+            job.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+            m_asyncCurrentEpoch.store(job.epoch, std::memory_order_release);
+        }
+        m_asyncController->setLatestEpoch(job.epoch);
+
+        auto const [previewWidth, previewHeight] = m_core->getLowResPreviewResolution();
+        job.width = static_cast<uint32_t>(previewWidth);
+        job.height = static_cast<uint32_t>(previewHeight);
+        job.frameHint = ++m_asyncPreviewFrameCounter;
+        job.startLine = 0;
+        job.stepSize = static_cast<size_t>(previewHeight);
+        job.precomputeSdf = false;
+        job.enableHighQuality = false;
+
+        m_streamingJobInFlight.store(true, std::memory_order_release);
+        m_asyncPreviewJobInFlight.store(true, std::memory_order_release);
+
+        m_asyncController->enqueueJob(job);
+        return true;
+    }
+
+    auto RenderWindow::executeStreamingPreviewJob(
+      async_rendering::RenderJob const & job,
+      async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
+      -> coro::task<async_rendering::FrameResultMeta>
+    {
+#ifdef TRACY_ENABLE
+        tracy::SetThreadName("StreamingPreviewWorker");
+#endif
+        using namespace async_rendering;
+
+        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto const & commandQueue =
+          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+
+        FrameResultMeta result{};
+        result.epoch = job.epoch;
+        result.jobType = job.type;
+        result.width = job.width;
+        result.height = job.height;
+
+        auto const shutdownRequested = [&]() -> bool {
+            return cancelCheck && cancelCheck() &&
+                   m_asyncController && !m_asyncController->isRunning();
+        };
+
+        auto lowResImage = m_core->getLowResPreviewImage();
+        if (!lowResImage)
+        {
+            result.cancelled = true;
+            m_streamingJobInFlight.store(false, std::memory_order_release);
+            m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+            co_return result;
+        }
+
+        // Get assembly for parameter pushing
+        auto assembly = m_document ? m_document->getAssembly() : nullptr;
+
+        uint64_t frameCounter = job.frameHint;
+        int consecutiveFailures = 0;
+        constexpr int kMaxConsecutiveFailures = 3;
+
+        // Streaming loop: push params → render → publish → repeat
+        while (m_streamingPreviewActive.load(std::memory_order_acquire) && !shutdownRequested())
+        {
+            auto const iterStart = std::chrono::steady_clock::now();
+
+            // Push latest Assembly parameter values to GPU
+            if (assembly)
+            {
+                (void) m_core->tryToupdateParameter(*assembly);
+            }
+
+            // Render low-res preview
+            cl::Event renderEvent =
+              m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
+
+            if (!renderEvent())
+            {
+                // Precondition failed — program not valid or similar.
+                // Retry a few times in case compilation is finishing.
+                ++consecutiveFailures;
+                if (consecutiveFailures >= kMaxConsecutiveFailures)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
+            // Poll GPU completion.  Use a generous timeout — the first frame
+            // after SDF invalidation uses AM_FULL_MODEL which can be slow.
+            auto constexpr timeout = std::chrono::milliseconds(5000);
+            auto const pollStart = std::chrono::steady_clock::now();
+            bool eventCompleted = false;
+
+            while (!eventCompleted)
+            {
+                try
+                {
+                    cl_int status = CL_QUEUED;
+                    renderEvent.getInfo(CL_EVENT_COMMAND_EXECUTION_STATUS, &status);
+
+                    if (status == CL_COMPLETE)
+                    {
+                        eventCompleted = true;
+                    }
+                    else if (status < 0)
+                    {
+                        break; // Error
+                    }
+                    else
+                    {
+                        if (std::chrono::steady_clock::now() - pollStart > timeout)
+                        {
+                            break; // Timeout
+                        }
+                        std::this_thread::sleep_for(std::chrono::microseconds(500));
+                    }
+                }
+                catch (std::exception const &)
+                {
+                    eventCompleted = false;
+                    break;
+                }
+            }
+
+            if (!eventCompleted)
+            {
+                // GPU work timed out or errored — flush the queue so we
+                // start clean on the next iteration.
+                try { commandQueue.finish(); } catch (...) {}
+                ++consecutiveFailures;
+                if (consecutiveFailures >= kMaxConsecutiveFailures)
+                {
+                    break;
+                }
+                continue;
+            }
+
+            consecutiveFailures = 0;
+            commandQueue.finish();
+            m_core->setDistanceInitBufferValid();
+
+            // Publish frame for UI thread consumption
+            ++frameCounter;
+            PreviewResultMeta previewMeta{};
+            previewMeta.frameId = frameCounter;
+            previewMeta.epoch = job.epoch;
+            previewMeta.cancelled = false;
+            previewMeta.sdfWasValid = m_core->isSdfValid();
+
+            auto const iterEnd = std::chrono::steady_clock::now();
+            previewMeta.latencyNs = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(iterEnd - iterStart).count());
+
+            m_asyncController->setLatestPreviewResult(previewMeta);
+        }
+
+        // Update the frame counter so future one-shot previews don't collide
+        m_asyncPreviewFrameCounter = frameCounter;
+
+        result.frameId = frameCounter;
+        result.completedFrame = true;
+
+        m_streamingJobInFlight.store(false, std::memory_order_release);
+        m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+
+        co_return result;
     }
 
 }
