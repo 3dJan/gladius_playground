@@ -627,6 +627,11 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
     {
+        // Stop streaming preview before any model/assembly mutation.
+        // The streaming coroutine iterates the Assembly without a dedicated
+        // lock — concurrent modification from the UI thread causes a segfault.
+        stopStreamingPreview();
+
         // CRITICAL: Mark SDF as invalid immediately so renderer uses direct function evaluation
         // This prevents rendering with stale precomputed SDF data
         m_core->setSdfValid(false);
@@ -1156,6 +1161,16 @@ namespace gladius::ui
         ZoneScopedN("render");
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
+        // Always consume async preview results, even during compilation.
+        // The streaming loop may have published a frame just before compilation
+        // started.  Consuming it here keeps the m_streamingFrameConsumed
+        // handshake from stalling (which would make the coroutine spin on the
+        // 200 ms timeout) and shows the latest pre-compilation preview.
+        if (m_asyncController)
+        {
+            processAsyncPreviewResults();
+        }
+
         if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
         {
             m_view->startAnimationMode();
@@ -1533,10 +1548,13 @@ namespace gladius::ui
         }
 
         bool const jobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
+        bool const pendingPreviewWork =
+          m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire) ||
+          m_lowResFeedbackPending.load(std::memory_order_acquire);
 
         m_view->stopAnimationMode();
 
-        if (!m_dirty && !state.isRendering && !jobInFlight)
+        if (!m_dirty && !state.isRendering && !jobInFlight && !pendingPreviewWork)
         {
             return;
         }
@@ -1856,6 +1874,15 @@ namespace gladius::ui
             // Skip LowResPreview results here - they are handled by processAsyncPreviewResults()
             // which consumes them via tryConsumePreviewResult() and does the resample + GL sync.
             if (result.jobType == async_rendering::RenderJobType::LowResPreview)
+            {
+                continue;
+            }
+
+            // Skip StreamingPreview results - they are handled via the separate preview result
+            // path (setLatestPreviewResult / tryConsumePreviewResult). Without this guard the
+            // result falls through to the HQ handler which incorrectly clears m_dirty and stops
+            // animation mode, freezing the preview.
+            if (result.jobType == async_rendering::RenderJobType::StreamingPreview)
             {
                 continue;
             }
@@ -3326,7 +3353,8 @@ namespace gladius::ui
         auto const shouldStop = [&]() -> bool {
             return !m_streamingPreviewActive.load(std::memory_order_acquire) ||
                    (cancelCheck && cancelCheck()) ||
-                   (m_asyncController && !m_asyncController->isRunning());
+                   (m_asyncController && !m_asyncController->isRunning()) ||
+                   !m_core->isRendererReady();
         };
 
         auto lowResImage = m_core->getLowResPreviewImage();
@@ -3382,8 +3410,11 @@ namespace gladius::ui
 
             auto const iterStart = std::chrono::steady_clock::now();
 
-            // Push latest Assembly parameter values to GPU
-            if (assembly)
+            // Push latest Assembly parameter values to GPU.
+            // Skip when the renderer is not ready (compilation in progress) —
+            // refreshWorker modifies the Assembly without a dedicated lock,
+            // so iterating it here would race with that modification.
+            if (assembly && m_core->isRendererReady())
             {
                 (void) m_core->tryToupdateParameter(*assembly);
             }
@@ -3444,9 +3475,10 @@ namespace gladius::ui
 
             if (!eventCompleted)
             {
-                // GPU work timed out or errored — flush the queue so we
-                // start clean on the next iteration.
-                try { commandQueue.finish(); } catch (...) {}
+                // GPU work timed out or errored — flush (not finish!) so
+                // we don't block the coroutine indefinitely on a GPU stall.
+                // The next enqueue will be ordered after pending work.
+                try { commandQueue.flush(); } catch (...) {}
                 ++consecutiveFailures;
                 if (consecutiveFailures >= kMaxConsecutiveFailures)
                 {
