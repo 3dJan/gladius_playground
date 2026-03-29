@@ -2563,8 +2563,11 @@ namespace gladius::ui
                 // writer, reading the latest Assembly values and pushing them to the
                 // parameter buffer in a tight loop.  This eliminates the UI-frame
                 // round-trip latency that limits one-shot preview scheduling.
-                m_renderWindow.invalidateViewDueToParameterChange();
-                m_renderWindow.startStreamingPreview();
+                if (!m_renderWindow.isStreamingPreviewActive())
+                {
+                    m_renderWindow.invalidateViewDueToParameterChange();
+                    m_renderWindow.startStreamingPreview();
+                }
                 m_parameterDirty = false;
                 m_contoursDirty = true;
             }

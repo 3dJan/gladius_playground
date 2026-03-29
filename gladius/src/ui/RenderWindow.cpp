@@ -1764,7 +1764,7 @@ namespace gladius::ui
         {
             auto const timeSinceLastLowResRender =
               std::chrono::system_clock::now() - m_lastLowResRenderTime;
-            if (timeSinceLastLowResRender < std::chrono::milliseconds(kBboxDebounceDelay.count() + 1000))
+            if (timeSinceLastLowResRender < kBboxDebounceDelay + std::chrono::seconds(1))
             {
                 return;
             }
@@ -3205,6 +3205,21 @@ namespace gladius::ui
     {
         stopStreamingPreview();
         notifyAsyncEpochIncrement();
+
+        // Wait for in-flight jobs to finish before returning.
+        // This is called from the UI thread before refreshWorker() starts
+        // rebuilding CL programs — a running coroutine would segfault.
+        auto constexpr maxWait = std::chrono::milliseconds(500);
+        auto const start = std::chrono::steady_clock::now();
+        while (m_streamingJobInFlight.load(std::memory_order_acquire) ||
+               m_asyncSdfJobInFlight.load(std::memory_order_acquire))
+        {
+            if (std::chrono::steady_clock::now() - start > maxWait)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 
     bool RenderWindow::isStreamingPreviewActive() const
@@ -3280,9 +3295,10 @@ namespace gladius::ui
         result.width = job.width;
         result.height = job.height;
 
-        auto const shutdownRequested = [&]() -> bool {
-            return cancelCheck && cancelCheck() &&
-                   m_asyncController && !m_asyncController->isRunning();
+        auto const shouldStop = [&]() -> bool {
+            return !m_streamingPreviewActive.load(std::memory_order_acquire) ||
+                   (cancelCheck && cancelCheck()) ||
+                   (m_asyncController && !m_asyncController->isRunning());
         };
 
         auto lowResImage = m_core->getLowResPreviewImage();
@@ -3302,7 +3318,7 @@ namespace gladius::ui
         constexpr int kMaxConsecutiveFailures = 3;
 
         // Streaming loop: push params → render → publish → repeat
-        while (m_streamingPreviewActive.load(std::memory_order_acquire) && !shutdownRequested())
+        while (!shouldStop())
         {
             // Wait for the UI thread to finish resampling the previous frame
             // from lowResImage before we overwrite it with the next render.
@@ -3311,8 +3327,7 @@ namespace gladius::ui
                 auto const waitStart = std::chrono::steady_clock::now();
                 while (!m_streamingFrameConsumed.load(std::memory_order_acquire))
                 {
-                    if (!m_streamingPreviewActive.load(std::memory_order_acquire) ||
-                        shutdownRequested())
+                    if (shouldStop())
                     {
                         break;
                     }
@@ -3326,10 +3341,11 @@ namespace gladius::ui
 
             // If the UI thread has not finished resampling yet, we must NOT
             // render into lowResImage — doing so would race with resample().
-            // Exit the streaming loop; the next parameter change will restart it.
+            // Skip this iteration and retry; the loop condition handles exit.
             if (!m_streamingFrameConsumed.load(std::memory_order_acquire))
             {
-                break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
             }
 
             // Mark the frame as in-progress so the UI thread won't

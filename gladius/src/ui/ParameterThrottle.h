@@ -10,6 +10,8 @@ namespace gladius::ui
     class ParameterThrottle
     {
       public:
+        /// @param debounceInterval 1ms (effectively immediate) — the streaming preview
+        ///        coroutine handles coalescing; this just gates the first trigger.
         explicit ParameterThrottle(
           std::chrono::milliseconds debounceInterval = std::chrono::milliseconds(1));
 
