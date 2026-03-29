@@ -82,6 +82,11 @@ namespace gladius::ui
         void stopStreamingPreview();
         [[nodiscard]] bool isStreamingPreviewActive() const;
 
+        /// Cancel all in-flight async work (streaming preview, SDF, bbox, render jobs)
+        /// by stopping streaming and bumping the epoch. Call before operations that
+        /// invalidate GPU programs/resources (e.g. file load).
+        void cancelAllAsyncWork();
+
         void renderScene(RenderWindowState & state);
 
         void hide();
@@ -345,6 +350,7 @@ namespace gladius::ui
         // Streaming preview state (tight render loop during parameter drag)
         std::atomic<bool> m_streamingPreviewActive{false}; ///< True while streaming loop should run
         std::atomic<bool> m_streamingJobInFlight{false};   ///< True while streaming coroutine is executing
+        std::atomic<bool> m_streamingFrameConsumed{true};  ///< Handshake: UI thread sets true after resample
 
         // Framebuffer preservation during resize (prevents flicker)
         bool m_preserveContentDuringResize{false}; ///< Keep displaying old texture during resize

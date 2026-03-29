@@ -1747,6 +1747,15 @@ namespace gladius::ui
 
         m_core->setPreCompSdfSize(256u);
 
+        // Do not start HQ progressive rendering while the streaming preview loop is
+        // active — both paths write to shared GPU image buffers (resultImage,
+        // lowResImage) and concurrent access would cause CL errors / segfaults.
+        if (m_streamingPreviewActive.load(std::memory_order_acquire) ||
+            m_streamingJobInFlight.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
         // Only enforce timeout if we're NOT already in middle of progressive rendering
         // (otherwise chunks would be blocked after any interaction)
         bool const isProgressiveRenderInProgress = state.isRendering && state.currentLine > 0;
@@ -2774,8 +2783,24 @@ namespace gladius::ui
             cl::CommandQueue const * queuePtr =
               workerQueue != nullptr ? workerQueue : &m_core->getComputeContext()->GetQueue();
 
+            // Acquire compute token non-blockingly to serialize with refreshWorker().
+            // refreshWorker() holds the mutex while it rebuilds CL programs and
+            // resources — running precomputeSdfAsync concurrently would segfault.
+            auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                // refreshWorker (or another heavy operation) holds the lock.
+                // Bail out — the next renderAsync cycle will reschedule.
+                result.cancelled = true;
+                co_return result;
+            }
+
             // Launch async SDF precomputation (returns cl::Event)
             cl::Event sdfEvent = m_core->precomputeSdfAsync(*queuePtr);
+
+            // Release the compute token — the kernel is already enqueued and the
+            // CL runtime retains its own references to the memory objects.
+            computeToken.reset();
 
             if (!sdfEvent())
             {
@@ -3107,6 +3132,7 @@ namespace gladius::ui
         if (meta.frameId <= lastDisplayedFrame)
         {
             ZoneText("OutOfOrderPreviewSkipped", 24);
+            m_streamingFrameConsumed.store(true, std::memory_order_release);
             return;
         }
 
@@ -3114,6 +3140,7 @@ namespace gladius::ui
         if (meta.cancelled)
         {
             ZoneText("CancelledPreviewSkipped", 23);
+            m_streamingFrameConsumed.store(true, std::memory_order_release);
             return;
         }
 
@@ -3145,6 +3172,10 @@ namespace gladius::ui
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
         }
 
+        // Signal the streaming worker that it is safe to render the next frame
+        // into lowResImage — the resample has completed.
+        m_streamingFrameConsumed.store(true, std::memory_order_release);
+
         // Clear low-res feedback pending flag since we now have fresh content
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
@@ -3168,6 +3199,12 @@ namespace gladius::ui
     void RenderWindow::stopStreamingPreview()
     {
         m_streamingPreviewActive.store(false, std::memory_order_release);
+    }
+
+    void RenderWindow::cancelAllAsyncWork()
+    {
+        stopStreamingPreview();
+        notifyAsyncEpochIncrement();
     }
 
     bool RenderWindow::isStreamingPreviewActive() const
@@ -3267,6 +3304,38 @@ namespace gladius::ui
         // Streaming loop: push params → render → publish → repeat
         while (m_streamingPreviewActive.load(std::memory_order_acquire) && !shutdownRequested())
         {
+            // Wait for the UI thread to finish resampling the previous frame
+            // from lowResImage before we overwrite it with the next render.
+            {
+                auto constexpr handshakeTimeout = std::chrono::milliseconds(200);
+                auto const waitStart = std::chrono::steady_clock::now();
+                while (!m_streamingFrameConsumed.load(std::memory_order_acquire))
+                {
+                    if (!m_streamingPreviewActive.load(std::memory_order_acquire) ||
+                        shutdownRequested())
+                    {
+                        break;
+                    }
+                    if (std::chrono::steady_clock::now() - waitStart > handshakeTimeout)
+                    {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                }
+            }
+
+            // If the UI thread has not finished resampling yet, we must NOT
+            // render into lowResImage — doing so would race with resample().
+            // Exit the streaming loop; the next parameter change will restart it.
+            if (!m_streamingFrameConsumed.load(std::memory_order_acquire))
+            {
+                break;
+            }
+
+            // Mark the frame as in-progress so the UI thread won't
+            // resample lowResImage while we're writing to it.
+            m_streamingFrameConsumed.store(false, std::memory_order_release);
+
             auto const iterStart = std::chrono::steady_clock::now();
 
             // Push latest Assembly parameter values to GPU
@@ -3360,6 +3429,10 @@ namespace gladius::ui
 
             m_asyncController->setLatestPreviewResult(previewMeta);
         }
+
+        // Ensure the consumed flag is set so the UI thread or the next
+        // scheduling cycle does not stay blocked.
+        m_streamingFrameConsumed.store(true, std::memory_order_release);
 
         // Update the frame counter so future one-shot previews don't collide
         m_asyncPreviewFrameCounter = frameCounter;

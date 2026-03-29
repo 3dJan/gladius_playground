@@ -1236,6 +1236,9 @@ namespace gladius::ui
             return;
         }
 
+        // Cancel all in-flight async GPU work before loading (same reason as loadFileDeferred).
+        m_renderWindow.cancelAllAsyncWork();
+
         // Defer editor reset until the async load inside newFromTemplate() completes.
         // (Same deferred pattern used by loadFileDeferred().)
         m_asyncLoadState = AsyncLoadState::LoadingWithReset;
@@ -1680,6 +1683,12 @@ namespace gladius::ui
     {
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
+
+        // Cancel all in-flight async GPU work before loading.
+        // refreshWorker() (on the loading thread) rebuilds CL programs and
+        // resources.  Any async job still running on the worker thread would
+        // access those resources concurrently, causing a segfault.
+        m_renderWindow.cancelAllAsyncWork();
 
         // Defer editor reset until the new Assembly has been loaded.
         m_asyncLoadState = AsyncLoadState::LoadingWithReset;
