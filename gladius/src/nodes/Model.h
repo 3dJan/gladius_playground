@@ -78,6 +78,7 @@ namespace gladius::nodes
         auto create() -> NodeType *
         {
             m_graphRequiresUpdate = true;
+            m_typesRequireUpdate = true;
 
             while (m_nodes.find(m_lastId) != m_nodes.end())
             {
@@ -129,6 +130,7 @@ namespace gladius::nodes
         NodeBase * insert(std::unique_ptr<NodeBase> node)
         {
             m_graphRequiresUpdate = true;
+            m_typesRequireUpdate = true;
 
             while (m_nodes.find(m_lastId) != m_nodes.end())
             {
@@ -316,6 +318,7 @@ namespace gladius::nodes
         graph::AdjacencyListDirectedGraph m_graph{0};
         graph::VertexList m_outputOrder;
         bool m_graphRequiresUpdate = true;
+        bool m_typesRequireUpdate = true;
 
         ModelName m_name{"unnamed"};
         std::optional<std::string> m_displayName;

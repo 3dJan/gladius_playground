@@ -312,7 +312,13 @@ namespace gladius::ui::async_rendering
                        data->latestEpoch.load(std::memory_order_acquire) > jobEpoch;
             };
 
-            if (cancellationCheck())
+            // Preview/streaming jobs must not be skipped here — their executors
+            // manage m_asyncPreviewJobInFlight and m_streamingJobInFlight flags
+            // that are only cleared inside the executor. Skipping the job would
+            // leave those flags stuck at true, preventing any future scheduling.
+            bool const isPreviewJob = (job.type == RenderJobType::LowResPreview ||
+                                       job.type == RenderJobType::StreamingPreview);
+            if (!isPreviewJob && cancellationCheck())
             {
                 continue;
             }

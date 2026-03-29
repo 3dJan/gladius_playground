@@ -1848,8 +1848,10 @@ namespace gladius::ui
                     m_currentModel->updateTypes();
                     if (!m_stateApplyingUndo)
                     {
-                        auto tmpAssembly = *m_assembly;
-                        m_history.storeState(tmpAssembly, "Parameter changed");
+                        // Pass *m_assembly directly — storeState() takes by const&
+                        // and copies into the undo stack only when the state differs.
+                        // Avoids creating an expensive intermediate Assembly copy.
+                        m_history.storeState(*m_assembly, "Parameter changed");
                     }
                 }
 

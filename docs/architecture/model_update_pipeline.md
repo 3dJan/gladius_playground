@@ -122,6 +122,7 @@ Low-res preview works via direct function evaluation (`AM_FULL_MODEL`), so SDF i
 3. `MainWindow::refreshModel()` → `Document::refreshModelIfNoCompilationIsRunning()`:
    - **Guard (non-blocking):** Returns `false` if any OpenCL program is already compiling. The dirty flags survive, so the next frame retries.
    - Otherwise calls `Document::refreshModelAsync()` → **launches `std::async(std::launch::async, refreshWorker)`**.
+   - **Note:** Assembly validation has been moved to the worker thread (step 1b below) to avoid blocking the UI.
 
 #### Phase B — Worker thread (async)
 
@@ -130,6 +131,7 @@ Low-res preview works via direct function evaluation (`AM_FULL_MODEL`), so SDF i
 | Step | Operation | Notes |
 |---|---|---|
 | 1 | `waitForComputeToken()` | Blocks worker until GPU mutex available |
+| 1b | `validateAssembly()` | Early exit if model is invalid (e.g. missing connections). Signals `compilationFinished` before returning. |
 | 2 | `updateInputsAndOutputs()` | Re-registers I/O ports for all functions |
 | 3 | `loadAllMeshResources()` | Loads any unloaded mesh resources from 3MF |
 | 4 | `updateParameterRegistration()` | Iterates all nodes to register parameters |
@@ -180,6 +182,51 @@ All jobs run on a worker thread via `co_await waitForEvent(clEvent)`. Results ar
 
 Epoch-based cancellation: each invalidation bumps `m_asyncEpochCounter`. In-flight jobs with stale epochs are discarded on completion.
 
+## Dynamic Resolution Adaptation
+
+The low-res preview resolution is not fixed — it adapts to maintain interactive frame rates during camera movement and parameter drags.
+
+### Resolution Computation
+
+The low-res preview dimensions are derived from the viewport size scaled by `state.renderQualityWhileMoving`:
+
+```
+newWidth  = m_renderWindowSize_px.x × renderQualityWhileMoving   (clamped to [1, 16000])
+newHeight = m_renderWindowSize_px.y × renderQualityWhileMoving   (clamped to [1, 16000])
+```
+
+`renderQualityWhileMoving` starts at `renderQuality × 0.5` (typically `0.6`) and is reset to `0.1` when compilation starts. It is adjusted each frame by the PID controller (see below).
+
+### Hysteresis Gate
+
+To avoid constant image reallocation, the low-res preview buffer is only reallocated when:
+- **Width or height changes by more than 20%**, or
+- **Aspect ratio changes by more than 0.01**
+
+This prevents GPU memory churn from small viewport adjustments.
+
+### PID Controller (Sync Path)
+
+In `renderSync()`, after each synchronous render, a PID controller adjusts `renderQualityWhileMoving` to converge on a **25 ms target frame time** (~40 FPS):
+
+| Parameter | Value | Role |
+|---|---|---|
+| `kp` | 0.001 | Proportional gain — primary response to frame time error |
+| `ki` | 0.00001 | Integral gain — eliminates steady-state error (low to prevent windup) |
+| `kd` | 0.000001 | Derivative gain — dampens oscillation |
+| Target | 25 ms | Target frame time during interaction |
+
+The controller only runs when the camera is moving or a compilation is in progress. The integral term decays by `0.8×` each frame to prevent windup. The quality factor is clamped to `[0.05, renderQuality]`.
+
+### Progressive Step Size Adaptation (HQ Path)
+
+For HQ progressive rendering, `state.renderingStepSize` (lines per async chunk) is adjusted after each completed chunk by `adjustProgressFromDuration()`:
+
+- **Chunk time > 100 ms target:** Reduce step size by 50% (or 90% if SDF is dirty).
+- **Chunk time < 100 ms target:** Grow step size by 1.5× + 1.
+
+This keeps each progressive chunk near 100 ms to avoid long GPU stalls while maximizing throughput.
+
 ### `cancelAllAsyncWork()`
 
 Called before file load/new model operations to ensure no coroutines are in flight when CL resources are rebuilt:
@@ -200,6 +247,21 @@ Called before file load/new model operations to ensure no coroutines are in flig
 | `processAsyncPreviewResults()` — resample + GL sync | Every streaming frame consumed | Low (single resample + texture upload) |
 
 **No longer on UI thread:** `Buffer::write()` (`paramBuf.write()`) and `Document::updateParameter()` — moved to the streaming preview worker coroutine.
+| `Model::updateTypes()` | Structural changes (skipped when `m_typesRequireUpdate` is `false`) | Medium (graph traversal) |
+| `Assembly::updateInputsAndOutputs()` | Structural model changes only | Medium (iterates all functions/nodes) |
+| `Document::updateParameterRegistration()` | Structural model changes only | Medium (iterates all nodes) |
+| `Assembly` copy for undo | Every structural change (parameter changes pass by const ref — single copy) | Medium (deep copy of entire assembly) |
+| `processAsyncPreviewResults()` — resample + GL sync | Every streaming frame consumed | Low (single resample + texture upload) |
+
+**No longer on UI thread:**
+- `Buffer::write()` (`paramBuf.write()`) and `Document::updateParameter()` — moved to the streaming preview worker coroutine.
+- `Document::validateAssembly()` — moved to `refreshWorker()` to avoid blocking the UI with full graph validation.
+
+### Optimizations
+
+- **`m_typesRequireUpdate` flag:** `Model::updateTypes()` short-circuits when types haven't been invalidated (no node/link changes since last update). Set alongside `m_graphRequiresUpdate` on structural changes. Eliminates redundant full-graph type inference passes.
+- **Deferred graph rebuild in `Model::remove()`:** The post-removal graph rebuild is deferred — callers like `updateInputsAndOutputs()` trigger it via `updateGraphAndOrderIfNeeded()` when they need it, saving one O(N+E) rebuild per deletion.
+- **Single Assembly copy for undo:** Parameter change undo snapshots pass `*m_assembly` by const reference directly to `History::storeState()`, avoiding an intermediate deep copy.
 
 ## Thread Architecture Diagram
 
