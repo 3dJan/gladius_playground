@@ -11,7 +11,7 @@ namespace gladius::ui
     {
       public:
         explicit ParameterThrottle(
-          std::chrono::milliseconds debounceInterval = std::chrono::milliseconds(100));
+          std::chrono::milliseconds debounceInterval = std::chrono::milliseconds(1));
 
         /// Called when a parameter value changes.
         /// @return true if a recompile should be triggered immediately (first call).
