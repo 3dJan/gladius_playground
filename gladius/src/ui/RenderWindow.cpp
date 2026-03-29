@@ -1181,6 +1181,10 @@ namespace gladius::ui
         if (m_compilationInvalidated)
         {
             m_compilationInvalidated = false;
+            // Restore preview quality — it was lowered to 0.1 during compilation.
+            // The sync path's PID controller would converge it back, but the async
+            // path has no PID, so we reset to the nominal 50% of full quality here.
+            state.renderQualityWhileMoving = state.renderQuality * 0.5f;
             invalidateViewDuetoModelUpdate();
         }
 
@@ -2073,6 +2077,18 @@ namespace gladius::ui
             {
                 if (auto const resultImage = m_core->getResultImage())
                 {
+                    // Validate dimensions — the result image may have been
+                    // resized on the UI thread since the job was created.
+                    if (resultImage->getWidth() < job.width ||
+                        resultImage->getHeight() < job.height ||
+                        writeBuffer->image->getWidth() < job.width ||
+                        writeBuffer->image->getHeight() < job.height)
+                    {
+                        releaseProgressiveBuffer();
+                        result.cancelled = true;
+                        co_return result;
+                    }
+
                     cl::Event previewCopyEvent{};
                     commandQueue.enqueueCopyImage(resultImage->getBuffer(),
                                                   writeBuffer->image->getBuffer(),
@@ -2148,25 +2164,37 @@ namespace gladius::ui
                     {
                         if (auto const resultImage = m_core->getResultImage())
                         {
-                            cl::Event copyBackEvent{};
-                            commandQueue.enqueueCopyImage(writeBuffer->image->getBuffer(),
-                                                          resultImage->getBuffer(),
-                                                          {0, 0, 0},
-                                                          {0, 0, 0},
-                                                          {result.width, result.height, 1},
-                                                          nullptr,
-                                                          &copyBackEvent);
-                            commandQueue.flush();
-                            co_await waitForEvent(copyBackEvent, cancelCheck);
-
-                            if (!cancellationRequested())
+                            // Validate dimensions — result image may have been
+                            // resized on the UI thread since the job was created.
+                            if (resultImage->getWidth() < result.width ||
+                                resultImage->getHeight() < result.height ||
+                                writeBuffer->image->getWidth() < result.width ||
+                                writeBuffer->image->getHeight() < result.height)
                             {
-                                writeBuffer->image->invalidateContent();
-                                resultImage->invalidateContent();
+                                result.cancelled = true;
                             }
                             else
                             {
-                                result.cancelled = true;
+                                cl::Event copyBackEvent{};
+                                commandQueue.enqueueCopyImage(writeBuffer->image->getBuffer(),
+                                                              resultImage->getBuffer(),
+                                                              {0, 0, 0},
+                                                              {0, 0, 0},
+                                                              {result.width, result.height, 1},
+                                                              nullptr,
+                                                              &copyBackEvent);
+                                commandQueue.flush();
+                                co_await waitForEvent(copyBackEvent, cancelCheck);
+
+                                if (!cancellationRequested())
+                                {
+                                    writeBuffer->image->invalidateContent();
+                                    resultImage->invalidateContent();
+                                }
+                                else
+                                {
+                                    result.cancelled = true;
+                                }
                             }
                         }
                     }
