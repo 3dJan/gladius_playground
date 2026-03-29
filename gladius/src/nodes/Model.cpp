@@ -55,6 +55,7 @@ namespace gladius::nodes
         , m_graph(other.m_graph)
         , m_outputOrder(other.m_outputOrder)
         , m_graphRequiresUpdate(other.m_graphRequiresUpdate)
+        , m_typesRequireUpdate(true)
         , m_name(other.m_name)
         , m_displayName(other.m_displayName)
         , m_resourceId(other.m_resourceId)
@@ -710,6 +711,7 @@ namespace gladius::nodes
 
         targetParameter->second->getSource().reset();
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
         return true;
     }
 
@@ -879,7 +881,9 @@ namespace gladius::nodes
             m_nodes.erase(nodeToRemove);
         }
         m_graphRequiresUpdate = true;
-        updateGraphAndOrderIfNeeded();
+        m_typesRequireUpdate = true;
+        // Graph rebuild deferred — callers (updateInputsAndOutputs, Validator)
+        // will trigger it via updateGraphAndOrderIfNeeded() when they need it.
     }
 
     void Model::removeNodeWithoutLinks(NodeId idOfNodeWithoutLinks)
@@ -890,6 +894,7 @@ namespace gladius::nodes
             m_nodes.erase(nodeToRemove);
         }
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
     }
 
     void Model::createBeginEnd()
@@ -991,6 +996,11 @@ namespace gladius::nodes
 
     bool Model::updateTypes()
     {
+        if (!m_typesRequireUpdate)
+        {
+            return m_isValid;
+        }
+
         bool isValid = true;
 
         for (auto & [id, node] : m_nodes)
@@ -1009,6 +1019,7 @@ namespace gladius::nodes
             }
             isValid = isValid && nodeIsValid;
         }
+        m_typesRequireUpdate = false;
         return isValid;
     }
 
@@ -1134,6 +1145,7 @@ namespace gladius::nodes
     void Model::invalidateGraph()
     {
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
     }
 
     void Model::markAsLayouted()
@@ -1260,6 +1272,7 @@ namespace gladius::nodes
 
         // Update the graph after removing nodes
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
         updateGraphAndOrderIfNeeded();
 
         return removedCount;
@@ -1286,6 +1299,7 @@ namespace gladius::nodes
         m_graph = graph::AdjacencyListDirectedGraph(0);
         m_outputOrder.clear();
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
 
         // Reset state flags
         m_allInputReferencesAreValid = false;

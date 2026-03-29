@@ -103,12 +103,8 @@ namespace gladius
             return false;
         }
 
-        // Early validation: Skip expensive compilation if model is in an invalid state
-        // (e.g., during graph editing when nodes have missing connections)
-        if (!validateAssembly())
-        {
-            return false;
-        }
+        // Validation moved to refreshWorker() to avoid blocking the UI thread.
+        // The worker validates first and exits early if the model is invalid.
 
         // saveBackup();
         {
@@ -136,6 +132,15 @@ namespace gladius
 
         auto meshResourceState = m_core->getMeshResourceState();
         meshResourceState->signalCompilationStarted();
+
+        // Validate early: skip expensive compilation if model is in an invalid
+        // state (e.g. nodes with missing connections during graph editing).
+        // This used to run on the UI thread; running here avoids blocking it.
+        if (!validateAssembly())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
 
         m_assembly->updateInputsAndOutputs();
 

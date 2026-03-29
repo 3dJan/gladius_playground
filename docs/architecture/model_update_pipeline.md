@@ -82,6 +82,7 @@ When a background compilation is running and the user changes parameters:
 3. `MainWindow::refreshModel()` → `Document::refreshModelIfNoCompilationIsRunning()`:
    - **Guard (non-blocking):** Returns `false` if any OpenCL program is already compiling. The dirty flags survive, so the next frame retries.
    - Otherwise calls `Document::refreshModelAsync()` → **launches `std::async(std::launch::async, refreshWorker)`**.
+   - **Note:** Assembly validation has been moved to the worker thread (step 1b below) to avoid blocking the UI.
 
 #### Phase B — Worker thread (async)
 
@@ -90,6 +91,7 @@ When a background compilation is running and the user changes parameters:
 | Step | Operation | Notes |
 |---|---|---|
 | 1 | `waitForComputeToken()` | Blocks worker until GPU mutex available |
+| 1b | `validateAssembly()` | Early exit if model is invalid (e.g. missing connections). Signals `compilationFinished` before returning. |
 | 2 | `updateInputsAndOutputs()` | Re-registers I/O ports for all functions |
 | 3 | `loadAllMeshResources()` | Loads any unloaded mesh resources from 3MF |
 | 4 | `updateParameterRegistration()` | Iterates all nodes to register parameters |
@@ -143,12 +145,21 @@ Epoch-based cancellation: each invalidation bumps `m_asyncEpochCounter`. In-flig
 
 | Operation | When | Severity |
 |---|---|---|
-| `Buffer::write()` — `clEnqueueWriteBuffer(CL_TRUE)` | Every parameter update | Low (buffer is small, ~microseconds) |
-| `Model::updateTypes()` | Every parameter change frame | Medium (graph traversal) |
-| `Assembly::updateInputsAndOutputs()` | Every parameter + model change | Medium (iterates all functions/nodes) |
-| `Document::updateParameterRegistration()` | Every parameter + model change | Medium (iterates all nodes) |
-| `Document::validateAssemblyIfDirty()` | Every frame when graph is dirty | Medium (full validation pass) |
-| `Assembly` copy for undo | Every parameter change | Medium (deep copy of entire assembly) |
+| `Model::updateTypes()` | Structural changes (skipped when `m_typesRequireUpdate` is `false`) | Medium (graph traversal) |
+| `Assembly::updateInputsAndOutputs()` | Structural model changes only | Medium (iterates all functions/nodes) |
+| `Document::updateParameterRegistration()` | Structural model changes only | Medium (iterates all nodes) |
+| `Assembly` copy for undo | Every structural change (parameter changes pass by const ref — single copy) | Medium (deep copy of entire assembly) |
+| `processAsyncPreviewResults()` — resample + GL sync | Every streaming frame consumed | Low (single resample + texture upload) |
+
+**No longer on UI thread:**
+- `Buffer::write()` (`paramBuf.write()`) and `Document::updateParameter()` — moved to the streaming preview worker coroutine.
+- `Document::validateAssembly()` — moved to `refreshWorker()` to avoid blocking the UI with full graph validation.
+
+### Optimizations
+
+- **`m_typesRequireUpdate` flag:** `Model::updateTypes()` short-circuits when types haven't been invalidated (no node/link changes since last update). Set alongside `m_graphRequiresUpdate` on structural changes. Eliminates redundant full-graph type inference passes.
+- **Deferred graph rebuild in `Model::remove()`:** The post-removal graph rebuild is deferred — callers like `updateInputsAndOutputs()` trigger it via `updateGraphAndOrderIfNeeded()` when they need it, saving one O(N+E) rebuild per deletion.
+- **Single Assembly copy for undo:** Parameter change undo snapshots pass `*m_assembly` by const reference directly to `History::storeState()`, avoiding an intermediate deep copy.
 
 ## Thread Architecture Diagram
 
