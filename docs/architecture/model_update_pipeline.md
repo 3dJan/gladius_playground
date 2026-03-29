@@ -33,34 +33,74 @@ Two per-frame flags originate in `NodeView` and are consumed by `ModelEditor::sh
    - `parameterModifiedByModelEditor = true` → `m_parameterThrottle.onParameterChanged()`.
    - `markFileAsChanged()`.
 
-4. `MainWindow::updateModel()` on a subsequent frame, once `m_parameterThrottle.shouldRecompile()` fires (100 ms debounce):
-   - Calls `Document::updateParameter()`:
-     - `updatePayload()` — acquires compute token (`requestComputeToken()` — returns early if background worker holds the lock), calls `updateParameterRegistration()`, regenerates the flat parameter buffer in CPU memory.
-     - `ComputeCore::tryToupdateParameter()`:
-       - **`m_computeMutex.try_lock()`** — non-blocking; returns `false` if the worker holds the lock, so this frame is skipped.
-       - `updateParameterBlocking()` — iterates all registered parameters, fills a `std::vector<float>`, then calls `paramBuf.write()`.
-       - **`paramBuf.write()` uses `clEnqueueWriteBuffer(..., CL_TRUE, ...)`** — synchronous GPU upload, blocks the UI thread until complete. Buffer is small (typically < 1 KB), so the block is short.
-   - `updateParameter()` returns `bool` to signal success. If it returns `false` (lock held by worker), **`m_parameterDirty` stays `true`** so the push is retried on the next frame.
-   - On success: calls `RenderWindow::invalidateViewDueToParameterChange()`:
-     - Marks SDF stale (preserves cached bbox with extra margin).
-     - Schedules low-res preview on next frame.
-     - Bumps async epoch to cancel any outdated HQ render jobs.
+4. `MainWindow::updateModel()` on a subsequent frame, once `m_parameterThrottle.shouldRecompile()` fires (1 ms debounce — effectively immediate; the streaming preview coroutine handles coalescing):
+   - If streaming preview is **not** already active:
+     - Calls `RenderWindow::invalidateViewDueToParameterChange()`:
+       - Marks SDF invalid (`setSdfValid(false)`).
+       - Sets `m_dirty`, `m_forceLowResRenderOnNextFrame`, `m_preComputedSdfDirty`, `m_parameterDirty`, `m_lowResFeedbackPending`.
+       - Cancels in-progress progressive render.
+       - Marks bounding box stale (preserves cached bbox with extra margin).
+       - Records `m_lastParameterChangeTime` for debounce.
+       - Does **not** bump the async epoch — the epoch is bumped later when the bbox debounce fires after the drag stops.
+     - Calls `RenderWindow::startStreamingPreview()` — sets `m_streamingPreviewActive = true` and schedules a `StreamingPreview` job on the async coroutine worker.
+   - If streaming preview **is** already active: skips both calls (the running coroutine already picks up the latest values).
+   - Sets `m_parameterDirty = false`.
+
+#### Streaming Preview Coroutine (worker thread)
+
+`executeStreamingPreviewJob()` runs a tight loop on the async coroutine worker thread:
+
+1. **Handshake wait** — spins until `m_streamingFrameConsumed` is `true` (set by the UI thread after resampling the previous frame). Times out after 200 ms and retries with `continue`.
+2. **Clears handshake** — `m_streamingFrameConsumed = false` (prevents UI from reading mid-render).
+3. **Push parameters** — `ComputeCore::tryToupdateParameter(assembly)`:
+   - `m_computeMutex.try_lock()` — non-blocking; skips if the background worker holds the lock.
+   - `updateParameterBlocking()` — fills `std::vector<float>` from registered parameters, then `paramBuf.write()` (`clEnqueueWriteBuffer(CL_TRUE)`) — blocks the **worker** thread, not the UI.
+4. **Render** — `renderLowResPreviewWithDistanceOutputAsync(workerQueue, ...)` — uses a local copy of `RenderingSettings` with `RF_DISABLE_SHADOWS | RF_DISABLE_AO` and `AM_FULL_MODEL` approximation. Returns a `cl::Event`.
+5. **Poll GPU completion** — polls the event status with 500 µs sleep intervals, up to 5 s timeout.
+6. **Publish** — increments frame counter, writes `PreviewResultMeta` via `setLatestPreviewResult()`.
+7. **Loop** — repeats from step 1 until `shouldStop()` (`!m_streamingPreviewActive || cancelCheck() || !isRunning()`).
+
+The UI thread consumes frames in `processAsyncPreviewResults()`: resamples `lowResImage` → `resultImage`, syncs GL texture, then sets `m_streamingFrameConsumed = true`.
+
+#### HQ Suppression During Streaming
+
+While streaming preview is active, `m_suppressHQDisplay` is `true` — the UI thread skips compositing HQ progressive frames. This prevents a stale HQ buffer (rendered with old parameters) from overwriting the live streaming preview. The flag is cleared when the bbox debounce fires after the drag stops.
+
+#### Streaming Termination (Bbox Debounce)
+
+When `m_lastParameterChangeTime` is older than `kBboxDebounceDelay` (1000 ms) and bbox is stale:
+1. `stopStreamingPreview()` — sets `m_streamingPreviewActive = false`, causing the coroutine loop to exit.
+2. `recomputeStaleBoundingBox()` — clears cached bbox for fresh recompute.
+3. Marks SDF invalid → `m_preComputedSdfDirty = true`.
+4. `notifyAsyncEpochIncrement()` — invalidates stale HQ front buffer.
+5. `m_suppressHQDisplay = false` — re-enables HQ compositing.
+6. Normal SDF → bbox → HQ pipeline resumes.
 
 ### Deferred Parameter Re-application
 
 When a background compilation is running and the user changes parameters:
 1. `nodeEditor()` sets `m_parameterDirty = true` as usual.
-2. `updateModel()` tries `Document::updateParameter()`, which fails to acquire the compute token → returns `false`.
-3. `m_parameterDirty` remains `true` — the push is retried each frame.
-4. After matching finishes, the lock is released, and the next `updateModel()` call succeeds — pushing the latest parameter values (read from node objects) through the current parameter mapping.
+2. `updateModel()` sees `m_parameterDirty` and the throttle fires, but streaming preview may already be active → no-op (coroutine keeps running).
+3. Inside the streaming coroutine, `tryToupdateParameter()` fails to acquire `m_computeMutex` → parameter push is silently skipped for that iteration. The loop retries on the next iteration.
+4. After the background worker finishes and releases the lock, the next coroutine iteration succeeds — pushing the latest parameter values (read from node objects) through the current parameter mapping.
+5. If streaming is **not** active (e.g., throttle bypassed after the coroutine exited), `updateModel()` starts a new streaming preview session.
 
 ### Async work triggered
 
 | Work item | Where it runs |
 |---|---|
-| Low-res preview render | Async coroutine worker (off UI thread) |
+| Streaming preview (push + render loop) | Async coroutine worker (off UI thread) |
 | SDF precomputation | Async coroutine worker → OpenCL event → `co_await` |
+| Bounding box update | Async coroutine worker (after debounce) |
 | HQ progressive render | Async coroutine worker → OpenCL event → `co_await` |
+
+### SDF Debounce During Parameter Drag
+
+During rapid slider changes, SDF is repeatedly invalidated. Recomputing it every tick wastes GPU time since the result is immediately stale. SDF scheduling is debounced: it only proceeds when either:
+- Bounding box is **not** stale (drag has stopped and bbox debounce fired), or
+- `kBboxDebounceDelay` has elapsed since `m_lastParameterChangeTime`.
+
+Low-res preview works via direct function evaluation (`AM_FULL_MODEL`), so SDF is not needed for interactive feedback.
 
 ## Update Path 2 — Structural Change (Full Recompile)
 
@@ -130,25 +170,36 @@ Same as Path 2, but triggered via `m_isManualCompileRequested = true` (the "Comp
 
 | Job type | Purpose | Scheduling |
 |---|---|---|
-| `SDFPrecomputation` | Precompute SDF grid on GPU | Enqueued when `m_preComputedSdfDirty` is set |
-| `BoundingBox` | Compute/refine bbox from SDF | Enqueued when `m_asyncBboxUpdatePending` is set |
-| `LowResPreview` | Immediate visual feedback | Scheduled on `m_forceLowResRenderOnNextFrame` |
+| `SDFPrecomputation` | Precompute SDF grid on GPU | Enqueued when `m_preComputedSdfDirty` is set (debounced during parameter drag) |
+| `StreamingPreview` | Continuous low-res preview during parameter drag | Enqueued by `startStreamingPreview()`, runs until `stopStreamingPreview()` |
+| `BoundingBoxUpdate` | Compute/refine bbox from SDF | Enqueued when `m_asyncBboxUpdatePending` is set |
+| `LowResPreview` | One-shot visual feedback (non-streaming) | Scheduled on `m_forceLowResRenderOnNextFrame` |
 | `ProgressiveHQ` | Full-resolution progressive render | Scheduled after SDF is valid |
 
 All jobs run on a worker thread via `co_await waitForEvent(clEvent)`. Results are polled and composited on the UI thread in `processAsyncResults()` / `processAsyncPreviewResults()`.
 
 Epoch-based cancellation: each invalidation bumps `m_asyncEpochCounter`. In-flight jobs with stale epochs are discarded on completion.
 
+### `cancelAllAsyncWork()`
+
+Called before file load/new model operations to ensure no coroutines are in flight when CL resources are rebuilt:
+
+1. `stopStreamingPreview()` — signals the streaming loop to exit.
+2. `notifyAsyncEpochIncrement()` — invalidates all in-flight job epochs.
+3. Busy-waits up to 500 ms for `m_streamingJobInFlight` and `m_asyncSdfJobInFlight` to clear.
+
 ## Blocking Operations on the UI Thread
 
 | Operation | When | Severity |
 |---|---|---|
-| `Buffer::write()` — `clEnqueueWriteBuffer(CL_TRUE)` | Every parameter update | Low (buffer is small, ~microseconds) |
 | `Model::updateTypes()` | Every parameter change frame | Medium (graph traversal) |
-| `Assembly::updateInputsAndOutputs()` | Every parameter + model change | Medium (iterates all functions/nodes) |
-| `Document::updateParameterRegistration()` | Every parameter + model change | Medium (iterates all nodes) |
+| `Assembly::updateInputsAndOutputs()` | Structural model changes only | Medium (iterates all functions/nodes) |
+| `Document::updateParameterRegistration()` | Structural model changes only | Medium (iterates all nodes) |
 | `Document::validateAssemblyIfDirty()` | Every frame when graph is dirty | Medium (full validation pass) |
 | `Assembly` copy for undo | Every parameter change | Medium (deep copy of entire assembly) |
+| `processAsyncPreviewResults()` — resample + GL sync | Every streaming frame consumed | Low (single resample + texture upload) |
+
+**No longer on UI thread:** `Buffer::write()` (`paramBuf.write()`) and `Document::updateParameter()` — moved to the streaming preview worker coroutine.
 
 ## Thread Architecture Diagram
 
@@ -161,20 +212,26 @@ UI Thread (main loop)
 │   └─ Assembly copy for undo                  ← synchronous
 │
 ├─ MainWindow::nodeEditor() callback
-│   ├─ Assembly::updateInputsAndOutputs()      ← synchronous
-│   ├─ Document::updateParameterRegistration() ← synchronous
+│   ├─ [structural only] Assembly::updateInputsAndOutputs()  ← synchronous
+│   ├─ [structural only] Document::updateParameterRegistration()
 │   └─ refreshModel() [if compile requested]
 │       └─ refreshModelAsync()  ──────────────────────┐
 │                                                      │
 ├─ MainWindow::updateModel()                           │
-│   ├─ Document::updateParameter()                     │
-│   │   └─ paramBuf.write(CL_TRUE)            ← sync  │
-│   └─ RenderWindow::invalidateViewDue...()            │
-│                                                      │
-├─ RenderWindow::renderAsync()                         │
-│   ├─ processAsyncResults()                           │
-│   └─ enqueue SDF / bbox / render jobs                │
-│                                                      ▼
+│   ├─ [if !streaming] invalidateViewDueToParameterChange()
+│   ├─ [if !streaming] startStreamingPreview()  ───────┼──────────┐
+│   └─ m_parameterDirty = false                        │          │
+│                                                      │          │
+├─ RenderWindow::renderAsync()                         │          │
+│   ├─ processAsyncResults()                           │          │
+│   ├─ processAsyncPreviewResults()                    │          │
+│   │   ├─ resample(lowRes → result)           ← sync │          │
+│   │   ├─ GL texture bind/unbind              ← sync │          │
+│   │   └─ m_streamingFrameConsumed = true             │          │
+│   ├─ [after debounce] stopStreamingPreview()         │          │
+│   ├─ [after debounce] recomputeStaleBoundingBox()    │          │
+│   └─ enqueue SDF / bbox / render jobs                │          │
+│                                                      ▼          │
 │                                          Worker Thread (std::async)
 │                                          │ Document::refreshWorker()
 │                                          │  ├─ waitForComputeToken()
@@ -194,7 +251,14 @@ UI Thread (main loop)
 │                                          │                └─ CLProgram::compile()
 │                                          │
 │                                 Async Render Coroutine Worker
-│                                 (AsyncRenderController thread)
+│                                 (AsyncRenderController thread pool)
+│                                    │
+│                                    ├─ StreamingPreview coroutine  ◄────────┘
+│                                    │   ├─ tryToupdateParameter()       [worker queue]
+│                                    │   ├─ renderLowResPreview()        [worker queue]
+│                                    │   ├─ publish PreviewResultMeta
+│                                    │   └─ loop until !m_streamingPreviewActive
+│                                    │
 │                                    ├─ co_await renderSceneComputeOnly()
 │                                    ├─ co_await precomputeSdfAsync()
 │                                    └─ co_await updateBBox()
