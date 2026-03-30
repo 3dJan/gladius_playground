@@ -165,55 +165,80 @@ namespace gladius::io
         std::string const& modelXml,
         std::vector<std::string> const& mmuAttributes)
     {
-        // Add the slic3rpe namespace to the root element if not present
-        std::string result = modelXml;
+        // Build the output in a single pass by appending slices of the original XML
+        // interleaved with injected attributes. This avoids O(n*m) repeated string
+        // insertions that shift the entire tail on every triangle.
 
-        // Find the <model element and inject namespace declaration
-        constexpr char const* NS_DECL = "xmlns:slic3rpe=\"http://schemas.slic3r.org/3mf/2017/06\"";
-        auto modelTagPos = result.find("<model");
-        if (modelTagPos != std::string::npos && result.find("xmlns:slic3rpe") == std::string::npos)
+        // Pre-estimate output size: original + ~80 bytes per non-empty attribute
+        std::size_t extraBytes = 0;
+        for (auto const& attr : mmuAttributes)
         {
-            auto closeBracket = result.find('>', modelTagPos);
-            if (closeBracket != std::string::npos)
+            if (!attr.empty())
             {
-                result.insert(closeBracket, std::string(" ") + NS_DECL);
+                extraBytes += attr.size() * 2 + 60; // two copies + fixed markup
             }
         }
 
-        // Inject mmu_segmentation attribute on each <triangle element
-        // We find each <triangle .../>  and insert the attribute before the closing />
-        std::size_t searchPos = 0;
+        std::string result;
+        result.reserve(modelXml.size() + extraBytes + 128);
+
+        // First pass: inject namespace declaration into <model> tag if needed
+        constexpr char const* NS_DECL = " xmlns:slic3rpe=\"http://schemas.slic3r.org/3mf/2017/06\"";
+        std::size_t copyFrom = 0;
+
+        auto modelTagPos = modelXml.find("<model");
+        if (modelTagPos != std::string::npos && modelXml.find("xmlns:slic3rpe") == std::string::npos)
+        {
+            auto closeBracket = modelXml.find('>', modelTagPos);
+            if (closeBracket != std::string::npos)
+            {
+                result.append(modelXml, copyFrom, closeBracket - copyFrom);
+                result.append(NS_DECL);
+                copyFrom = closeBracket;
+            }
+        }
+
+        // Second pass: inject attributes on each <triangle .../> element
         std::size_t triangleIdx = 0;
 
-        while (searchPos < result.size() && triangleIdx < mmuAttributes.size())
+        while (copyFrom < modelXml.size() && triangleIdx < mmuAttributes.size())
         {
-            auto triPos = result.find("<triangle ", searchPos);
+            auto triPos = modelXml.find("<triangle ", copyFrom);
             if (triPos == std::string::npos)
             {
                 break;
             }
 
-            auto closePos = result.find("/>", triPos);
+            auto closePos = modelXml.find("/>", triPos);
             if (closePos == std::string::npos)
             {
                 break;
             }
 
-            // Only inject if this triangle has an MMU attribute
             if (!mmuAttributes[triangleIdx].empty())
             {
+                // Copy everything up to the closing />
+                result.append(modelXml, copyFrom, closePos - copyFrom);
                 // Emit both paint_color (OrcaSlicer/BambuStudio) and
                 // slic3rpe:mmu_segmentation (PrusaSlicer) for maximum compatibility
-                std::string attr = fmt::format(
+                fmt::format_to(std::back_inserter(result),
                     " paint_color=\"{}\" slic3rpe:mmu_segmentation=\"{}\"",
                     mmuAttributes[triangleIdx],
                     mmuAttributes[triangleIdx]);
-                result.insert(closePos, attr);
-                closePos += attr.size();
+                copyFrom = closePos;
             }
 
-            searchPos = closePos + 2; // skip past "/>"
+            // Advance past this triangle's "/>"
+            auto nextPos = closePos + 2;
+            result.append(modelXml, copyFrom, nextPos - copyFrom);
+            copyFrom = nextPos;
             ++triangleIdx;
+        }
+
+        // Append the remainder of the XML
+        if (copyFrom < modelXml.size())
+        {
+            result.append(modelXml, copyFrom, std::string::npos);
         }
 
         return result;
