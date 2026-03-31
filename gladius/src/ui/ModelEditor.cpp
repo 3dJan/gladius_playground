@@ -1871,8 +1871,11 @@ namespace gladius::ui
                     {
                         applyNodePositions();
                     }
-                    else
+                    else if (!m_pendingInitialAutoLayout)
                     {
+                        // Do not read back positions while auto-layout is pending —
+                        // the editor context may contain default-placed garbage that
+                        // would corrupt the model and prevent auto-layout recovery.
                         readBackNodePositions();
                     }
                 }
@@ -2666,6 +2669,12 @@ namespace gladius::ui
         // Only set node positions on first visit - subsequent visits preserve the editor's internal state
         if (isFirstVisit)
         {
+            // Ensure the correct editor context is active — navigation triggered
+            // mid-frame (e.g. double-click, back/forward) may leave the previous
+            // function's context set.
+            auto * ctx = getOrCreateEditorContext(funcId);
+            ed::SetCurrentEditor(ctx);
+
             for (auto & node : *currentModel())
             {
                 auto const targetPos = node.second->screenPos();
