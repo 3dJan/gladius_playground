@@ -7,6 +7,8 @@
 #include <queue>
 #include <sstream>
 #include <stack>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace gladius::nodes::graph
 {
@@ -131,11 +133,12 @@ namespace gladius::nodes::graph
             return true;
         }
 
-        std::vector<bool> visited(graph.getSize() + 1u, false);
+        std::unordered_set<Identifier> visited;
+        visited.reserve(graph.getVertices().size());
         std::queue<Identifier> nodesToVisit;
 
         nodesToVisit.push(id);
-        visited[id] = true;
+        visited.insert(id);
 
         while (!nodesToVisit.empty())
         {
@@ -147,14 +150,14 @@ namespace gladius::nodes::graph
                 return true;
             }
 
-            for (auto dep = 0; dep < static_cast<Identifier>(graph.getSize()); ++dep)
+            for (auto dep : graph.getVertices())
             {
-                if (!visited[dep])
+                if (visited.find(dep) == visited.end())
                 {
                     if (graph.isDirectlyDependingOn(nextNode, dep))
                     {
                         nodesToVisit.push(dep);
-                        visited[dep] = true;
+                        visited.insert(dep);
                     }
                 }
             }
@@ -206,20 +209,33 @@ namespace gladius::nodes::graph
             PARENT
         };
 
+        auto const & vertices = graph.getVertices();
+        std::size_t const vertexCount = vertices.size();
+
         // Stack to keep track of the nodes to visit
         std::stack<std::pair<NodeType, Identifier>> nodesToVisit;
 
-        // Vector of visited nodes
-        std::vector<bool> visited(graph.getSize(), false);
+        // Use unordered_sets for O(1) membership tests instead of O(N) linear scan
+        std::unordered_set<Identifier> visited;
+        std::unordered_set<Identifier> inResult;
+        visited.reserve(vertexCount);
+        inResult.reserve(vertexCount);
 
         // List of vertices in topological order
         VertexList topologicalOrder;
+        topologicalOrder.reserve(vertexCount);
+
+        // Sort vertices by ID so that Begin nodes (lowest IDs, created first in a model)
+        // are always processed before disconnected constant nodes (higher IDs).
+        // This preserves the code-generator's requirement that Begin is visited first.
+        VertexList sortedVertices(vertices.begin(), vertices.end());
+        std::sort(sortedVertices.begin(), sortedVertices.end());
 
         // Loop through all the vertices of the graph
-        for (auto id = 0; id < static_cast<Identifier>(graph.getSize()); ++id)
+        for (auto id : sortedVertices)
         {
             // If the current vertex is not visited, add it as a child to the stack
-            if (!visited[id])
+            if (visited.find(id) == visited.end())
             {
                 nodesToVisit.push({NodeType::CHILD, id});
             }
@@ -232,27 +248,27 @@ namespace gladius::nodes::graph
                 nodesToVisit.pop();
 
                 // Mark the current node as visited
-                visited[nodeId] = true;
+                visited.insert(nodeId);
 
                 // If the node type is parent and it is not already in the topological order,
                 // add it to the topological order
-                if (nodeType == NodeType::PARENT &&
-                    std::find(topologicalOrder.begin(), topologicalOrder.end(), nodeId) ==
-                      topologicalOrder.end())
+                if (nodeType == NodeType::PARENT)
                 {
-                    topologicalOrder.push_back(nodeId);
+                    if (inResult.find(nodeId) == inResult.end())
+                    {
+                        topologicalOrder.push_back(nodeId);
+                        inResult.insert(nodeId);
+                    }
                 }
-                else if (nodeType == NodeType::CHILD)
+                else // CHILD
                 {
                     // Add the node to the stack as a parent
                     nodesToVisit.push({NodeType::PARENT, nodeId});
 
-                    // Check every adjacent node to the current node
-                    for (auto dep = 0; dep < static_cast<Identifier>(graph.getSize()); ++dep)
+                    // Check every adjacent vertex — iterate only actual vertices, not ID gaps
+                    for (auto dep : vertices)
                     {
-                        // If adjacent node is not visited already and is dependent on the current
-                        // one, add it to the stack as a child to visit
-                        if (!visited[dep])
+                        if (visited.find(dep) == visited.end())
                         {
                             if (graph.isDirectlyDependingOn(nodeId, dep))
                             {
@@ -330,11 +346,67 @@ namespace gladius::nodes::graph
 
     auto isCyclic(const IDirectedGraph & graph) -> bool
     {
-        for (auto vertex : graph.getVertices())
+        // Single-pass DFS with 3-color marking (white/gray/black).
+        // A back-edge to a gray (in-stack) vertex proves a cycle.
+        // O(V+E) with actual vertex iteration — far better than the
+        // previous per-vertex BFS approach.
+        enum class Color : uint8_t
         {
-            if (IsDependingOnImpl(graph, vertex, vertex))
+            White,
+            Gray,
+            Black
+        };
+
+        auto const & vertices = graph.getVertices();
+        std::unordered_map<Identifier, Color> color;
+        color.reserve(vertices.size());
+        for (auto v : vertices)
+        {
+            color[v] = Color::White;
+        }
+
+        // Iterative DFS: pair is (vertex, already-expanded)
+        std::stack<std::pair<Identifier, bool>> dfsStack;
+
+        for (auto startVertex : vertices)
+        {
+            if (color.at(startVertex) != Color::White)
             {
-                return true;
+                continue;
+            }
+
+            dfsStack.push({startVertex, false});
+
+            while (!dfsStack.empty())
+            {
+                auto & [v, expanded] = dfsStack.top();
+
+                if (!expanded)
+                {
+                    expanded = true;
+                    color[v] = Color::Gray;
+
+                    for (auto dep : vertices)
+                    {
+                        if (!graph.isDirectlyDependingOn(v, dep))
+                        {
+                            continue;
+                        }
+                        if (color.at(dep) == Color::Gray)
+                        {
+                            return true; // back-edge → cycle
+                        }
+                        if (color.at(dep) == Color::White)
+                        {
+                            dfsStack.push({dep, false});
+                        }
+                    }
+                }
+                else
+                {
+                    color[v] = Color::Black;
+                    dfsStack.pop();
+                }
             }
         }
         return false;

@@ -183,34 +183,42 @@ namespace gladius
     void ComputeCore::generateContourQuadtree(nodes::SliceParameter const & sliceParameter)
     {
         ProfileFunction
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        // Ensure GPU distance map buffers are allocated
-        m_resources->requestDistanceMaps();
-        m_primitives->write();
+        // --- GPU phase: acquire compute mutex, render SDF, copy data to local buffers ---
+        std::vector<cl_float2> localSdfData;
+        int sdfWidth = 0;
+        int sdfHeight = 0;
+        float xMin = 0.0f, yMin = 0.0f, xMax = 0.0f, yMax = 0.0f;
 
-        // Compute a 2D float SDF slice at the target z height
-        // Note: renderLayers uses AM_HYBRID internally; this is acceptable since near-surface
-        // pixels (which we care about) still receive full model evaluation via branchThreshold.
-        m_programs.getSlicerProgram()->renderLayers(*m_primitives, 0.0f, sliceParameter.zHeight_mm);
-
-        // After renderLayers(), DistanceMipMaps.back() contains CPU-side float SDF values.
-        // Each pixel stores cl_float2 where .x = signed distance value.
-        auto const & sdfImage = *m_resources->getDistanceMipMaps().back();
-        auto const & sdfData = sdfImage.getData();
-        auto const sdfWidth = static_cast<int>(sdfImage.getWidth());
-        auto const sdfHeight = static_cast<int>(sdfImage.getHeight());
-
-        if (sdfData.empty() || sdfWidth < 2 || sdfHeight < 2)
         {
-            return;
-        }
+            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto const clipArea = m_resources->getClippingArea(); // {xmin, ymin, xmax, ymax}
-        float const xMin = clipArea.x;
-        float const yMin = clipArea.y;
-        float const xMax = clipArea.z;
-        float const yMax = clipArea.w;
+            m_resources->requestDistanceMaps();
+            m_primitives->write();
+
+            m_programs.getSlicerProgram()->renderLayers(
+                *m_primitives, 0.0f, sliceParameter.zHeight_mm);
+
+            auto const & sdfImage = *m_resources->getDistanceMipMaps().back();
+            sdfWidth = static_cast<int>(sdfImage.getWidth());
+            sdfHeight = static_cast<int>(sdfImage.getHeight());
+
+            if (sdfImage.getData().empty() || sdfWidth < 2 || sdfHeight < 2)
+            {
+                return;
+            }
+
+            // Copy SDF data so we can release the GPU mutex
+            localSdfData = sdfImage.getData();
+
+            auto const clipArea = m_resources->getClippingArea();
+            xMin = clipArea.x;
+            yMin = clipArea.y;
+            xMax = clipArea.z;
+            yMax = clipArea.w;
+        }
+        // --- m_computeMutex released — UI thread is unblocked ---
+
         float const domainW = xMax - xMin;
         float const domainH = yMax - yMin;
 
@@ -219,8 +227,7 @@ namespace gladius
             return;
         }
 
-        // SDF function: bilinear interpolation from the GPU-computed 2D SDF grid.
-        // Pixel (i,j) maps to world pos: x = xMin + i*domainW/(W-1), y = yMin + j*domainH/(H-1)
+        // SDF function: bilinear interpolation from the local copy of the GPU SDF grid.
         auto const sdfFunc = [&](Eigen::Vector2f const & pos) -> float
         {
             float const px = (pos.x() - xMin) / domainW * static_cast<float>(sdfWidth - 1);
@@ -239,10 +246,10 @@ namespace gladius
                        static_cast<std::size_t>(x);
             };
 
-            float const v00 = sdfData[idx(ix,  iy )].x;
-            float const v10 = sdfData[idx(ix1, iy )].x;
-            float const v01 = sdfData[idx(ix,  iy1)].x;
-            float const v11 = sdfData[idx(ix1, iy1)].x;
+            float const v00 = localSdfData[idx(ix,  iy )].x;
+            float const v10 = localSdfData[idx(ix1, iy )].x;
+            float const v01 = localSdfData[idx(ix,  iy1)].x;
+            float const v11 = localSdfData[idx(ix1, iy1)].x;
 
             return v00 * (1.0f - tx) * (1.0f - ty) + v10 * tx * (1.0f - ty) +
                    v01 * (1.0f - tx) * ty           + v11 * tx * ty;
