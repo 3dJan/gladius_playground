@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Document.h"
+#include "EnvUtils.h"
 #include "EventLogger.h"
 #include "ComputeContext.h"
 #include "io/CancellationToken.h"
@@ -90,8 +91,7 @@ namespace gladius::io::tests
     TEST_F(ExportCancellation_Test, ManifoldExporter_WithCancellation_StopsQuickly)
     {
         // Check if GPU tests should run
-        char const * const envVar = std::getenv("GLADIUS_RUN_GPU_TESTS");
-        if (envVar == nullptr || std::string(envVar) != "1")
+        if (!gladius::isEnvVarSet("GLADIUS_RUN_GPU_TESTS"))
         {
             GTEST_SKIP() << "GPU tests disabled (set GLADIUS_RUN_GPU_TESTS=1 to enable)";
         }

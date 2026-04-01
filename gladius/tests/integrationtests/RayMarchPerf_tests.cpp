@@ -8,6 +8,7 @@
 #include <filesystem>
 
 #include "Document.h"
+#include "EnvUtils.h"
 #include "compute/ComputeCore.h"
 #include "compute/Rendering.h"
 #include "EventLogger.h"
@@ -35,8 +36,7 @@ namespace gladius::tests
             }
 
             // Skip if GPU tests disabled
-            char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
-            if (!env || std::string(env) != "1")
+            if (!gladius::isEnvVarSet("GLADIUS_RUN_GPU_TESTS"))
             {
                 GTEST_SKIP() << "GPU tests disabled; set GLADIUS_RUN_GPU_TESTS=1 to enable";
             }

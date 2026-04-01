@@ -6,6 +6,7 @@
 
 #include "ComputeContext.h"
 #include "Document.h"
+#include "EnvUtils.h"
 #include "EventLogger.h"
 #include "io/3mf/ShellGenerator.h"
 #include "io/3mf/FilamentOpticalProperties.h"
@@ -22,7 +23,6 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -80,8 +80,7 @@ namespace gladius_tests::shell_mesh_quality
 
         [[nodiscard]] bool gpuTestsEnabled()
         {
-            char const * const env = std::getenv("GLADIUS_SKIP_GPU_TESTS");
-            if (env != nullptr && std::string(env) == "1")
+            if (gladius::isEnvVarSet("GLADIUS_SKIP_GPU_TESTS"))
             {
                 return false;
             }

@@ -409,11 +409,12 @@ namespace gladius::io
         std::atomic<bool> hasOutOfRangeIndex{false};
 
         #pragma omp parallel for schedule(static)
-        for (std::size_t fi = 0U; fi < numFaces; ++fi)
+        for (std::ptrdiff_t fi = 0; fi < static_cast<std::ptrdiff_t>(numFaces); ++fi)
         {
-            auto const idxA = static_cast<std::size_t>(repairedIndices[fi * 3U + 0U]);
-            auto const idxB = static_cast<std::size_t>(repairedIndices[fi * 3U + 1U]);
-            auto const idxC = static_cast<std::size_t>(repairedIndices[fi * 3U + 2U]);
+            auto const base = static_cast<std::size_t>(fi) * 3U;
+            auto const idxA = static_cast<std::size_t>(repairedIndices[base + 0U]);
+            auto const idxB = static_cast<std::size_t>(repairedIndices[base + 1U]);
+            auto const idxC = static_cast<std::size_t>(repairedIndices[base + 2U]);
 
             if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
             {

@@ -540,6 +540,14 @@ namespace gladius
             return false;
         }
 
+        // Guard against a null native handle before entering the driver.
+        // A non-null handle from a crashed/detached driver can still cause an
+        // SEH access-violation that bypasses catch(...) on MSVC.
+        if (queue() == nullptr)
+        {
+            return false;
+        }
+
         try
         {
             // Try to get queue info to check if it's still valid

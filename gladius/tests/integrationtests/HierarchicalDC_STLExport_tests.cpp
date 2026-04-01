@@ -7,6 +7,7 @@
 
 #include "ComputeContext.h"
 #include "Document.h"
+#include "EnvUtils.h"
 #include "EventLogger.h"
 #include "HierarchicalDualContouring.h"
 #include "io/HierarchicalDualContouringStlExporter.h"
@@ -19,7 +20,6 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <sstream>
@@ -77,8 +77,7 @@ namespace gladius_tests::hierarchical_dc_mesh
           [[nodiscard]] bool gpuTestsEnabled()
           {
             // Allow CI opt-out via GLADIUS_SKIP_GPU_TESTS=1
-            char const * const env = std::getenv("GLADIUS_SKIP_GPU_TESTS");
-            if (env != nullptr && std::string(env) == "1")
+            if (gladius::isEnvVarSet("GLADIUS_SKIP_GPU_TESTS"))
             {
                 return false;
             }
