@@ -17,5 +17,7 @@ namespace gladius::nodes
         float zHeight_mm = 0.f;
         bool adoptGradientBased = true;
         float offset = 0.f;
+        bool useAdaptiveContour = false;         ///< Use memory-efficient quadtree contour extraction
+        float minFeatureSize_mm = 0.2f;          ///< Minimum feature size for adaptive refinement (mm)
     };
 }

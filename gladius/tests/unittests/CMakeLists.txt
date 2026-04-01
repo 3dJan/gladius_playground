@@ -42,7 +42,7 @@ endif()
 set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD 20)
 set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD_REQUIRED ON)
 
-target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../components/nanovdb)
+target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../src/slicer ../../components/nanovdb)
 
 # OpenGL is needed because gladius_lib links imgui which uses OpenGL
 find_package(OpenGL REQUIRED)

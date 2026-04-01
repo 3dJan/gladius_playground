@@ -33,6 +33,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/contour
     ${CMAKE_CURRENT_SOURCE_DIR}/nodes
     ${CMAKE_CURRENT_SOURCE_DIR}/compute
+    ${CMAKE_CURRENT_SOURCE_DIR}/slicer
 )
 
 set (INCLUDE_PATHS
@@ -42,6 +43,7 @@ set (INCLUDE_PATHS
     ${CMAKE_CURRENT_SOURCE_DIR}/contour
     ${CMAKE_CURRENT_SOURCE_DIR}/nodes
     ${CMAKE_CURRENT_SOURCE_DIR}/compute
+    ${CMAKE_CURRENT_SOURCE_DIR}/slicer
     ${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders
     ${CMAKE_CURRENT_SOURCE_DIR}/components
     ${OPENMESH_INCLUDE_DIRS}

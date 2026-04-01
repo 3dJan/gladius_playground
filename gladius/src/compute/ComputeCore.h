@@ -703,6 +703,7 @@ namespace gladius
         void generateContours(nodes::SliceParameter sliceParameter);
         void generateContourInternal(nodes::SliceParameter const & sliceParameter);
         void generateContourMarchingSquare(nodes::SliceParameter const & sliceParameter);
+        void generateContourQuadtree(nodes::SliceParameter const & sliceParameter);
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
         SharedContourExtractor m_contour;

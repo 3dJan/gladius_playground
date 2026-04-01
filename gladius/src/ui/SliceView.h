@@ -72,7 +72,9 @@ namespace gladius::ui
         bool m_renderSourceVertices = false;
         bool m_showJumps = false;
         bool m_showSelfIntersections = false;
-        bool m_hideDeveloperTools = true;
+        bool m_hideDeveloperTools = false;
+        bool m_useAdaptiveContour = false;       ///< Toggle for quadtree-based contour extraction
+        float m_minFeatureSize_mm = 0.2f;        ///< Min feature size for adaptive contour (mm)
 
         std::optional<PolyLines> m_contours;
         bool m_contoursNeedRefetch = false;

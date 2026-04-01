@@ -64,6 +64,23 @@ namespace gladius::ui
                 ImGui::Checkbox("All vertices ", &m_renderSourceVertices);
                 ImGui::SameLine();
                 ImGui::Checkbox("Jumps ", &m_showJumps);
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Adaptive contour", &m_useAdaptiveContour))
+                {
+                    core.invalidateContourCache();
+                    m_contoursNeedRefetch = true;
+                }
+                if (m_useAdaptiveContour)
+                {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    if (ImGui::InputFloat("Min feature (mm)", &m_minFeatureSize_mm, 0.0f, 0.0f, "%.3f"))
+                    {
+                        m_minFeatureSize_mm = std::max(0.01f, m_minFeatureSize_mm);
+                        core.invalidateContourCache();
+                        m_contoursNeedRefetch = true;
+                    }
+                }
             }
             if (m_distanceMeasurement.end.has_value() && m_distanceMeasurement.start.has_value())
             {
@@ -291,6 +308,8 @@ namespace gladius::ui
             {
                 auto sliceParameter = contourOnlyParameter();
                 sliceParameter.zHeight_mm = core.getSliceHeight();
+                sliceParameter.useAdaptiveContour = m_useAdaptiveContour;
+                sliceParameter.minFeatureSize_mm = m_minFeatureSize_mm;
                 if (core.requestContourUpdate(sliceParameter))
                 {
                     m_contoursNeedRefetch = true;

@@ -32,6 +32,7 @@
 #include "gpgpu.h"
 #include "nodes/OptimizeOutputs.h"
 #include "nodes/Validator.h"
+#include "slicer/QuadtreeContourExtractor.h"
 
 namespace gladius
 {
@@ -126,7 +127,14 @@ namespace gladius
             .approximation = AM_FULL_MODEL;
         m_contour->clear();
 
-        generateContourMarchingSquare(sliceParameter);
+        if (sliceParameter.useAdaptiveContour)
+        {
+            generateContourQuadtree(sliceParameter);
+        }
+        else
+        {
+            generateContourMarchingSquare(sliceParameter);
+        }
     }
 
     void ComputeCore::generateContourMarchingSquare(nodes::SliceParameter const & sliceParameter)
@@ -168,6 +176,133 @@ namespace gladius
                 }
             }
         }
+        m_contour->runPostProcessing();
+        m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
+    }
+
+    void ComputeCore::generateContourQuadtree(nodes::SliceParameter const & sliceParameter)
+    {
+        ProfileFunction
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        // Ensure GPU distance map buffers are allocated
+        m_resources->requestDistanceMaps();
+        m_primitives->write();
+
+        // Compute a 2D float SDF slice at the target z height
+        // Note: renderLayers uses AM_HYBRID internally; this is acceptable since near-surface
+        // pixels (which we care about) still receive full model evaluation via branchThreshold.
+        m_programs.getSlicerProgram()->renderLayers(*m_primitives, 0.0f, sliceParameter.zHeight_mm);
+
+        // After renderLayers(), DistanceMipMaps.back() contains CPU-side float SDF values.
+        // Each pixel stores cl_float2 where .x = signed distance value.
+        auto const & sdfImage = *m_resources->getDistanceMipMaps().back();
+        auto const & sdfData = sdfImage.getData();
+        auto const sdfWidth = static_cast<int>(sdfImage.getWidth());
+        auto const sdfHeight = static_cast<int>(sdfImage.getHeight());
+
+        if (sdfData.empty() || sdfWidth < 2 || sdfHeight < 2)
+        {
+            return;
+        }
+
+        auto const clipArea = m_resources->getClippingArea(); // {xmin, ymin, xmax, ymax}
+        float const xMin = clipArea.x;
+        float const yMin = clipArea.y;
+        float const xMax = clipArea.z;
+        float const yMax = clipArea.w;
+        float const domainW = xMax - xMin;
+        float const domainH = yMax - yMin;
+
+        if (domainW <= 0.0f || domainH <= 0.0f)
+        {
+            return;
+        }
+
+        // SDF function: bilinear interpolation from the GPU-computed 2D SDF grid.
+        // Pixel (i,j) maps to world pos: x = xMin + i*domainW/(W-1), y = yMin + j*domainH/(H-1)
+        auto const sdfFunc = [&](Eigen::Vector2f const & pos) -> float
+        {
+            float const px = (pos.x() - xMin) / domainW * static_cast<float>(sdfWidth - 1);
+            float const py = (pos.y() - yMin) / domainH * static_cast<float>(sdfHeight - 1);
+
+            int const ix  = std::clamp(static_cast<int>(px), 0, sdfWidth - 1);
+            int const iy  = std::clamp(static_cast<int>(py), 0, sdfHeight - 1);
+            int const ix1 = std::min(ix + 1, sdfWidth - 1);
+            int const iy1 = std::min(iy + 1, sdfHeight - 1);
+
+            float const tx = px - static_cast<float>(ix);
+            float const ty = py - static_cast<float>(iy);
+
+            auto const idx = [&](int x, int y) {
+                return static_cast<std::size_t>(y) * static_cast<std::size_t>(sdfWidth) +
+                       static_cast<std::size_t>(x);
+            };
+
+            float const v00 = sdfData[idx(ix,  iy )].x;
+            float const v10 = sdfData[idx(ix1, iy )].x;
+            float const v01 = sdfData[idx(ix,  iy1)].x;
+            float const v11 = sdfData[idx(ix1, iy1)].x;
+
+            return v00 * (1.0f - tx) * (1.0f - ty) + v10 * tx * (1.0f - ty) +
+                   v01 * (1.0f - tx) * ty           + v11 * tx * ty;
+        };
+
+        // Compute max depth so that the finest cells match the native GPU resolution
+        // (one cell per GPU pixel) bounded by minFeatureSize.
+        float const nativeCellSize = domainW / static_cast<float>(sdfWidth - 1);
+        float const targetCellSize =
+          std::max(sliceParameter.minFeatureSize_mm, nativeCellSize * 2.0f);
+        float const domainSize = std::max(domainW, domainH);
+        std::size_t maxDepth = 3U;
+        while (maxDepth < 14U &&
+               (domainSize / static_cast<float>(1U << maxDepth)) > targetCellSize)
+        {
+            ++maxDepth;
+        }
+
+        slicer::BoundingBox2D const quadBounds{Eigen::Vector2f{xMin, yMin},
+                                               Eigen::Vector2f{xMax, yMax}};
+
+        slicer::MortonQuadtreeConfig cfg;
+        cfg.initialDepth        = 3U;
+        cfg.maxDepth            = maxDepth;
+        cfg.isoValue            = 0.0f;
+        cfg.minFeatureSize      = sliceParameter.minFeatureSize_mm;
+        cfg.enableAdaptiveRefinement = false;
+        cfg.maxNodes            = 2000000U;
+        cfg.refinementPasses    = 1U;
+
+        slicer::MortonQuadtree quadtree(quadBounds);
+        quadtree.build(cfg);
+
+        // Iterative deepening: populate SDF at leaf corners → refine → repeat
+        for (std::size_t depth = cfg.initialDepth; depth < maxDepth; ++depth)
+        {
+            slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
+            quadtree.refineAdaptively(cfg);
+        }
+        slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
+
+        // Extract polylines from the adaptive quadtree
+        float const snapTol = std::max(1e-4f, nativeCellSize * 0.1f);
+        slicer::QuadtreeContourExtractor const extractor;
+        auto const sparsePolyLines = extractor.extractPolyLines(quadtree, 0.0f, snapTol);
+
+        // Convert SparsePolyLine → PolyLine and insert into ContourExtractor
+        auto & polylines = m_contour->getContour();
+        for (auto const & sparsePoly : sparsePolyLines)
+        {
+            if (sparsePoly.vertices.size() < 2)
+            {
+                continue;
+            }
+            PolyLine poly;
+            poly.isClosed = sparsePoly.isClosed;
+            poly.vertices.assign(sparsePoly.vertices.begin(), sparsePoly.vertices.end());
+            polylines.push_back(std::move(poly));
+        }
+
         m_contour->runPostProcessing();
         m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
     }
