@@ -35,7 +35,14 @@ namespace gladius::tests
             }
 
             // Skip if GPU tests disabled
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
             char const * const env = std::getenv("GLADIUS_RUN_GPU_TESTS");
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
             if (!env || std::string(env) != "1")
             {
                 GTEST_SKIP() << "GPU tests disabled; set GLADIUS_RUN_GPU_TESTS=1 to enable";

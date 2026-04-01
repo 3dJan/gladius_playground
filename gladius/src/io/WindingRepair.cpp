@@ -59,6 +59,15 @@ namespace
         key ^= key >> 31U;
         return static_cast<std::size_t>(key);
     }
+
+    struct EdgeSlot
+    {
+        static constexpr std::uint64_t EMPTY_KEY = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t key = EMPTY_KEY;
+        std::uint32_t triId = 0U;
+        std::uint8_t dir = 0U;
+        bool matched = false;
+    };
 } // anonymous namespace
 
 namespace gladius::io
@@ -100,15 +109,6 @@ namespace gladius::io
         // Build triangle adjacency using a flat open-addressing hash table.
         // This reduces complexity from O(N log N) (sort-based) to amortized O(N)
         // with cache-friendly linear probing and zero per-element heap allocations.
-        constexpr std::uint64_t EMPTY_KEY = std::numeric_limits<std::uint64_t>::max();
-
-        struct EdgeSlot
-        {
-            std::uint64_t key = EMPTY_KEY;
-            std::uint32_t triId = 0U;
-            std::uint8_t dir = 0U;
-            bool matched = false;
-        };
 
         // Size the table to the next power of 2 >= 2 * expected unique edges.
         // For a manifold mesh: unique edges ≈ triCount * 3 / 2.
@@ -124,7 +124,7 @@ namespace gladius::io
         auto findSlot = [&hashTable, tableSize](std::uint64_t key) -> std::size_t
         {
             std::size_t idx = hashEdgeKey(key) & (tableSize - 1U);
-            while (hashTable[idx].key != EMPTY_KEY && hashTable[idx].key != key)
+            while (hashTable[idx].key != EdgeSlot::EMPTY_KEY && hashTable[idx].key != key)
             {
                 idx = (idx + 1U) & (tableSize - 1U);
             }
@@ -154,7 +154,7 @@ namespace gladius::io
                 std::size_t const idx = findSlot(key);
                 EdgeSlot& slot = hashTable[idx];
 
-                if (slot.key == EMPTY_KEY)
+                if (slot.key == EdgeSlot::EMPTY_KEY)
                 {
                     // First time seeing this edge — insert.
                     slot.key = key;

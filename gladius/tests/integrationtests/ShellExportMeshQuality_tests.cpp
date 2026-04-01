@@ -80,7 +80,14 @@ namespace gladius_tests::shell_mesh_quality
 
         [[nodiscard]] bool gpuTestsEnabled()
         {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
             char const * const env = std::getenv("GLADIUS_SKIP_GPU_TESTS");
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
             if (env != nullptr && std::string(env) == "1")
             {
                 return false;

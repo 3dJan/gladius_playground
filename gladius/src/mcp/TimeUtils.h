@@ -43,7 +43,11 @@ namespace gladius::mcp
         int millis = 0;
 
         // Try full format with milliseconds first: "2026-03-17T10:00:00.123Z"
+#ifdef _WIN32
+        if (sscanf_s(iso.c_str(),
+#else
         if (std::sscanf(iso.c_str(),
+#endif
                         "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ",
                         &tm.tm_year,
                         &tm.tm_mon,
@@ -54,7 +58,11 @@ namespace gladius::mcp
                         &millis) < 6)
         {
             // Fallback: try without milliseconds: "2026-03-17T10:00:00Z"
+#ifdef _WIN32
+            if (sscanf_s(iso.c_str(),
+#else
             if (std::sscanf(iso.c_str(),
+#endif
                             "%4d-%2d-%2dT%2d:%2d:%2dZ",
                             &tm.tm_year,
                             &tm.tm_mon,

@@ -187,13 +187,20 @@ namespace gladius::compute
                 mesh.indices = std::move(dedupedIndices);
             }
 
+            [[nodiscard]] bool hasEnvVar(char const* name)
+            {
+                std::size_t len = 0;
+                getenv_s(&len, nullptr, 0, name);
+                return len > 0;
+            }
+
             [[nodiscard]] bool shouldRepairNonManifoldEdges()
             {
                 // Keep this opt-in / strict-mode only: building an edge incidence map over
                 // millions of triangles is expensive. Tests enable strict enforcement via
                 // GLADIUS_REQUIRE_WATERTIGHT=1.
-                return (std::getenv("GLADIUS_REQUIRE_WATERTIGHT") != nullptr) ||
-                       (std::getenv("GLADIUS_MDC_REPAIR_NONMANIFOLD_EDGES") != nullptr);
+                return hasEnvVar("GLADIUS_REQUIRE_WATERTIGHT") ||
+                       hasEnvVar("GLADIUS_MDC_REPAIR_NONMANIFOLD_EDGES");
             }
 
             struct EdgeIncidence
@@ -528,7 +535,7 @@ namespace gladius::compute
 
             [[nodiscard]] bool debugMdcTopologyStagesEnabled()
             {
-                return std::getenv("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES") != nullptr;
+                return hasEnvVar("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES");
             }
 
             [[nodiscard]] TopologyStats computeTopologyStats(ManifoldDualContouringMesh const & mesh)
@@ -735,7 +742,7 @@ namespace gladius::compute
         m_cachedBboxMax = originalBboxMax + Eigen::Vector3f(margin, margin, margin);
         m_cachedBboxSize = m_cachedBboxMax - m_cachedBboxMin;
 
-        if (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
+        if (hasEnvVar("GLADIUS_DEBUG_MDC_CONFIG"))
         {
             std::cout << "MDC generateMesh config: initialDepth=" << m_config.initialDepth
                       << ", maxDepth=" << m_config.maxDepth
@@ -2824,7 +2831,7 @@ namespace gladius::compute
             return;
         }
 
-        bool const debugEnabled = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        bool const debugEnabled = hasEnvVar("GLADIUS_DEBUG_MDC_CONFIG");
 
         // ----------------------------------------------------------------
         // Pre-pass: weld near-coincident boundary vertices (index remap only)

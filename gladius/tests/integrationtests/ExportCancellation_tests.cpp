@@ -90,7 +90,14 @@ namespace gladius::io::tests
     TEST_F(ExportCancellation_Test, ManifoldExporter_WithCancellation_StopsQuickly)
     {
         // Check if GPU tests should run
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
         char const * const envVar = std::getenv("GLADIUS_RUN_GPU_TESTS");
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
         if (envVar == nullptr || std::string(envVar) != "1")
         {
             GTEST_SKIP() << "GPU tests disabled (set GLADIUS_RUN_GPU_TESTS=1 to enable)";
