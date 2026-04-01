@@ -234,6 +234,27 @@ namespace gladius::slicer
          */
         void clear();
 
+        /**
+         * @brief Find the leaf node that spatially contains grid position (gx, gy) at queryDepth.
+         *
+         * Walks from @p queryDepth up to the root until a leaf is found.
+         * @return Pointer to the containing leaf, or nullptr if out of bounds.
+         */
+        [[nodiscard]] QuadNode const* findLeafContaining(
+            std::uint32_t gx, std::uint32_t gy, std::uint8_t queryDepth) const;
+
+        /**
+         * @brief Ensure all face-neighbors of intersecting leaves at maxDepth also exist at maxDepth.
+         *
+         * This eliminates T-junctions by forcing every cell that shares an edge with an
+         * intersecting leaf to be at the same resolution.  After calling this, the caller
+         * must re-populate corner values for the newly created leaves.
+         *
+         * @param config Configuration (maxDepth, maxNodes).
+         * @return Number of new leaf nodes created.
+         */
+        std::size_t ensureBalancedSurface(MortonQuadtreeConfig const& config);
+
     private:
         /**
          * @brief Create the root node.
@@ -263,6 +284,18 @@ namespace gladius::slicer
          * @return True if curvature is high
          */
         [[nodiscard]] bool hasHighCurvature(QuadNode const& node, float threshold) const;
+
+        /**
+         * @brief Recursively subdivide a node (and its descendants) down to targetDepth.
+         */
+        void subdivideToDepth(std::size_t nodeIndex, std::uint8_t targetDepth);
+
+        /**
+         * @brief Find the index of the leaf containing grid coords (gx, gy) at queryDepth.
+         * @return Index into m_nodes or SIZE_MAX if not found.
+         */
+        [[nodiscard]] std::size_t findLeafIndexContaining(
+            std::uint32_t gx, std::uint32_t gy, std::uint8_t queryDepth) const;
 
         BoundingBox2D m_bounds;                                    ///< Bounding box of the tree
         std::vector<QuadNode> m_nodes;                             ///< All nodes in the tree

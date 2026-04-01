@@ -73,6 +73,8 @@ namespace gladius::ui
                 if (m_useAdaptiveContour)
                 {
                     ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "(memory-efficient)");
+                    ImGui::SameLine();
                     ImGui::SetNextItemWidth(80.0f);
                     if (ImGui::InputFloat("Min feature (mm)", &m_minFeatureSize_mm, 0.0f, 0.0f, "%.3f"))
                     {

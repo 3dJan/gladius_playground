@@ -118,6 +118,18 @@ namespace gladius::slicer
                                         float isoValue,
                                         std::vector<ContourSegment>& outSegments);
 
+        /**
+         * @brief Detect self-intersections in a set of polylines.
+         *
+         * Checks all non-adjacent segment pairs for geometric crossings.
+         * O(n²) in total segment count — acceptable for typical contour sizes.
+         *
+         * @param polylines Polylines to check.
+         * @return Number of self-intersecting segment pairs found.
+         */
+        [[nodiscard]] static std::size_t detectSelfIntersections(
+            std::vector<SparsePolyLine> const& polylines);
+
     private:
         /// Interpolate an edge crossing position.
         static Eigen::Vector2f computeEdgeCrossing(BoundingBox2D const& cellBounds,

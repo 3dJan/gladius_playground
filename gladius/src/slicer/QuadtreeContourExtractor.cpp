@@ -328,6 +328,107 @@ namespace gladius::slicer
     }
 
     // ============================================================================
+    // Self-intersection detection
+    // ============================================================================
+
+    namespace
+    {
+        /// 2D cross product of (b-a) × (c-a).
+        inline float cross2d(Eigen::Vector2f const& a,
+                             Eigen::Vector2f const& b,
+                             Eigen::Vector2f const& c)
+        {
+            return (b.x() - a.x()) * (c.y() - a.y()) -
+                   (b.y() - a.y()) * (c.x() - a.x());
+        }
+
+        /// Test whether segment (p1,p2) crosses segment (p3,p4) (proper intersection only).
+        inline bool segmentsCross(Eigen::Vector2f const& p1, Eigen::Vector2f const& p2,
+                                  Eigen::Vector2f const& p3, Eigen::Vector2f const& p4)
+        {
+            float const d1 = cross2d(p3, p4, p1);
+            float const d2 = cross2d(p3, p4, p2);
+            float const d3 = cross2d(p1, p2, p3);
+            float const d4 = cross2d(p1, p2, p4);
+
+            if (((d1 > 0.0F && d2 < 0.0F) || (d1 < 0.0F && d2 > 0.0F)) &&
+                ((d3 > 0.0F && d4 < 0.0F) || (d3 < 0.0F && d4 > 0.0F)))
+            {
+                return true;
+            }
+            return false;
+        }
+    } // namespace
+
+    std::size_t QuadtreeContourExtractor::detectSelfIntersections(
+        std::vector<SparsePolyLine> const& polylines)
+    {
+        // Flatten all segments from all polylines into a single list with polyline ID.
+        struct IndexedSegment
+        {
+            Eigen::Vector2f a;
+            Eigen::Vector2f b;
+            std::size_t polyIdx;
+            std::size_t segIdx;   ///< segment index within polyline
+        };
+
+        std::vector<IndexedSegment> allSegs;
+        for (std::size_t pi = 0U; pi < polylines.size(); ++pi)
+        {
+            auto const& verts = polylines[pi].vertices;
+            if (verts.size() < 2U)
+            {
+                continue;
+            }
+            for (std::size_t si = 0U; si + 1U < verts.size(); ++si)
+            {
+                allSegs.push_back({verts[si], verts[si + 1U], pi, si});
+            }
+        }
+
+        std::size_t count = 0U;
+
+        for (std::size_t i = 0U; i < allSegs.size(); ++i)
+        {
+            for (std::size_t j = i + 1U; j < allSegs.size(); ++j)
+            {
+                auto const& si = allSegs[i];
+                auto const& sj = allSegs[j];
+
+                // Skip adjacent segments within the same polyline (they share an endpoint)
+                if (si.polyIdx == sj.polyIdx)
+                {
+                    auto const diff = (si.segIdx > sj.segIdx)
+                                        ? (si.segIdx - sj.segIdx)
+                                        : (sj.segIdx - si.segIdx);
+                    if (diff <= 1U)
+                    {
+                        continue;
+                    }
+                    // Also skip first-last adjacency for closed polylines
+                    auto const& poly = polylines[si.polyIdx];
+                    if (poly.isClosed && poly.vertices.size() >= 3U)
+                    {
+                        std::size_t const lastSeg = poly.vertices.size() - 2U;
+                        if ((si.segIdx == 0U && sj.segIdx == lastSeg) ||
+                            (sj.segIdx == 0U && si.segIdx == lastSeg))
+                        {
+                            continue;
+                        }
+                    }
+                }
+
+                if (segmentsCross(si.a, si.b, sj.a, sj.b))
+                {
+                    ++count;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    // ============================================================================
     // Memory estimation helpers
     // ============================================================================
 

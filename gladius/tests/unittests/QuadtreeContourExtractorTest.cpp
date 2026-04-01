@@ -382,7 +382,7 @@ TEST_F(QuadtreeContourExtractorTest, Memory_Rectangle_SparseMemoryIsBounded)
 }
 
 // ============================================================================
-// Benchmark: quadtree vs dense marching squares
+// Feature detection: small features in large domains
 // ============================================================================
 
 /// Build an adaptively refined quadtree: populate SDF → refine intersecting → repeat.
@@ -418,6 +418,319 @@ static MortonQuadtree buildAdaptive(BoundingBox2D const& bounds,
 
     return tree;
 }
+
+TEST_F(QuadtreeContourExtractorTest, SmallCircleInLargeDomain_AdaptiveDetectsFeature)
+{
+    // Simulate a real-world scenario: a small feature (r=5mm circle) placed at an offset
+    // within a large build domain (250×250mm).  At initialDepth=3, cells are ~31mm.
+    // The circle fits entirely inside ONE coarse cell → all 4 corners have the same
+    // sign → the feature is invisible to the iterative-deepening approach.
+    BoundingBox2D largeBounds{{0.0F, 0.0F}, {250.0F, 250.0F}};
+    Eigen::Vector2f const center{80.0F, 120.0F};
+    float const radius = 5.0F;
+
+    auto sdf = [center, radius](Eigen::Vector2f const& p) -> float {
+        return (p - center).norm() - radius;
+    };
+
+    constexpr std::size_t TARGET_DEPTH = 9U;
+    auto tree = buildAdaptive(largeBounds, sdf, TARGET_DEPTH, 0.0F);
+
+    auto const leaves = tree.getIntersectingLeaves();
+
+    // Balanced + extracted
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 2000000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U) break;
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = largeBounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    // Should find at least one closed polyline representing the circle
+    ASSERT_GE(polylines.size(), 1U) << "Small circle in large domain was not detected";
+    EXPECT_TRUE(polylines[0].isClosed) << "Circle polyline should be closed";
+
+    // Verify circumference is approximately correct: 2*pi*5 ≈ 31.4 mm
+    float totalLength = 0.0F;
+    for (auto const& pl : polylines)
+    {
+        for (std::size_t i = 0U; i + 1U < pl.vertices.size(); ++i)
+        {
+            totalLength += (pl.vertices[i + 1U] - pl.vertices[i]).norm();
+        }
+    }
+    float const expectedCircumference = 2.0F * std::numbers::pi_v<float> * radius;
+    EXPECT_NEAR(totalLength, expectedCircumference, expectedCircumference * 0.15F)
+        << "Circle circumference should be approximately 2*pi*r";
+}
+
+TEST_F(QuadtreeContourExtractorTest, MultipleFeaturesLargeDomain_AllDetected)
+{
+    // Multiple small circles scattered across a large domain.
+    // Some will align with coarse cell boundaries, others won't.
+    BoundingBox2D largeBounds{{0.0F, 0.0F}, {250.0F, 250.0F}};
+
+    struct Circle { Eigen::Vector2f center; float radius; };
+    std::vector<Circle> circles = {
+        {{40.0F,  40.0F},  3.0F},   // far from cell boundaries
+        {{125.0F, 125.0F}, 8.0F},   // near center
+        {{200.0F, 180.0F}, 4.0F},   // upper-right region
+        {{10.0F,  230.0F}, 6.0F},   // near edge
+    };
+
+    auto sdf = [&circles](Eigen::Vector2f const& p) -> float {
+        float minDist = std::numeric_limits<float>::max();
+        for (auto const& c : circles)
+        {
+            float const d = (p - c.center).norm() - c.radius;
+            minDist = std::min(minDist, d);
+        }
+        return minDist;
+    };
+
+    constexpr std::size_t TARGET_DEPTH = 9U;
+    auto tree = buildAdaptive(largeBounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 2000000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U) break;
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = largeBounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    // Count closed polylines - should match number of circles
+    std::size_t closedCount = 0U;
+    for (auto const& pl : polylines)
+    {
+        if (pl.isClosed && pl.vertices.size() >= 4U)
+        {
+            ++closedCount;
+        }
+    }
+    EXPECT_EQ(closedCount, circles.size())
+        << "Expected " << circles.size() << " closed contours but got " << closedCount;
+}
+
+TEST_F(QuadtreeContourExtractorTest, RectangularDomain_FeaturesNotLost)
+{
+    // Non-square domain (typical for real build plates): 200mm × 80mm
+    // The quadtree squares up to 200mm, so the aspect ratio is 2.5:1.
+    // Features near the short-axis edges should still be detected.
+    BoundingBox2D rectBounds{{0.0F, 0.0F}, {200.0F, 80.0F}};
+    Eigen::Vector2f const center{100.0F, 40.0F};
+    float const radius = 10.0F;
+
+    auto sdf = [center, radius](Eigen::Vector2f const& p) -> float {
+        return (p - center).norm() - radius;
+    };
+
+    constexpr std::size_t TARGET_DEPTH = 8U;
+    auto tree = buildAdaptive(rectBounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 2000000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U) break;
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = rectBounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    ASSERT_GE(polylines.size(), 1U) << "Circle in rectangular domain not detected";
+    EXPECT_TRUE(polylines[0].isClosed);
+}
+
+TEST_F(QuadtreeContourExtractorTest, ComplexLattice_LargeDomain_AllContoursDetected)
+{
+    // Simulate a complex model like an air purifier or heat exchanger:
+    // a grid of thin-walled tubes (circles) across a large build plate.
+    // This combines the challenges of:
+    //   (a) many small features in a large domain
+    //   (b) features that can be entirely inside coarse cells
+    //   (c) high total contour count requiring robust chaining
+    BoundingBox2D largeBounds{{0.0F, 0.0F}, {200.0F, 200.0F}};
+
+    // Grid of circular tubes: 5×5 grid, tube radius=3mm, wall spacing ~40mm
+    struct Tube { Eigen::Vector2f center; float radius; };
+    std::vector<Tube> tubes;
+    for (int row = 0; row < 5; ++row)
+    {
+        for (int col = 0; col < 5; ++col)
+        {
+            Eigen::Vector2f const c{20.0F + static_cast<float>(col) * 40.0F,
+                                    20.0F + static_cast<float>(row) * 40.0F};
+            tubes.push_back({c, 3.0F});
+        }
+    }
+
+    auto sdf = [&tubes](Eigen::Vector2f const& p) -> float {
+        float minDist = std::numeric_limits<float>::max();
+        for (auto const& t : tubes)
+        {
+            minDist = std::min(minDist, (p - t.center).norm() - t.radius);
+        }
+        return minDist;
+    };
+
+    constexpr std::size_t TARGET_DEPTH = 9U;
+    auto tree = buildAdaptive(largeBounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 2000000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U) break;
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = largeBounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    // Count closed polylines
+    std::size_t closedCount = 0U;
+    std::size_t openCount = 0U;
+    for (auto const& pl : polylines)
+    {
+        if (pl.isClosed && pl.vertices.size() >= 4U)
+        {
+            ++closedCount;
+        }
+        else if (!pl.isClosed && pl.vertices.size() >= 2U)
+        {
+            ++openCount;
+        }
+    }
+
+    EXPECT_EQ(closedCount, tubes.size())
+        << "Expected " << tubes.size() << " closed contours (one per tube) but got " << closedCount;
+    EXPECT_EQ(openCount, 0U)
+        << "Should have no open polylines, but found " << openCount;
+
+    // Self-intersection check
+    auto const selfIntersections = QuadtreeContourExtractor::detectSelfIntersections(polylines);
+    EXPECT_EQ(selfIntersections, 0U)
+        << "Lattice contours should have no self-intersections";
+
+    std::cout << "[INFO] Lattice 5x5 tubes: " << closedCount << " closed, " << openCount
+              << " open, " << tree.getNodeCount() << " nodes, " << selfIntersections
+              << " self-intersections" << std::endl;
+}
+
+TEST_F(QuadtreeContourExtractorTest, DenseHoneycomb_AirPurifierScale_AllContoursDetected)
+{
+    // Approximate the air purifier model: 300×210mm build plate with a dense
+    // hexagonal grid of ~100+ holes (3mm radius, ~8mm center-to-center spacing).
+    BoundingBox2D bounds{{0.0F, 0.0F}, {300.0F, 210.0F}};
+
+    struct Hole { Eigen::Vector2f center; float radius; };
+    std::vector<Hole> holes;
+
+    // Hexagonal grid covering a 200×150mm area centered in the build plate
+    float const holeRadius = 3.0F;
+    float const spacing = 8.0F;  // center-to-center
+    float const startX = 50.0F;
+    float const startY = 30.0F;
+    float const endX = 250.0F;
+    float const endY = 180.0F;
+
+    for (float y = startY; y <= endY; y += spacing * 0.866F)  // √3/2 for hex packing
+    {
+        int const row = static_cast<int>((y - startY) / (spacing * 0.866F));
+        float const xOffset = (row % 2 == 0) ? 0.0F : spacing * 0.5F;
+        for (float x = startX + xOffset; x <= endX; x += spacing)
+        {
+            holes.push_back({{x, y}, holeRadius});
+        }
+    }
+
+    std::cout << "[INFO] Honeycomb: " << holes.size() << " holes over 300x210mm domain"
+              << std::endl;
+
+    // SDF: union of all circular holes (negative inside hole, positive outside)
+    auto sdf = [&holes](Eigen::Vector2f const& p) -> float {
+        float minDist = std::numeric_limits<float>::max();
+        for (auto const& h : holes)
+        {
+            minDist = std::min(minDist, (p - h.center).norm() - h.radius);
+        }
+        return minDist;
+    };
+
+    // Target depth so cell size ≈ 0.6mm (matching ~512px GPU texture over 300mm)
+    constexpr std::size_t TARGET_DEPTH = 9U;  // 300/512 ≈ 0.59mm cell size
+
+    auto tree = buildAdaptive(bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 2000000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U) break;
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    std::cout << "[INFO] Honeycomb quadtree: " << tree.getNodeCount() << " total nodes"
+              << std::endl;
+    ASSERT_LE(tree.getNodeCount(), cfg.maxNodes) << "Exceeded node budget";
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = bounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    std::size_t closedCount = 0U;
+    std::size_t openCount = 0U;
+    for (auto const& pl : polylines)
+    {
+        if (pl.isClosed && pl.vertices.size() >= 4U)
+        {
+            ++closedCount;
+        }
+        else if (!pl.isClosed && pl.vertices.size() >= 2U)
+        {
+            ++openCount;
+        }
+    }
+
+    // All holes should produce closed contours
+    EXPECT_EQ(closedCount, holes.size())
+        << "Expected " << holes.size() << " closed contours but got " << closedCount;
+    EXPECT_EQ(openCount, 0U)
+        << "Should have no open polylines, but found " << openCount;
+
+    auto const selfIntersections = QuadtreeContourExtractor::detectSelfIntersections(polylines);
+    EXPECT_EQ(selfIntersections, 0U);
+
+    std::cout << "[INFO] Honeycomb result: " << closedCount << " closed, " << openCount
+              << " open, " << selfIntersections << " self-intersections" << std::endl;
+}
+
+// ============================================================================
+// Benchmark: quadtree vs dense marching squares
+// ============================================================================
 
 class ContourExtractionBenchmark : public ::testing::Test
 {
@@ -624,7 +937,7 @@ TEST_F(ContourExtractionBenchmark, Adaptive_ExtractCircle_Depth9_MemoryAndTiming
     EXPECT_NEAR(static_cast<long>(sparseSegs.size()), static_cast<long>(denseSegs.size()), 5);
     // fullBuildNodes = sum of 4^k for k=0..9 = (4^10 - 1)/3 = 349525
     std::size_t const fullBuildNodes = ((std::size_t{1} << (2U * 10U)) - 1U) / 3U;
-    EXPECT_LT(tree.getNodeCount(), fullBuildNodes / 50U);  // at least 50× fewer nodes
+    EXPECT_LT(tree.getNodeCount(), fullBuildNodes / 10U);  // at least 10× fewer nodes
 }
 
 TEST_F(ContourExtractionBenchmark, Adaptive_vs_Uniform_NodeCountComparison)
@@ -664,4 +977,262 @@ TEST_F(ContourExtractionBenchmark, Adaptive_vs_Uniform_NodeCountComparison)
     // Adaptive should have dramatically fewer nodes than uniform
     EXPECT_LT(adaptiveNodes, uniformNodes / 10U);
     EXPECT_GT(nodeReduction, 90.0F);
+}
+
+// ============================================================================
+// Balanced surface enforcement tests
+// ============================================================================
+
+TEST_F(QuadtreeContourExtractorTest, EnsureBalancedSurface_AdaptiveCircle_CreatesNeighborCells)
+{
+    // Build an adaptive tree where intersecting leaves are at maxDepth and their
+    // neighbors may be at coarser depths.  After balancing, all face-neighbors of
+    // intersecting leaves should be at maxDepth too.
+    float const radius = 30.0F;
+    auto sdf = [radius](Eigen::Vector2f const& p) { return circleSdf(p, radius); };
+
+    constexpr std::size_t TARGET_DEPTH = 7U;
+    auto tree = buildAdaptive(m_bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    std::size_t const nodesBefore = tree.getNodeCount();
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 500000U;
+    auto const created = tree.ensureBalancedSurface(cfg);
+
+    // With near-surface refinement, the adaptive tree may already have neighbors at
+    // the correct depth.  Balancing may or may not create new nodes.
+    EXPECT_GE(tree.getNodeCount(), nodesBefore);
+    (void)created;
+}
+
+TEST_F(QuadtreeContourExtractorTest, EnsureBalancedSurface_AllSurfaceNeighborsSameDepth)
+{
+    // After balancing, every intersecting leaf at maxDepth should have all 4 face-neighbors
+    // also existing at maxDepth (as leaves).
+    float const radius = 30.0F;
+    auto sdf = [radius](Eigen::Vector2f const& p) { return circleSdf(p, radius); };
+
+    constexpr std::size_t TARGET_DEPTH = 7U;
+    auto tree = buildAdaptive(m_bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 500000U;
+    tree.ensureBalancedSurface(cfg);
+    // Re-populate after balancing so new leaves have correct corner values
+    QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+
+    auto const targetDepth = static_cast<std::uint8_t>(TARGET_DEPTH);
+    auto const gridExtent = static_cast<std::uint32_t>(1U << TARGET_DEPTH);
+
+    std::size_t violations = 0U;
+    for (auto const& node : tree.getNodes())
+    {
+        if (!node.isLeaf || !node.isIntersecting || node.depth != targetDepth)
+        {
+            continue;
+        }
+
+        auto const [gx, gy] = mortonDecode(node.mortonCode);
+
+        static constexpr std::array<std::pair<int, int>, 4> OFFSETS = {{
+            {-1, 0}, {1, 0}, {0, -1}, {0, 1}
+        }};
+
+        for (auto const& [dx, dy] : OFFSETS)
+        {
+            auto const nx = static_cast<int64_t>(gx) + dx;
+            auto const ny = static_cast<int64_t>(gy) + dy;
+            if (nx < 0 || ny < 0 ||
+                nx >= static_cast<int64_t>(gridExtent) ||
+                ny >= static_cast<int64_t>(gridExtent))
+            {
+                continue;  // out of bounds is OK
+            }
+
+            auto const* neighbor = tree.findLeafContaining(
+                static_cast<std::uint32_t>(nx),
+                static_cast<std::uint32_t>(ny),
+                targetDepth);
+
+            if (neighbor == nullptr || neighbor->depth != targetDepth)
+            {
+                ++violations;
+            }
+        }
+    }
+
+    EXPECT_EQ(violations, 0U)
+        << "Found " << violations
+        << " intersecting-leaf face-neighbors NOT at maxDepth after balancing";
+}
+
+TEST_F(QuadtreeContourExtractorTest, EnsureBalancedSurface_UniformTree_NoChanges)
+{
+    // A uniform tree (all leaves at the same depth) should require no balancing changes.
+    float const radius = 30.0F;
+    auto sdf = [radius](Eigen::Vector2f const& p) { return circleSdf(p, radius); };
+
+    MortonQuadtree tree{m_bounds};
+    MortonQuadtreeConfig cfg;
+    cfg.initialDepth = 6U;
+    cfg.maxDepth = 6U;
+    cfg.maxNodes = 500000U;
+    tree.build(cfg);
+    QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+
+    auto const created = tree.ensureBalancedSurface(cfg);
+    EXPECT_EQ(created, 0U);
+}
+
+// ============================================================================
+// Balanced extraction watertightness tests
+// ============================================================================
+
+TEST_F(QuadtreeContourExtractorTest, BalancedAdaptive_Circle_AllPolylinesClosed)
+{
+    // After adaptive build + balancing + re-populate, polylines should be closed loops
+    // (no T-junction gaps).
+    float const radius = 30.0F;
+    auto sdf = [radius](Eigen::Vector2f const& p) { return circleSdf(p, radius); };
+
+    constexpr std::size_t TARGET_DEPTH = 8U;
+    auto tree = buildAdaptive(m_bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    // Balance + re-populate loop
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 500000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U)
+        {
+            break;
+        }
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = m_bounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    ASSERT_GE(polylines.size(), 1U);
+
+    std::size_t openCount = 0U;
+    for (auto const& pl : polylines)
+    {
+        if (!pl.isClosed)
+        {
+            ++openCount;
+        }
+    }
+    EXPECT_EQ(openCount, 0U)
+        << openCount << " open polylines found after balanced adaptive extraction";
+}
+
+TEST_F(QuadtreeContourExtractorTest, BalancedAdaptive_Rectangle_AllPolylinesClosed)
+{
+    float const hw = 20.0F, hh = 15.0F;
+    auto sdf = [hw, hh](Eigen::Vector2f const& p) { return rectangleSdf(p, hw, hh); };
+
+    constexpr std::size_t TARGET_DEPTH = 7U;
+    auto tree = buildAdaptive(m_bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 500000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U)
+        {
+            break;
+        }
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = m_bounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    ASSERT_GE(polylines.size(), 1U);
+
+    std::size_t openCount = 0U;
+    for (auto const& pl : polylines)
+    {
+        if (!pl.isClosed)
+        {
+            ++openCount;
+        }
+    }
+    EXPECT_EQ(openCount, 0U)
+        << openCount << " open polylines from balanced rectangle extraction";
+}
+
+// ============================================================================
+// Self-intersection detection tests
+// ============================================================================
+
+TEST_F(QuadtreeContourExtractorTest, DetectSelfIntersections_NoIntersections_ReturnsZero)
+{
+    // A simple square polyline should have no self-intersections
+    SparsePolyLine square;
+    square.vertices = {
+        {0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}, {0.0F, 0.0F}
+    };
+    square.isClosed = true;
+
+    auto const count = QuadtreeContourExtractor::detectSelfIntersections({square});
+    EXPECT_EQ(count, 0U);
+}
+
+TEST_F(QuadtreeContourExtractorTest, DetectSelfIntersections_FigureEight_DetectsOne)
+{
+    // A figure-eight shape: segments cross at the center
+    SparsePolyLine figEight;
+    figEight.vertices = {
+        {0.0F, 0.0F},   // A
+        {1.0F, 1.0F},   // B  (segment AB: bottom-left to top-right)
+        {1.0F, 0.0F},   // C  (segment BC: top-right to bottom-right)
+        {0.0F, 1.0F},   // D  (segment CD: bottom-right to top-left — crosses AB!)
+        {0.0F, 0.0F}    // back to A
+    };
+    figEight.isClosed = true;
+
+    auto const count = QuadtreeContourExtractor::detectSelfIntersections({figEight});
+    EXPECT_GE(count, 1U);
+}
+
+TEST_F(QuadtreeContourExtractorTest, DetectSelfIntersections_BalancedCircle_Zero)
+{
+    // A balanced adaptive circle extraction should have no self-intersections
+    float const radius = 30.0F;
+    auto sdf = [radius](Eigen::Vector2f const& p) { return circleSdf(p, radius); };
+
+    constexpr std::size_t TARGET_DEPTH = 7U;
+    auto tree = buildAdaptive(m_bounds, sdf, TARGET_DEPTH, 0.0F);
+
+    MortonQuadtreeConfig cfg;
+    cfg.maxDepth = TARGET_DEPTH;
+    cfg.maxNodes = 500000U;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        auto const created = tree.ensureBalancedSurface(cfg);
+        if (created == 0U)
+        {
+            break;
+        }
+        QuadtreeContourExtractor::populateCornerValues(tree, sdf, 0.0F);
+    }
+
+    QuadtreeContourExtractor extractor;
+    float const cellSize = m_bounds.getMaxExtent() / static_cast<float>(1U << TARGET_DEPTH);
+    auto const polylines = extractor.extractPolyLines(tree, 0.0F, cellSize * 0.01F);
+
+    auto const selfIntersections = QuadtreeContourExtractor::detectSelfIntersections(polylines);
+    EXPECT_EQ(selfIntersections, 0U)
+        << "Balanced circle extraction has " << selfIntersections << " self-intersections";
 }

@@ -284,10 +284,51 @@ namespace gladius
         }
         slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
 
+        // Ensure all face-neighbors of surface cells are at the same depth.
+        // This eliminates T-junction gaps that would break watertightness.
+        // Loop because balancing may create new leaves that become intersecting.
+        for (int balancePass = 0; balancePass < 8; ++balancePass)
+        {
+            auto const created = quadtree.ensureBalancedSurface(cfg);
+            if (created == 0U)
+            {
+                break;
+            }
+            slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
+        }
+
         // Extract polylines from the adaptive quadtree
         float const snapTol = std::max(1e-4f, nativeCellSize * 0.1f);
         slicer::QuadtreeContourExtractor const extractor;
         auto const sparsePolyLines = extractor.extractPolyLines(quadtree, 0.0f, snapTol);
+
+        // Self-intersection check for manufacturing safety
+        auto const selfIntersectionCount =
+            slicer::QuadtreeContourExtractor::detectSelfIntersections(sparsePolyLines);
+        if (selfIntersectionCount > 0U)
+        {
+            logMsg(fmt::format(
+                "WARNING: Adaptive contour has {} self-intersection(s). "
+                "Result may not be watertight — do not use for manufacturing.",
+                selfIntersectionCount));
+        }
+
+        // Check for unclosed polylines
+        std::size_t openCount = 0U;
+        for (auto const & poly : sparsePolyLines)
+        {
+            if (!poly.isClosed && poly.vertices.size() >= 2U)
+            {
+                ++openCount;
+            }
+        }
+        if (openCount > 0U)
+        {
+            logMsg(fmt::format(
+                "WARNING: Adaptive contour has {} open polyline(s). "
+                "Result may not be watertight — do not use for manufacturing.",
+                openCount));
+        }
 
         // Convert SparsePolyLine → PolyLine and insert into ContourExtractor
         auto & polylines = m_contour->getContour();
