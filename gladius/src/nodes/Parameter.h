@@ -376,6 +376,17 @@ namespace gladius::nodes
             return m_visible;
         }
 
+        /// Mark this parameter as internal (runtime-only, never serialised to 3MF).
+        void markAsInternal()
+        {
+            m_isInternal = true;
+        }
+
+        [[nodiscard]] bool isInternal() const
+        {
+            return m_isInternal;
+        }
+
         std::string const & getArgumentAssoziation() const
         {
             return m_argumentAssoziation;
@@ -474,6 +485,7 @@ namespace gladius::nodes
 
         bool m_isValid{true};
         bool m_inputSourceRequired{true};
+        bool m_isInternal{false};
         int m_sortIndex{0};
     };
 

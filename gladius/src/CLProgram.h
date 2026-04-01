@@ -125,15 +125,11 @@ namespace gladius
                 }
                 if (m_ComputeContext)
                 {
-                    // Validate the queue before including diagnostics
-                    if (m_ComputeContext->validateQueue(queue))
-                    {
-                        msg += ", QueueValid=true";
-                    }
-                    else
-                    {
-                        msg += ", QueueValid=false";
-                    }
+                    // NOTE: Do NOT call validateQueue here. This lambda may be invoked from a
+                    // catch block after a driver-level failure (e.g. enqueueNDRangeKernel threw).
+                    // In that state the driver may have crashed and calling back into it (via
+                    // clGetCommandQueueInfo) causes a secondary access-violation that is an SEH
+                    // exception — not caught by catch(...) — which masks the original error.
                     msg += "\n" + m_ComputeContext->getDiagnosticInfo();
                 }
                 if (m_logger)

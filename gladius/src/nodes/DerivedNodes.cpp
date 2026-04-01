@@ -122,6 +122,9 @@ namespace gladius::nodes
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
 
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
+
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
 
@@ -133,6 +136,9 @@ namespace gladius::nodes
 
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
+
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
 
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
@@ -218,6 +224,9 @@ namespace gladius::nodes
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
 
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
+
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
 
@@ -229,6 +238,9 @@ namespace gladius::nodes
 
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
+
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
 
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
@@ -309,6 +321,9 @@ namespace gladius::nodes
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
 
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
+
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
 
@@ -319,6 +334,9 @@ namespace gladius::nodes
     {
         m_parameter[FieldNames::Start].hide();
         m_parameter[FieldNames::End].hide();
+
+        m_parameter[FieldNames::Start].markAsInternal();
+        m_parameter[FieldNames::End].markAsInternal();
 
         m_parameter[FieldNames::Start].setInputSourceRequired(false);
         m_parameter[FieldNames::End].setInputSourceRequired(false);
