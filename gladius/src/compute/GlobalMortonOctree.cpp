@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -43,6 +44,19 @@ namespace gladius::compute
 
         /// Tolerance for zero-crossing refinement
         constexpr float ZERO_CROSSING_TOLERANCE = 1e-5F;
+
+        /// Returns true if the named environment variable is set to any non-empty value.
+        [[nodiscard]] bool isEnvVarSet(char const* name)
+        {
+#ifdef _WIN32
+            std::size_t requiredSize = 0U;
+            getenv_s(&requiredSize, nullptr, 0U, name);
+            return requiredSize > 0U;
+#else
+            char const* const value = ::secure_getenv(name);
+            return value != nullptr && value[0] != '\0';
+#endif
+        }
 
         [[nodiscard]] bool hasEdgeCrossing(float const v0, float const v1)
         {
@@ -236,7 +250,7 @@ namespace gladius::compute
 
     void GlobalMortonOctree::buildInitialOctree()
     {
-        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        bool const debugProgress = isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG");
         if (debugProgress)
         {
             std::cout << "  Building initial octree..." << std::endl;
@@ -585,7 +599,7 @@ namespace gladius::compute
         // 2:1 octree balancing: ensure all intersecting cells have face-adjacent neighbors
         // at the same depth. This is critical for proper quad formation.
 
-        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        bool const debugProgress = isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG");
         
         std::cout << "  Balancing octree for watertight mesh generation..." << std::endl;
         
@@ -1260,7 +1274,7 @@ namespace gladius::compute
     {
         auto const startTime = std::chrono::high_resolution_clock::now();
 
-        bool const debugProgress = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        bool const debugProgress = isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG");
         std::size_t const totalNodes = m_nodes.size();
         std::size_t intersectingLeaves = 0U;
         for (auto const& n : m_nodes)
