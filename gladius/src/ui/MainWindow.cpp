@@ -1114,22 +1114,11 @@ namespace gladius::ui
               bool const modelWasModified = m_modelEditor.modelWasModified();
               bool const compileRequested = m_modelEditor.isCompileRequested();
 
-              // Structural changes require updating the graph topology and parameter mapping.
-              // Parameter-only changes skip this — updatePayload() handles registration
-              // on the fast path, and refreshWorker() handles it on the compilation path.
-              if (modelWasModified)
-              {
-                  try
-                  {
-                      m_doc->getAssembly()->updateInputsAndOutputs();
-                      m_doc->updateParameterRegistration();
-                  }
-                  catch (const std::exception & e)
-                  {
-                      m_logger->addEvent({fmt::format("Error updating model: {}", e.what()),
-                                          events::Severity::Error});
-                  }
-              }
+              // updateInputsAndOutputs() and updateParameterRegistration() are called at the
+              // start of refreshWorker() on the background thread. Running them here on the
+              // UI thread was a redundant O(N·models) stall per structural edit. Nodes
+              // self-register in create()/insert(); the lazy updateGraphAndOrderIfNeeded()
+              // in visitNodes() keeps the render path consistent for the current frame.
 
               if (modelWasModified || parameterModifiedByModelEditor)
               {

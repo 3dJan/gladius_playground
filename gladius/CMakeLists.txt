@@ -255,6 +255,7 @@ add_subdirectory(src/ui)
 add_subdirectory(src/nodes)
 add_subdirectory(src/io)
 add_subdirectory(src/contour)
+add_subdirectory(src/slicer)
 add_subdirectory(src/api)
 add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
 
