@@ -485,6 +485,10 @@ namespace gladius::nodes
 
         bool m_isValid{true};
         bool m_inputSourceRequired{true};
+        // m_isInternal is set once at node construction and must survive parameter
+        // assignment. If a Parameter is reassigned (e.g. from parameterFromType()),
+        // the compiler-generated operator= will reset this to false unless the
+        // assignment is guarded by an isInternal() check (as in Importer3mf).
         bool m_isInternal{false};
         int m_sortIndex{0};
     };

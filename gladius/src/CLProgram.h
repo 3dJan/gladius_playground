@@ -130,6 +130,8 @@ namespace gladius
                     // In that state the driver may have crashed and calling back into it (via
                     // clGetCommandQueueInfo) causes a secondary access-violation that is an SEH
                     // exception — not caught by catch(...) — which masks the original error.
+                    // A null-handle check is safe (no driver call) and preserves triage value.
+                    msg += queue() == nullptr ? ", QueueHandle=null" : ", QueueHandle=non-null";
                     msg += "\n" + m_ComputeContext->getDiagnosticInfo();
                 }
                 if (m_logger)

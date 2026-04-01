@@ -1,6 +1,7 @@
 #include "ComputeContext.h"
 #include "ComputeCore.h"
 #include "Document.h"
+#include "EnvUtils.h"
 #include "EventLogger.h"
 #include "ResourceContext.h"
 #include "SurfaceExtractionOptions.h"
@@ -16,7 +17,6 @@
 #include <cmath>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -91,15 +91,7 @@ namespace gladius::compute::tests
         [[nodiscard]] bool gpuTestsEnabled()
         {
             // Allow CI opt-out via GLADIUS_SKIP_GPU_TESTS=1
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4996)
-#endif
-            char const * const env = std::getenv("GLADIUS_SKIP_GPU_TESTS");
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-            if (env != nullptr && std::string(env) == "1")
+            if (gladius::isEnvVarSet("GLADIUS_SKIP_GPU_TESTS"))
             {
                 return false;
             }
@@ -152,15 +144,7 @@ namespace gladius::compute::tests
 
         [[nodiscard]] bool debugTopologyEnabled()
         {
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4996)
-#endif
-            bool const result = std::getenv("GLADIUS_DEBUG_MESH_TOPOLOGY") != nullptr;
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-            return result;
+            return gladius::isEnvVarSet("GLADIUS_DEBUG_MESH_TOPOLOGY");
         }
 
         struct EdgeUsageInfo
@@ -1241,18 +1225,7 @@ namespace gladius::compute::tests
         ASSERT_EQ(mesh.indices.size() % 3U, 0U);
 
         auto const stats = analyzeMeshEdges(mesh);
-        bool requireWatertight = false;
-#ifdef _WIN32
-        char * envValue = nullptr;
-        size_t envLen = 0;
-        if (_dupenv_s(&envValue, &envLen, "GLADIUS_REQUIRE_WATERTIGHT") == 0 && envValue != nullptr)
-        {
-            requireWatertight = true;
-            free(envValue);
-        }
-#else
-        requireWatertight = std::getenv("GLADIUS_REQUIRE_WATERTIGHT") != nullptr;
-#endif
+        bool requireWatertight = gladius::isEnvVarSet("GLADIUS_REQUIRE_WATERTIGHT");
         if (!requireWatertight)
         {
             GTEST_SUCCEED() << "Watertightness enforcement disabled (set "

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <functional>
+#include "../EnvUtils.h"
 #include <iostream>
 #include <map>
 #include <unordered_map>
@@ -44,19 +45,6 @@ namespace gladius::compute
 
         /// Tolerance for zero-crossing refinement
         constexpr float ZERO_CROSSING_TOLERANCE = 1e-5F;
-
-        /// Returns true if the named environment variable is set to any non-empty value.
-        [[nodiscard]] bool isEnvVarSet(char const* name)
-        {
-#ifdef _WIN32
-            std::size_t requiredSize = 0U;
-            getenv_s(&requiredSize, nullptr, 0U, name);
-            return requiredSize > 0U;
-#else
-            char const* const value = ::secure_getenv(name);
-            return value != nullptr && value[0] != '\0';
-#endif
-        }
 
         [[nodiscard]] bool hasEdgeCrossing(float const v0, float const v1)
         {

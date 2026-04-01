@@ -5,6 +5,12 @@
 #include <ctime>
 #include <string>
 
+#ifdef _WIN32
+#  define GLADIUS_SSCANF ::sscanf_s
+#else
+#  define GLADIUS_SSCANF std::sscanf
+#endif
+
 namespace gladius::mcp
 {
     /// Format a time_point as ISO-8601 UTC string (e.g. "2026-03-17T10:00:00.123Z").
@@ -43,33 +49,25 @@ namespace gladius::mcp
         int millis = 0;
 
         // Try full format with milliseconds first: "2026-03-17T10:00:00.123Z"
-#ifdef _WIN32
-        if (sscanf_s(iso.c_str(),
-#else
-        if (std::sscanf(iso.c_str(),
-#endif
-                        "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ",
-                        &tm.tm_year,
-                        &tm.tm_mon,
-                        &tm.tm_mday,
-                        &tm.tm_hour,
-                        &tm.tm_min,
-                        &tm.tm_sec,
-                        &millis) < 6)
+        if (GLADIUS_SSCANF(iso.c_str(),
+                           "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ",
+                           &tm.tm_year,
+                           &tm.tm_mon,
+                           &tm.tm_mday,
+                           &tm.tm_hour,
+                           &tm.tm_min,
+                           &tm.tm_sec,
+                           &millis) < 6)
         {
             // Fallback: try without milliseconds: "2026-03-17T10:00:00Z"
-#ifdef _WIN32
-            if (sscanf_s(iso.c_str(),
-#else
-            if (std::sscanf(iso.c_str(),
-#endif
-                            "%4d-%2d-%2dT%2d:%2d:%2dZ",
-                            &tm.tm_year,
-                            &tm.tm_mon,
-                            &tm.tm_mday,
-                            &tm.tm_hour,
-                            &tm.tm_min,
-                            &tm.tm_sec) < 6)
+            if (GLADIUS_SSCANF(iso.c_str(),
+                               "%4d-%2d-%2dT%2d:%2d:%2dZ",
+                               &tm.tm_year,
+                               &tm.tm_mon,
+                               &tm.tm_mday,
+                               &tm.tm_hour,
+                               &tm.tm_min,
+                               &tm.tm_sec) < 6)
             {
                 return std::chrono::system_clock::time_point{}; // epoch
             }
