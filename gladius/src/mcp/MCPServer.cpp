@@ -6,14 +6,22 @@
 #include "MCPServer.h"
 #include "FunctionArgument.h"
 #include "MCPApplicationInterface.h"
+#include "TimeUtils.h"
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <thread>
 #include <vector>
+
+#ifdef ENABLE_UI_TESTING
+#include "imgui.h"
+#include "imgui_internal.h"
+#endif
 
 #include "../version.h"
 
@@ -256,22 +264,90 @@ namespace gladius::mcp
         return tools;
     }
 
+    /// Build a minimal usage_example JSON from a tool's inputSchema.
+    /// Walks the "properties" object and generates a placeholder value for each
+    /// required property based on its declared type.
+    static nlohmann::json buildUsageExample(nlohmann::json const & schema)
+    {
+        nlohmann::json example = nlohmann::json::object();
+        if (!schema.contains("properties") || !schema["properties"].is_object())
+        {
+            return example;
+        }
+        for (auto const & [key, prop] : schema["properties"].items())
+        {
+            auto const type = prop.value("type", "string");
+            if (type == "integer" || type == "number")
+            {
+                example[key] = 0;
+            }
+            else if (type == "boolean")
+            {
+                example[key] = false;
+            }
+            else if (type == "array")
+            {
+                example[key] = nlohmann::json::array();
+            }
+            else if (type == "object")
+            {
+                example[key] = nlohmann::json::object();
+            }
+            else
+            {
+                auto const desc = prop.value("description", "");
+                example[key] = desc.empty() ? "<" + key + ">" : "<" + desc + ">";
+            }
+        }
+        return example;
+    }
+
+    /// Enrich an error response with `success: false` and `usage_example` if missing.
+    static void enrichErrorResponse(nlohmann::json & result,
+                                    std::string const & toolName,
+                                    std::map<std::string, ToolInfo> const & toolInfo)
+    {
+        bool const isError = (result.contains("error") && !result.value("error", "").empty()) ||
+                             (result.contains("success") && result["success"] == false);
+        if (!isError)
+        {
+            return;
+        }
+        if (!result.contains("success"))
+        {
+            result["success"] = false;
+        }
+        if (!result.contains("usage_example"))
+        {
+            auto infoIt = toolInfo.find(toolName);
+            if (infoIt != toolInfo.end() && !infoIt->second.schema.empty())
+            {
+                result["usage_example"] = buildUsageExample(infoIt->second.schema);
+            }
+        }
+    }
+
     nlohmann::json MCPServer::executeTool(const std::string & toolName,
                                           const nlohmann::json & params)
     {
         auto toolIt = m_tools.find(toolName);
         if (toolIt == m_tools.end())
         {
-            return {{"error", "Tool not found: " + toolName}};
+            return {{"success", false}, {"error", "Tool not found: " + toolName}};
         }
 
         try
         {
-            return toolIt->second(params);
+            auto result = toolIt->second(params);
+            enrichErrorResponse(result, toolName, m_toolInfo);
+            return result;
         }
         catch (const std::exception & e)
         {
-            return {{"error", "Tool execution failed: " + std::string(e.what())}};
+            nlohmann::json result = {
+              {"success", false}, {"error", "Tool execution failed: " + std::string(e.what())}};
+            enrichErrorResponse(result, toolName, m_toolInfo);
+            return result;
         }
     }
 
@@ -431,7 +507,22 @@ namespace gladius::mcp
 
             json response = {
               {"jsonrpc", "2.0"},
-              {"result", {{"content", {{{"type", "text"}, {"text", result.dump()}}}}}}};
+              {"result", json::object()}
+            };
+
+            if (result.is_object() && result.contains("content") && result["content"].is_array())
+            {
+                response["result"]["content"] = result["content"];
+                // Preserve isError flag if present
+                if (result.contains("isError") && result["isError"].is_boolean())
+                {
+                    response["result"]["isError"] = result["isError"];
+                }
+            }
+            else
+            {
+                response["result"]["content"] = {{{"type", "text"}, {"text", result.dump(2)}}};
+            }
 
             if (request.contains("id"))
             {
@@ -469,6 +560,8 @@ namespace gladius::mcp
           {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}},
           [this](const json & params) -> json
           {
+              auto const serverTime = formatIso8601Utc(std::chrono::system_clock::now());
+
               return {{"application", m_application->getApplicationName()},
                       {"version", m_application->getVersion()},
                       {"status", m_application->getStatus()},
@@ -476,7 +569,8 @@ namespace gladius::mcp
                       {"has_active_document", m_application->hasActiveDocument()},
                       {"headless", m_application->isHeadlessMode()},
                       {"ui_running", m_application->isUIRunning()},
-                      {"active_document_path", m_application->getActiveDocumentPath()}};
+                      {"active_document_path", m_application->getActiveDocumentPath()},
+                      {"server_time", serverTime}};
           });
 
         // MODEL STRUCTURE INSPECTION
@@ -929,6 +1023,36 @@ namespace gladius::mcp
               {
                   std::string snippet = params["snippet"];
                   return m_application->setProgramSnippet(snippet);
+              });
+
+            // evaluate_function: evaluate a function at sample points via OpenCL
+            json evalFuncSchema;
+            evalFuncSchema["type"] = "object";
+            json evalProps;
+            evalProps["function_id"] = {
+              {"type", "integer"},
+              {"description", "ModelResourceID of the function to evaluate"}};
+            evalProps["samples"] = {
+              {"type", "array"},
+              {"description",
+               "Array of sample point objects mapping argument names to values. "
+               "For vec3 args use [x,y,z], for scalar args use a number."},
+              {"items", {{"type", "object"}}},
+              {"minItems", 1},
+              {"maxItems", 1000}};
+            evalFuncSchema["properties"] = evalProps;
+            evalFuncSchema["required"] = json::array({"function_id", "samples"});
+
+            registerTool(
+              "evaluate_function",
+              "Evaluate a volumetric function at 3D sample points and return numeric results. "
+              "Useful for verifying SDF values without rendering. Uses OpenCL.",
+              evalFuncSchema,
+              [this](json const & params) -> json
+              {
+                  uint32_t functionId = params["function_id"];
+                  auto const & samples = params["samples"];
+                  return m_application->evaluateFunction(functionId, samples);
               });
         }
 
@@ -1644,14 +1768,19 @@ namespace gladius::mcp
           "list_library",
           "List all library categories and their entries. Returns category names, entry "
           "names, descriptions, and tagged function IDs. Scans both shipped and user "
-          "library directories.",
+          "library directories. Supports optional keyword search by name, description, or tags.",
           {{"type", "object"},
            {"properties",
             {{"category",
               {{"type", "string"},
                {"description",
                 "Optional: filter to a specific category (subdirectory name). "
-                "If omitted, lists all categories."}}}}},
+                "If omitted, lists all categories."}}},
+             {"query",
+              {{"type", "string"},
+               {"description",
+                "Optional: case-insensitive substring to filter entries by name, "
+                "description, or tags. Returns empty list (not error) when no matches."}}}}},
            {"required", json::array()}},
           [this](const json & params) -> json
           {
@@ -1660,7 +1789,8 @@ namespace gladius::mcp
                   return {{"success", false}, {"error", "No application available"}};
               }
               std::string category = params.value("category", "");
-              return m_application->listLibrary(category);
+              std::string query = params.value("query", "");
+              return m_application->listLibrary(category, query);
           });
 
         // GET LIBRARY ENTRY INFO
@@ -1699,15 +1829,12 @@ namespace gladius::mcp
         // CREATE LIBRARY ENTRY
         registerTool(
           "create_library_entry",
-          "Create a new library entry from a GLSL-like snippet (or simple expression). "
-          "Either 'snippet' or 'expression' (deprecated, single-line) must be provided. "
-          "Creates a 3MF file with the specified function, library metadata, and saves "
-          "it to the user library directory. The 'snippet' field accepts multi-line code "
-          "with float assignments, if/else, and return statements. For backward "
-          "compatibility, 'expression' is also accepted (single-line, x/y/z auto-"
-          "detected). Supported: operators + - * /; functions sin, cos, tan, acos, "
-          "asin, atan, atan2, sqrt, abs, exp, log, pow, mod, min, max, clamp, mix, "
-          "step, smoothstep, length, dot, cross, normalize; constants pi, e.",
+          "Create a new library entry with quality validation. Requires a full program "
+          "snippet (same format as set_program_snippet) that includes a main function "
+          "demonstrating the library function. The tool creates a document from the "
+          "template, applies the program, validates the bounding box, renders a "
+          "thumbnail, and exports the entry with the full scaffold. This ensures every "
+          "library entry has a working demo, a valid bounding box, and a thumbnail.",
           {{"type", "object"},
            {"properties",
             {{"name",
@@ -1719,44 +1846,40 @@ namespace gladius::mcp
               {{"type", "string"},
                {"description",
                 "Library category (subdirectory name, created if needed)"}}},
-             {"snippet",
+             {"program_snippet",
               {{"type", "string"},
                {"description",
-                "GLSL-like code defining the SDF function. Supports multi-line "
-                "assignments (float x = expr;), if/else, and return. Example: "
-                "'float r = length(pos);\nreturn r - radius;'"}}},
-             {"expression",
-              {{"type", "string"},
+                "Full program listing in set_program_snippet format. MUST include "
+                "the library function AND a main function that demonstrates it. "
+                "IMPORTANT: main MUST use named-output syntax '(float shape)' not 'float'. "
+                "Example:\n"
+                "// Function: my_shape (ID: 1)\n"
+                "float my_shape_1(vec3 pos, float radius) {\n"
+                "  return length(pos) - radius;\n"
+                "}\n\n"
+                "// Function: main (ID: 3) [root]\n"
+                "(float shape) main_3(vec3 pos) {\n"
+                "  shape = my_shape_1(pos, 10.0);\n"
+                "}"}}},
+             {"function_id",
+              {{"type", "integer"},
                {"description",
-                "Deprecated: use 'snippet' instead. Single-line math expression "
-                "with x,y,z auto-detection. Example: 'sqrt(x*x+y*y+z*z)-5'"}}},
-             {"arguments",
-              {{"type", "array"},
-               {"description",
-                "Function input arguments. Each has 'name' and 'type' "
-                "(float or vec3). If omitted and snippet uses pos.x/pos.y/pos.z, "
-                "a pos:vec3 argument is auto-inferred."},
-               {"items",
-                {{"type", "object"},
-                 {"properties",
-                  {{"name", {{"type", "string"}}},
-                   {"type",
-                    {{"type", "string"},
-                     {"enum", {"float", "vec3"}}}}}}}}}},
-             {"output_type",
-              {{"type", "string"},
-               {"description", "Output type: 'float' (default) or 'vec3'."},
-               {"default", "float"}}},
+                "Resource ID of the function to tag as the library function "
+                "(not main). This is the function that will be importable."}}},
              {"description",
               {{"type", "string"},
-               {"description", "Human-readable description of the function"}}},
+               {"description", "Human-readable description of the library function"}}},
+             {"tags",
+              {{"type", "array"},
+               {"description", "Optional keyword tags for searchability"},
+               {"items", {{"type", "string"}}}}},
              {"overwrite",
               {{"type", "boolean"},
                {"description",
                 "If true, overwrite an existing entry with the same name. "
                 "Default: false."},
                {"default", false}}}}},
-           {"required", {"name", "category", "description"}}},
+           {"required", {"name", "category", "program_snippet", "function_id", "description"}}},
           [this](const json & params) -> json
           {
               if (!m_application)
@@ -1765,20 +1888,13 @@ namespace gladius::mcp
               }
 
               auto missing = std::vector<std::string>{};
-              for (auto const & key : {"name", "category", "description"})
+              for (auto const & key :
+                   {"name", "category", "program_snippet", "function_id", "description"})
               {
                   if (!params.contains(key))
                   {
                       missing.emplace_back(key);
                   }
-              }
-
-              bool hasSnippet = params.contains("snippet");
-              bool hasExpression = params.contains("expression");
-
-              if (!hasSnippet && !hasExpression)
-              {
-                  missing.emplace_back("snippet");
               }
 
               if (!missing.empty())
@@ -1795,49 +1911,39 @@ namespace gladius::mcp
                   return {{"success", false},
                           {"error", "Missing required parameters: " + missingList},
                           {"usage_example",
-                           {{"name", "spur-gear"},
-                            {"category", "mechanical"},
-                            {"snippet",
-                             "float r = length(pos);\nreturn r - radius;"},
-                            {"arguments",
-                             {{{"name", "pos"}, {"type", "vec3"}},
-                              {{"name", "radius"}, {"type", "float"}}}},
-                            {"description", "Sphere with given radius"}}}};
+                           {{"name", "my-shape"},
+                            {"category", "primitives"},
+                            {"program_snippet",
+                             "// Function: my_shape (ID: 1)\n"
+                             "float my_shape_1(vec3 pos, float radius) {\n"
+                             "  return length(pos) - radius;\n"
+                             "}\n\n"
+                             "// Function: main (ID: 3) [root]\n"
+                             "(float shape) main_3(vec3 pos) {\n"
+                             "  shape = my_shape_1(pos, 10.0);\n"
+                             "}"},
+                            {"function_id", 1},
+                            {"description", "A parametric sphere"}}}};
               }
 
               std::string name = params["name"];
               std::string category = params["category"];
+              std::string programSnippet = params["program_snippet"];
+              uint32_t functionId = params["function_id"].get<uint32_t>();
               std::string description = params["description"];
               bool overwrite = params.value("overwrite", false);
 
-              // 'expression' is a legacy alias: auto-detects x,y,z → pos
-              if (hasExpression && !hasSnippet)
+              std::vector<std::string> tags;
+              if (params.contains("tags") && params["tags"].is_array())
               {
-                  std::string expression = params["expression"];
-                  return m_application->createLibraryEntry(
-                    name, category, expression, description, overwrite);
-              }
-
-              std::string snippet = params["snippet"];
-              std::string outputType = params.value("output_type", "float");
-
-              std::vector<FunctionArgument> arguments;
-              if (params.contains("arguments") && params["arguments"].is_array())
-              {
-                  for (auto const & argJson : params["arguments"])
+                  for (auto const & t : params["tags"])
                   {
-                      std::string argName = argJson["name"];
-                      std::string argType = argJson["type"];
-                      ArgumentType type =
-                        (argType == "float" || argType == "scalar")
-                          ? ArgumentType::Scalar
-                          : ArgumentType::Vector;
-                      arguments.emplace_back(argName, type);
+                      tags.push_back(t.get<std::string>());
                   }
               }
 
-              return m_application->createLibraryEntryFromSnippet(
-                name, category, snippet, description, arguments, outputType, overwrite);
+              return m_application->createLibraryEntry(
+                name, category, programSnippet, functionId, description, tags, overwrite);
           });
 
         // EXPORT TO LIBRARY
@@ -1973,10 +2079,10 @@ namespace gladius::mcp
         // SET LIBRARY METADATA
         registerTool(
           "set_library_metadata",
-          "Stamp library metadata (tagged function IDs and description) onto the "
-          "current document's 3MF model. Use this before save_document / "
-          "save_document_as when you want a document to behave as a library entry "
-          "without going through export_to_library.",
+          "Stamp library metadata (tagged function IDs, description, and tags) onto the "
+          "current document or an existing library entry. When 'category' and 'name' are "
+          "provided, updates the library entry file directly without affecting the current "
+          "document. Otherwise, updates the current document's 3MF model.",
           {{"type", "object"},
            {"properties",
             {{"function_ids",
@@ -1987,7 +2093,20 @@ namespace gladius::mcp
              {"description",
               {{"type", "string"},
                {"description",
-                "Human-readable description of the library entry"}}}}},
+                "Human-readable description of the library entry"}}},
+             {"tags",
+              {{"type", "array"},
+               {"items", {{"type", "string"}}},
+               {"description",
+                "Optional keyword tags for searchability (e.g. [\"gear\", \"mechanical\"])"}}},
+             {"category",
+              {{"type", "string"},
+               {"description",
+                "Optional library category to target an existing entry (e.g. \"primitives\")"}}},
+             {"name",
+              {{"type", "string"},
+               {"description",
+                "Optional entry name to target an existing library entry (e.g. \"sphere\")"}}}}},
            {"required", {"function_ids", "description"}}},
           [this](json const & params) -> json
           {
@@ -2002,13 +2121,158 @@ namespace gladius::mcp
                            "Missing required parameters: function_ids and description"},
                           {"usage_example",
                            {{"function_ids", {5}},
-                            {"description", "My library entry"}}}};
+                            {"description", "My library entry"},
+                            {"tags", {"sdf", "primitive"}}}}};
               }
               auto functionIds =
                 params["function_ids"].get<std::vector<uint32_t>>();
               std::string description = params["description"];
-              return m_application->setLibraryMetadata(functionIds, description);
+              std::vector<std::string> tags;
+              if (params.contains("tags") && params["tags"].is_array())
+              {
+                  tags = params["tags"].get<std::vector<std::string>>();
+              }
+              std::string category;
+              if (params.contains("category") && params["category"].is_string())
+              {
+                  category = params["category"].get<std::string>();
+              }
+              std::string name;
+              if (params.contains("name") && params["name"].is_string())
+              {
+                  name = params["name"].get<std::string>();
+              }
+              return m_application->setLibraryMetadata(
+                functionIds, description, tags, category, name);
           });
+
+        // CHANGE NOTIFICATIONS
+        registerTool(
+          "get_changes_since",
+          "Return a structured log of document changes (function additions, modifications, "
+          "removals) since a given ISO-8601 timestamp. Enables agents to detect user-driven "
+          "edits and avoid overwriting them. Returns an empty list when no changes occurred.",
+          {{"type", "object"},
+           {"properties",
+            {{"since",
+              {{"type", "string"},
+               {"description",
+                "ISO-8601 UTC timestamp (e.g. '2026-03-17T10:00:00Z'). Only changes made after "
+                "this timestamp are returned."}}}}},
+           {"required", json::array({"since"})}},
+          [this](json const & params) -> json
+          {
+              auto const & since = params["since"].get<std::string>();
+              return m_application->getChangesSince(since);
+          });
+
+#ifdef ENABLE_UI_TESTING
+        // UI TESTING TOOLS
+        registerTool(
+          "ui_click",
+          "Perform a UI click on the specified ImGui test engine path",
+          {{"type", "object"},
+           {"properties",
+            {{"path",
+              {{"type", "string"},
+               {"description", "The ImGui test path (e.g., '//MainWindow/File/Open')"}}}}},
+           {"required", json::array({"path"})}},
+          [this](const json & params) -> json
+          {
+              if (!params.contains("path"))
+              {
+                  return {{"success", false}, {"error", "Missing required parameter: path"}};
+              }
+              std::string path = params["path"];
+              bool success = m_application->uiClick(path);
+              return {{"success", success},
+                      {"message", success ? "Click queued successfully" : "Failed to queue click"}};
+          });
+
+        registerTool(
+          "capture_screenshot",
+          "Capture a screenshot of the current UI. If output_path is provided, it saves to disk. Otherwise it returns the image directly as base64 in the MCP response.",
+          {{"type", "object"},
+           {"properties",
+            {{"output_path",
+              {{"type", "string"},
+               {"description", "Optional. The file path where the screenshot will be saved."}}}}}},
+          [this](const json & params) -> json
+          {
+              std::string outputPath;
+              bool returnDirectly = false;
+              if (params.contains("output_path"))
+              {
+                  outputPath = params["output_path"];
+              }
+              else
+              {
+                  auto tmpDir = std::filesystem::temp_directory_path();
+                  outputPath = (tmpDir / "gladius_mcp_screenshot_tmp.png").string();
+                  returnDirectly = true;
+              }
+              
+              bool success = m_application->captureUIScreenshot(outputPath);
+              if (!success) {
+                  return {{"isError", true}, {"content", {{{"type", "text"}, {"text", "Failed to capture screenshot"}}}}};
+              }
+
+              if (returnDirectly)
+              {
+                  auto bytes = readFileBinary(outputPath);
+                  std::remove(outputPath.c_str());
+                  if (!bytes.empty())
+                  {
+                      std::string b64 = base64Encode(bytes);
+                      return {{"content", {
+                          {{"type", "image"}, {"data", b64}, {"mimeType", "image/png"}}
+                      }}};
+                  }
+                  return {{"isError", true}, {"content", {{{"type", "text"}, {"text", "Screenshot captured but failed to read"}}}}};
+              }
+
+              return {{"content", {{{"type", "text"}, {"text", "Screenshot captured successfully to " + outputPath}}}}};
+          });
+
+        registerTool(
+          "ui_dump_windows",
+          "Dump all ImGui window names",
+          {{"type", "object"}, {"properties", json::object()}},
+          [this](const json &) -> json
+          {
+              std::vector<std::string> windows;
+              ImGuiContext* ctx = ImGui::GetCurrentContext();
+              if (ctx)
+              {
+                  for(int i = 0; i < ctx->Windows.Size; i++)
+                  {
+                      if (ctx->Windows[i]->Name != nullptr)
+                        windows.push_back(ctx->Windows[i]->Name);
+                  }
+              }
+              return {{"success", true}, {"windows", windows}};
+          });
+
+        registerTool(
+          "ui_dump_items",
+          "Dump all interactable elements within a specific UI path. If path is empty, dumps from root.",
+          {{"type", "object"},
+           {"properties",
+            {{"path",
+              {{"type", "string"},
+               {"description", "The ImGui test path (e.g., '//Model Editor') or empty string"}}}}}},
+          [this](const json & params) -> json
+          {
+              std::string path = "";
+              if (params.contains("path") && params["path"].is_string())
+              {
+                  path = params["path"].get<std::string>();
+              }
+              std::vector<std::string> items = m_application->uiDumpItems(path);
+              return {{"success", true}, {"items", items}};
+          });
+
+#endif
     }
 
     void MCPServer::runStdioLoop()

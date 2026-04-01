@@ -1,0 +1,56 @@
+{
+  "tools": ["list_library", "get_library_entry_info", "set_library_metadata"],
+  "description": "Library tool extensions in 024-mcp-agent-ux: keyword search for list_library, tags and snippet in get_library_entry_info, tags persistence in set_library_metadata.",
+  "changes": {
+    "list_library": {
+      "newOptionalParam": {
+        "query": {
+          "type": "string",
+          "description": "Optional keyword filter. Case-insensitive substring match against entry name, description, and tags. If omitted, all entries are returned."
+        }
+      },
+      "example": {
+        "request": {"query": "sphere"},
+        "response": {
+          "success": true,
+          "categories": [
+            {
+              "name": "primitives",
+              "entries": [
+                {
+                  "name": "sphere",
+                  "description": "Sphere primitive SDF",
+                  "tags": ["sdf", "primitive"],
+                  "is_shipped": true,
+                  "tagged_function_ids": [5]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "get_library_entry_info": {
+      "newResponseFields": {
+        "snippet": {
+          "type": "string",
+          "description": "Full snippet of the tagged function's body"
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Tags associated with this library entry"
+        }
+      }
+    },
+    "set_library_metadata": {
+      "newOptionalParam": {
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Tags to associate with this library entry. Replaces existing tags."
+        }
+      }
+    }
+  }
+}

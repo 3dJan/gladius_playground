@@ -1,0 +1,76 @@
+{
+  "tool": "get_changes_since",
+  "description": "Return a structured log of document changes (function additions, modifications, removals) since a given ISO-8601 timestamp. Enables agents to detect user-driven edits and avoid overwriting them. Returns an empty list when no changes occurred. Change history is in-memory only and resets when the document is closed.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "since": {
+        "type": "string",
+        "description": "ISO-8601 UTC timestamp (e.g. '2026-03-17T10:00:00Z'). Only changes made after this timestamp are returned."
+      }
+    },
+    "required": ["since"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": {"type": "boolean"},
+      "changes": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "timestamp": {"type": "string", "description": "ISO-8601 UTC timestamp of the change"},
+            "type": {
+              "type": "string",
+              "enum": ["added", "modified", "deleted"],
+              "description": "What kind of change occurred"
+            },
+            "resource_type": {
+              "type": "string",
+              "enum": ["function", "levelset", "parameter", "document"],
+              "description": "What category of resource changed"
+            },
+            "resource_id": {
+              "type": "integer",
+              "description": "ModelResourceID of the changed resource. 0 for document-level changes."
+            },
+            "display_name": {
+              "type": "string",
+              "description": "Human-readable name of the changed resource"
+            }
+          },
+          "required": ["timestamp", "type", "resource_type", "resource_id", "display_name"]
+        }
+      },
+      "error": {"type": "string"}
+    },
+    "required": ["success", "changes"]
+  },
+  "examples": [
+    {
+      "description": "Agent checks for changes after a pause",
+      "request": {"since": "2026-03-17T10:00:00Z"},
+      "response": {
+        "success": true,
+        "changes": [
+          {
+            "timestamp": "2026-03-17T10:05:32Z",
+            "type": "modified",
+            "resource_type": "function",
+            "resource_id": 5,
+            "display_name": "sphere"
+          }
+        ]
+      }
+    },
+    {
+      "description": "No changes since timestamp",
+      "request": {"since": "2026-03-17T11:00:00Z"},
+      "response": {
+        "success": true,
+        "changes": []
+      }
+    }
+  ]
+}

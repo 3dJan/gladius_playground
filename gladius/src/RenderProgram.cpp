@@ -117,6 +117,19 @@ namespace gladius
                                               size_t startHeight,
                                               size_t endHeight)
     {
+        return renderSceneAsync(
+          queue, lines, targetImage, m_resources->getRenderingSettings(),
+          z_mm, startHeight, endHeight);
+    }
+
+    cl::Event RenderProgram::renderSceneAsync(cl::CommandQueue const & queue,
+                                              Primitives const & lines,
+                                              ImageRGBA & targetImage,
+                                              RenderingSettings settings,
+                                              cl_float z_mm,
+                                              size_t startHeight,
+                                              size_t endHeight)
+    {
         ProfileFunction;
         cl::Event kernelEvent{};
 
@@ -125,6 +138,10 @@ namespace gladius
         {
             return kernelEvent;
         }
+
+        // Ensure time and z_mm are current in the caller's copy
+        settings.time_s = m_resources->getTime_s();
+        settings.z_mm = z_mm;
 
         try
         {
@@ -139,7 +156,7 @@ namespace gladius
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resources->getRenderingSettings(),
+              settings,
               m_resources->getPrecompSdfBuffer().getBuffer(),
               m_resources->getParameterBuffer().getBuffer(),
               m_resources->getCommandBuffer().getBuffer(),
@@ -212,6 +229,21 @@ namespace gladius
         size_t startHeight,
         size_t endHeight)
     {
+        return renderSceneWithDistanceOutputAsync(
+          queue, lines, targetImage, distanceOutput,
+          m_resources->getRenderingSettings(), z_mm, startHeight, endHeight);
+    }
+
+    cl::Event RenderProgram::renderSceneWithDistanceOutputAsync(
+        cl::CommandQueue const & queue,
+        Primitives const & lines,
+        ImageRGBA & targetImage,
+        DistanceInitBuffer & distanceOutput,
+        RenderingSettings settings,
+        cl_float z_mm,
+        size_t startHeight,
+        size_t endHeight)
+    {
         ProfileFunction;
         cl::Event kernelEvent{};
 
@@ -220,6 +252,10 @@ namespace gladius
         {
             return kernelEvent;
         }
+
+        // Ensure time and z_mm are current in the caller's copy
+        settings.time_s = m_resources->getTime_s();
+        settings.z_mm = z_mm;
 
         try
         {
@@ -235,7 +271,7 @@ namespace gladius
               cl_int(lines.primitives.getSize()),
               lines.data.getBuffer(),
               cl_int(lines.data.getSize()),
-              m_resources->getRenderingSettings(),
+              settings,
               m_resources->getPrecompSdfBuffer().getBuffer(),
               m_resources->getParameterBuffer().getBuffer(),
               m_resources->getCommandBuffer().getBuffer(),

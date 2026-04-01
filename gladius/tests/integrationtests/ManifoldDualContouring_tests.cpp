@@ -920,6 +920,71 @@ namespace gladius::compute::tests
             return exportAndValidateWithAdmesh(core, exportOptions);
         }
 
+        /// Result of STL bounds validation
+        struct StlBoundsResult
+        {
+            std::uint32_t triCount{0U};
+            std::size_t outOfBoundsVerts{0U};
+            Eigen::Vector3f meshMin{std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max()};
+            Eigen::Vector3f meshMax{std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest()};
+        };
+
+        /// Read a binary STL and check all vertices against a bounding box + margin.
+        [[nodiscard]] StlBoundsResult validateStlBounds(
+            std::filesystem::path const & stlPath,
+            BoundingBox const & modelBBox,
+            float margin = 5.0F)
+        {
+            StlBoundsResult result;
+
+            std::ifstream stl(stlPath, std::ios::binary);
+            if (!stl.is_open())
+            {
+                throw std::runtime_error("Failed to open STL: " + stlPath.string());
+            }
+
+            std::array<char, 80> header{};
+            stl.read(header.data(), 80);
+            stl.read(reinterpret_cast<char *>(&result.triCount), sizeof(result.triCount));
+
+            float const bboxMinX = modelBBox.min.x - margin;
+            float const bboxMinY = modelBBox.min.y - margin;
+            float const bboxMinZ = modelBBox.min.z - margin;
+            float const bboxMaxX = modelBBox.max.x + margin;
+            float const bboxMaxY = modelBBox.max.y + margin;
+            float const bboxMaxZ = modelBBox.max.z + margin;
+
+            for (std::uint32_t i = 0; i < result.triCount; ++i)
+            {
+                float normal[3];
+                stl.read(reinterpret_cast<char *>(normal), sizeof(normal));
+                for (int v = 0; v < 3; ++v)
+                {
+                    float xyz[3];
+                    stl.read(reinterpret_cast<char *>(xyz), sizeof(xyz));
+                    result.meshMin.x() = std::min(result.meshMin.x(), xyz[0]);
+                    result.meshMin.y() = std::min(result.meshMin.y(), xyz[1]);
+                    result.meshMin.z() = std::min(result.meshMin.z(), xyz[2]);
+                    result.meshMax.x() = std::max(result.meshMax.x(), xyz[0]);
+                    result.meshMax.y() = std::max(result.meshMax.y(), xyz[1]);
+                    result.meshMax.z() = std::max(result.meshMax.z(), xyz[2]);
+                    if (xyz[0] < bboxMinX || xyz[0] > bboxMaxX ||
+                        xyz[1] < bboxMinY || xyz[1] > bboxMaxY ||
+                        xyz[2] < bboxMinZ || xyz[2] > bboxMaxZ)
+                    {
+                        ++result.outOfBoundsVerts;
+                    }
+                }
+                std::uint16_t attr;
+                stl.read(reinterpret_cast<char *>(&attr), sizeof(attr));
+            }
+            return result;
+        }
+
         std::shared_ptr<ComputeContext> m_context;
         events::SharedLogger m_logger;
     };
@@ -3738,5 +3803,439 @@ namespace gladius::compute::tests
         std::cout << "  Parts: " << metrics.numberOfParts << std::endl;
         std::cout << "  Reversed facets: " << metrics.facetsReversed << " ("
                   << (reversedRatio * 100.0) << "%)" << std::endl;
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_QemFastSimplification_Export3mfWithColors)
+    {
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // Fine preset with fast QEM simplification and colors.
+        // Using Fine (depth 6/8) instead of UltraFine (7/9) to keep runtime
+        // manageable while still testing the full export + simplification + color pipeline.
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::Fine;
+        exportOptions.applyPreset(); // initialDepth=6, maxDepth=8
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto temp3mf = makeUniqueTempFile("mdc_union_color_simplify_", ".3mf");
+        TempFileGuard cleanup3mf(temp3mf);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.setOutputFormat(gladius::io::MeshOutputFileFormat::ThreeMF);
+        exporter.setDocument(bundle.document.get());
+        exporter.setExportWithColors(true);
+
+        exporter.beginExport(temp3mf, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+
+        ASSERT_FALSE(exporter.hasError()) << "3MF export failed: " << exporter.errorMessage();
+        ASSERT_TRUE(std::filesystem::exists(temp3mf)) << "3MF file should exist";
+        ASSERT_GT(std::filesystem::file_size(temp3mf), static_cast<std::uintmax_t>(0))
+            << "3MF file should not be empty";
+
+        // Read back and validate
+        {
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+            reader->ReadFromFile(temp3mf.string());
+
+            // Count mesh objects and triangles.
+            // With TargetApplication::None the compatibility planner selects
+            // StandardDiscreteComponents, which produces separate mesh objects per
+            // color region.  Individual region meshes may have open boundary edges
+            // at the cut between regions; this is expected.
+            std::size_t meshObjectsSeen = 0U;
+            std::size_t totalTriangles = 0U;
+            auto objectIterator = model->GetObjects();
+            while (objectIterator->MoveNext())
+            {
+                auto const object = objectIterator->GetCurrentObject();
+                if (!object->IsMeshObject())
+                {
+                    continue;
+                }
+                ++meshObjectsSeen;
+
+                auto const meshObject =
+                    model->GetMeshObjectByID(object->GetUniqueResourceID());
+                totalTriangles += meshObject->GetTriangleCount();
+            }
+            ASSERT_GT(meshObjectsSeen, 0U) << "No mesh objects found in exported 3MF";
+            ASSERT_GT(totalTriangles, 0U) << "Exported mesh should have triangles";
+
+            // The model has two colors (red sphere + blue box), so we expect
+            // multiple mesh objects / build items representing the color regions.
+            EXPECT_GT(meshObjectsSeen, 1U)
+                << "Color model should produce multiple mesh objects (one per color region)";
+
+            // Validate that color information is present via base material groups
+            // (StandardDiscreteComponents uses basematerials, not color groups).
+            auto baseMaterials = model->GetBaseMaterialGroups();
+            EXPECT_TRUE(baseMaterials->MoveNext())
+                << "Exported 3MF should contain a base material group for color regions";
+
+            // Verify multiple build items (one per color region)
+            auto buildItems = model->GetBuildItems();
+            std::size_t buildItemCount = 0U;
+            while (buildItems->MoveNext())
+            {
+                ++buildItemCount;
+            }
+            EXPECT_GT(buildItemCount, 1U)
+                << "Colored model should have multiple build items";
+
+            std::cout << "UnionWithColor Fine+QemFast export:" << std::endl;
+            std::cout << "  Mesh objects: " << meshObjectsSeen << std::endl;
+            std::cout << "  Total triangles: " << totalTriangles << std::endl;
+            std::cout << "  Build items: " << buildItemCount << std::endl;
+        }
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_UltraFineQemFast_Export3mfWithColors)
+    {
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // UltraFine preset (depth 7/9) with fast QEM simplification.
+        // This test verifies that the vtx2tri pruning keeps the algorithm
+        // fast enough for large meshes (~2.3M triangles).
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto temp3mf = makeUniqueTempFile("mdc_union_color_ultrafine_", ".3mf");
+        TempFileGuard cleanup3mf(temp3mf);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.setOutputFormat(gladius::io::MeshOutputFileFormat::ThreeMF);
+        exporter.setDocument(bundle.document.get());
+        exporter.setExportWithColors(true);
+
+        auto const start = std::chrono::steady_clock::now();
+
+        exporter.beginExport(temp3mf, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+
+        auto const elapsed = std::chrono::steady_clock::now() - start;
+        auto const elapsedSec =
+            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+
+        std::cout << "UnionWithColor UltraFine+QemFast elapsed: " << elapsedSec << "s"
+                  << std::endl;
+
+        // With the vtx2tri pruning fix this should complete in well under 5 minutes.
+        EXPECT_LT(elapsedSec, 300) << "UltraFine QemFast should complete within 5 minutes";
+
+        ASSERT_FALSE(exporter.hasError()) << "3MF export failed: " << exporter.errorMessage();
+        ASSERT_TRUE(std::filesystem::exists(temp3mf)) << "3MF file should exist";
+        ASSERT_GT(std::filesystem::file_size(temp3mf), static_cast<std::uintmax_t>(0))
+            << "3MF file should not be empty";
+
+        // Read back and validate
+        {
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            auto model = wrapper->CreateModel();
+            auto reader = model->QueryReader("3mf");
+            reader->ReadFromFile(temp3mf.string());
+
+            std::size_t meshObjectsSeen = 0U;
+            std::size_t totalTriangles = 0U;
+            auto objectIterator = model->GetObjects();
+            while (objectIterator->MoveNext())
+            {
+                auto const object = objectIterator->GetCurrentObject();
+                if (!object->IsMeshObject())
+                {
+                    continue;
+                }
+                ++meshObjectsSeen;
+
+                auto const meshObject =
+                    model->GetMeshObjectByID(object->GetUniqueResourceID());
+                totalTriangles += meshObject->GetTriangleCount();
+            }
+            ASSERT_GT(meshObjectsSeen, 0U) << "No mesh objects found in exported 3MF";
+            ASSERT_GT(totalTriangles, 0U) << "Exported mesh should have triangles";
+            EXPECT_GT(meshObjectsSeen, 1U)
+                << "Color model should produce multiple mesh objects";
+
+            auto baseMaterials = model->GetBaseMaterialGroups();
+            EXPECT_TRUE(baseMaterials->MoveNext())
+                << "Exported 3MF should contain a base material group";
+
+            auto buildItems = model->GetBuildItems();
+            std::size_t buildItemCount = 0U;
+            while (buildItems->MoveNext())
+            {
+                ++buildItemCount;
+            }
+            EXPECT_GT(buildItemCount, 1U)
+                << "Colored model should have multiple build items";
+
+            std::cout << "UnionWithColor UltraFine+QemFast export:" << std::endl;
+            std::cout << "  Mesh objects: " << meshObjectsSeen << std::endl;
+            std::cout << "  Total triangles: " << totalTriangles << std::endl;
+            std::cout << "  Build items: " << buildItemCount << std::endl;
+            std::cout << "  Elapsed: " << elapsedSec << "s" << std::endl;
+        }
+    }
+
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithUnionWithColor_UltraFineQemFast_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/union_with_color.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        // UltraFine preset (depth 7 / 9) with QemFast simplification — the combination
+        // that previously produced holes in the mesh after simplification.
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::TargetReductionPercent;
+        exportOptions.simplificationTargetReduction = 50.0F;
+
+        auto const metrics = exportAndValidateWithAdmesh(*bundle.core, exportOptions);
+
+        // After simplification we expect a watertight mesh:
+        // zero disconnected facets, zero degenerate facets, zero edges fixed.
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets before admesh repair"
+            << " (original had " << metrics.totalDisconnectedFacets.original << ")";
+        EXPECT_EQ(metrics.totalDisconnectedFacets.final, 0)
+            << "Simplified mesh should have no disconnected facets after admesh processing";
+        EXPECT_EQ(metrics.degenerateFacets, 0)
+            << "Simplified mesh should have no degenerate facets";
+        EXPECT_EQ(metrics.edgesFixed, 0)
+            << "Simplified mesh should require no edge fixes";
+
+        // The STL exporter merges all bodies into one file, so the number of parts
+        // depends on whether the bodies share geometry.  Just verify we have at least 1.
+        EXPECT_GE(metrics.numberOfParts, 1)
+            << "Simplified mesh should contain at least 1 part";
+
+        // No backwards edges — winding repair should have taken care of this.
+        EXPECT_EQ(metrics.backwardsEdges, 0)
+            << "Simplified mesh should have no backwards edges";
+
+        // Reversed facets should be negligible (< 1%).
+        double const reversedRatio = static_cast<double>(metrics.facetsReversed) /
+                                     static_cast<double>(metrics.numberOfFacets.original);
+        EXPECT_LE(reversedRatio, 0.01)
+            << "Too many facets reversed: " << metrics.facetsReversed << " out of "
+            << metrics.numberOfFacets.original << " (" << (reversedRatio * 100.0) << "%)";
+
+        // Positive volume ⇒ normals point outward.
+        EXPECT_GT(metrics.volume, 0.0)
+            << "Volume should be positive for outward-facing normals";
+
+        std::cout << "UnionWithColor UltraFine+QemFast Admesh validation:" << std::endl;
+        std::cout << "  Original facets: " << metrics.numberOfFacets.original << std::endl;
+        std::cout << "  Final facets:    " << metrics.numberOfFacets.final << std::endl;
+        std::cout << "  Volume:          " << metrics.volume << std::endl;
+        std::cout << "  Parts:           " << metrics.numberOfParts << std::endl;
+        std::cout << "  Degenerate:      " << metrics.degenerateFacets << std::endl;
+        std::cout << "  Edges fixed:     " << metrics.edgesFixed << std::endl;
+        std::cout << "  Facets reversed: " << metrics.facetsReversed
+                  << " (" << (reversedRatio * 100.0) << "%)" << std::endl;
+        std::cout << "  Backwards edges: " << metrics.backwardsEdges << std::endl;
+        std::cout << "  Disconnected (orig): "
+                  << metrics.totalDisconnectedFacets.original << std::endl;
+        std::cout << "  Disconnected (final): "
+                  << metrics.totalDisconnectedFacets.final << std::endl;
+    }
+
+    /// @test Export filamentholder5_standalone with error-bounded QemFast simplification
+    /// and validate with admesh + bounding box. maxError = 0.440 (user-reported problematic value).
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithFilamentholder5_ErrorBoundedQemFast_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder5_standalone.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const modelBBox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(modelBBox.has_value()) << "Model bounding box must be available";
+
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = false;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::ErrorBounded;
+        exportOptions.simplificationMaxError = 0.440F;
+
+        // Export to STL with bounds checking
+        auto tempFile = makeUniqueTempFile("filholder5_eb_", ".stl");
+        TempFileGuard guard(tempFile);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.beginExport(tempFile, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+        ASSERT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
+
+        auto const bounds = validateStlBounds(tempFile, *modelBBox);
+        ASSERT_GT(bounds.triCount, 0U);
+
+        std::cout << "Filamentholder5 ErrorBounded QemFast (maxError=0.440):" << std::endl;
+        std::cout << "  Model bbox: (" << modelBBox->min.x << ", " << modelBBox->min.y
+                  << ", " << modelBBox->min.z << ") - (" << modelBBox->max.x << ", "
+                  << modelBBox->max.y << ", " << modelBBox->max.z << ")" << std::endl;
+        std::cout << "  Mesh bounds: (" << bounds.meshMin.x() << ", " << bounds.meshMin.y() << ", "
+                  << bounds.meshMin.z() << ") - (" << bounds.meshMax.x() << ", " << bounds.meshMax.y() << ", "
+                  << bounds.meshMax.z() << ")" << std::endl;
+        std::cout << "  Facets: " << bounds.triCount << std::endl;
+        std::cout << "  Out-of-bounds vertices: " << bounds.outOfBoundsVerts << std::endl;
+
+        EXPECT_EQ(bounds.outOfBoundsVerts, 0U)
+            << "Vertices must stay within model bounding box + margin. "
+            << "Mesh bounds: (" << bounds.meshMin.x() << ", " << bounds.meshMin.y() << ", " << bounds.meshMin.z()
+            << ") - (" << bounds.meshMax.x() << ", " << bounds.meshMax.y() << ", " << bounds.meshMax.z() << ")";
+
+        // Also run admesh validation
+        int exitCode = 0;
+        std::string const admeshOutput =
+            runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+        ASSERT_EQ(exitCode, 0) << "admesh failed\n" << admeshOutput;
+
+        auto const metrics = parseAdmeshMetrics(admeshOutput);
+
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.degenerateFacets, 0);
+        EXPECT_EQ(metrics.edgesFixed, 0);
+        EXPECT_EQ(metrics.backwardsEdges, 0);
+        EXPECT_GT(metrics.volume, 0.0);
+    }
+
+    /// @test Export filamentholder5_standalone with error-bounded QemFast simplification
+    /// AND sharp edge refinement, then validate with admesh + bounding box.
+    TEST_F(ManifoldDualContouringGpu_Test,
+           GenerateMesh_WithFilamentholder5_ErrorBoundedSharpEdge_AdmeshValidation)
+    {
+        if (!isAdmeshAvailable())
+        {
+            GTEST_SKIP() << "admesh not available, skipping validation test";
+        }
+
+        auto bundle = loadDocument("testdata/filamentholder5_standalone.3mf");
+        ASSERT_TRUE(bundle.core->updateBBox()) << "Failed to compute bounding box";
+
+        auto const modelBBox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(modelBBox.has_value()) << "Model bounding box must be available";
+
+        gladius::io::ManifoldDualContouringOptions exportOptions{};
+        exportOptions.qualityPreset = gladius::io::ManifoldDualContouringQuality::UltraFine;
+        exportOptions.applyPreset();
+        exportOptions.enableHierarchicalOctree = true;
+        exportOptions.minFeatureSize = 0.0F;
+        exportOptions.enableChunking = true;
+        exportOptions.projectToSurface = true;
+        exportOptions.enableSharpFeaturePostProcess = true;
+        exportOptions.sharpFeatureAngleThreshold = 0.5F;
+        exportOptions.subdivisionIterations = 1U;
+        exportOptions.simplificationMethod = gladius::io::SimplificationMethod::QemFast;
+        exportOptions.simplificationTerminationMode =
+            gladius::io::SimplificationTerminationMode::ErrorBounded;
+        exportOptions.simplificationMaxError = 0.440F;
+
+        // Export to STL with bounds checking
+        auto tempFile = makeUniqueTempFile("filholder5_eb_sharp_", ".stl");
+        TempFileGuard guard(tempFile);
+
+        gladius::io::ManifoldDualContouringStlExporter exporter(m_logger);
+        exporter.setOptions(exportOptions);
+        exporter.beginExport(tempFile, *bundle.core);
+        while (exporter.advanceExport(*bundle.core))
+        {
+        }
+        exporter.finalize();
+        ASSERT_FALSE(exporter.hasError()) << "Export failed: " << exporter.errorMessage();
+
+        auto const bounds = validateStlBounds(tempFile, *modelBBox);
+        ASSERT_GT(bounds.triCount, 0U);
+
+        std::cout << "Filamentholder5 ErrorBounded+SharpEdge QemFast (maxError=0.440):" << std::endl;
+        std::cout << "  Model bbox: (" << modelBBox->min.x << ", " << modelBBox->min.y
+                  << ", " << modelBBox->min.z << ") - (" << modelBBox->max.x << ", "
+                  << modelBBox->max.y << ", " << modelBBox->max.z << ")" << std::endl;
+        std::cout << "  Mesh bounds: (" << bounds.meshMin.x() << ", " << bounds.meshMin.y() << ", "
+                  << bounds.meshMin.z() << ") - (" << bounds.meshMax.x() << ", " << bounds.meshMax.y() << ", "
+                  << bounds.meshMax.z() << ")" << std::endl;
+        std::cout << "  Facets: " << bounds.triCount << std::endl;
+        std::cout << "  Out-of-bounds vertices: " << bounds.outOfBoundsVerts << std::endl;
+
+        EXPECT_EQ(bounds.outOfBoundsVerts, 0U)
+            << "Vertices must stay within model bounding box + margin. "
+            << "Mesh bounds: (" << bounds.meshMin.x() << ", " << bounds.meshMin.y() << ", " << bounds.meshMin.z()
+            << ") - (" << bounds.meshMax.x() << ", " << bounds.meshMax.y() << ", " << bounds.meshMax.z() << ")";
+
+        // Also run admesh validation
+        int exitCode = 0;
+        std::string const admeshOutput =
+            runCommandAndCapture("admesh " + tempFile.string(), exitCode);
+        ASSERT_EQ(exitCode, 0) << "admesh failed\n" << admeshOutput;
+
+        auto const metrics = parseAdmeshMetrics(admeshOutput);
+
+        EXPECT_EQ(metrics.totalDisconnectedFacets.original, 0)
+            << "Simplified mesh should have no disconnected facets";
+        EXPECT_EQ(metrics.degenerateFacets, 0);
+        EXPECT_EQ(metrics.edgesFixed, 0);
+        EXPECT_EQ(metrics.backwardsEdges, 0);
+        EXPECT_GT(metrics.volume, 0.0);
     }
 }

@@ -104,14 +104,7 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json, getSceneHierarchy, (), (const, override));
         MOCK_METHOD(nlohmann::json, getDocumentInfo, (), (const, override));
         MOCK_METHOD(nlohmann::json, get3MFStructure, (), (const, override));
-        MOCK_METHOD(nlohmann::json, getFunctionGraph, (uint32_t), (const, override));
-        // Simple inline override to satisfy pure virtual; tests don't use it explicitly here
-        nlohmann::json setFunctionGraph(uint32_t /*functionId*/,
-                                        const nlohmann::json & /*graph*/,
-                                        bool /*replace*/) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
+
         MOCK_METHOD(std::vector<std::string>, listAvailableFunctions, (), (const, override));
         MOCK_METHOD(nlohmann::json,
                     validateForManufacturing,
@@ -146,37 +139,16 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json, getModelBoundingBox, (), (const, override));
         MOCK_METHOD(nlohmann::json, removeUnusedResources, (), (override));
 
-        MOCK_METHOD(nlohmann::json, getNodeInfo, (uint32_t, uint32_t), (const, override));
-        MOCK_METHOD(nlohmann::json,
-                    createNode,
-                    (uint32_t, const std::string &, const std::string &, uint32_t),
-                    (override));
-        MOCK_METHOD(nlohmann::json, deleteNode, (uint32_t, uint32_t), (override));
+
         MOCK_METHOD(nlohmann::json,
                     setParameterValue,
                     (uint32_t, uint32_t, const std::string &, const nlohmann::json &),
                     (override));
-        MOCK_METHOD(nlohmann::json,
-                    createLink,
-                    (uint32_t, uint32_t, const std::string &, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    deleteLink,
-                    (uint32_t, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createFunctionCallNode,
-                    (uint32_t, uint32_t, const std::string &),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createConstantNodesForMissingParameters,
-                    (uint32_t, uint32_t, bool, std::vector<std::string> const &),
-                    (override));
-        MOCK_METHOD(nlohmann::json, removeUnusedNodes, (uint32_t), (override));
+
         MOCK_METHOD(nlohmann::json, validateModel, (const nlohmann::json &), (override));
 
         // Library operations
-        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &), (const, override));
+        MOCK_METHOD(nlohmann::json, listLibrary, (std::string const &, std::string const &), (const, override));
         MOCK_METHOD(nlohmann::json,
                     getLibraryEntryInfo,
                     (std::string const &, std::string const &),
@@ -186,17 +158,9 @@ namespace gladius::tests
                     (std::string const &,
                      std::string const &,
                      std::string const &,
+                     uint32_t,
                      std::string const &,
-                     bool),
-                    (override));
-        MOCK_METHOD(nlohmann::json,
-                    createLibraryEntryFromSnippet,
-                    (std::string const &,
-                     std::string const &,
-                     std::string const &,
-                     std::string const &,
-                     std::vector<FunctionArgument> const &,
-                     std::string const &,
+                     std::vector<std::string> const &,
                      bool),
                     (override));
         MOCK_METHOD(nlohmann::json,
@@ -211,6 +175,9 @@ namespace gladius::tests
         MOCK_METHOD(nlohmann::json,
                     setLibraryMetadata,
                     (std::vector<uint32_t> const &,
+                     std::string const &,
+                     std::vector<std::string> const &,
+                     std::string const &,
                      std::string const &),
                     (override));
         MOCK_METHOD(nlohmann::json,
@@ -221,6 +188,12 @@ namespace gladius::tests
                     deleteLibraryEntry,
                     (std::string const &, std::string const &),
                     (override));
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(std::string const & /*path*/) override { return false; }
+        std::vector<std::string> uiDumpItems(std::string const & /*parentPath*/) override { return {}; }
+        bool captureUIScreenshot(std::string const & /*outputPath*/) override { return false; }
+#endif
     };
 
     class MCPServerTest : public ::testing::Test
@@ -268,14 +241,12 @@ namespace gladius::tests
         // Check for essential tools that are actually implemented
         std::vector<std::string> expectedTools = {"get_status",
                                                   "get_3mf_structure",
-                                                  "get_function_graph",
                                                   "create_document",
                                                   "open_document",
                                                   "save_document_as",
                                                   "save_document",
                                                   "create_function_from_expression",
                                                   "create_levelset",
-                                                  "create_image3d_function",
                                                   "create_volumetric_color",
                                                   "create_volumetric_property",
                                                   "set_parameter",
@@ -283,9 +254,10 @@ namespace gladius::tests
                                                   "set_build_item_object",
                                                   "set_build_item_transform",
                                                   "modify_levelset",
-                                                  // Newly added tools
                                                   "get_model_bounding_box",
-                                                  "remove_unused_resources"};
+                                                  "remove_unused_resources",
+                                                  "evaluate_function",
+                                                  "get_changes_since"};
 
         for (const auto & expectedTool : expectedTools)
         {
@@ -972,198 +944,4 @@ namespace gladius::tests
         EXPECT_THAT(result["error"].get<std::string>(), ::testing::HasSubstr("No document"));
     }
 
-    // ========================================
-    // Create Link Enhanced Error Messages tests
-    // ========================================
-
-    TEST_F(MCPServerTest, CreateLinkTool_TargetParameterNotFound_ReturnsDetailedErrorInfo)
-    {
-        // Arrange
-        json linkResult = {
-          {"success", false},
-          {"error", "Target parameter not found on target node"},
-          {"requested_function_id", 1},
-          {"source_node_id", 1},
-          {"source_port_name", "output"},
-          {"target_node_id", 2},
-          {"target_parameter_name", "invalid_param"},
-          {"target_node_available_parameters",
-           json::array({{{"name", "input"}, {"type", "float"}, {"is_connected", false}},
-                        {{"name", "scale"}, {"type", "float"}, {"is_connected", true}},
-                        {{"name", "offset"}, {"type", "vec3"}, {"is_connected", false}}})}};
-
-        EXPECT_CALL(*m_mockApp, createLink(1, 1, "output", 2, "invalid_param"))
-          .WillOnce(::testing::Return(linkResult));
-
-        json request = {{"jsonrpc", "2.0"},
-                        {"id", 1},
-                        {"method", "tools/call"},
-                        {"params",
-                         {{"name", "create_link"},
-                          {"arguments",
-                           {{"function_id", 1},
-                            {"source_node_id", 1},
-                            {"source_port_name", "output"},
-                            {"target_node_id", 2},
-                            {"target_parameter_name", "invalid_param"}}}}}};
-
-        // Act
-        json response = m_server->processJSONRPCRequest(request);
-
-        // Assert
-        auto content = response["result"]["content"];
-        ASSERT_TRUE(content.is_array() && !content.empty());
-        std::string jsonString = content[0]["text"];
-        json result = json::parse(jsonString);
-
-        EXPECT_EQ(result["success"], false);
-        EXPECT_THAT(result["error"].get<std::string>(),
-                    ::testing::HasSubstr("Target parameter not found on target node"));
-
-        // Check that detailed parameter information is included
-        ASSERT_TRUE(result.contains("target_node_available_parameters"));
-        auto params = result["target_node_available_parameters"];
-        ASSERT_TRUE(params.is_array());
-        EXPECT_EQ(params.size(), 3);
-
-        // Check first parameter
-        EXPECT_EQ(params[0]["name"], "input");
-        EXPECT_EQ(params[0]["type"], "float");
-        EXPECT_EQ(params[0]["is_connected"], false);
-
-        // Check second parameter
-        EXPECT_EQ(params[1]["name"], "scale");
-        EXPECT_EQ(params[1]["type"], "float");
-        EXPECT_EQ(params[1]["is_connected"], true);
-
-        // Check third parameter
-        EXPECT_EQ(params[2]["name"], "offset");
-        EXPECT_EQ(params[2]["type"], "vec3");
-        EXPECT_EQ(params[2]["is_connected"], false);
-    }
-
-    TEST_F(MCPServerTest, CreateLinkTool_TargetNodeNotFound_ReturnsNodesWithUnconnectedInputs)
-    {
-        // Arrange
-        json linkResult = {
-          {"success", false},
-          {"error", "Target node not found"},
-          {"requested_function_id", 1},
-          {"source_node_id", 1},
-          {"source_port_name", "output"},
-          {"target_node_id", 999},
-          {"target_parameter_name", "input"},
-          {"nodes_with_unconnected_inputs",
-           json::array(
-             {{{"id", 2},
-               {"name", "AddNode"},
-               {"display_name", "Add Node"},
-               {"unconnected_parameters",
-                json::array({{{"name", "a"}, {"type", "float"}, {"is_connected", false}},
-                             {{"name", "b"}, {"type", "float"}, {"is_connected", false}}})}},
-              {{"id", 3},
-               {"name", "MultiplyNode"},
-               {"display_name", "Multiply Node"},
-               {"unconnected_parameters",
-                json::array({{{"name", "input"}, {"type", "vec3"}, {"is_connected", false}}})}}})}};
-
-        EXPECT_CALL(*m_mockApp, createLink(1, 1, "output", 999, "input"))
-          .WillOnce(::testing::Return(linkResult));
-
-        json request = {{"jsonrpc", "2.0"},
-                        {"id", 1},
-                        {"method", "tools/call"},
-                        {"params",
-                         {{"name", "create_link"},
-                          {"arguments",
-                           {{"function_id", 1},
-                            {"source_node_id", 1},
-                            {"source_port_name", "output"},
-                            {"target_node_id", 999},
-                            {"target_parameter_name", "input"}}}}}};
-
-        // Act
-        json response = m_server->processJSONRPCRequest(request);
-
-        // Assert
-        auto content = response["result"]["content"];
-        ASSERT_TRUE(content.is_array() && !content.empty());
-        std::string jsonString = content[0]["text"];
-        json result = json::parse(jsonString);
-
-        EXPECT_EQ(result["success"], false);
-        EXPECT_THAT(result["error"].get<std::string>(),
-                    ::testing::HasSubstr("Target node not found"));
-
-        // Check that nodes with unconnected inputs are listed
-        ASSERT_TRUE(result.contains("nodes_with_unconnected_inputs"));
-        auto nodes = result["nodes_with_unconnected_inputs"];
-        ASSERT_TRUE(nodes.is_array());
-        EXPECT_EQ(nodes.size(), 2);
-
-        // Check first node
-        auto node1 = nodes[0];
-        EXPECT_EQ(node1["id"], 2);
-        EXPECT_EQ(node1["name"], "AddNode");
-        EXPECT_EQ(node1["display_name"], "Add Node");
-        ASSERT_TRUE(node1.contains("unconnected_parameters"));
-        auto params1 = node1["unconnected_parameters"];
-        EXPECT_EQ(params1.size(), 2);
-        EXPECT_EQ(params1[0]["name"], "a");
-        EXPECT_EQ(params1[0]["type"], "float");
-        EXPECT_EQ(params1[0]["is_connected"], false);
-
-        // Check second node
-        auto node2 = nodes[1];
-        EXPECT_EQ(node2["id"], 3);
-        EXPECT_EQ(node2["name"], "MultiplyNode");
-        EXPECT_EQ(node2["display_name"], "Multiply Node");
-        auto params2 = node2["unconnected_parameters"];
-        EXPECT_EQ(params2.size(), 1);
-        EXPECT_EQ(params2[0]["name"], "input");
-        EXPECT_EQ(params2[0]["type"], "vec3");
-        EXPECT_EQ(params2[0]["is_connected"], false);
-    }
-
-    TEST_F(MCPServerTest, CreateLinkTool_Success_ReturnsSuccessResponse)
-    {
-        // Arrange
-        json linkResult = {{"success", true},
-                           {"requested_function_id", 1},
-                           {"source_node_id", 1},
-                           {"source_port_name", "output"},
-                           {"target_node_id", 2},
-                           {"target_parameter_name", "input"}};
-
-        EXPECT_CALL(*m_mockApp, createLink(1, 1, "output", 2, "input"))
-          .WillOnce(::testing::Return(linkResult));
-
-        json request = {{"jsonrpc", "2.0"},
-                        {"id", 1},
-                        {"method", "tools/call"},
-                        {"params",
-                         {{"name", "create_link"},
-                          {"arguments",
-                           {{"function_id", 1},
-                            {"source_node_id", 1},
-                            {"source_port_name", "output"},
-                            {"target_node_id", 2},
-                            {"target_parameter_name", "input"}}}}}};
-
-        // Act
-        json response = m_server->processJSONRPCRequest(request);
-
-        // Assert
-        auto content = response["result"]["content"];
-        ASSERT_TRUE(content.is_array() && !content.empty());
-        std::string jsonString = content[0]["text"];
-        json result = json::parse(jsonString);
-
-        EXPECT_EQ(result["success"], true);
-        EXPECT_EQ(result["requested_function_id"], 1);
-        EXPECT_EQ(result["source_node_id"], 1);
-        EXPECT_EQ(result["source_port_name"], "output");
-        EXPECT_EQ(result["target_node_id"], 2);
-        EXPECT_EQ(result["target_parameter_name"], "input");
-    }
 }

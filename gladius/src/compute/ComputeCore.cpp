@@ -825,6 +825,11 @@ namespace gladius
         return true;
     }
 
+    void ComputeCore::invalidateContourCache()
+    {
+        m_lastContourSliceHeight_mm = std::numeric_limits<cl_float>::quiet_NaN();
+    }
+
     bool ComputeCore::isSlicingInProgress() const
     {
         ProfileFunction
@@ -1680,11 +1685,16 @@ namespace gladius
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        // and avoids expensive shadow rays and AO samples during interactive editing
+        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+
         getBestRenderProgram()->renderScene(*m_primitives,
                                             *m_lowResPreviewImage,
                                             m_sliceHeight_mm,
                                             0,
                                             m_lowResPreviewImage->getHeight());
+        m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         getBestRenderProgram()->resample(
           *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
@@ -1703,23 +1713,31 @@ namespace gladius
         // Note: No mutex lock - caller is responsible for thread safety
         // Note: No glFinish() - this is async, caller handles sync via returned event
 
+        // Work with a local copy of settings to avoid mutating shared state
+        // across threads (the worker thread calls this during streaming preview)
+        auto settings = m_resources->getRenderingSettings();
+
         // Use precomputed SDF if available, otherwise use full model evaluation (slower but works)
         if (m_precompSdfIsValid)
         {
-            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            settings.approximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
         else
         {
-            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            settings.approximation = AM_FULL_MODEL;
             m_lastUsedApproximation = AM_FULL_MODEL;
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
 
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+
         cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
                                                                          *m_primitives,
                                                                          targetImage,
+                                                                         settings,
                                                                          m_sliceHeight_mm,
                                                                          0,
                                                                          targetImage.getHeight());
@@ -1727,8 +1745,6 @@ namespace gladius
         // Flush to ensure commands are submitted to the GPU before returning
         // This is important for proper event completion signaling
         queue.flush();
-
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         return renderEvent;
     }
@@ -1747,32 +1763,37 @@ namespace gladius
             return renderLowResPreviewAsync(queue, targetImage);
         }
 
+        // Work with a local copy of settings to avoid mutating shared state
+        auto settings = m_resources->getRenderingSettings();
+
         // Use precomputed SDF if available, otherwise use full model evaluation
         if (m_precompSdfIsValid)
         {
-            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+            settings.approximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
         }
         else
         {
-            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+            settings.approximation = AM_FULL_MODEL;
             m_lastUsedApproximation = AM_FULL_MODEL;
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
         }
+
+        // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
+        settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
         cl::Event renderEvent = getBestRenderProgram()->renderSceneWithDistanceOutputAsync(
             queue,
             *m_primitives,
             targetImage,
             *distanceBuffer,
+            settings,
             m_sliceHeight_mm,
             0,
             targetImage.getHeight());
 
         queue.flush();
-
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
         return renderEvent;
     }

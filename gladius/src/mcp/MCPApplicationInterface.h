@@ -128,58 +128,6 @@ namespace gladius
         virtual nlohmann::json get3MFStructure() const = 0;
 
         /**
-         * @brief Serialize and return the node graph of a function (model) as JSON.
-         *
-         * The function can be addressed by its ModelResourceID (resource id in 3MF), which
-         * corresponds to the model id used throughout Gladius. Returns an error if the
-         * model does not exist.
-         *
-         * @param functionId ModelResourceID of the function (model) to serialize.
-         * @return JSON with nodes, parameters, outputs and links.
-         */
-        virtual nlohmann::json getFunctionGraph(uint32_t functionId) const = 0;
-
-        /**
-         * @brief Serialize and return information about a specific node in a function graph.
-         *
-         * @param functionId ModelResourceID of the function (model).
-         * @param nodeId NodeID of the node to inspect.
-         * @return JSON with node information.
-         */
-        virtual nlohmann::json getNodeInfo(uint32_t functionId, uint32_t nodeId) const = 0;
-
-        /**
-         * @brief Creates a new node in a function graph.
-         *
-         * @param functionId ModelResourceID of the function (model).
-         * @param nodeType The type of the node to create.
-         * @param displayName An optional display name for the new node.
-         * @param nodeId An optional ID for the new node.
-         * @return JSON with the new node's ID.
-         */
-        virtual nlohmann::json createNode(uint32_t functionId,
-                                          const std::string & nodeType,
-                                          const std::string & displayName,
-                                          uint32_t nodeId) = 0;
-
-        /**
-         * @brief Replace or create a function graph from JSON in one operation.
-         * See FunctionOperationsTool::setFunctionGraph for expected schema.
-         */
-        virtual nlohmann::json setFunctionGraph(uint32_t functionId,
-                                                const nlohmann::json & graph,
-                                                bool replace = true) = 0;
-
-        /**
-         * @brief Deletes a node from a function graph.
-         *
-         * @param functionId ModelResourceID of the function (model).
-         * @param nodeId The ID of the node to delete.
-         * @return JSON with success status.
-         */
-        virtual nlohmann::json deleteNode(uint32_t functionId, uint32_t nodeId) = 0;
-
-        /**
          * @brief Sets the value of a parameter on a node.
          *
          * @param functionId ModelResourceID of the function (model).
@@ -193,87 +141,18 @@ namespace gladius
                                                  const std::string & parameterName,
                                                  const nlohmann::json & value) = 0;
 
-        /**
-         * @brief Creates a link between two nodes in a function graph.
-         *
-         * @param functionId ModelResourceID of the function (model).
-         * @param sourceNodeId The ID of the source node.
-         * @param sourcePortName The name of the source port.
-         * @param targetNodeId The ID of the target node.
-         * @param targetParameterName The name of the target parameter.
-         * @return JSON with success status.
-         */
-        virtual nlohmann::json createLink(uint32_t functionId,
-                                          uint32_t sourceNodeId,
-                                          const std::string & sourcePortName,
-                                          uint32_t targetNodeId,
-                                          const std::string & targetParameterName) = 0;
+        /// Evaluate a function at sample points via OpenCL. Override to provide implementation.
+        virtual nlohmann::json evaluateFunction(uint32_t /*functionId*/,
+                                                nlohmann::json const & /*samples*/)
+        {
+            return {{"success", false}, {"error", "Not implemented"}};
+        }
 
-        /**
-         * @brief Deletes a link from a function graph.
-         *
-         * @param functionId ModelResourceID of the function (model).
-         * @param targetNodeId The ID of the target node.
-         * @param targetParameterName The name of the target parameter.
-         * @return JSON with success status.
-         */
-        virtual nlohmann::json deleteLink(uint32_t functionId,
-                                          uint32_t targetNodeId,
-                                          const std::string & targetParameterName) = 0;
-
-        /**
-         * @brief Creates a function call node with a resource node for the function reference.
-         *
-         * This is a specialized node creation method that:
-         * 1. Creates a Resource node with the referenced function ID
-         * 2. Creates a FunctionCall node
-         * 3. Connects the Resource node's output to the FunctionCall's FunctionId input
-         * 4. Updates the FunctionCall node's inputs/outputs based on the referenced function
-         * 5. Registers the new nodes with the model
-         *
-         * @param targetFunctionId The ID of the function (model) where the nodes will be added
-         * @param referencedFunctionId The ID of the function that will be called
-         * @param displayName Optional display name for the function call node
-         * @return JSON with creation result, including unconnected inputs and outputs
-         */
-        virtual nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
-                                                      uint32_t referencedFunctionId,
-                                                      const std::string & displayName = "") = 0;
-
-        /**
-         * @brief Creates constant nodes for missing parameters on a node (typically a function call
-         * node)
-         *
-         * This method analyzes a node to find parameters that require input sources but don't have
-         * them, then creates appropriate constant nodes (ConstantScalar, ConstantVector,
-         * ConstantMatrix, or Resource) based on the parameter types. Optionally auto-connects the
-         * created constant nodes.
-         *
-         * @param functionId ModelResourceID of the function (model) containing the node
-         * @param nodeId The ID of the node to analyze for missing parameters
-         * @param autoConnect Whether to automatically connect the created constant nodes to the
-         * missing parameters
-         * @return JSON with creation result, including information about created constant nodes and
-         * links
-         */
-        virtual nlohmann::json createConstantNodesForMissingParameters(
-          uint32_t functionId,
-          uint32_t nodeId,
-          bool autoConnect = true,
-          std::vector<std::string> const & excludeParams = {}) = 0;
-
-        /**
-         * @brief Removes unused nodes from a function graph
-         *
-         * This method analyzes a function graph to find nodes whose outputs are not connected
-         * to any other nodes or to the function's output ports. Such nodes are considered unused
-         * and can be safely removed. This is useful for cleaning up after automatic node creation
-         * or when nodes become disconnected during graph editing.
-         *
-         * @param functionId ModelResourceID of the function (model) to clean up
-         * @return JSON with removal result, including information about removed nodes
-         */
-        virtual nlohmann::json removeUnusedNodes(uint32_t functionId) = 0;
+        /// Return a structured log of document changes since a given ISO-8601 timestamp.
+        virtual nlohmann::json getChangesSince(std::string const & /*isoTimestamp*/) const
+        {
+            return {{"success", true}, {"changes", nlohmann::json::array()}};
+        }
 
         /// Get code snippet for a function. Override to provide implementation.
         virtual nlohmann::json getFunctionSnippet(uint32_t /*functionId*/) const
@@ -479,8 +358,10 @@ namespace gladius
 
         /// @brief List all library categories and their entries.
         /// @param category Optional filter for a specific category.
+        /// @param query Optional case-insensitive substring to filter entries by name, description, or tags.
         /// @return JSON with categories array, each containing entries with metadata.
-        virtual nlohmann::json listLibrary(std::string const & category = "") const = 0;
+        virtual nlohmann::json listLibrary(std::string const & category = "",
+                                           std::string const & query = "") const = 0;
 
         /// @brief Get detailed information about a specific library entry.
         /// @param category Category subdirectory name.
@@ -489,28 +370,14 @@ namespace gladius
         virtual nlohmann::json getLibraryEntryInfo(std::string const & category,
                                                    std::string const & name) const = 0;
 
-        /// @brief Create a new library entry from a math expression.
-        /// @param name Entry name (used as filename).
-        /// @param category Category subdirectory name.
-        /// @param expression Math expression defining the SDF function.
-        /// @param description Human-readable description.
-        /// @param overwrite If true, replace an existing entry with the same name.
-        /// @return JSON with creation result including path and function ID.
+        /// @brief Create a library entry from a full program snippet with quality gate.
         virtual nlohmann::json createLibraryEntry(std::string const & name,
                                                   std::string const & category,
-                                                  std::string const & expression,
+                                                  std::string const & programSnippet,
+                                                  uint32_t functionId,
                                                   std::string const & description,
+                                                  std::vector<std::string> const & tags = {},
                                                   bool overwrite = false) = 0;
-
-        /// @brief Create a new library entry from a multi-line snippet with custom arguments.
-        virtual nlohmann::json
-        createLibraryEntryFromSnippet(std::string const & name,
-                                      std::string const & category,
-                                      std::string const & snippet,
-                                      std::string const & description,
-                                      std::vector<FunctionArgument> const & arguments,
-                                      std::string const & outputType = "float",
-                                      bool overwrite = false) = 0;
 
         /// @brief Export a function from the active document to the library.
         /// @param functionId ModelResourceID of the function to export.
@@ -531,10 +398,16 @@ namespace gladius
         /// @brief Set library metadata (tagged functions and description) on the current document.
         /// @param functionIds Resource IDs of tagged (importable) functions.
         /// @param description Human-readable description of the library entry.
+        /// @param tags Optional keyword tags for searchability.
+        /// @param category Optional category to target a library entry directly.
+        /// @param name Optional entry name to target a library entry directly.
         /// @return JSON with success status.
         virtual nlohmann::json
         setLibraryMetadata(std::vector<uint32_t> const & functionIds,
-                           std::string const & description) = 0;
+                           std::string const & description,
+                           std::vector<std::string> const & tags = {},
+                           std::string const & category = "",
+                           std::string const & name = "") = 0;
 
         /// @brief Import a library entry's tagged functions into the active document.
         /// @param category Category subdirectory name.
@@ -549,6 +422,21 @@ namespace gladius
         /// @return JSON with deletion result (fails for shipped/read-only entries).
         virtual nlohmann::json deleteLibraryEntry(std::string const & category,
                                                   std::string const & name) = 0;
+
+#ifdef ENABLE_UI_TESTING
+        /// @brief Perform a UI click on the specified ImGui test engine path.
+        /// @param path The ImGui test path (e.g., "//MainWindow/File/Open").
+        /// @return True if the click was successfully queued.
+        virtual bool uiClick(std::string const & path) = 0;
+
+        /// @brief Dump all items within a parent path.
+        virtual std::vector<std::string> uiDumpItems(std::string const & parentPath) = 0;
+
+        /// @brief Capture a screenshot of the current UI.
+        /// @param outputPath The file path where the screenshot will be saved.
+        /// @return True if the screenshot was saved successfully.
+        virtual bool captureUIScreenshot(std::string const & outputPath) = 0;
+#endif
 
         // Error handling
         virtual std::string getLastErrorMessage() const = 0;

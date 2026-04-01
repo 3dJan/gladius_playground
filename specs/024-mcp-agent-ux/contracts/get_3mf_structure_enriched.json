@@ -1,0 +1,38 @@
+{
+  "tool": "get_3mf_structure",
+  "description": "Get a comprehensive listing of the current 3MF model structure (build items and resources). Enhanced in 024-mcp-agent-ux to include arguments, output_type, and snippet_preview for each implicit function resource.",
+  "changesSince": "023-node-editor-ux",
+  "newFieldsOnFunctionResources": {
+    "arguments": {
+      "type": "array",
+      "description": "Function input arguments in set_function_snippet format. Each entry has 'name' (string) and 'type' ('float' | 'vec3').",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string", "enum": ["float", "vec3"]}
+        }
+      }
+    },
+    "output_type": {
+      "type": "string",
+      "enum": ["float", "vec3"],
+      "description": "Output type of the first connected output port"
+    },
+    "snippet_preview": {
+      "type": "string",
+      "description": "First 3 lines of the function's snippet, or the full snippet if shorter. Useful for quick inspection without calling get_function_snippet."
+    }
+  },
+  "example": {
+    "id": 5,
+    "kind": "function",
+    "function_type": "implicit",
+    "display_name": "sphere",
+    "arguments": [{"name": "pos", "type": "vec3"}],
+    "output_type": "float",
+    "snippet_preview": "float r = length(pos);\nreturn r - radius;",
+    "inputs": [{"identifier": "pos", "display_name": "pos", "type": "vector"}],
+    "outputs": [{"identifier": "shape", "display_name": "shape", "type": "scalar"}]
+  }
+}

@@ -619,6 +619,9 @@ namespace gladius
 
         bool requestContourUpdate(nodes::SliceParameter sliceParameter);
 
+        /// Invalidate cached contour height so the next requestContourUpdate triggers a recomputation.
+        void invalidateContourCache();
+
         bool isSlicingInProgress() const;
 
         std::mutex & getContourExtractorMutex();

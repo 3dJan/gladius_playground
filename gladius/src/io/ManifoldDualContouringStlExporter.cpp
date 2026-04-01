@@ -1,5 +1,8 @@
 #include "ManifoldDualContouringStlExporter.h"
 
+#include "3mf/ColorCompatibilityPlanner.h"
+#include "3mf/ColorExportDispatcher.h"
+#include "3mf/ColorQuantizer.h"
 #include "3mf/FaceColorSampler.h"
 #include "3mf/MeshWriter3mf.h"
 #include "MeshExporter.h"
@@ -15,8 +18,13 @@
 #include <Eigen/Geometry>
 #include <fmt/format.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -104,6 +112,21 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setColorMode(ColorMode mode)
     {
         m_colorMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setQuantizationMode(QuantizationMode mode)
+    {
+        m_quantizationMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setMaxPaletteSize(std::optional<std::uint32_t> maxPaletteSize)
+    {
+        m_maxPaletteSize = maxPaletteSize;
+    }
+
+    void ManifoldDualContouringStlExporter::setTargetApplication(TargetApplication targetApplication)
+    {
+        m_targetApplication = targetApplication;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -245,6 +268,9 @@ namespace gladius::io
             case SimplificationMethod::None:
                 config.simplificationMethod = compute::SimplificationMethod::None;
                 break;
+            case SimplificationMethod::QemFast:
+                config.simplificationMethod = compute::SimplificationMethod::QemFast;
+                break;
             case SimplificationMethod::QemSdfAware:
                 config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
                 break;
@@ -261,6 +287,20 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
+        // Map io → compute termination mode via explicit switch (keeps enums in sync)
+        switch (m_options.simplificationTerminationMode)
+        {
+            case SimplificationTerminationMode::TargetTriangleCount:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetTriangleCount;
+                break;
+            case SimplificationTerminationMode::TargetReductionPercent:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetReductionPercent;
+                break;
+            case SimplificationTerminationMode::ErrorBounded:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::ErrorBounded;
+                break;
+        }
+        config.simplificationMaxGeometricError = m_options.simplificationMaxError;
         gpuPipeline.setConfig(std::move(config));
         
         // Wire progress callback to update exporter's atomic progress
@@ -357,16 +397,28 @@ namespace gladius::io
 
         Mesh convertedMesh(*computeContext);
 
-        for (std::size_t i = 0U; i + 2U < repairedIndices.size(); i += 3U)
+        // Pre-allocate and fill the Mesh buffers in parallel using OpenMP.
+        std::size_t const numFaces = repairedIndices.size() / 3U;
+        auto& faceNormalsVec = convertedMesh.getFaceNormals().getData();
+        auto& verticesVec = convertedMesh.getVertices().getData();
+        auto& vertexNormalsVec = convertedMesh.getVertexNormals().getData();
+        faceNormalsVec.resize(numFaces);
+        verticesVec.resize(numFaces * 3U);
+        vertexNormalsVec.resize(numFaces * 3U);
+
+        std::atomic<bool> hasOutOfRangeIndex{false};
+
+        #pragma omp parallel for schedule(static)
+        for (std::size_t fi = 0U; fi < numFaces; ++fi)
         {
-            auto const idxA = static_cast<std::size_t>(repairedIndices[i + 0U]);
-            auto const idxB = static_cast<std::size_t>(repairedIndices[i + 1U]);
-            auto const idxC = static_cast<std::size_t>(repairedIndices[i + 2U]);
+            auto const idxA = static_cast<std::size_t>(repairedIndices[fi * 3U + 0U]);
+            auto const idxB = static_cast<std::size_t>(repairedIndices[fi * 3U + 1U]);
+            auto const idxC = static_cast<std::size_t>(repairedIndices[fi * 3U + 2U]);
 
             if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
             {
-                throw std::runtime_error(
-                  "Manifold dual contouring mesh references out-of-range vertex indices");
+                hasOutOfRangeIndex.store(true, std::memory_order_relaxed);
+                continue;
             }
 
             Eigen::Vector3f const a = positions[idxA];
@@ -376,34 +428,41 @@ namespace gladius::io
             Eigen::Vector3f normal = (b - a).cross(c - a);
             if (normal.squaredNorm() <= 1e-12F)
             {
-                if (idxA < normals.size())
-                {
-                    normal = normals[idxA];
-                }
-                else
-                {
-                    normal = Eigen::Vector3f{0.0F, 0.0F, 1.0F};
-                }
+                normal = (idxA < normals.size()) ? normals[idxA]
+                                                 : Eigen::Vector3f{0.0F, 0.0F, 1.0F};
             }
             else
             {
                 normal.normalize();
             }
 
-            Face faceData{};
-            faceData.normal = toVector3(normal);
-            faceData.vertices = {toVector3(a), toVector3(b), toVector3(c)};
+            faceNormalsVec[fi] = {normal.x(), normal.y(), normal.z(), 0.F};
+
+            verticesVec[fi * 3U + 0U] = {a.x(), a.y(), a.z(), 0.F};
+            verticesVec[fi * 3U + 1U] = {b.x(), b.y(), b.z(), 0.F};
+            verticesVec[fi * 3U + 2U] = {c.x(), c.y(), c.z(), 0.F};
+
             if (idxA < normals.size() && idxB < normals.size() && idxC < normals.size())
             {
-                faceData.vertexNormals = {
-                  toVector3(normals[idxA]), toVector3(normals[idxB]), toVector3(normals[idxC])};
+                auto const& nA = normals[idxA];
+                auto const& nB = normals[idxB];
+                auto const& nC = normals[idxC];
+                vertexNormalsVec[fi * 3U + 0U] = {nA.x(), nA.y(), nA.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 1U] = {nB.x(), nB.y(), nB.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 2U] = {nC.x(), nC.y(), nC.z(), 0.F};
             }
             else
             {
-                faceData.vertexNormals = {faceData.normal, faceData.normal, faceData.normal};
+                vertexNormalsVec[fi * 3U + 0U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 1U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 2U] = faceNormalsVec[fi];
             }
+        }
 
-            convertedMesh.addFace(faceData);
+        if (hasOutOfRangeIndex.load(std::memory_order_relaxed))
+        {
+            throw std::runtime_error(
+              "Manifold dual contouring mesh references out-of-range vertex indices");
         }
 
         if (convertedMesh.getNumberOfFaces() == 0U)
@@ -435,37 +494,72 @@ namespace gladius::io
                 
                 if (samplingProgram != nullptr && primitives != nullptr)
                 {
-                    if (m_colorMode == ColorMode::PerVertex)
+                    // Use multipoint majority vote for face colors when simplification is active,
+                    // as larger triangles after simplification may span color boundaries. The
+                    // majority vote samples at centroid + 3 edge midpoints per face and picks
+                    // the most frequent color, producing cleaner color transitions.
+                    bool const useMultipointSampling =
+                        m_options.simplificationMethod != SimplificationMethod::None;
+
+                    auto faceColors = useMultipointSampling
+                        ? FaceColorSampler::sampleFaceColorsMajorityVote(
+                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb)
+                        : FaceColorSampler::sampleFaceColorsAsColor8(
+                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
+
+                    // Run compatibility planner
+                    MeshColorExportSettings const settings{
+                        m_exportWithColors,
+                        m_convertToSrgb,
+                        m_colorMode,
+                        m_quantizationMode,
+                        m_targetApplication,
+                        m_maxPaletteSize,
+                    };
+
+                    auto const uniqueColors = ColorQuantizer::countUniqueOpaqueColors(faceColors);
+                    bool const hasTransparency = ColorQuantizer::hasTransparency(faceColors);
+
+                    auto const decision = ColorCompatibilityPlanner::decide(settings, uniqueColors, hasTransparency);
+
+                    // Log warnings from the planner
+                    if (m_logger)
                     {
-                        auto vertexColors = FaceColorSampler::sampleVertexColors(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        m_progress.store(0.90, std::memory_order_relaxed);
-                        writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
-                        m_progress.store(1.0, std::memory_order_relaxed);
-                        
-                        if (m_logger)
+                        for (auto const& warning : decision.warnings)
                         {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with per-vertex colors"),
-                               events::Severity::Info});
+                            m_logger->addEvent({warning, events::Severity::Warning});
                         }
                     }
-                    else
+
+                    m_progress.store(0.90, std::memory_order_relaxed);
+
+                    auto vertexColorSupplier = [&]() -> VertexColors
                     {
-                        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        m_progress.store(0.90, std::memory_order_relaxed);
-                        writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                        m_progress.store(1.0, std::memory_order_relaxed);
-                        
-                        if (m_logger)
-                        {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
-                               events::Severity::Info});
-                        }
+                        return FaceColorSampler::sampleVertexColors(
+                            positions, facesForSampling, *samplingProgram, *primitives,
+                            nullptr, m_convertToSrgb);
+                    };
+                    auto multipointSupplier = [&]() -> std::vector<FaceColors>
+                    {
+                        return FaceColorSampler::sampleFaceColorsMultipoint(
+                            positions, facesForSampling, *samplingProgram, *primitives,
+                            nullptr, m_convertToSrgb);
+                    };
+
+                    dispatchColorExport(
+                        writer, m_targetFile, convertedMesh, "Mesh",
+                        faceColors, decision, settings, uniqueColors,
+                        m_document, true,
+                        vertexColorSupplier, multipointSupplier);
+
+                    m_progress.store(1.0, std::memory_order_relaxed);
+
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {fmt::format("Exported 3MF mesh with colors (representation: {})",
+                                       static_cast<int>(decision.finalRepresentation)),
+                           events::Severity::Info});
                     }
                 }
                 else

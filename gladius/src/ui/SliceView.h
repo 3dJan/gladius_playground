@@ -75,6 +75,7 @@ namespace gladius::ui
         bool m_hideDeveloperTools = true;
 
         std::optional<PolyLines> m_contours;
+        bool m_contoursNeedRefetch = false;
 
         /// Current canvas size in pixels
         ImVec2 m_canvasSize = {800.0f, 600.0f};

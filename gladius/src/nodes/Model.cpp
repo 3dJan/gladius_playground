@@ -55,6 +55,7 @@ namespace gladius::nodes
         , m_graph(other.m_graph)
         , m_outputOrder(other.m_outputOrder)
         , m_graphRequiresUpdate(other.m_graphRequiresUpdate)
+        , m_typesRequireUpdate(true)
         , m_name(other.m_name)
         , m_displayName(other.m_displayName)
         , m_resourceId(other.m_resourceId)
@@ -62,6 +63,8 @@ namespace gladius::nodes
         , m_allInputReferencesAreValid(other.m_allInputReferencesAreValid)
         , m_nodesHaveBeenLayouted(other.m_nodesHaveBeenLayouted)
         , m_isValid(other.m_isValid)
+        , m_numericWidgetLayoutModes(other.m_numericWidgetLayoutModes)
+        , m_vectorDisplayModes(other.m_vectorDisplayModes)
     {
         m_outPorts.clear();
         m_inputParameter.clear();
@@ -307,8 +310,10 @@ namespace gladius::nodes
         {
             return;
         }
+        parameter.setSortIndex(static_cast<int>(m_beginNode->parameter().size()));
         m_beginNode->parameter()[name] = parameter;
         m_beginNode->addOutputPort(name, parameter.getTypeIndex());
+        m_beginNode->getOutputs()[name].setSortIndex(parameter.getSortIndex());
         registerInput(m_beginNode->parameter()[name]);
         registerOutput(m_beginNode->getOutputs()[name]);
     }
@@ -324,9 +329,277 @@ namespace gladius::nodes
         registerInput(m_endNode->parameter()[name]);
     }
 
+    void Model::removeArgument(ParameterName const & name)
+    {
+        if (m_beginNode == nullptr)
+        {
+            return;
+        }
+
+        auto & params = m_beginNode->parameter();
+        if (auto it = params.find(name); it != params.end())
+        {
+            m_numericWidgetLayoutModes.erase(it->second.getId());
+            m_vectorDisplayModes.erase(it->second.getId());
+            m_inputParameter.erase(it->second.getId());
+            params.erase(it);
+        }
+
+        auto & outputs = m_beginNode->getOutputs();
+        if (auto it = outputs.find(name); it != outputs.end())
+        {
+            auto const removedPortId = it->second.getId();
+            m_outPorts.erase(removedPortId);
+            outputs.erase(it);
+
+            for (auto & nodePair : m_nodes)
+            {
+                if (!nodePair.second)
+                {
+                    continue;
+                }
+                for (auto & in : nodePair.second->parameter())
+                {
+                    if (in.second.getSource() && in.second.getSource()->portId == removedPortId)
+                    {
+                        in.second.getSource().reset();
+                    }
+                }
+            }
+        }
+    }
+
+    void Model::renameArgument(ParameterName const & oldName, ParameterName const & newName)
+    {
+        if (m_beginNode == nullptr || oldName == newName)
+        {
+            return;
+        }
+
+        if (m_beginNode->parameter().find(newName) != m_beginNode->parameter().end())
+        {
+            return;
+        }
+
+        auto & params = m_beginNode->parameter();
+        if (auto it = params.find(oldName); it != params.end())
+        {
+            auto node = params.extract(it);
+            node.key() = newName;
+            params.insert(std::move(node));
+        }
+
+        auto & outputs = m_beginNode->getOutputs();
+        if (auto it = outputs.find(oldName); it != outputs.end())
+        {
+            auto node = outputs.extract(it);
+            node.key() = newName;
+            node.mapped().setShortName(newName);
+            node.mapped().setUniqueName(m_beginNode->getUniqueName() + "_" + newName);
+            outputs.insert(std::move(node));
+        }
+    }
+
+    void Model::reorderArgument(ParameterName source, ParameterName target)
+    {
+        if (m_beginNode == nullptr || source == target)
+        {
+            return;
+        }
+
+        auto & params = m_beginNode->parameter();
+        auto & outputs = m_beginNode->getOutputs();
+
+        auto srcParamIt = params.find(source);
+        auto tgtParamIt = params.find(target);
+        if (srcParamIt == params.end() || tgtParamIt == params.end())
+        {
+            return;
+        }
+
+        // Collect entries sorted by current sortIndex
+        std::vector<ParameterName> ordered;
+        ordered.reserve(params.size());
+        for (auto & [name, _] : params)
+        {
+            ordered.push_back(name);
+        }
+        std::sort(ordered.begin(), ordered.end(), [&](auto const & a, auto const & b) {
+            return params.at(a).getSortIndex() < params.at(b).getSortIndex();
+        });
+
+        // Remove source from ordered list and insert before target
+        ordered.erase(std::remove(ordered.begin(), ordered.end(), source), ordered.end());
+        auto targetIt = std::find(ordered.begin(), ordered.end(), target);
+        ordered.insert(targetIt, source);
+
+        // Reassign sequential sort indices
+        for (int i = 0; i < static_cast<int>(ordered.size()); ++i)
+        {
+            params.at(ordered[i]).setSortIndex(i);
+            auto outIt = outputs.find(ordered[i]);
+            if (outIt != outputs.end())
+            {
+                outIt->second.setSortIndex(i);
+            }
+        }
+    }
+
+    void Model::removeFunctionOutput(ParameterName const & name)
+    {
+        if (m_endNode == nullptr)
+        {
+            return;
+        }
+
+        auto & params = m_endNode->parameter();
+        if (auto it = params.find(name); it != params.end())
+        {
+            m_numericWidgetLayoutModes.erase(it->second.getId());
+            m_vectorDisplayModes.erase(it->second.getId());
+            m_inputParameter.erase(it->second.getId());
+            params.erase(it);
+        }
+    }
+
+    void Model::setNumericWidgetLayoutMode(ParameterId parameterId, NumericWidgetLayoutMode layoutMode)
+    {
+        m_numericWidgetLayoutModes[parameterId] = layoutMode;
+    }
+
+    NumericWidgetLayoutMode Model::getNumericWidgetLayoutMode(ParameterId parameterId) const
+    {
+        auto const iter = m_numericWidgetLayoutModes.find(parameterId);
+        if (iter == m_numericWidgetLayoutModes.end())
+        {
+            return NumericWidgetLayoutMode::DialPlusDragFloat;
+        }
+
+        return iter->second;
+    }
+
+    bool Model::hasNumericWidgetLayoutMode(ParameterId parameterId) const
+    {
+        return m_numericWidgetLayoutModes.find(parameterId) != m_numericWidgetLayoutModes.end();
+    }
+
+    void Model::setVectorDisplayMode(ParameterId parameterId, VectorDisplayMode mode)
+    {
+        m_vectorDisplayModes[parameterId] = mode;
+    }
+
+    VectorDisplayMode Model::getVectorDisplayMode(ParameterId parameterId) const
+    {
+        auto const iter = m_vectorDisplayModes.find(parameterId);
+        if (iter == m_vectorDisplayModes.end())
+        {
+            return VectorDisplayMode::Vector;
+        }
+        return iter->second;
+    }
+
+    void Model::renameFunctionOutput(ParameterName const & oldName, ParameterName const & newName)
+    {
+        if (m_endNode == nullptr || oldName == newName)
+        {
+            return;
+        }
+
+        if (m_endNode->parameter().find(newName) != m_endNode->parameter().end())
+        {
+            return;
+        }
+
+        auto & params = m_endNode->parameter();
+        if (auto it = params.find(oldName); it != params.end())
+        {
+            auto node = params.extract(it);
+            node.key() = newName;
+            params.insert(std::move(node));
+        }
+    }
+
     PortRegistry & Model::getPortRegistry()
     {
         return m_outPorts;
+    }
+
+    std::unordered_set<int64_t> Model::collectCompatibleLinkCandidates(int64_t sourceEndpointId,
+                                                                       bool sourceIsOutput)
+    {
+        std::unordered_set<int64_t> candidates;
+
+        if (sourceIsOutput)
+        {
+            auto const sourcePortIter = m_outPorts.find(static_cast<PortId>(sourceEndpointId));
+            if (sourcePortIter == m_outPorts.end() || sourcePortIter->second == nullptr)
+            {
+                return candidates;
+            }
+
+            for (auto const & [parameterId, parameter] : m_inputParameter)
+            {
+                auto * targetParameter = dynamic_cast<VariantParameter *>(parameter);
+                if (targetParameter == nullptr)
+                {
+                    continue;
+                }
+
+                if (targetParameter->getParentId() == sourcePortIter->second->getParentId())
+                {
+                    continue;
+                }
+
+                if (targetParameter->getTypeIndex() != sourcePortIter->second->getTypeIndex())
+                {
+                    continue;
+                }
+
+                if (isLinkValid(sourcePortIter->second->getId(), targetParameter->getId()))
+                {
+                    candidates.insert(parameterId);
+                }
+            }
+
+            return candidates;
+        }
+
+        auto const sourceParameterIter = m_inputParameter.find(static_cast<ParameterId>(sourceEndpointId));
+        if (sourceParameterIter == m_inputParameter.end())
+        {
+            return candidates;
+        }
+
+        auto * sourceParameter = dynamic_cast<VariantParameter *>(sourceParameterIter->second);
+        if (sourceParameter == nullptr)
+        {
+            return candidates;
+        }
+
+        for (auto const & [portId, port] : m_outPorts)
+        {
+            if (port == nullptr)
+            {
+                continue;
+            }
+
+            if (port->getParentId() == sourceParameter->getParentId())
+            {
+                continue;
+            }
+
+            if (port->getTypeIndex() != sourceParameter->getTypeIndex())
+            {
+                continue;
+            }
+
+            if (isLinkValid(port->getId(), sourceParameter->getId()))
+            {
+                candidates.insert(portId);
+            }
+        }
+
+        return candidates;
     }
 
     const graph::AdjacencyListDirectedGraph & Model::getGraph() const
@@ -347,6 +620,11 @@ namespace gladius::nodes
     InputParameterRegistry const & Model::getConstParameterRegistry() const
     {
         return m_inputParameter;
+    }
+
+    PortRegistry const & Model::getConstPortRegistry() const
+    {
+        return m_outPorts;
     }
 
     std::optional<NodeBase *> Model::getNode(NodeId id) const
@@ -433,6 +711,7 @@ namespace gladius::nodes
 
         targetParameter->second->getSource().reset();
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
         return true;
     }
 
@@ -577,6 +856,8 @@ namespace gladius::nodes
             for (auto & [name, param] : nodeToRemove->second->parameter())
             {
                 auto paramIter = m_inputParameter.find(param.getId());
+                m_numericWidgetLayoutModes.erase(param.getId());
+                m_vectorDisplayModes.erase(param.getId());
                 if (param.getParentId() != nodeToRemove->second->getId())
                 {
                     // Log warning instead of throwing - this can happen in edge cases
@@ -600,7 +881,9 @@ namespace gladius::nodes
             m_nodes.erase(nodeToRemove);
         }
         m_graphRequiresUpdate = true;
-        updateGraphAndOrderIfNeeded();
+        m_typesRequireUpdate = true;
+        // Graph rebuild deferred — callers (updateInputsAndOutputs, Validator)
+        // will trigger it via updateGraphAndOrderIfNeeded() when they need it.
     }
 
     void Model::removeNodeWithoutLinks(NodeId idOfNodeWithoutLinks)
@@ -611,6 +894,7 @@ namespace gladius::nodes
             m_nodes.erase(nodeToRemove);
         }
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
     }
 
     void Model::createBeginEnd()
@@ -628,8 +912,10 @@ namespace gladius::nodes
     void Model::createBeginEndWithDefaultInAndOuts()
     {
         createBeginEnd();
-        m_beginNode->addOutputPort(FieldNames::Pos, ParameterTypeIndex::Float3);
-        registerOutputs(*m_beginNode);
+        // Use addArgument instead of directly calling addOutputPort so that
+        // the Begin node's parameter map is also populated. This ensures
+        // getArguments() returns the correct entries (used by MCP snippet tools).
+        addArgument(FieldNames::Pos, VariantParameter(float3{0.0f, 0.0f, 0.0f}));
         m_endNode->parameter()[FieldNames::Shape] = VariantParameter(float{-1.f});
         m_endNode->parameter()[FieldNames::Color] = VariantParameter(float3{0.5f, 0.5f, 0.5f});
 
@@ -710,6 +996,11 @@ namespace gladius::nodes
 
     bool Model::updateTypes()
     {
+        if (!m_typesRequireUpdate)
+        {
+            return m_isValid;
+        }
+
         bool isValid = true;
 
         for (auto & [id, node] : m_nodes)
@@ -728,6 +1019,7 @@ namespace gladius::nodes
             }
             isValid = isValid && nodeIsValid;
         }
+        m_typesRequireUpdate = false;
         return isValid;
     }
 
@@ -853,6 +1145,7 @@ namespace gladius::nodes
     void Model::invalidateGraph()
     {
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
     }
 
     void Model::markAsLayouted()
@@ -979,6 +1272,7 @@ namespace gladius::nodes
 
         // Update the graph after removing nodes
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
         updateGraphAndOrderIfNeeded();
 
         return removedCount;
@@ -1005,11 +1299,13 @@ namespace gladius::nodes
         m_graph = graph::AdjacencyListDirectedGraph(0);
         m_outputOrder.clear();
         m_graphRequiresUpdate = true;
+        m_typesRequireUpdate = true;
 
         // Reset state flags
         m_allInputReferencesAreValid = false;
         m_nodesHaveBeenLayouted = false;
         m_isValid = true;
+        m_numericWidgetLayoutModes.clear();
     }
 
     FunctionCall * Model::createFunctionCallNode(ResourceId functionId, Model & sourceModel)
@@ -1029,3 +1325,4 @@ namespace gladius::nodes
     }
 
 } // namespace gladius::nodes
+

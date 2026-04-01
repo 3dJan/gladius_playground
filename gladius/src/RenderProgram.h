@@ -38,6 +38,16 @@ namespace gladius
              size_t startHeight,
              size_t endHeight);
 
+        /// Overload that uses caller-provided RenderingSettings instead
+        /// of the shared settings from the resource context.
+        [[nodiscard]] cl::Event renderSceneAsync(cl::CommandQueue const & queue,
+             Primitives const & lines,
+             ImageRGBA & targetImage,
+             RenderingSettings settings,
+             cl_float z_mm,
+             size_t startHeight,
+             size_t endHeight);
+
         void resample(ImageRGBA & sourceImage,
                       ImageRGBA & targetImage,
                       size_t startHeight,
@@ -71,6 +81,17 @@ namespace gladius
             Primitives const & lines,
             ImageRGBA & targetImage,
             DistanceInitBuffer & distanceOutput,
+            cl_float z_mm,
+            size_t startHeight,
+            size_t endHeight);
+
+        /// Overload that uses caller-provided RenderingSettings.
+        [[nodiscard]] cl::Event renderSceneWithDistanceOutputAsync(
+            cl::CommandQueue const & queue,
+            Primitives const & lines,
+            ImageRGBA & targetImage,
+            DistanceInitBuffer & distanceOutput,
+            RenderingSettings settings,
             cl_float z_mm,
             size_t startHeight,
             size_t endHeight);

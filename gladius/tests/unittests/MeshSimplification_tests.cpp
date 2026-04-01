@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <numbers>
 #include <vector>
 
@@ -14,6 +15,32 @@ namespace gladius::compute::tests
 {
     namespace
     {
+        /// Count boundary edges (shared by 1 tri) and non-manifold edges (shared by >2 tris)
+        std::pair<std::size_t, std::size_t> countEdgeDefects(std::vector<std::uint32_t> const & idx)
+        {
+            std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> edgeTris;
+            auto const tc = idx.size() / 3U;
+            for (std::size_t t = 0U; t < tc; ++t)
+            {
+                std::uint32_t const v[3] = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
+                for (int e = 0; e < 3; ++e)
+                {
+                    auto a = v[e];
+                    auto b = v[(e + 1) % 3];
+                    if (a > b) std::swap(a, b);
+                    edgeTris[{a, b}]++;
+                }
+            }
+            std::size_t boundary = 0U;
+            std::size_t nonManifold = 0U;
+            for (auto const & [edge, count] : edgeTris)
+            {
+                if (count == 1U) ++boundary;
+                else if (count > 2U) ++nonManifold;
+            }
+            return {boundary, nonManifold};
+        }
+
         /// Generate a UV sphere mesh for testing
         struct SphereMesh
         {
@@ -63,6 +90,77 @@ namespace gladius::compute::tests
                     mesh.indices.push_back(second + 1);
                     mesh.indices.push_back(first + 1);
                 }
+            }
+
+            return mesh;
+        }
+
+        /// Generate a closed (watertight) UV sphere with single pole vertices and stitched seam.
+        /// Every edge is shared by exactly 2 triangles — guaranteed manifold.
+        [[nodiscard]] SphereMesh generateClosedSphere(float radius, std::size_t stacks, std::size_t slices)
+        {
+            SphereMesh mesh;
+            mesh.radius = radius;
+
+            // Single north pole vertex
+            mesh.positions.push_back({0.F, radius, 0.F});
+            mesh.normals.push_back({0.F, 1.F, 0.F});
+
+            // Interior latitude rings (stacks-1 rings, slices vertices each, no seam duplicate)
+            for (std::size_t i = 1U; i < stacks; ++i)
+            {
+                float const phi = std::numbers::pi_v<float> * static_cast<float>(i) / static_cast<float>(stacks);
+                float const y = radius * std::cos(phi);
+                float const r = radius * std::sin(phi);
+                for (std::size_t j = 0U; j < slices; ++j)
+                {
+                    float const theta = 2.0F * std::numbers::pi_v<float> * static_cast<float>(j) / static_cast<float>(slices);
+                    Eigen::Vector3f const pos(r * std::cos(theta), y, r * std::sin(theta));
+                    mesh.positions.push_back(pos);
+                    mesh.normals.push_back(pos.normalized());
+                }
+            }
+
+            // Single south pole vertex
+            auto const southPole = static_cast<std::uint32_t>(mesh.positions.size());
+            mesh.positions.push_back({0.F, -radius, 0.F});
+            mesh.normals.push_back({0.F, -1.F, 0.F});
+
+            // North pole fan
+            for (std::uint32_t j = 0U; j < static_cast<std::uint32_t>(slices); ++j)
+            {
+                mesh.indices.push_back(0U);
+                mesh.indices.push_back(1U + j);
+                mesh.indices.push_back(1U + (j + 1U) % static_cast<std::uint32_t>(slices));
+            }
+
+            // Interior quad strips
+            for (std::size_t i = 0U; i + 2U < stacks; ++i)
+            {
+                auto const ring0 = static_cast<std::uint32_t>(1U + i * slices);
+                auto const ring1 = static_cast<std::uint32_t>(1U + (i + 1U) * slices);
+                auto const sl = static_cast<std::uint32_t>(slices);
+                for (std::uint32_t j = 0U; j < sl; ++j)
+                {
+                    std::uint32_t const j1 = (j + 1U) % sl;
+                    mesh.indices.push_back(ring0 + j);
+                    mesh.indices.push_back(ring1 + j);
+                    mesh.indices.push_back(ring0 + j1);
+
+                    mesh.indices.push_back(ring1 + j);
+                    mesh.indices.push_back(ring1 + j1);
+                    mesh.indices.push_back(ring0 + j1);
+                }
+            }
+
+            // South pole fan
+            auto const lastRing = static_cast<std::uint32_t>(1U + (stacks - 2U) * slices);
+            auto const sl = static_cast<std::uint32_t>(slices);
+            for (std::uint32_t j = 0U; j < sl; ++j)
+            {
+                mesh.indices.push_back(lastRing + j);
+                mesh.indices.push_back(southPole);
+                mesh.indices.push_back(lastRing + (j + 1U) % sl);
             }
 
             return mesh;
@@ -371,6 +469,396 @@ namespace gladius::compute::tests
         std::cout << "  Edge flips: " << flips << std::endl;
         
         EXPECT_EQ(indices.size(), 24U);  // Still 8 triangles
+    }
+
+    // ========================================================================
+    // Fast QEM simplification tests (T011)
+    // ========================================================================
+
+    TEST(FastQemSimplifyTest, SphereReduction_TargetCount_ReducesTriangles)
+    {
+        auto sphere = generateSphere(1.0F, 20, 40);
+        auto const originalTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetTriangleCount;
+        config.targetTriangleCount = originalTriCount / 2U;
+
+        auto collapsed = fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        auto const finalTriCount = sphere.indices.size() / 3U;
+        EXPECT_GT(collapsed, 0U);
+        EXPECT_LE(finalTriCount, config.targetTriangleCount + 10U); // allow some tolerance
+        EXPECT_GT(finalTriCount, 0U);
+
+        // All indices should be valid
+        for (auto idx : sphere.indices)
+        {
+            EXPECT_LT(idx, static_cast<std::uint32_t>(sphere.positions.size()));
+        }
+    }
+
+    TEST(FastQemSimplifyTest, SphereReduction_Percentage_ReducesTriangles)
+    {
+        auto sphere = generateSphere(1.0F, 20, 40);
+        auto const originalTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 50.0F;
+
+        auto collapsed = fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        auto const finalTriCount = sphere.indices.size() / 3U;
+        EXPECT_GT(collapsed, 0U);
+        // Should remove approximately 50% (within margin)
+        float const actualReduction = 1.0F - static_cast<float>(finalTriCount) / static_cast<float>(originalTriCount);
+        EXPECT_GT(actualReduction, 0.3F); // at least 30%
+    }
+
+    TEST(FastQemSimplifyTest, ErrorBounded_StopsAtThreshold)
+    {
+        auto sphere = generateClosedSphere(1.0F, 16, 32);
+        auto const initialTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::ErrorBounded;
+        // On a unit sphere at this resolution, minimum QEM edge error is ~0.01.
+        // Use a threshold that allows some collapses but preserves most geometry.
+        config.maxError = 1e-4F;
+
+        auto collapsed = fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        auto const finalTriCount = sphere.indices.size() / 3U;
+        // Error-bounded mode should stop early — most triangles remain
+        EXPECT_GT(finalTriCount, initialTriCount / 2U) << "Error threshold should preserve most triangles";
+        EXPECT_LT(finalTriCount, initialTriCount) << "Some collapses should have occurred";
+        EXPECT_GT(collapsed, 0U) << "At least some collapses should occur at this error threshold";
+    }
+
+    TEST(FastQemSimplifyTest, ManifoldPreservation_NoDegenerate)
+    {
+        auto sphere = generateSphere(1.0F, 16, 32);
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 75.0F; // aggressive
+
+        fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        // Check: no degenerate triangles
+        auto const triCount = sphere.indices.size() / 3U;
+        for (std::size_t t = 0U; t < triCount; ++t)
+        {
+            auto const i0 = sphere.indices[t * 3U + 0U];
+            auto const i1 = sphere.indices[t * 3U + 1U];
+            auto const i2 = sphere.indices[t * 3U + 2U];
+            EXPECT_NE(i0, i1);
+            EXPECT_NE(i1, i2);
+            EXPECT_NE(i2, i0);
+        }
+
+        // Check: all indices valid
+        for (auto idx : sphere.indices)
+        {
+            EXPECT_LT(idx, static_cast<std::uint32_t>(sphere.positions.size()));
+        }
+    }
+
+    TEST(FastQemSimplifyTest, ManifoldPreservation_AllEdgesSharedByTwoTriangles)
+    {
+        auto sphere = generateSphere(1.0F, 16, 32);
+
+        auto [inputBoundary, inputNonManifold] = countEdgeDefects(sphere.indices);
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 50.0F;
+
+        fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        auto [outputBoundary, outputNonManifold] = countEdgeDefects(sphere.indices);
+
+        // Simplification must never create non-manifold edges (>2 tris sharing an edge)
+        EXPECT_EQ(outputNonManifold, 0U)
+            << "Simplification created " << outputNonManifold << " non-manifold edges"
+            << " (input had " << inputNonManifold << ")";
+
+        // Simplification should not increase boundary edges
+        EXPECT_LE(outputBoundary, inputBoundary)
+            << "Simplification created new boundary edges: " << outputBoundary
+            << " > input " << inputBoundary;
+    }
+
+    TEST(FastQemSimplifyTest, ClosedMesh_RemainsWatertightAfterSimplification)
+    {
+        auto sphere = generateClosedSphere(1.0F, 16, 32);
+
+        // Verify input is a closed manifold
+        auto [inputBoundary, inputNonManifold] = countEdgeDefects(sphere.indices);
+        ASSERT_EQ(inputBoundary, 0U) << "Input sphere should have no boundary edges";
+        ASSERT_EQ(inputNonManifold, 0U) << "Input sphere should have no non-manifold edges";
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 50.0F;
+
+        fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        EXPECT_GT(sphere.indices.size() / 3U, 0U);
+
+        auto [outputBoundary, outputNonManifold] = countEdgeDefects(sphere.indices);
+        EXPECT_EQ(outputBoundary, 0U)
+            << "Simplification created " << outputBoundary << " boundary edges (holes)";
+        EXPECT_EQ(outputNonManifold, 0U)
+            << "Simplification created " << outputNonManifold << " non-manifold edges";
+    }
+
+    TEST(FastQemSimplifyTest, ClosedMesh_AggressiveReduction_RemainsWatertight)
+    {
+        auto sphere = generateClosedSphere(1.0F, 24, 48); // larger mesh for aggressive test
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 75.0F; // very aggressive
+
+        fastQemSimplify(sphere.positions, sphere.indices, config);
+
+        auto [outputBoundary, outputNonManifold] = countEdgeDefects(sphere.indices);
+        EXPECT_EQ(outputBoundary, 0U)
+            << "Aggressive simplification created " << outputBoundary << " boundary edges (holes)";
+        EXPECT_EQ(outputNonManifold, 0U)
+            << "Aggressive simplification created " << outputNonManifold << " non-manifold edges";
+    }
+
+    TEST(FastQemSimplifyTest, DoubleDiagonalDiamond_NoDuplicateTriangles)
+    {
+        // Construct a mesh that would produce overlapping triangles without the
+        // duplicate-face guard. The "double-diagonal diamond" has edges along both
+        // diagonals: (A-B) and (C-D), plus the 4 perimeter edges. Collapsing A-B
+        // without a duplicate check would turn triangle (B,C,D) into (A,C,D) which
+        // already exists, creating two coincident, opposite-winding faces = hole.
+        //
+        //       C
+        //      /|\
+        //     / | \
+        //    A--+--B     (both diagonals present)
+        //     \ | /
+        //      \|/
+        //       D
+        //
+        // Plus apex E above and apex F below to close the surface.
+
+        std::vector<Eigen::Vector3f> positions = {
+            { 0.0F,  0.0F,  0.0F},  // 0: A
+            { 2.0F,  0.0F,  0.0F},  // 1: B
+            { 1.0F,  1.0F,  0.0F},  // 2: C
+            { 1.0F, -1.0F,  0.0F},  // 3: D
+            { 1.0F,  0.0F,  1.0F},  // 4: E (apex above)
+            { 1.0F,  0.0F, -1.0F},  // 5: F (apex below)
+        };
+
+        // 10 triangles forming a closed surface around the diamond.
+        // The diamond has shared tris (A,B,C) and (A,B,D), plus the diagonal
+        // tris (A,C,D) and (B,C,D). The rest close the mesh via apexes.
+        std::vector<std::uint32_t> indices = {
+            // Diamond faces (both diagonals)
+            0, 1, 2,   // (A, B, C)
+            0, 3, 1,   // (A, D, B)
+            0, 2, 3,   // (A, C, D)
+            1, 3, 2,   // (B, D, C)
+            // Top cap (E above, closing with C)
+            0, 4, 2,   // (A, E, C)
+            1, 2, 4,   // (B, C, E)
+            // Bottom cap (F below, closing with D)
+            0, 3, 5,   // (A, D, F)
+            1, 5, 3,   // (B, F, D)
+            // Front/back caps connecting E and F
+            0, 5, 4,   // (A, F, E)
+            1, 4, 5,   // (B, E, F)
+        };
+
+        auto countDuplicateFaces = [](std::vector<std::uint32_t> const & idx)
+        {
+            std::map<std::array<std::uint32_t, 3>, std::size_t> faceSets;
+            auto const tc = idx.size() / 3U;
+            for (std::size_t t = 0U; t < tc; ++t)
+            {
+                std::array<std::uint32_t, 3> verts = {idx[t * 3U], idx[t * 3U + 1U], idx[t * 3U + 2U]};
+                std::sort(verts.begin(), verts.end());
+                faceSets[verts]++;
+            }
+            std::size_t dupes = 0U;
+            for (auto const & [face, count] : faceSets)
+            {
+                if (count > 1U) dupes += count - 1U;
+            }
+            return dupes;
+        };
+
+        EXPECT_EQ(countDuplicateFaces(indices), 0U) << "Test mesh has duplicates before simplification";
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 50.0F;
+
+        fastQemSimplify(positions, indices, config);
+
+        EXPECT_EQ(countDuplicateFaces(indices), 0U)
+            << "Simplification created duplicate overlapping triangles";
+    }
+
+    TEST(FastQemSimplifyTest, EmptyMesh_Returns0)
+    {
+        std::vector<Eigen::Vector3f> positions;
+        std::vector<std::uint32_t> indices;
+        FastQemConfig config;
+
+        auto collapsed = fastQemSimplify(positions, indices, config);
+        EXPECT_EQ(collapsed, 0U);
+    }
+
+    TEST(FastQemSimplifyTest, NoReductionNeeded_Returns0)
+    {
+        auto sphere = generateSphere(1.0F, 4, 8);
+        auto const originalTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetTriangleCount;
+        config.targetTriangleCount = originalTriCount + 100U; // already below target
+
+        auto collapsed = fastQemSimplify(sphere.positions, sphere.indices, config);
+        EXPECT_EQ(collapsed, 0U);
+    }
+
+    // ========================================================================
+    // Regression test for existing QemSdfAware (T011b)
+    // ========================================================================
+
+    TEST(QemSdfAwareRegressionTest, SphereSimplification_StillWorks)
+    {
+        auto sphere = generateSphere(1.0F, 16, 32);
+        auto const originalTriCount = sphere.indices.size() / 3U;
+
+        QemSimplificationConfig config;
+        config.targetTriangleCount = originalTriCount / 2U;
+        config.maxPasses = 5U;
+
+        // Provide trivial SDF evaluator (returns distance from origin)
+        auto sdfEval = [](std::vector<Eigen::Vector3f> const & positions) -> std::vector<float>
+        {
+            std::vector<float> result(positions.size());
+            for (std::size_t i = 0U; i < positions.size(); ++i)
+            {
+                result[i] = positions[i].norm() - 1.0F; // SDF of unit sphere
+            }
+            return result;
+        };
+
+        auto gradEval = [](std::vector<Eigen::Vector3f> const & positions) -> std::vector<Eigen::Vector3f>
+        {
+            std::vector<Eigen::Vector3f> result(positions.size());
+            for (std::size_t i = 0U; i < positions.size(); ++i)
+            {
+                result[i] = positions[i].normalized();
+            }
+            return result;
+        };
+
+        QemMeshSimplifier simplifier;
+        simplifier.setConfig(config);
+        simplifier.setGpuSdfEvaluator(sdfEval);
+        simplifier.setGpuSdfGradientEvaluator(gradEval);
+
+        auto collapsed = simplifier.simplify(sphere.positions, sphere.normals, sphere.indices);
+
+        EXPECT_GT(collapsed, 0U);
+        auto const finalTriCount = sphere.indices.size() / 3U;
+        EXPECT_LT(finalTriCount, originalTriCount);
+
+        // All indices valid
+        for (auto idx : sphere.indices)
+        {
+            EXPECT_LT(idx, static_cast<std::uint32_t>(sphere.positions.size()));
+        }
+    }
+
+    TEST(FastQemSimplifyTest, Cancellation_StopsEarlyAndThrows)
+    {
+        auto sphere = generateSphere(1.0F, 16, 32);
+        auto const initialTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 90.0F; // very aggressive to ensure many collapses needed
+        config.cancelCheckPeriod = 4U;         // check frequently
+
+        std::size_t cancelAfter = 2U;
+        std::size_t callCount = 0U;
+        auto throwOnCancel = [&]()
+        {
+            ++callCount;
+            if (callCount >= cancelAfter)
+            {
+                throw std::runtime_error("cancelled");
+            }
+        };
+
+        EXPECT_THROW(
+            fastQemSimplify(sphere.positions, sphere.indices, config, throwOnCancel),
+            std::runtime_error);
+
+        // After cancel, mesh arrays are unchanged size (compaction doesn't run)
+        auto const finalTriCount = sphere.indices.size() / 3U;
+        EXPECT_EQ(finalTriCount, initialTriCount);
+        EXPECT_GE(callCount, cancelAfter) << "Cancel callback should have been invoked";
+    }
+
+    TEST(FastQemSimplifyTest, ProgressCallback_ReportsAscendingProgress)
+    {
+        auto sphere = generateSphere(1.0F, 16, 32);
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 50.0F;
+
+        std::vector<int> progressValues;
+        auto progressFn = [&](int progress)
+        {
+            progressValues.push_back(progress);
+        };
+
+        fastQemSimplify(sphere.positions, sphere.indices, config, nullptr, progressFn);
+
+        ASSERT_FALSE(progressValues.empty()) << "Progress callback should have been called";
+        EXPECT_EQ(progressValues.back(), 100) << "Final progress should be 100";
+
+        // Progress should be monotonically non-decreasing
+        for (std::size_t i = 1U; i < progressValues.size(); ++i)
+        {
+            EXPECT_GE(progressValues[i], progressValues[i - 1U]);
+        }
+    }
+
+    TEST(FastQemSimplifyTest, StarvationGuard_TerminatesWhenTargetUnreachable)
+    {
+        // Request a reduction target that topology guards will make impossible.
+        // The starvation detector must ensure the loop terminates promptly.
+        auto sphere = generateSphere(1.0F, 8, 16);
+        std::size_t const initialTriCount = sphere.indices.size() / 3U;
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetTriangleCount;
+        config.targetTriangleCount = 4U; // Almost certainly unreachable
+
+        auto const start = std::chrono::steady_clock::now();
+        fastQemSimplify(sphere.positions, sphere.indices, config);
+        auto const elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+
+        std::size_t const finalTriCount = sphere.indices.size() / 3U;
+        EXPECT_LT(finalTriCount, initialTriCount) << "Some reduction should have occurred";
+        EXPECT_LT(elapsed.count(), 2000) << "Starvation guard should prevent long spinning";
     }
 
 } // namespace gladius::compute::tests

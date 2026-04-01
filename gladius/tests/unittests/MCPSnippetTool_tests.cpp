@@ -12,6 +12,7 @@
 #include "ExpressionToGraphConverter.h"
 #include "FunctionArgument.h"
 #include "nodes/Assembly.h"
+#include "nodes/GraphFlattener.h"
 #include "nodes/Model.h"
 
 namespace gladius::tests
@@ -45,8 +46,16 @@ namespace gladius::tests
             // Validate by parsing into temp model
             nodes::Model tempModel;
             tempModel.createBeginEndWithDefaultInAndOuts();
-            auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-              snippet, tempModel, *m_parser, m_args, m_output);
+            nodes::NodeId nodeId = 0;
+            try
+            {
+                nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                  snippet, tempModel, *m_parser, m_args, m_output);
+            }
+            catch (std::exception const & e)
+            {
+                return {false, e.what()};
+            }
             if (nodeId == 0)
             {
                 return {false, "Failed to parse snippet"};
@@ -1209,6 +1218,206 @@ namespace gladius::tests
           << "main should reference twist_1, got: " << mainSnippet;
         EXPECT_EQ(mainSnippet.find("return 0"), std::string::npos)
           << "main should NOT be 'return 0', got: " << mainSnippet;
+    }
+
+    // =====================================================================================
+    // Multi-output functions in set_program_snippet should parse arguments correctly
+    // (regression: the first (...) was the output list, not the argument list)
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_MultiOutputFunction_ParsesArgumentsCorrectly)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        std::string program =
+          "// Function: helper (ID: 10)\n"
+          "float helper_10(vec3 pos, float size) {\n"
+          "  return length(pos) - size;\n"
+          "}\n"
+          "\n"
+          "// Function: myFunc (ID: 20)\n"
+          "(float shape, vec3 color) myFunc_20(float factor, vec3 pos) {\n"
+          "  shape = helper_10(pos, factor);\n"
+          "  color = vec3(factor, 0, 0);\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser);
+
+        auto model20 = assembly.findModel(20);
+        ASSERT_NE(model20, nullptr) << "Function ID 20 should exist";
+        EXPECT_EQ(model20->getDisplayName().value_or(""), "myFunc");
+
+        // Verify the function has correct arguments (factor, pos) — not the outputs
+        auto * beginNode = model20->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+
+        bool hasFactorInput = false;
+        bool hasPosInput = false;
+        bool hasShapeInput = false;
+        for (auto const & [portName, port] : beginNode->getOutputs())
+        {
+            if (portName == "factor")
+                hasFactorInput = true;
+            if (portName == "pos")
+                hasPosInput = true;
+            if (portName == "shape")
+                hasShapeInput = true;
+        }
+        EXPECT_TRUE(hasFactorInput) << "Should have 'factor' as input argument";
+        EXPECT_TRUE(hasPosInput) << "Should have 'pos' as input argument";
+        EXPECT_FALSE(hasShapeInput) << "Output 'shape' should NOT appear as input argument";
+
+        // Verify the function body parsed correctly (not 'return 0')
+        std::vector<FunctionArgument> args = {{"factor", ArgumentType::Scalar},
+                                              {"pos", ArgumentType::Vector}};
+        std::vector<FunctionOutput> outputs = {{"shape", ArgumentType::Scalar},
+                                               {"color", ArgumentType::Vector}};
+        auto snippet =
+          ExpressionToGraphConverter::convertGraphToSnippet(*model20, args, outputs, &assembly);
+        EXPECT_EQ(snippet.find("return 0"), std::string::npos)
+          << "Multi-output function body should NOT be 'return 0', got: " << snippet;
+        EXPECT_NE(snippet.find("helper_10"), std::string::npos)
+          << "Function body should reference helper_10, got: " << snippet;
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_CrossFunctionCallByResourceId_Works)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        std::string program =
+          "// Function: box (ID: 2)\n"
+          "float box_2(vec3 b, vec3 pos) {\n"
+          "  float v0 = abs(in_pos) - vec3(0.5, 0.5, 0.5) * in_b;\n"
+          "  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 1)\n"
+          "float main_1(vec3 pos) {\n"
+          "  return box_2(vec3(10, 10, 10), in_pos);\n"
+          "}\n";
+
+        EXPECT_NO_THROW(
+          ExpressionToGraphConverter::setProgramSnippet(program, assembly, parser))
+          << "setProgramSnippet should parse cross-function calls by resource ID";
+
+        assembly.updateInputsAndOutputs();
+
+        // Verify main (ID 1) references box (ID 2)
+        auto mainModel = assembly.findModel(1);
+        ASSERT_NE(mainModel, nullptr) << "main model should exist";
+        auto boxModel = assembly.findModel(2);
+        ASSERT_NE(boxModel, nullptr) << "box model should exist";
+
+        // Verify flattening works
+        nodes::GraphFlattener flattener(assembly);
+        EXPECT_NO_THROW(flattener.flatten())
+          << "Assembly with cross-function call should flatten";
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_SimpleBoxAndMain_CanBeFlattenedWithoutCrash)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // First: set up an assembly with box, sphere, and main (3 functions)
+        std::string initialProgram =
+          "// Function: sphere (ID: 5)\n"
+          "float sphere_5(vec3 pos, float radius) {\n"
+          "  return length(in_pos) - in_radius;\n"
+          "}\n"
+          "\n"
+          "// Function: box (ID: 4)\n"
+          "float box_4(vec3 b, vec3 pos) {\n"
+          "  float v0 = abs(in_pos) - vec3(0.5, 0.5, 0.5) * in_b;\n"
+          "  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3)\n"
+          "float main_3(vec3 pos) {\n"
+          "  return box_4(vec3(10, 10, 10), in_pos - vec3(5, 5, 5));\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(initialProgram, assembly, parser);
+        assembly.updateInputsAndOutputs();
+
+        // Verify initial assembly can flatten
+        {
+            nodes::GraphFlattener flattener(assembly);
+            EXPECT_NO_THROW(flattener.flatten())
+              << "Initial assembly should flatten without issues";
+        }
+
+        // Now: overwrite ONLY box and main, leaving sphere untouched
+        std::string partialProgram =
+          "// Function: box (ID: 4)\n"
+          "float box_4(vec3 b, vec3 pos) {\n"
+          "  float v0 = abs(in_pos) - vec3(0.5, 0.5, 0.5) * in_b;\n"
+          "  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3)\n"
+          "float main_3(vec3 pos) {\n"
+          "  return box_4(vec3(10, 10, 10), in_pos - vec3(5, 5, 5));\n"
+          "}\n";
+
+        ExpressionToGraphConverter::setProgramSnippet(partialProgram, assembly, parser);
+        assembly.updateInputsAndOutputs();
+
+        // Flatten should not throw even with partial update
+        nodes::GraphFlattener flattener(assembly);
+        EXPECT_NO_THROW(flattener.flatten())
+          << "Assembly should flatten after partial setProgramSnippet update";
+    }
+
+    // =====================================================================================
+    // Auto-detected in_-prefixed arguments: pos should always come first
+    // =====================================================================================
+
+    TEST_F(MCPSnippetToolTest, AutoDetect_InPosPrefix_PosIsFirstArgument)
+    {
+        // When all arguments use the in_ prefix (no bare "pos"),
+        // the auto-detection should still place pos first.
+        std::vector<FunctionArgument> noArgs; // empty: triggers auto-detection
+        m_model->createBeginEnd();            // no default pos argument
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "float v = in_radius * 2;\nreturn length(in_pos) - v;",
+          *m_model, *m_parser, noArgs, m_output);
+        EXPECT_NE(nodeId, 0u);
+
+        auto * beginNode = m_model->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+
+        auto argList = beginNode->getArguments();
+        ASSERT_GE(argList.size(), 2u);
+        EXPECT_EQ(argList[0].first, "pos")
+          << "pos must be the first argument even when only in_pos appears in snippet";
+        EXPECT_EQ(argList[0].second->getTypeIndex(), nodes::ParameterTypeIndex::Float3)
+          << "pos should be inferred as vec3";
+        EXPECT_EQ(argList[1].first, "radius");
+    }
+
+    TEST_F(MCPSnippetToolTest, AutoDetect_InPosComponent_PosIsVec3)
+    {
+        // in_pos.z component access should cause pos to be detected as vec3
+        std::vector<FunctionArgument> noArgs;
+        m_model->createBeginEnd();
+
+        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "return abs(in_pos.z) - in_height;",
+          *m_model, *m_parser, noArgs, m_output);
+        EXPECT_NE(nodeId, 0u);
+
+        auto * beginNode = m_model->getBeginNode();
+        ASSERT_NE(beginNode, nullptr);
+
+        auto argList = beginNode->getArguments();
+        ASSERT_GE(argList.size(), 2u);
+        EXPECT_EQ(argList[0].first, "pos");
+        EXPECT_EQ(argList[0].second->getTypeIndex(), nodes::ParameterTypeIndex::Float3);
+        EXPECT_EQ(argList[1].first, "height");
     }
 
 } // namespace gladius::tests

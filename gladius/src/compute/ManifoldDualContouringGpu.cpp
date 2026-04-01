@@ -2136,13 +2136,29 @@ namespace gladius::compute
 
         switch (method)
         {
+        case SimplificationMethod::QemFast:
+        {
+            FastQemConfig fastConfig;
+            fastConfig.terminationMode = m_config.simplificationTerminationMode;
+            fastConfig.maxError = m_config.simplificationMaxGeometricError;
+            if (m_config.simplificationTargetTriangles.has_value())
+            {
+                fastConfig.targetTriangleCount = *m_config.simplificationTargetTriangles;
+            }
+            if (m_config.simplificationTargetReduction.has_value())
+            {
+                fastConfig.targetReductionPercent = *m_config.simplificationTargetReduction;
+            }
+            fastQemSimplify(m_mesh.positions, m_mesh.indices, fastConfig);
+            break;
+        }
+
         case SimplificationMethod::QemSdfAware:
             simplifyMeshQemSdfAware();
             break;
 
         case SimplificationMethod::None:
         default:
-            // Should not reach here due to caller check, but handle gracefully
             break;
         }
     }

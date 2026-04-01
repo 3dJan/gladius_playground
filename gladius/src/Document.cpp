@@ -103,12 +103,15 @@ namespace gladius
             return false;
         }
 
-        // Early validation: Skip expensive compilation if model is in an invalid state
-        // (e.g., during graph editing when nodes have missing connections)
-        if (!validateAssembly())
-        {
-            return false;
-        }
+        // Validation moved to refreshWorker() to avoid blocking the UI thread.
+        // The worker validates first and exits early if the model is invalid.
+
+        // Signal compilation started on the UI thread BEFORE launching the worker.
+        // This ensures isRendererReady() returns false immediately, preventing
+        // render() from rendering a frame with stale state (flicker).
+        // The worker also calls signalCompilationStarted() after acquiring the
+        // compute token — that call is redundant but harmless.
+        m_core->getMeshResourceState()->signalCompilationStarted();
 
         // saveBackup();
         {
@@ -136,6 +139,15 @@ namespace gladius
 
         auto meshResourceState = m_core->getMeshResourceState();
         meshResourceState->signalCompilationStarted();
+
+        // Validate early: skip expensive compilation if model is in an invalid
+        // state (e.g. nodes with missing connections during graph editing).
+        // This used to run on the UI thread; running here avoids blocking it.
+        if (!validateAssembly())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
 
         m_assembly->updateInputsAndOutputs();
 
@@ -227,25 +239,26 @@ namespace gladius
             return;
         }
 
-        nodes::Assembly assemblyToFlat{*m_assembly};
-
-        nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
-        gradientLowering.run();
-
-        nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat, getSharedLogger()};
-        normalizeLowering.run();
-
-        nodes::OptimizeOutputs optimizer{&assemblyToFlat};
-        optimizer.optimize();
-
-        // Pass the dependency graph to the flattener if available
-        nodes::GraphFlattener flattener =
-          m_resourceDependencyGraph
-            ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
-            : nodes::GraphFlattener(assemblyToFlat);
-
         try
         {
+            nodes::Assembly assemblyToFlat{*m_assembly};
+
+            nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
+            gradientLowering.run();
+
+            nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat,
+                                                                  getSharedLogger()};
+            normalizeLowering.run();
+
+            nodes::OptimizeOutputs optimizer{&assemblyToFlat};
+            optimizer.optimize();
+
+            // Pass the dependency graph to the flattener if available
+            nodes::GraphFlattener flattener =
+              m_resourceDependencyGraph
+                ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
+                : nodes::GraphFlattener(assemblyToFlat);
+
             m_flatAssembly = std::make_shared<nodes::Assembly>(flattener.flatten());
         }
         catch (std::exception const & e)
@@ -253,7 +266,7 @@ namespace gladius
             auto logger = getSharedLogger();
             if (logger)
                 logger->addEvent(
-                  {"Error flattening assembly: " + std::string(e.what()), Severity::Error});
+                  {std::string("Error flattening assembly: ") + e.what(), Severity::Error});
         }
     }
 
@@ -387,12 +400,12 @@ namespace gladius
         loadNonBlocking(templateFiletName);
     }
 
-    void Document::updateParameter()
+    bool Document::updateParameter()
     {
         ProfileFunction;
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
 
         updatePayload();
@@ -434,6 +447,7 @@ namespace gladius
         }
 
         m_parameterDirty = !updateSucceeded;
+        return updateSucceeded;
     }
 
     void Document::updateParameterRegistration()
@@ -476,6 +490,10 @@ namespace gladius
             }
 
             auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                return; // Background worker holds the compute mutex; skip to avoid blocking
+            }
 
             if (!m_generatorContext)
             {
@@ -1011,10 +1029,11 @@ namespace gladius
         model.createBeginEnd();
         model.setDisplayName(name);
 
-        // Add pos vector input to begin node
-        model.getBeginNode()->addOutputPort(nodes::FieldNames::Pos,
-                                            nodes::ParameterTypeIndex::Float3);
-        model.registerOutputs(*model.getBeginNode());
+        // Add pos vector input to begin node using addArgument so that both
+        // the output port and parameter entry are created (consistent with
+        // createBeginEndWithDefaultInAndOuts).
+        model.addArgument(nodes::FieldNames::Pos,
+                          nodes::VariantParameter(nodes::float3{0.0f, 0.0f, 0.0f}));
 
         // Add color vector output and shape scalar output to end node
         model.getEndNode()->parameter()[nodes::FieldNames::Color] =

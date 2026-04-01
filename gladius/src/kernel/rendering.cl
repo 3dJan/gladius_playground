@@ -560,7 +560,9 @@ shadingMetal(float3 pos, float3 col, float3 normalOfSurface, float3 rayDirection
 
     float3 ref = reflect(rayDirection, normalOfSurface);
 
-    float occlusion = calcAmbientOcclusion(pos, normalOfSurface, PASS_PAYLOAD_ARGS);
+    float occlusion = (renderingSettings.flags & RF_DISABLE_AO)
+        ? (0.5f + 0.5f * normalOfSurface.y)
+        : calcAmbientOcclusion(pos, normalOfSurface, PASS_PAYLOAD_ARGS);
     float3 lightDirection = normalize((float3)(-0.4f, -0.7f, 1.f));
     float3 hal = normalize(lightDirection - rayDirection);
     float const ambient = clamp(0.7f - 0.3f * normalOfSurface.y, 0.f, 1.f);
@@ -570,7 +572,8 @@ shadingMetal(float3 pos, float3 col, float3 normalOfSurface, float3 rayDirection
     float dom = smoothstep(-0.2f, 0.2f, ref.y);
     float const fresnel = pow(clamp(1.f + dot(normalOfSurface, rayDirection), 0.f, 1.f), 2.f);
 
-    if (!(renderingSettings.approximation & AM_ONLY_PRECOMPSDF))
+    if (!(renderingSettings.approximation & AM_ONLY_PRECOMPSDF) &&
+        !(renderingSettings.flags & RF_DISABLE_SHADOWS))
     {
         dif *= calcSoftshadow(pos, lightDirection, 0.002f, 25.f, PASS_PAYLOAD_ARGS);
         dom *= calcSoftshadow(pos, ref, 0.002f, 25.f, PASS_PAYLOAD_ARGS);

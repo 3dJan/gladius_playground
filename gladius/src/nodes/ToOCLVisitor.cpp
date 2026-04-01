@@ -252,8 +252,21 @@ namespace gladius::nodes
         }
         std::stringstream customArguments;
         bool first = true;
-        for (auto & [name, input] : m_currentModel->getInputs())
+
+        // Sort inputs by definition order (sort index) rather than alphabetical map order.
+        // Both the signature and the call site must use the same order.
+        auto const & rawInputs = m_currentModel->getInputs();
+        std::vector<std::pair<int, std::string>> sortableInputs;
+        sortableInputs.reserve(rawInputs.size());
+        for (auto const & [name, input] : rawInputs)
         {
+            sortableInputs.emplace_back(input.getSortIndex(), name);
+        }
+        std::sort(sortableInputs.begin(), sortableInputs.end());
+
+        for (auto const & [sortIdx, name] : sortableInputs)
+        {
+            auto const & input = rawInputs.at(name);
             // if (!input.isUsed())
             // {
             //     continue;
@@ -270,7 +283,7 @@ namespace gladius::nodes
 
         for (auto & [name, output] : m_currentModel->getOutputs())
         {
-            if (!output.isConsumedByFunction())
+            if (!m_standaloneMode && !output.isConsumedByFunction())
             {
                 continue;
             }
@@ -333,7 +346,7 @@ namespace gladius::nodes
 
         for (auto & [name, output] : m_currentModel->getOutputs())
         {
-            if (!output.isConsumedByFunction())
+            if (!m_standaloneMode && !output.isConsumedByFunction())
             {
                 continue;
             }
@@ -341,7 +354,7 @@ namespace gladius::nodes
             m_definition << fmt::format("*{0} = ({1})({2});\n",
                                         name,
                                         typeIndexToOpenCl(output.getTypeIndex()),
-                                        output.toString());
+                                        resolveParameter(output));
         }
         m_definition << "}\n";
     }
@@ -639,14 +652,12 @@ namespace gladius::nodes
 
         std::stringstream customArguments;
         bool first = true;
-        for (auto & [name, parameter] : functionCall.parameter())
+        // Use getArguments() which returns args sorted by definition order (sort index),
+        // not alphabetical map order. This ensures the call site argument order matches
+        // the callee's function signature parameter order.
+        for (auto & [name, paramPtr] : functionCall.getArguments())
         {
-            if (!parameter.isArgument())
-            {
-                continue;
-            }
-
-            if (parameter.toString().empty())
+            if (paramPtr->toString().empty())
             {
                 continue;
             }
@@ -657,13 +668,13 @@ namespace gladius::nodes
             }
 
             customArguments << fmt::format(
-              "({0})({1})", typeIndexToOpenCl(parameter.getTypeIndex()), parameter.toString());
+              "({0})({1})", typeIndexToOpenCl(paramPtr->getTypeIndex()), resolveParameter(*paramPtr));
             first = false;
         }
 
         for (auto & [name, port] : functionCall.getOutputs())
         {
-            if (!port.isUsed())
+            if (!m_standaloneMode && !port.isUsed())
             {
                 continue;
             }

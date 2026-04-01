@@ -14,6 +14,103 @@ namespace gladius::ui
         m_navigationCallback = std::move(callback);
     }
 
+    bool ValidationOverlay::renderIssueGroup(
+        std::map<NodeTypeKey, std::vector<nodes::ValidationIssue const*>> const& groupedIssues,
+        char const* childId,
+        bool isTodo)
+    {
+        bool navigationRequested = false;
+
+        float const itemHeight = ImGui::GetTextLineHeightWithSpacing();
+        float const maxHeight =
+            std::min(150.0f, static_cast<float>(groupedIssues.size()) * itemHeight + 8.0f);
+        ImGui::BeginChild(childId, ImVec2(0, maxHeight), false);
+
+        int groupIndex = 0;
+        for (auto const& [key, issues] : groupedIssues)
+        {
+            ImGui::PushID(groupIndex++);
+
+            char const* icon;
+            ImVec4 color;
+            ImVec4 hoverBg;
+            ImVec4 activeBg;
+
+            if (isTodo)
+            {
+                icon = reinterpret_cast<char const*>(ICON_FA_CLIPBOARD_LIST);
+                color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+                hoverBg = ImVec4(0.15f, 0.25f, 0.4f, 0.5f);
+                activeBg = ImVec4(0.2f, 0.3f, 0.5f, 0.7f);
+            }
+            else
+            {
+                bool hasError =
+                    std::any_of(issues.begin(),
+                                issues.end(),
+                                [](auto const* i)
+                                { return i->severity == nodes::IssueSeverity::Error; });
+                icon = hasError ? reinterpret_cast<char const*>(ICON_FA_TIMES_CIRCLE)
+                                : reinterpret_cast<char const*>(ICON_FA_EXCLAMATION_CIRCLE);
+                color =
+                    hasError ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                hoverBg = ImVec4(0.4f, 0.2f, 0.2f, 0.5f);
+                activeBg = ImVec4(0.5f, 0.3f, 0.3f, 0.7f);
+            }
+
+            std::string const& nodeName = issues.front()->node;
+            std::string const& modelName = issues.front()->model;
+            std::string message = buildMessage(key.type, modelName, nodeName, issues);
+
+            bool const hasNode = (key.nodeId != 0);
+            std::string buttonLabel = fmt::format("{} {}", icon, message);
+
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+
+            if (hasNode)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hoverBg);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, activeBg);
+
+                if (ImGui::Button(buttonLabel.c_str()))
+                {
+                    if (m_navigationCallback)
+                    {
+                        m_navigationCallback(key.nodeId, key.modelId);
+                    }
+                    navigationRequested = true;
+                }
+
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted("Click to navigate to node");
+                    if (!issues.front()->fixSuggestion.empty())
+                    {
+                        ImGui::Separator();
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 0.7f, 1.0f));
+                        ImGui::TextWrapped("%s", issues.front()->fixSuggestion.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                    ImGui::EndTooltip();
+                }
+
+                ImGui::PopStyleColor(3);
+            }
+            else
+            {
+                ImGui::TextUnformatted(buttonLabel.c_str());
+            }
+
+            ImGui::PopStyleColor();
+            ImGui::PopID();
+        }
+
+        ImGui::EndChild();
+        return navigationRequested;
+    }
+
     bool ValidationOverlay::render(nodes::IssueList const& issueList)
     {
         if (!issueList.hasErrors())
@@ -23,123 +120,67 @@ namespace gladius::ui
 
         bool navigationRequested = false;
         auto const allIssues = issueList.getAll();
-        size_t const errorCount = issueList.errorCount();
-        size_t const warningCount = issueList.warningCount();
 
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.1f, 0.1f, 0.9f));
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.0f);
-
-        std::string const headerText =
-            fmt::format("{} Validation Issues ({} errors, {} warnings)",
-                        reinterpret_cast<const char*>(ICON_FA_EXCLAMATION_TRIANGLE),
-                        errorCount,
-                        warningCount);
-
-        if (ImGui::CollapsingHeader(headerText.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+        // Separate issues into todos (missing connections) and actual errors
+        std::map<NodeTypeKey, std::vector<nodes::ValidationIssue const*>> todoGroups;
+        std::map<NodeTypeKey, std::vector<nodes::ValidationIssue const*>> errorGroups;
+        for (auto const& issue : allIssues)
         {
-            // Group issues by (modelId, nodeId, type) to create smart messages
-            struct NodeTypeKey
+            NodeTypeKey key{issue.modelId, issue.nodeId, issue.type};
+            if (issue.type == nodes::IssueType::MissingConnection)
             {
-                nodes::ResourceId modelId;
-                nodes::NodeId nodeId;
-                nodes::IssueType type;
-                bool operator<(NodeTypeKey const& other) const
-                {
-                    if (modelId != other.modelId)
-                        return modelId < other.modelId;
-                    if (nodeId != other.nodeId)
-                        return nodeId < other.nodeId;
-                    return static_cast<int>(type) < static_cast<int>(other.type);
-                }
-            };
-
-            std::map<NodeTypeKey, std::vector<nodes::ValidationIssue const*>> groupedIssues;
-            for (auto const& issue : allIssues)
-            {
-                groupedIssues[{issue.modelId, issue.nodeId, issue.type}].push_back(&issue);
+                todoGroups[key].push_back(&issue);
             }
-
-            // Calculate actual content height based on item count
-            float const itemHeight = ImGui::GetTextLineHeightWithSpacing();
-            float const maxHeight =
-                std::min(150.0f, static_cast<float>(groupedIssues.size()) * itemHeight + 8.0f);
-            ImGui::BeginChild("IssuesListChild", ImVec2(0, maxHeight), false);
-
-            int groupIndex = 0;
-            for (auto const& [key, issues] : groupedIssues)
+            else
             {
-                ImGui::PushID(groupIndex++);
-
-                // Determine worst severity for color
-                bool hasError = std::any_of(issues.begin(),
-                                            issues.end(),
-                                            [](auto const* i)
-                                            { return i->severity == nodes::IssueSeverity::Error; });
-
-                char const* icon = hasError
-                                       ? reinterpret_cast<const char*>(ICON_FA_TIMES_CIRCLE)
-                                       : reinterpret_cast<const char*>(ICON_FA_EXCLAMATION_CIRCLE);
-
-                ImVec4 const color =
-                    hasError ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
-
-                std::string const& nodeName = issues.front()->node;
-                std::string const& modelName = issues.front()->model;
-                std::string message = buildMessage(key.type, modelName, nodeName, issues);
-
-                bool const hasNode = (key.nodeId != 0);
-                std::string buttonLabel = fmt::format("{} {}", icon, message);
-
-                ImGui::PushStyleColor(ImGuiCol_Text, color);
-
-                if (hasNode)
-                {
-                    // Clickable button for navigation
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.2f, 0.2f, 0.5f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.3f, 0.3f, 0.7f));
-
-                    if (ImGui::Button(buttonLabel.c_str()))
-                    {
-                        if (m_navigationCallback)
-                        {
-                            m_navigationCallback(key.nodeId, key.modelId);
-                        }
-                        navigationRequested = true;
-                    }
-
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Click to navigate to node");
-                        // Show fix suggestion if available
-                        if (!issues.front()->fixSuggestion.empty())
-                        {
-                            ImGui::Separator();
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 0.7f, 1.0f));
-                            ImGui::TextWrapped("%s", issues.front()->fixSuggestion.c_str());
-                            ImGui::PopStyleColor();
-                        }
-                        ImGui::EndTooltip();
-                    }
-
-                    ImGui::PopStyleColor(3);
-                }
-                else
-                {
-                    // Non-clickable text for issues without specific node
-                    ImGui::TextUnformatted(buttonLabel.c_str());
-                }
-
-                ImGui::PopStyleColor();
-                ImGui::PopID();
+                errorGroups[key].push_back(&issue);
             }
-
-            ImGui::EndChild();
         }
 
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor();
+        // Render errors section (red styling)
+        if (!errorGroups.empty())
+        {
+            size_t errorItemCount = errorGroups.size();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.1f, 0.1f, 0.9f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.0f);
+
+            std::string const errorHeader =
+                fmt::format("{} {} {}",
+                            reinterpret_cast<char const*>(ICON_FA_EXCLAMATION_TRIANGLE),
+                            errorItemCount == 1 ? "Error" : "Errors",
+                            errorItemCount);
+
+            if (ImGui::CollapsingHeader(errorHeader.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                navigationRequested |=
+                    renderIssueGroup(errorGroups, "ErrorsListChild", false);
+            }
+
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
+
+        // Render todo section (blue/info styling)
+        if (!todoGroups.empty())
+        {
+            size_t todoItemCount = todoGroups.size();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.15f, 0.3f, 0.9f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.0f);
+
+            std::string const todoHeader =
+                fmt::format("{} {} to connect",
+                            reinterpret_cast<char const*>(ICON_FA_CLIPBOARD_LIST),
+                            todoItemCount == 1 ? "1 input" : fmt::format("{} inputs", todoItemCount));
+
+            if (ImGui::CollapsingHeader(todoHeader.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                navigationRequested |=
+                    renderIssueGroup(todoGroups, "TodoListChild", true);
+            }
+
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
 
         ImGui::Separator();
 

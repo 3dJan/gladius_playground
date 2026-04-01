@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -25,6 +26,7 @@ namespace gladius::compute
     enum class SimplificationMethod
     {
         None,           ///< No simplification
+        QemFast,        ///< Fast geometric QEM, CPU-only, single-pass with priority queue
         QemSdfAware     ///< QEM with GPU SDF error evaluation (SDF-aware)
     };
 
@@ -69,6 +71,10 @@ namespace gladius::compute
         std::size_t simplificationMaxPasses{10U};   ///< Maximum simplification passes
         std::optional<std::size_t> simplificationTargetTriangles{std::nullopt}; ///< Target triangle count (optional)
         std::optional<float> simplificationTargetReduction{std::nullopt};       ///< Target reduction percentage (optional)
+        
+        // Fast QEM-specific options
+        SimplificationTerminationMode simplificationTerminationMode{SimplificationTerminationMode::TargetReductionPercent};
+        float simplificationMaxGeometricError{std::numeric_limits<float>::max()}; ///< Maximum geometric error for fast QEM (squared world units)
         
         // Mesh quality improvement (post-processing)
         // NOTE: Keep this OFF by default. Edge flipping is purely a quality optimization and must

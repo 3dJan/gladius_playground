@@ -45,6 +45,7 @@ namespace gladius::ui::async_rendering
     {
         HighQuality,
         LowResPreview,
+        StreamingPreview,     // Continuous preview loop during parameter drag
         BoundingBoxUpdate,
         ParameterUpdate,      // Fast path: parameter values changed without structure change
         SDFPrecomputation,    // Async SDF generation after model/bbox update

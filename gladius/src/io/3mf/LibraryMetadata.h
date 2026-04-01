@@ -18,8 +18,9 @@ namespace gladius::io
     /// The `libraryDescription` field contains a free-text description of the library entry.
     struct LibraryMetadata
     {
-        std::string libraryFunctions;  ///< Semicolon-separated model resource IDs (e.g. "5;12")
+        std::string libraryFunctions;   ///< Semicolon-separated model resource IDs (e.g. "5;12")
         std::string libraryDescription; ///< Free-text description of this library entry
+        std::string libraryTags;        ///< Comma-separated tags (e.g. "csg,primitive,sphere")
     };
 
     /// Metadata namespace used for library-specific keys in 3MF files.
@@ -30,6 +31,9 @@ namespace gladius::io
 
     /// Metadata key for the library entry description.
     inline auto constexpr LIBRARY_DESCRIPTION_KEY = "library-description";
+
+    /// Metadata key for the library entry tags.
+    inline auto constexpr LIBRARY_TAGS_KEY = "library-tags";
 
     /// @brief Parses a semicolon-separated string of resource IDs into a vector.
     ///

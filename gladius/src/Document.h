@@ -151,7 +151,8 @@ namespace gladius
         void newEmptyModel();
         void newFromTemplate();
 
-        void updateParameter();
+        /// @return true if the parameter values were successfully pushed to the GPU
+        bool updateParameter();
         void updateParameterRegistration();
         void updatePayload();
         void refreshModelBlocking();
@@ -161,6 +162,10 @@ namespace gladius
                          io::StlExportOptions const & options);
 
         void markFileAsChanged();
+
+        /// @brief Check if the file has unsaved changes.
+        [[nodiscard]] bool isFileChanged() const { return m_fileChanged; }
+
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
         nodes::SharedAssembly getFlatAssembly() const;

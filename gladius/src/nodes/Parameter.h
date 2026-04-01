@@ -446,6 +446,16 @@ namespace gladius::nodes
             m_inputSourceRequired = required;
         }
 
+        void setSortIndex(int index)
+        {
+            m_sortIndex = index;
+        }
+
+        [[nodiscard]] int getSortIndex() const
+        {
+            return m_sortIndex;
+        }
+
         [[nodiscard]] bool isInputSourceRequired() const
         {
             return m_inputSourceRequired;
@@ -464,6 +474,7 @@ namespace gladius::nodes
 
         bool m_isValid{true};
         bool m_inputSourceRequired{true};
+        int m_sortIndex{0};
     };
 
     using VariantParameter = Parameter<VariantType>;

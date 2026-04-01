@@ -105,6 +105,25 @@ namespace gladius::ui
         }
     }
 
+    template <typename Exporter>
+    void MeshExportDialog::applyColorSettings(Exporter& exporter, bool exportColors)
+    {
+        exporter.setExportWithColors(exportColors);
+        exporter.setConvertToSrgb(m_convertToSrgb);
+        exporter.setColorMode(m_colorMode);
+        exporter.setQuantizationMode(m_quantizationMode);
+        exporter.setTargetApplication(m_targetApplication);
+        if (m_overridePaletteSize)
+        {
+            exporter.setMaxPaletteSize(
+                static_cast<std::uint32_t>(m_maxPaletteSize));
+        }
+        else
+        {
+            exporter.setMaxPaletteSize(std::nullopt);
+        }
+    }
+
     void MeshExportDialog::show(std::filesystem::path suggestedFilename)
     {
         if (!m_visible)
@@ -699,8 +718,8 @@ namespace gladius::ui
             ImGui::Text("Mesh Simplification");
             
             // Simplification method selection
-            char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
-            int const numMethods = 2;
+            char const * const simplificationMethods[] = {"None", "Fast (Geometric)", "QEM (SDF-aware)"};
+            int const numMethods = 3;
             if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
             {
                 for (int i = 0; i < numMethods; ++i)
@@ -718,7 +737,27 @@ namespace gladius::ui
                 ImGui::EndCombo();
             }
             
-            if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
+            if (m_manifoldSimplificationMethod == 1)  // Fast (Geometric)
+            {
+                ImGui::Indent();
+                
+                char const * const terminationModes[] = {"Target Count", "Reduction %", "Error-Bounded"};
+                ImGui::Combo("Termination##simplterm", &m_manifoldSimplificationTerminationMode,
+                             terminationModes, 3);
+                
+                if (m_manifoldSimplificationTerminationMode == 2)  // Error-bounded
+                {
+                    ImGui::SliderFloat("Max error##simplerr",
+                                       &m_manifoldSimplificationMaxError,
+                                       0.001F, 10.0F,
+                                       "%.3f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("squared world units");
+                }
+                
+                ImGui::Unindent();
+            }
+            else if (m_manifoldSimplificationMethod == 2)  // QEM SDF-aware
             {
                 ImGui::Indent();
                 
@@ -856,6 +895,71 @@ namespace gladius::ui
         
         ImGui::EndDisabled();
         
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // Compatibility tuning section
+        ImGui::Text("Compatibility");
+        ImGui::Separator();
+
+        ImGui::BeginDisabled(!colorExportAvailable || !m_exportWithColors);
+
+        // Target application selector
+        ImGui::Text("Target Application:");
+        ImGui::SameLine();
+        int targetIdx = static_cast<int>(m_targetApplication);
+        char const* targetLabels[] = {"None (portable)", "PrusaSlicer", "OrcaSlicer"};
+        if (ImGui::Combo("##TargetApp", &targetIdx, targetLabels, 3))
+        {
+            m_targetApplication = static_cast<io::TargetApplication>(targetIdx);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Select a target slicer for optimized export.\n"
+                "'None' produces standard-only output portable to any 3MF viewer.");
+        }
+        if (m_targetApplication != io::TargetApplication::None)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                "Warning: Portability to other slicers may be reduced.");
+        }
+
+        // Quantization mode
+        ImGui::Text("Quantization:");
+        ImGui::SameLine();
+        int quantMode = static_cast<int>(m_quantizationMode);
+        char const* quantLabels[] = {"Disabled", "Adaptive"};
+        if (ImGui::Combo("##QuantMode", &quantMode, quantLabels, 2))
+        {
+            m_quantizationMode = static_cast<io::QuantizationMode>(quantMode);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Adaptive: Automatically reduce colors to fit a palette for slicer compatibility.\n"
+                "Disabled: Preserve all unique colors (may not produce printable regions).");
+        }
+
+        // Optional palette size override
+        ImGui::Checkbox("Override palette size", &m_overridePaletteSize);
+        if (m_overridePaletteSize)
+        {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            int const maxSlider = (m_targetApplication != io::TargetApplication::None) ? 16 : 256;
+            m_maxPaletteSize = std::min(m_maxPaletteSize, maxSlider);
+            ImGui::SliderInt("##PaletteSize", &m_maxPaletteSize, 2, maxSlider, "%d colors");
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Limit the number of distinct colors in the export.\n"
+                "When unchecked, the palette is sized automatically.");
+        }
+
+        ImGui::EndDisabled();
+
         ImGui::Spacing();
         ImGui::Spacing();
 
@@ -1121,6 +1225,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+        options.simplificationMaxError = m_manifoldSimplificationMaxError;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1202,6 +1308,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
+        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+        options.simplificationMaxError = m_manifoldSimplificationMaxError;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1286,9 +1394,7 @@ namespace gladius::ui
                 m_layeredExporter3mf.setQualityLevel(quality);
                 // Enable color export if checkbox is checked and model has color
                 bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
-                m_layeredExporter3mf.setExportWithColors(exportColors);
-                m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
-                m_layeredExporter3mf.setColorMode(m_colorMode);
+                applyColorSettings(m_layeredExporter3mf, exportColors);
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -1356,6 +1462,8 @@ namespace gladius::ui
             // Mesh simplification options
             options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
             options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
+            options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
+            options.simplificationMaxError = m_manifoldSimplificationMaxError;
             // QEM SDF-aware options
             options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
             options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
@@ -1371,9 +1479,7 @@ namespace gladius::ui
             m_manifoldExporter.setDocument(m_document);
             // Enable color export if checkbox is checked and model has color (3MF only)
             bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
-            m_manifoldExporter.setExportWithColors(exportColors);
-            m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
-            m_manifoldExporter.setColorMode(m_colorMode);
+            applyColorSettings(m_manifoldExporter, exportColors);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;

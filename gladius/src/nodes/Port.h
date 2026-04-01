@@ -29,6 +29,9 @@ namespace gladius::nodes
         void setIsUsed(bool isUsed);
         [[nodiscard]] bool isUsed() const;
 
+        void setSortIndex(int index);
+        [[nodiscard]] int getSortIndex() const;
+
       private:
         std::string m_uniqueName{};
         std::string m_shortName{}; // "e.g. FieldNames::Shape, FieldNames::Pos etc.
@@ -38,5 +41,6 @@ namespace gladius::nodes
         bool m_visible{true};
         std::type_index m_typeIndex = std::type_index(typeid(float));
         bool m_isused{false};
+        int m_sortIndex{0};
     };
 } // namespace gladius::nodes

@@ -80,6 +80,9 @@ namespace gladius::ui
         void resetState();
         void resetExportState();
 
+        template <typename Exporter>
+        void applyColorSettings(Exporter& exporter, bool exportColors);
+
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
         vdb::MeshExporter3mf m_layeredExporter3mf;
@@ -114,7 +117,9 @@ namespace gladius::ui
         bool m_manifoldProjectToSurface = true;
         // Mesh simplification
         bool m_manifoldEnableSimplification = false;
-        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemSdfAware
+        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemFast, 2=QemSdfAware
+        int m_manifoldSimplificationTerminationMode = 0;  ///< 0=TargetCount, 1=ReductionPercent, 2=ErrorBounded
+        float m_manifoldSimplificationMaxError = 1.0F;  ///< Max error for error-bounded mode
         float m_manifoldSimplificationMaxSdfError = 0.01F;
         float m_manifoldSimplificationSdfWeight = 0.5F;
         float m_manifoldSimplificationNormalWeight = 0.3F;
@@ -139,6 +144,12 @@ namespace gladius::ui
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
         bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
+
+        // Compatibility tuning options
+        io::QuantizationMode m_quantizationMode = io::QuantizationMode::Adaptive;
+        bool m_overridePaletteSize = false;  ///< Whether user has overridden palette size
+        int m_maxPaletteSize = 16;           ///< Maximum palette colors (when overridden)
+        io::TargetApplication m_targetApplication = io::TargetApplication::None;
 
         ColorToThicknessDialog m_colorToThicknessDialog;
 

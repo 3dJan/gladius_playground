@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Theme.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -76,6 +77,7 @@ namespace gladius::ui
 
         m_renderWindow.initialize(m_core.get(), &m_mainView, m_shortcutManager, m_configManager);
         m_renderWindow.setDocument(m_doc.get());
+        m_renderWindow.setExportState(&m_exportState);
         LOG_LOCATION
         m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack([&]()
                                                                     { onPreviewProgramSwap(); });
@@ -91,6 +93,7 @@ namespace gladius::ui
 
         m_mainView.clearViewCallback();
         m_mainView.addViewCallBack([&]() { render(); });
+        nodeEditor();
 
         m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
 
@@ -136,8 +139,14 @@ namespace gladius::ui
         m_meshExporterDialog.setExportState(&m_exportState);
         m_modelEditor.setExportState(&m_exportState);
 
-        nodeEditor();
-        newModel();
+        // Defer the initial template load while the welcome screen is visible.
+        // Starting it now would set isLoadingInProgress(), causing a click on a
+        // thumbnail to be silently dropped by open().  The template is loaded
+        // later when the welcome screen closes without a file selection.
+        if (!m_welcomeScreen.isVisible())
+        {
+            newModel();
+        }
         loadRenderSettings();
     }
 
@@ -205,6 +214,16 @@ namespace gladius::ui
             }
         }
 
+        if (ImGui::CollapsingHeader("Appearance"))
+        {
+            auto & names = themeNames();
+            int currentIdx = static_cast<int>(m_mainView.getCurrentTheme());
+            if (ImGui::Combo("Theme", &currentIdx, names.data(), THEME_COUNT))
+            {
+                m_mainView.setCurrentTheme(static_cast<ThemeId>(currentIdx));
+            }
+        }
+
         if (ImGui::CollapsingHeader("Keyboard Shortcuts"))
         {
             if (ImGui::Button("Configure Shortcuts"))
@@ -238,9 +257,10 @@ namespace gladius::ui
         }
 
         auto z = m_core->getSliceHeight();
-        ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.);
-
-        m_core->setSliceHeight(z);
+        if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
+        {
+            m_core->setSliceHeight(z);
+        }
         bool tmp_m_dirty = m_dirty.load();
 
         ImGui::Checkbox("m_dirty", &tmp_m_dirty);
@@ -539,8 +559,15 @@ namespace gladius::ui
                        events::Severity::Error});
                 }
             }
-            // No pending file is normal for "New Project", "Open Existing", 
-            // backup restore, or manual close - no action needed
+            else if (m_asyncLoadState == AsyncLoadState::Idle &&
+                     !m_asyncFileDialog.isActive())
+            {
+                // Welcome screen closed without selecting a file and no other
+                // operation was already started (e.g. "New Project" or "Open
+                // Existing").  Load the default template so the user has a
+                // blank model to work with.
+                newModel();
+            }
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
 
@@ -662,7 +689,7 @@ namespace gladius::ui
                 }
 
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                                    {20.f * m_uiScale, 12.f * m_uiScale});
+                                    {12.f * m_uiScale, 8.f * m_uiScale});
                 if (ImGui::BeginMainMenuBar())
                 {
                     if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_BARS)))
@@ -785,6 +812,11 @@ namespace gladius::ui
                     {
                         if (m_fileChanged)
                         {
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave")))
+                            {
+                                save();
+                            }
                             ImGui::TextUnformatted(
                               fmt::format("*{}", m_currentAssemblyFileName.value().string())
                                 .c_str());
@@ -1072,19 +1104,25 @@ namespace gladius::ui
               }
 
               const auto parameterModifiedByModelEditor = m_modelEditor.showAndEdit();
+              // T047: Route parameter changes through throttle
+              if (parameterModifiedByModelEditor)
+              {
+                  m_parameterThrottle.onParameterChanged();
+              }
               m_parameterDirty = parameterModifiedByModelEditor || m_parameterDirty;
               m_dirty = m_parameterDirty || m_dirty;
-              m_contoursDirty = m_parameterDirty || m_contoursDirty;
               bool const modelWasModified = m_modelEditor.modelWasModified();
               bool const compileRequested = m_modelEditor.isCompileRequested();
 
-              if (modelWasModified || parameterModifiedByModelEditor)
+              // Structural changes require updating the graph topology and parameter mapping.
+              // Parameter-only changes skip this — updatePayload() handles registration
+              // on the fast path, and refreshWorker() handles it on the compilation path.
+              if (modelWasModified)
               {
                   try
                   {
                       m_doc->getAssembly()->updateInputsAndOutputs();
                       m_doc->updateParameterRegistration();
-                      markFileAsChanged();
                   }
                   catch (const std::exception & e)
                   {
@@ -1093,16 +1131,28 @@ namespace gladius::ui
                   }
               }
 
+              if (modelWasModified || parameterModifiedByModelEditor)
+              {
+                  markFileAsChanged();
+              }
+
               // Refresh model when compile is explicitly requested (structural changes)
               if (compileRequested)
               {
                   refreshModel();
+                  m_parameterThrottle.reset(); // Full compile resets throttle state
+                  m_contoursDirty = true;
+                  // If compilation was successfully launched, the async worker
+                  // handles parameter updates — skip the redundant main-thread path
+                  // that would block on Queue.finish() while the worker runs.
+                  if (!m_modelEditor.isCompileRequested())
+                  {
+                      m_parameterDirty = false;
+                  }
               }
               // For parameter-only changes, m_parameterDirty is already set above.
               // updateModel() will handle it using the fast updateParameter() path
               // and call invalidateViewDueToParameterChange() which bumps the epoch.
-              // Do NOT call invalidateView() here — it would bump the epoch a second
-              // time, causing in-flight SDF results to be discarded as outdated.
 
               // Only clear the modified flags when no compile request is
               // pending.  If refreshModel() was skipped because a
@@ -1129,8 +1179,8 @@ namespace gladius::ui
 #endif
 
         // Measure the menu bar height using the SAME padding as the actual menu bar in render()
-        // The actual menu bar uses: ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {20.f * m_uiScale, 12.f * m_uiScale});
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {20.f * m_uiScale, 12.f * m_uiScale});
+        // The actual menu bar uses: ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {12.f * m_uiScale, 8.f * m_uiScale});
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {12.f * m_uiScale, 8.f * m_uiScale});
         ImGui::BeginMainMenuBar();
         float const menuBarHeight = ImGui::GetWindowHeight();
         ImGui::EndMainMenuBar();
@@ -1185,6 +1235,9 @@ namespace gladius::ui
             m_showSaveBeforeFileOperation = true;
             return;
         }
+
+        // Cancel all in-flight async GPU work before loading (same reason as loadFileDeferred).
+        m_renderWindow.cancelAllAsyncWork();
 
         // Defer editor reset until the async load inside newFromTemplate() completes.
         // (Same deferred pattern used by loadFileDeferred().)
@@ -1529,7 +1582,7 @@ namespace gladius::ui
         {
             return;
         }
-        m_core->requestContourUpdate({});
+        m_core->invalidateContourCache();
         m_contoursDirty = false;
     }
 
@@ -1630,6 +1683,12 @@ namespace gladius::ui
     {
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
+
+        // Cancel all in-flight async GPU work before loading.
+        // refreshWorker() (on the loading thread) rebuilds CL programs and
+        // resources.  Any async job still running on the worker thread would
+        // access those resources concurrently, causing a segfault.
+        m_renderWindow.cancelAllAsyncWork();
 
         // Defer editor reset until the new Assembly has been loaded.
         m_asyncLoadState = AsyncLoadState::LoadingWithReset;
@@ -2060,6 +2119,21 @@ namespace gladius::ui
                 sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
             }
             
+            // Bounding box dimensions
+            if (m_core)
+            {
+                auto const bb = m_core->getBoundingBox();
+                if (bb.has_value())
+                {
+                    ImGui::Text("%s %.3f x %.3f x %.3f mm",
+                                ICON_FA_CUBE,
+                                bb->max.x - bb->min.x,
+                                bb->max.y - bb->min.y,
+                                bb->max.z - bb->min.z);
+                    ImGui::SameLine();
+                }
+            }
+
             ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 400.0f);
             ImGui::Text("%.0f FPS | %s%s",
                         ImGui::GetIO().Framerate,
@@ -2423,6 +2497,16 @@ namespace gladius::ui
             return;
         }
 
+        // Suppress HQ front-buffer display when a parameter change is pending.
+        // This runs before renderWindow() (in displayUI()) so the stale HQ image
+        // (with shadows) is not shown while the parameter push is in progress.
+        // Unlike invalidateView(), this does not bump the epoch or disrupt
+        // in-flight SDF/preview work.
+        if (m_parameterDirty)
+        {
+            m_renderWindow.suppressHQDisplay();
+        }
+
         auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
         auto const rateLimit = std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f));
         
@@ -2469,9 +2553,24 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
-            m_doc->updateParameter();
-            m_renderWindow.invalidateViewDueToParameterChange();
-            m_parameterDirty = false;
+            // T047: Only update parameters when throttle allows (debounce interval expired).
+            // When the throttle has no pending recompile it means it already fired but the
+            // previous push failed (compute lock held by background worker).  In that case
+            // bypass the throttle — the debounce already elapsed, we just need to retry.
+            if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
+            {
+                // Streaming preview mode: the worker coroutine becomes the sole GPU
+                // writer, reading the latest Assembly values and pushing them to the
+                // parameter buffer in a tight loop.  This eliminates the UI-frame
+                // round-trip latency that limits one-shot preview scheduling.
+                if (!m_renderWindow.isStreamingPreviewActive())
+                {
+                    m_renderWindow.invalidateViewDueToParameterChange();
+                    m_renderWindow.startStreamingPreview();
+                }
+                m_parameterDirty = false;
+                m_contoursDirty = true;
+            }
         }
         updateContours();
     }
@@ -3162,24 +3261,27 @@ namespace gladius::ui
 
     void MainWindow::saveRenderSettings()
     {
-        if (!m_configManager || !m_computeAvailable || !m_core)
+        if (!m_configManager)
         {
             return;
         }
 
-        // Get current rendering settings
-        auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+        // Save rendering settings if compute is available
+        if (m_computeAvailable && m_core)
+        {
+            auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
 
-        // Create JSON object for render settings
-        nlohmann::json renderJson;
-        renderJson["quality"] = renderSettings.quality;
-        renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+            nlohmann::json renderJson;
+            renderJson["quality"] = renderSettings.quality;
+            renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
 
-        // Save to config
-        m_configManager->setValue("rendering", "settings", renderJson);
+            m_configManager->setValue("rendering", "settings", renderJson);
+        }
 
-        // Save UI settings (user scale factor)
+        // Save UI settings (always available)
         m_configManager->setValue("ui", "userScale", m_mainView.getUserScale());
+        m_configManager->setValue(
+          "ui", "theme", std::string(themeIdToString(m_mainView.getCurrentTheme())));
 
         // Save shortcuts too
         if (m_shortcutManager)
@@ -3191,12 +3293,25 @@ namespace gladius::ui
         m_configManager->save();
 
         // Log success
-        m_logger->addEvent({"Rendering settings saved", events::Severity::Info});
+        m_logger->addEvent({"Settings saved", events::Severity::Info});
     }
 
     void MainWindow::loadRenderSettings()
     {
-        if (!m_configManager || !m_computeAvailable || !m_core)
+        if (!m_configManager)
+        {
+            return;
+        }
+
+        // Load UI settings that don't require compute
+        float const userScale = m_configManager->getValue<float>("ui", "userScale", 1.0f);
+        m_mainView.setUserScale(userScale);
+
+        std::string const themeName =
+          m_configManager->getValue<std::string>("ui", "theme", "Modern");
+        m_mainView.setCurrentTheme(themeIdFromString(themeName));
+
+        if (!m_computeAvailable || !m_core)
         {
             return;
         }
@@ -3228,12 +3343,6 @@ namespace gladius::ui
             else
                 renderSettings.flags &= ~RF_SHOW_FIELD;
         }
-
-        // Load shortcuts too (this happens automatically when m_shortcutManager is created)
-
-        // Load UI settings (user scale factor)
-        float const userScale = m_configManager->getValue<float>("ui", "userScale", 1.0f);
-        m_mainView.setUserScale(userScale);
 
         // Log success
         m_logger->addEvent({"Rendering settings loaded", events::Severity::Info});

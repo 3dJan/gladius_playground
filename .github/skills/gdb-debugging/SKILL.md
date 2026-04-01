@@ -8,7 +8,7 @@ description: >-
   multi-threaded debugging, and strategies for async/coroutine pipelines.
 metadata:
   author: gladius
-  version: "1.0"
+  version: "1.1"
   requires: gdb-mcp-server
 ---
 
@@ -266,6 +266,29 @@ in worker threads, the coroutine machinery (e.g., `coro::thread_pool::executor`)
 hides the logical call chain. Focus on:
 - The coroutine's local variables and state
 - Setting breakpoints inside the coroutine body rather than relying on caller info
+
+### Segfault / crash debugging
+
+GDB automatically catches SIGSEGV signals. The workflow:
+
+1. Start the binary under GDB and `run` it
+2. Trigger the crash (e.g., send a request to the MCP server)
+3. GDB stops at the crash site — run `bt` to see the full backtrace
+4. Inspect variables: look for corrupted vtables, null pointers, or stale
+   object references
+5. Common cause: using pointers to objects that were freed/reallocated by
+   a prior operation (e.g., iterating 3MF resources after `setProgramSnippet`
+   invalidates them)
+
+For the Gladius MCP server, HTTP mode (`--mcp-server <port> --headless`) is
+easier to debug than stdio mode because you can send requests via `curl` or
+Python while the process runs under GDB.
+
+### LLDB alternative
+
+The MCP server also supports LLDB via `mcp_gdb-mcp_lldb_*` tools. The
+commands are similar but use LLDB syntax. Use GDB by default — only switch
+to LLDB if GDB is unavailable.
 
 ## Quick Reference
 

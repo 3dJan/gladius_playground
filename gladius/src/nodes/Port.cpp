@@ -92,4 +92,14 @@ namespace gladius::nodes
     {
         return m_isused;
     }
+
+    void Port::setSortIndex(int index)
+    {
+        m_sortIndex = index;
+    }
+
+    int Port::getSortIndex() const
+    {
+        return m_sortIndex;
+    }
 } // namespace gladius::nodes

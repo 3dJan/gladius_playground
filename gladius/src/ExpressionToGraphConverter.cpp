@@ -195,7 +195,7 @@ namespace gladius
         // awareness; snippets must not contain semicolons inside string literals.
         if (snippet.empty())
         {
-            return 0;
+            throw std::runtime_error("Function body is empty");
         }
 
         // Clear any previous static state (matching convertExpressionToGraph)
@@ -250,13 +250,15 @@ namespace gladius
             processedSnippet = match.prefix().str() + replacement + match.suffix().str();
         }
 
-        // Only inject implicit "pos" if the snippet references it and it wasn't already declared
+        // Only inject implicit "pos" if the snippet references it and it wasn't already declared.
+        // Match both bare "pos" and the in_-prefixed form "in_pos" (note: \bpos\b alone
+        // doesn't match "in_pos" because '_' is a word character).
         std::vector<FunctionArgument> effectiveArguments = arguments;
         bool const hasPosArg = std::any_of(arguments.begin(), arguments.end(),
           [](auto const & arg) { return arg.name == "pos"; });
         if (!hasPosArg)
         {
-            static std::regex const posWordRegex(R"(\bpos\b)");
+            static std::regex const posWordRegex(R"(\b(?:in_)?pos\b)");
             if (std::regex_search(processedSnippet, posWordRegex))
             {
                 effectiveArguments.insert(
@@ -264,11 +266,49 @@ namespace gladius
             }
         }
 
+        // Auto-detect undeclared in_-prefixed arguments from the snippet.
+        // Any "in_<name>" identifier that doesn't match an already-declared
+        // argument is added automatically. Type is inferred as vec3 if
+        // component access (.x/.y/.z) is found, otherwise float.
+        {
+            std::set<std::string> declaredArgs;
+            for (auto const & arg : effectiveArguments)
+            {
+                declaredArgs.insert(arg.name);
+                declaredArgs.insert("in_" + arg.name);
+            }
+
+            std::regex const inArgRegex(R"(\bin_([a-zA-Z_][a-zA-Z0-9_]*)\b)");
+            auto begin = std::sregex_iterator(processedSnippet.begin(),
+                                              processedSnippet.end(),
+                                              inArgRegex);
+            auto end_iter = std::sregex_iterator();
+
+            std::set<std::string> discovered;
+            for (auto it = begin; it != end_iter; ++it)
+            {
+                std::string argName = (*it)[1].str();
+                std::string fullName = "in_" + argName;
+                if (declaredArgs.count(argName) == 0 && declaredArgs.count(fullName) == 0
+                    && discovered.count(argName) == 0)
+                {
+                    discovered.insert(argName);
+                    // Infer type: vec3 if component access is used, float otherwise
+                    std::regex componentRegex(
+                      R"(\bin_)" + argName + R"(\.([xyzXYZ])\b)");
+                    ArgumentType type = std::regex_search(processedSnippet, componentRegex)
+                                          ? ArgumentType::Vector
+                                          : ArgumentType::Scalar;
+                    effectiveArguments.emplace_back(argName, type);
+                }
+            }
+        }
+
         std::map<std::string, nodes::NodeId> variableNodes =
           createArgumentNodes(effectiveArguments, model);
         if (variableNodes.empty() && !effectiveArguments.empty())
         {
-            return 0;
+            throw std::runtime_error("Failed to create argument nodes for function inputs");
         }
 
         // Split snippet by semicolons
@@ -323,7 +363,9 @@ namespace gladius
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
                 if (exprNodeId == 0)
                 {
-                    return 0; // Failed to parse expression
+                    throw std::runtime_error(
+                      "Failed to parse expression '" + expr +
+                      "' in statement '" + cleanStmt + "'");
                 }
 
                 // Check if this assignment targets an output
@@ -333,28 +375,30 @@ namespace gladius
                     auto const & matchedOutput = *outputIt->second;
                     if (!validateOutputType(model, exprNodeId, matchedOutput.type))
                     {
-                        return 0;
-                    }
-
-                    if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
-                    {
-                        auto varIt = std::find_if(variableNodes.begin(), variableNodes.end(),
-                          [exprNodeId](auto const & kv) { return kv.second == exprNodeId; });
-                        if (varIt != variableNodes.end())
-                        {
-                            s_variableContextStack.push_back(varIt->first);
-                        }
+                        throw std::runtime_error(
+                          "Output type mismatch for '" + varName +
+                          "' in statement '" + cleanStmt + "'");
                     }
 
                     if (!connectToEndNode(model, exprNodeId, matchedOutput))
                     {
-                        return 0;
+                        throw std::runtime_error(
+                          "Failed to connect output '" + varName +
+                          "' to end node in statement '" + cleanStmt + "'");
                     }
                 }
+
                 else
                 {
                     variableNodes[varName] = exprNodeId;
+                    std::string outPortName = getOutputPortName(model, exprNodeId);
+
+                    if (dynamic_cast<nodes::Begin *>(model.getNode(exprNodeId).value_or(nullptr)))
+                    {
+                        s_argSnippetToPortName[varName] = outPortName;
+                    }
                 }
+
                 lastResult = exprNodeId;
             }
             else if (std::regex_match(cleanStmt, stmtMatch, return_regex))
@@ -370,13 +414,15 @@ namespace gladius
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
                 if (exprNodeId == 0)
                 {
-                    return 0; // Failed to parse return expression
+                    throw std::runtime_error(
+                      "Failed to parse return expression '" + expr + "'");
                 }
 
                 // Validate output type and connect to End node
                 if (!validateOutputType(model, exprNodeId, singleOutput.type))
                 {
-                    return 0; // Type validation failed
+                    throw std::runtime_error(
+                      "Output type mismatch in return statement '" + cleanStmt + "'");
                 }
 
                 // For Begin nodes: validateOutputType consumed the variable context,
@@ -393,7 +439,8 @@ namespace gladius
 
                 if (!connectToEndNode(model, exprNodeId, singleOutput))
                 {
-                    return 0; // Failed to connect to End node
+                    throw std::runtime_error(
+                      "Failed to connect return value to end node in '" + cleanStmt + "'");
                 }
 
                 return exprNodeId;
@@ -403,10 +450,20 @@ namespace gladius
                 // Try to parse as a single expression if it's the only statement
                 if (statements.size() == 1 && !outputs.empty())
                 {
-                    return convertExpressionToGraph(
+                    auto result = convertExpressionToGraph(
                       cleanStmt, model, parser, arguments, outputs.front());
+                    if (result == 0)
+                    {
+                        auto parserError = parser.getLastError();
+                        throw std::runtime_error(
+                          "Failed to parse single expression '" + cleanStmt + "'" +
+                          (parserError.empty() ? "" : ": " + parserError));
+                    }
+                    return result;
                 }
-                return 0; // Unrecognized statement format
+                throw std::runtime_error(
+                  "Unrecognized statement (not an assignment, return, or single expression): '" +
+                  cleanStmt + "'");
             }
         }
 
@@ -831,31 +888,34 @@ namespace gladius
             nodes::NodeId innerNode = parseAndBuildGraph(innerExpr, model, variableNodes);
             if (innerNode == 0)
             {
-                return 0; // Failed to parse inner expression
+                return 0;
             }
+
+            // Capture the output port name immediately after parsing, before other
+            // getOutputPortName calls can consume from s_variableContextStack.
+            // This matches the pattern used for binary operators (see leftPortName below).
+            std::string innerOutput = getOutputPortName(model, innerNode);
 
             // Create a multiplication by -1 to represent unary minus
             nodes::NodeId negativeOne = createConstantNode(-1.0, model);
             if (negativeOne == 0)
             {
-                return 0; // Failed to create constant
+                return 0;
             }
 
             nodes::NodeId multiplyNode = createMathOperationNode("Multiplication", model);
             if (multiplyNode == 0)
             {
-                return 0; // Failed to create multiplication node
+                return 0;
             }
 
-            // Connect -1 to first input and inner expression to second input
             std::string negativeOneOutput = getOutputPortName(model, negativeOne);
-            std::string innerOutput = getOutputPortName(model, innerNode);
 
             if (!connectNodes(
                   model, negativeOne, negativeOneOutput, multiplyNode, nodes::FieldNames::A) ||
                 !connectNodes(model, innerNode, innerOutput, multiplyNode, nodes::FieldNames::B))
             {
-                return 0; // Failed to connect nodes
+                return 0;
             }
 
             return multiplyNode;
@@ -1358,6 +1418,12 @@ namespace gladius
                                 // Sync argument ports from the referenced model
                                 fc->updateInputsAndOutputs(*referencedModel);
 
+                                // Set display name from the referenced function
+                                if (referencedModel->getDisplayName().has_value())
+                                {
+                                    fc->setDisplayName(referencedModel->getDisplayName().value());
+                                }
+
                                 // Re-register ports/params that were dynamically added
                                 model.registerOutputs(*fcNode);
                                 model.registerInputs(*fcNode);
@@ -1656,18 +1722,24 @@ namespace gladius
         auto nodeOpt = model.getNode(nodeId);
         if (!nodeOpt.has_value())
         {
+            if (!s_variableContextStack.empty()) s_variableContextStack.pop_back();
             return nodes::FieldNames::Value; // Default fallback
         }
         nodes::NodeBase * node = nodeOpt.value();
 
+        // Always pop one context if it was set for this node evaluation to prevent leaks
+        std::string context;
+        if (!s_variableContextStack.empty())
+        {
+            context = s_variableContextStack.back();
+            s_variableContextStack.pop_back();
+        }
+
         // Check if this is a Begin node - if so, use the current variable context
         if (dynamic_cast<nodes::Begin *>(node) != nullptr)
         {
-            if (!s_variableContextStack.empty())
+            if (!context.empty())
             {
-                // Clear the context after use
-                std::string context = s_variableContextStack.back();
-                s_variableContextStack.pop_back();
                 // Translate snippet identifier (e.g. "in_pos") back to the real
                 // Begin node port name (e.g. "pos") via the lookup table.
                 auto const portIt = s_argSnippetToPortName.find(context);
@@ -3125,21 +3197,17 @@ namespace gladius
                         }
                     }
                     std::string args;
-                    auto const & params = fc->parameter();
+                    auto argList = fc->getArguments();
                     bool first = true;
-                    for (auto const & [name, param] : params)
+                    for (auto const & [name, paramPtr] : argList)
                     {
-                        if (name == nodes::FieldNames::FunctionId || !param.isArgument())
-                        {
-                            continue;
-                        }
                         if (!first)
                         {
                             args += ", ";
                         }
                         first = false;
                         args += sourceExpression(
-                          model, param, fanOut, assignedVars, statements,
+                          model, *paramPtr, fanOut, assignedVars, statements,
                           varCounter, 0, assembly);
                     }
                     expr = funcName + "(" + args + ")";
@@ -3667,30 +3735,30 @@ namespace gladius
                 continue;
             }
 
-            // Build function signature from Begin node outputs
+            // Build function signature from Begin node arguments (sorted by definition order)
             std::string signature = "(";
             auto * beginNode = model->getBeginNode();
             if (beginNode)
             {
                 bool first = true;
-                for (auto const & [portName, port] : beginNode->getOutputs())
+                for (auto const & [name, paramPtr] : beginNode->getArguments())
                 {
                     if (!first)
                     {
                         signature += ", ";
                     }
                     first = false;
-                    if (port.getTypeIndex() == std::type_index(typeid(nodes::float3)))
+                    if (paramPtr->getTypeIndex() == std::type_index(typeid(nodes::float3)))
                     {
-                        signature += "vec3 " + portName;
+                        signature += "vec3 " + name;
                     }
-                    else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Matrix4)
+                    else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Matrix4)
                     {
-                        signature += "mat4 " + portName;
+                        signature += "mat4 " + name;
                     }
                     else
                     {
-                        signature += "float " + portName;
+                        signature += "float " + name;
                     }
                 }
             }
@@ -3874,8 +3942,18 @@ namespace gladius
                     }
 
                     // Parse arguments from signature: float name(vec3 pos, float b) {
+                    // For multi-output functions like "(float a, vec3 b) name(vec3 pos) {"
+                    // the first (...) is the return type list, so skip to the second pair.
                     auto parenOpen = line.find('(');
                     auto parenClose = line.find(')');
+                    if (trimmedLine.front() == '(' && parenClose != std::string::npos)
+                    {
+                        parenOpen = line.find('(', parenClose + 1);
+                        if (parenOpen != std::string::npos)
+                        {
+                            parenClose = line.find(')', parenOpen + 1);
+                        }
+                    }
                     if (parenOpen != std::string::npos && parenClose != std::string::npos &&
                         parenClose > parenOpen)
                     {
@@ -3900,6 +3978,42 @@ namespace gladius
 
                     inFunction = true;
                     braceDepth = 1;
+
+                    // Process any body content after the opening '{' on the same line
+                    // to support single-line function bodies like: float foo(vec3 p) { return 1.0; }
+                    auto afterBrace = line.substr(bracePos + 1);
+                    for (char c : afterBrace)
+                    {
+                        if (c == '{') ++braceDepth;
+                        if (c == '}') --braceDepth;
+                    }
+                    if (braceDepth <= 0)
+                    {
+                        // Entire body was on the signature line — strip trailing '}'
+                        auto bodyEnd = afterBrace.rfind('}');
+                        if (bodyEnd != std::string::npos)
+                        {
+                            afterBrace = afterBrace.substr(0, bodyEnd);
+                        }
+                        // Trim whitespace
+                        auto first = afterBrace.find_first_not_of(" \t");
+                        auto last = afterBrace.find_last_not_of(" \t");
+                        current.body = (first != std::string::npos)
+                                         ? afterBrace.substr(first, last - first + 1)
+                                         : "";
+                        blocks.push_back(current);
+                        current = {};
+                        inFunction = false;
+                    }
+                    else
+                    {
+                        // Body continues on subsequent lines; accumulate what we have
+                        auto first = afterBrace.find_first_not_of(" \t");
+                        if (first != std::string::npos)
+                        {
+                            bodyAccum = afterBrace.substr(first);
+                        }
+                    }
                     continue;
                 }
             }
@@ -4020,13 +4134,23 @@ namespace gladius
             model->clear();
             model->createBeginEnd();
 
-            auto nodeId = convertSnippetToGraph(
-              block.body, *model, parser, block.args, effectiveOutputs, &assembly);
+            nodes::NodeId nodeId = 0;
+            try
+            {
+                nodeId = convertSnippetToGraph(
+                  block.body, *model, parser, block.args, effectiveOutputs, &assembly);
+            }
+            catch (std::exception const & e)
+            {
+                lastParseError = "Failed to parse function '" + block.displayName +
+                  "' (ID: " + std::to_string(block.resourceId) + "): " + e.what();
+                continue;
+            }
 
             if (nodeId == 0)
             {
                 lastParseError = "Failed to parse function body for '" + block.displayName +
-                  "' (ID: " + std::to_string(block.resourceId) + ")";
+                  "' (ID: " + std::to_string(block.resourceId) + "): convertSnippetToGraph returned 0";
                 continue;
             }
 
@@ -4055,7 +4179,8 @@ namespace gladius
                     calledId = ndf->getFunctionId();
                 }
 
-                if (calledId != 0 && definedIds.count(calledId) == 0)
+                if (calledId != 0 && definedIds.count(calledId) == 0 &&
+                    !assembly.findModel(calledId))
                 {
                     throw std::runtime_error(
                       "Function '" + block.displayName +

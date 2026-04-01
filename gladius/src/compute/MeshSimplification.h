@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FastQemSimplification.h"
+
 #include "../types.h"
 
 #include <Eigen/Core>
@@ -7,6 +9,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <vector>
 

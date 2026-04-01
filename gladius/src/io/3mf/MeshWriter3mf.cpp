@@ -11,6 +11,11 @@
 #include "MeshResourceVdb.h"
 #include "ResourceKey.h"
 #include "VdbResource.h"
+#include "io/3mf/ColorQuantizer.h"
+#include "io/3mf/ColorRegionizer.h"
+#include "io/3mf/MmuSegmentationWriter.h"
+#include "io/3mf/SlicerConfigWriter.h"
+#include "io/3mf/ThreeMfPostProcessor.h"
 #include "nodes/Model.h"
 
 #include <lib3mf_abi.hpp>
@@ -471,6 +476,271 @@ namespace gladius::io
                                                 filePath.string(),
                                                 e.what()),
                                     events::Severity::Error});
+            }
+            throw;
+        }
+    }
+
+    void MeshWriter3mf::exportMeshWithRegions(
+        std::filesystem::path const & filePath,
+        Mesh const & mesh,
+        std::string const & meshName,
+        QuantizedPalette const & palette,
+        std::vector<PrintableRegion> const & regions,
+        Document const * sourceDocument,
+        bool writeThumbnail)
+    {
+        if (!validateMesh(mesh))
+        {
+            throw std::runtime_error("Invalid mesh for export");
+        }
+
+        if (regions.empty())
+        {
+            throw std::runtime_error("No printable regions provided for export");
+        }
+
+        try
+        {
+            auto model3mf = m_wrapper->CreateModel();
+            addDefaultMetadata(model3mf);
+
+            if (sourceDocument)
+            {
+                copyMetadata(*sourceDocument, model3mf);
+            }
+
+            // Create a base material group for solid per-region colors
+            // Slicers (OrcaSlicer, PrusaSlicer) require <basematerials> (not <colorgroup>)
+            // for multi-color/multi-material printing.
+            auto baseMaterialGroup = model3mf->AddBaseMaterialGroup();
+            Lib3MF_uint32 const baseMaterialGroupId = baseMaterialGroup->GetUniqueResourceID();
+
+            // Add palette colors as named materials
+            std::vector<Lib3MF_uint32> palettePropertyIds;
+            palettePropertyIds.reserve(palette.colors.size());
+            for (std::size_t ci = 0; ci < palette.colors.size(); ++ci)
+            {
+                auto const& color = palette.colors[ci];
+                Lib3MF::sColor lib3mfColor{color.r, color.g, color.b, color.a};
+                auto materialName = fmt::format("Color_{}", ci);
+                palettePropertyIds.push_back(baseMaterialGroup->AddMaterial(materialName, lib3mfColor));
+            }
+
+            // Get vertex data from the original mesh
+            auto const & vertexBuffer = mesh.getVertices();
+            auto const vertexData = const_cast<Buffer<cl_float4> &>(vertexBuffer).getDataCopy();
+            auto const tolerance = 1e-6f;
+
+            // For each region, create a separate mesh object with the region's faces
+            std::size_t regionsExported = 0;
+            for (auto const& region : regions)
+            {
+                if (region.triangleIndices.empty())
+                {
+                    continue;
+                }
+
+                if (region.paletteIndex >= palette.colors.size())
+                {
+                    continue;
+                }
+
+                auto regionMeshObject = model3mf->AddMeshObject();
+                auto const regionName = fmt::format("{}_{}", meshName, region.regionId);
+                regionMeshObject->SetName(regionName);
+
+                // Track unique vertices for this region
+                std::map<std::tuple<float, float, float>, Lib3MF_uint32> vertexMap;
+
+                auto getOrCreateVertex = [&](float x, float y, float z) -> Lib3MF_uint32
+                {
+                    auto rx = std::round(x / tolerance) * tolerance;
+                    auto ry = std::round(y / tolerance) * tolerance;
+                    auto rz = std::round(z / tolerance) * tolerance;
+
+                    auto key = std::make_tuple(rx, ry, rz);
+                    auto it = vertexMap.find(key);
+                    if (it != vertexMap.end())
+                    {
+                        return it->second;
+                    }
+                    auto vertexIndex = regionMeshObject->AddVertex(
+                        {static_cast<float>(rx), static_cast<float>(ry), static_cast<float>(rz)});
+                    vertexMap[key] = vertexIndex;
+                    return vertexIndex;
+                };
+
+                Lib3MF_uint32 const materialPropId = palettePropertyIds[region.paletteIndex];
+
+                // Set object-level property so slicers identify this mesh's material
+                regionMeshObject->SetObjectLevelProperty(baseMaterialGroupId, materialPropId);
+
+                std::vector<Lib3MF::sTriangleProperties> triProps;
+                triProps.reserve(region.triangleIndices.size());
+
+                std::size_t trianglesAdded = 0;
+                for (auto const faceIdx : region.triangleIndices)
+                {
+                    std::size_t const vertexOffset = static_cast<std::size_t>(faceIdx) * 3;
+                    if (vertexOffset + 2 >= vertexData.size())
+                    {
+                        continue;
+                    }
+
+                    auto const & v1 = vertexData[vertexOffset];
+                    auto const & v2 = vertexData[vertexOffset + 1];
+                    auto const & v3 = vertexData[vertexOffset + 2];
+
+                    if (!isFinite3(v1.x, v1.y, v1.z) || !isFinite3(v2.x, v2.y, v2.z) ||
+                        !isFinite3(v3.x, v3.y, v3.z))
+                    {
+                        continue;
+                    }
+
+                    auto const vi1 = getOrCreateVertex(v1.x, v1.y, v1.z);
+                    auto const vi2 = getOrCreateVertex(v2.x, v2.y, v2.z);
+                    auto const vi3 = getOrCreateVertex(v3.x, v3.y, v3.z);
+
+                    if (vi1 == vi2 || vi2 == vi3 || vi1 == vi3)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        regionMeshObject->AddTriangle({vi1, vi2, vi3});
+                        ++trianglesAdded;
+
+                        Lib3MF::sTriangleProperties props{};
+                        props.m_ResourceID = baseMaterialGroupId;
+                        props.m_PropertyIDs[0] = materialPropId;
+                        props.m_PropertyIDs[1] = materialPropId;
+                        props.m_PropertyIDs[2] = materialPropId;
+                        triProps.push_back(props);
+                    }
+                    catch (Lib3MF::ELib3MFException const &)
+                    {
+                        continue;
+                    }
+                }
+
+                if (trianglesAdded == 0)
+                {
+                    continue;
+                }
+
+                regionMeshObject->SetAllTriangleProperties(triProps);
+                createBuildItem(model3mf, regionMeshObject, regionName);
+                ++regionsExported;
+            }
+
+            if (regionsExported == 0)
+            {
+                throw std::runtime_error(
+                    "3MF export failed: no valid regions produced triangles");
+            }
+
+            if (writeThumbnail && sourceDocument)
+            {
+                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
+            }
+
+            auto writer = model3mf->QueryWriter("3mf");
+            writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
+
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Successfully exported {} printable regions to {}",
+                                 regionsExported, filePath.string()),
+                     events::Severity::Info});
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Failed to export regionized mesh to {}: {}",
+                                 filePath.string(), e.what()),
+                     events::Severity::Error});
+            }
+            throw;
+        }
+    }
+
+    void MeshWriter3mf::exportMeshWithMmuSegmentation(
+        std::filesystem::path const & filePath,
+        Mesh const & mesh,
+        std::string const & meshName,
+        QuantizedPalette const & palette,
+        Document const * sourceDocument,
+        bool writeThumbnail)
+    {
+        if (!validateMesh(mesh))
+        {
+            throw std::runtime_error("Invalid mesh for export");
+        }
+
+        try
+        {
+            // Step 1: Write a plain mesh (no color properties) via lib3mf
+            auto model3mf = m_wrapper->CreateModel();
+            addDefaultMetadata(model3mf);
+
+            if (sourceDocument)
+            {
+                copyMetadata(*sourceDocument, model3mf);
+            }
+
+            auto meshObject = addMeshToModel(model3mf, mesh, meshName);
+            createBuildItem(model3mf, meshObject, meshName);
+
+            if (writeThumbnail && sourceDocument)
+            {
+                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
+            }
+
+            auto writer = model3mf->QueryWriter("3mf");
+            writer->WriteToFile(filePath.string());
+            verifyFileWritten(filePath);
+
+            // Step 2: Encode per-face MMU segmentation attributes
+            auto const mmuAttributes = MmuSegmentationWriter::encodeFaceExtruders(palette);
+
+            // Step 3: Generate the slicer config XML
+            int const objectId = static_cast<int>(meshObject->GetUniqueResourceID());
+            std::size_t const numFaces = mesh.getNumberOfFaces();
+
+            SlicerVolumeInfo volume;
+            volume.name = meshName;
+            volume.firstTriangleId = 0;
+            volume.lastTriangleId = numFaces > 0 ? numFaces - 1 : 0;
+            volume.defaultExtruder = 1;
+
+            auto const configXml = SlicerConfigWriter::generate(objectId, volume);
+
+            // Step 4: Post-process the 3MF ZIP to inject attributes and config
+            ThreeMfPostProcessor::injectMmuSegmentation(filePath, mmuAttributes, configXml);
+
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Successfully exported mesh with MMU segmentation to {}",
+                                 filePath.string()),
+                     events::Severity::Info});
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                    {fmt::format("Failed to export mesh with MMU segmentation to {}: {}",
+                                 filePath.string(), e.what()),
+                     events::Severity::Error});
             }
             throw;
         }

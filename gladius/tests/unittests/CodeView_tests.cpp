@@ -190,16 +190,17 @@ namespace gladius::tests
 
     // ---- T041: Syntax error preserves original graph and returns error ----
 
-    TEST_F(CodeViewSnippetTest, SyntaxError_ReturnsZeroNodeId)
+    TEST_F(CodeViewSnippetTest, SyntaxError_Throws)
     {
         m_model->createBeginEndWithDefaultInAndOuts();
-        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          "return +++invalid;",
-          *m_model,
-          *m_parser,
-          {{"pos", ArgumentType::Vector}},
-          FunctionOutput::defaultOutput());
-        EXPECT_EQ(nodeId, 0) << "Invalid syntax should fail (return 0)";
+        EXPECT_THROW(
+          ExpressionToGraphConverter::convertSnippetToGraph(
+            "return +++invalid;",
+            *m_model,
+            *m_parser,
+            {{"pos", ArgumentType::Vector}},
+            FunctionOutput::defaultOutput()),
+          std::runtime_error);
     }
 
     // ---- T042: Code with unsupported comment is detectable before sync ----
@@ -217,25 +218,27 @@ namespace gladius::tests
     TEST_F(CodeViewSnippetTest, ForLoop_RejectedByParser)
     {
         m_model->createBeginEndWithDefaultInAndOuts();
-        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          "for (int i = 0; i < 10; i++) { }",
-          *m_model,
-          *m_parser,
-          {{"pos", ArgumentType::Vector}},
-          FunctionOutput::defaultOutput());
-        EXPECT_EQ(nodeId, 0) << "for loops should be rejected by the parser";
+        EXPECT_THROW(
+          ExpressionToGraphConverter::convertSnippetToGraph(
+            "for (int i = 0; i < 10; i++) { }",
+            *m_model,
+            *m_parser,
+            {{"pos", ArgumentType::Vector}},
+            FunctionOutput::defaultOutput()),
+          std::runtime_error);
     }
 
     TEST_F(CodeViewSnippetTest, IfElse_RejectedByParser)
     {
         m_model->createBeginEndWithDefaultInAndOuts();
-        auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-          "if (pos.x > 0) return 1; else return 0;",
-          *m_model,
-          *m_parser,
-          {{"pos", ArgumentType::Vector}},
-          FunctionOutput::defaultOutput());
-        EXPECT_EQ(nodeId, 0) << "if/else should be rejected by the parser";
+        EXPECT_THROW(
+          ExpressionToGraphConverter::convertSnippetToGraph(
+            "if (pos.x > 0) return 1; else return 0;",
+            *m_model,
+            *m_parser,
+            {{"pos", ArgumentType::Vector}},
+            FunctionOutput::defaultOutput()),
+          std::runtime_error);
     }
 
 } // namespace gladius::tests
