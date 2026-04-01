@@ -644,6 +644,24 @@ namespace gladius::io
                 continue;
             }
 
+            // Skip internal parameters (e.g. start/end memory offsets on mesh distance
+            // nodes). They are runtime-only and must never be loaded from a 3MF file.
+            // Warn so the user knows the file was malformed and will be fixed on next save.
+            if (parameter->isInternal())
+            {
+                if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent(
+                      {fmt::format("Ignoring internal parameter '{}' on node '{}'. "
+                                   "This parameter is for internal use only and will be removed "
+                                   "from the file when saved.",
+                                   parameterName,
+                                   node->getUniqueName()),
+                       events::Severity::Warning});
+                }
+                continue;
+            }
+
             *parameter = parameterFromType(input->GetType());
             parameter->setParentId(node->getId());
 

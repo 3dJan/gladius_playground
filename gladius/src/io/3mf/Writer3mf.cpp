@@ -393,6 +393,13 @@ namespace gladius::io
         {
             for (auto & [portName, input] : node.parameter())
             {
+                // Skip internal parameters (e.g. start/end memory offsets on mesh distance
+                // nodes) — they are runtime-only and must not appear in the 3MF file.
+                if (input.isInternal())
+                {
+                    continue;
+                }
+
                 auto input3mf = node3mf->FindInput(portName);
                 if (!input3mf)
                 {
