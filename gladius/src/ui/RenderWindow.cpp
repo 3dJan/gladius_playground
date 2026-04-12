@@ -575,10 +575,11 @@ namespace gladius::ui
             bool open = true;
 
             ImGui::SetNextWindowBgAlpha(0.0f);
+            ImGui::SetNextWindowPos(windowCenter, ImGuiCond_Always, {0.5f, 0.5f});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
             if (ImGui::Begin("ProgressIndicator", &open, window_flags))
             {
-                ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
                 // Red color for compilation (loading case is handled by early return)
                 ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
                 ui::loadingIndicatorCircle("compiling",
@@ -589,6 +590,7 @@ namespace gladius::ui
                                            10.0f);
                 ImGui::End();
             }
+            ImGui::PopStyleVar(); // WindowBorderSize
         }
     }
 
@@ -2479,6 +2481,14 @@ namespace gladius::ui
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
         ImGui::Begin("Preview", &m_isVisible, window_flags);
 
+        // Update render window size from actual content region (bypassed the normal render path)
+        m_renderWindowSize_px = {
+          {ImGui::GetWindowWidth(),
+           ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y}};
+        float constexpr minDimension = 1.0f;
+        m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, minDimension);
+        m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, minDimension);
+
         // Get content area dimensions for spinner positioning
         ImVec2 const contentMin = {
           ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
@@ -2509,10 +2519,11 @@ namespace gladius::ui
         
         bool open = true;
         ImGui::SetNextWindowBgAlpha(0.0f);
-        
+        ImGui::SetNextWindowPos(windowCenter, ImGuiCond_Always, {0.5f, 0.5f});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
         if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
         {
-            ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
             // Blue color for file loading (red is used for compilation)
             ImVec4 const indicatorColor = ImVec4(0.2f, 0.6f, 1.0f, 0.8f);
             ui::loadingIndicatorCircle("loading",
@@ -2523,6 +2534,7 @@ namespace gladius::ui
                                        10.0f);
         }
         ImGui::End();
+        ImGui::PopStyleVar(); // WindowBorderSize
     }
 
     void RenderWindow::renderBusyOverlay()

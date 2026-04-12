@@ -420,8 +420,9 @@ namespace gladius::ui
             bool open = true;
 
             ImGui::SetNextWindowBgAlpha(0.0f);
+            ImGui::SetNextWindowPos(windowCenter, ImGuiCond_Always, {0.5f, 0.5f});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
-            ImGui::SetNextWindowPos({windowCenter.x - 30.f, windowCenter.y - 30.f});
             if (ImGui::Begin("SliceProgressIndicator", &open, window_flags))
             {
 
@@ -433,6 +434,7 @@ namespace gladius::ui
                                            10.0f);
                 ImGui::End();
             }
+            ImGui::PopStyleVar(); // WindowBorderSize
         }
         return windowIsActuallyVisible;
     }
