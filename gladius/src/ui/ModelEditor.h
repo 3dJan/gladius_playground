@@ -323,7 +323,7 @@ namespace gladius::ui
 
         bool m_autoCompile = true;
         bool m_isManualCompileRequested = false;
-        bool m_outlineNodeColorLines = true;
+        bool m_outlineNodeColorLines = false;
 
         std::shared_ptr<Document> m_doc;
 
