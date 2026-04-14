@@ -476,8 +476,10 @@ namespace gladius::ui
         m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, minDimension);
         
         float constexpr tolerance = 1.E-4f;
-        if (fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
-            fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance)
+        bool const sizeChanged =
+          fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
+          fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance;
+        if (sizeChanged)
         {
             // Preserve existing framebuffer content during resize to prevent flicker
             // Schedule low-res preview at new dimensions without clearing current display
@@ -493,10 +495,16 @@ namespace gladius::ui
                 m_viewportSizeChangedSinceLastCenter = true;
             }
         }
+        else if (m_deferredResizePending)
+        {
+            // Size has stabilized — allow render() to proceed next frame and
+            // reallocate GPU buffers to the new dimensions.
+            m_deferredResizePending = false;
+            m_preserveContentDuringResize = false;
+        }
 
         ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
-                     ImVec2(static_cast<float>(m_renderWindowSize_px.x),
-                            static_cast<float>(m_renderWindowSize_px.y)));
+                     ImVec2(m_renderWindowSize_px.x, m_renderWindowSize_px.y));
 
         auto const contentMin =
           ImVec2{ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x,
@@ -1162,6 +1170,22 @@ namespace gladius::ui
     {
         ZoneScopedN("render");
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        // During an active resize the GPU image buffers may be reallocated at
+        // any moment.  Consuming async preview results that reference the old
+        // (now-freed) CL images would crash in resample().  Skip all render
+        // work while a deferred resize is pending — the stretched old
+        // framebuffer is displayed in the meantime.
+        if (m_deferredResizePending)
+        {
+            // Discard any pending async preview so the streaming worker doesn't
+            // stall waiting for m_streamingFrameConsumed.
+            if (m_asyncController && m_asyncController->tryConsumePreviewResult().has_value())
+            {
+                m_streamingFrameConsumed.store(true, std::memory_order_release);
+            }
+            return;
+        }
 
         // Always consume async preview results, even during compilation.
         // The streaming loop may have published a frame just before compilation
@@ -2467,13 +2491,6 @@ namespace gladius::ui
     {
         ProfileFunction;
 
-        // Clear the result image to hide any previous render
-        auto displayImage = m_core->getResultImage();
-        if (displayImage)
-        {
-            displayImage->clear();
-        }
-
         // Show a simple loading window without requiring compute resources
         ImGuiWindowFlags const window_flags =
           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
@@ -2500,16 +2517,12 @@ namespace gladius::ui
           0.5f * (contentMin.x + contentMax.x),
           0.5f * (contentMin.y + contentMax.y)};
 
-        // Display the cleared image
-        auto const textureId = displayImage->GetTextureId();
-        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
-                     ImVec2(static_cast<float>(m_renderWindowSize_px.x),
-                            static_cast<float>(m_renderWindowSize_px.y)));
+        // Fill the content area without using the render texture (avoids size mismatch flicker)
+        ImGui::Dummy(ImGui::GetContentRegionAvail());
 
         ImGui::End();
         ImGui::PopStyleVar();
-        displayImage->unbind();
-        
+
         // Show loading spinner overlay
         m_view->startAnimationMode();
         ImGuiWindowFlags const overlayFlags =
