@@ -1,0 +1,168 @@
+{
+  "tools": {
+    "delete_library_entry": {
+      "description": "Soft-delete a user library entry by moving it to the bin. Cannot delete shipped (read-only) library entries. The entry can be restored later using restore_bin_entry.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name, e.g., 'primitives')"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "responses": {
+        "success": {
+          "success": true,
+          "name": "my_shape",
+          "category": "primitives",
+          "bin_path": ".bin/primitives/my_shape.3mf",
+          "message": "Moved 'my_shape' from category 'primitives' to bin"
+        },
+        "error_shipped": {
+          "success": false,
+          "error": "Cannot delete shipped library entry 'sphere' in category 'primitives'. Shipped entries are read-only.",
+          "is_shipped": true
+        },
+        "error_not_found": {
+          "success": false,
+          "error": "Library entry 'nonexistent' not found in category 'primitives'. Available entries: sphere, cube",
+          "available_entries": ["sphere", "cube"]
+        }
+      }
+    },
+    "browse_bin": {
+      "description": "List all entries in the library bin, optionally filtered by category.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Optional category filter. If omitted, lists entries from all categories."
+          }
+        },
+        "required": []
+      },
+      "responses": {
+        "success_with_entries": {
+          "success": true,
+          "entries": [
+            {
+              "name": "old_shape",
+              "category": "primitives",
+              "file_path": ".bin/primitives/old_shape.3mf"
+            },
+            {
+              "name": "my_test",
+              "category": "csg",
+              "file_path": ".bin/csg/my_test.3mf"
+            }
+          ],
+          "total_count": 2
+        },
+        "success_empty": {
+          "success": true,
+          "entries": [],
+          "total_count": 0,
+          "message": "Bin is empty"
+        }
+      }
+    },
+    "restore_bin_entry": {
+      "description": "Restore a previously deleted library entry from the bin back to its original category. If an entry with the same name exists in the target category, the restored entry is renamed with a numeric suffix.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Original category of the binned entry"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the binned entry (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "responses": {
+        "success": {
+          "success": true,
+          "name": "old_shape",
+          "category": "primitives",
+          "restored_as": "old_shape",
+          "message": "Restored 'old_shape' to category 'primitives'"
+        },
+        "success_with_rename": {
+          "success": true,
+          "name": "old_shape",
+          "category": "primitives",
+          "restored_as": "old_shape_1",
+          "message": "Restored 'old_shape' to category 'primitives' as 'old_shape_1' (name conflict resolved)"
+        },
+        "error_not_found": {
+          "success": false,
+          "error": "Bin entry 'nonexistent' not found in category 'primitives'."
+        }
+      }
+    },
+    "empty_bin": {
+      "description": "Permanently delete all entries from the library bin, or entries from a specific category. This is irreversible.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Optional category filter. If omitted, empties the entire bin."
+          }
+        },
+        "required": []
+      },
+      "responses": {
+        "success": {
+          "success": true,
+          "deleted_count": 5,
+          "message": "Permanently deleted 5 entries from bin"
+        },
+        "success_empty": {
+          "success": true,
+          "deleted_count": 0,
+          "message": "Bin was already empty"
+        }
+      }
+    },
+    "delete_bin_entry": {
+      "description": "Permanently delete a single entry from the library bin. This is irreversible.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Category of the binned entry"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the binned entry (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "responses": {
+        "success": {
+          "success": true,
+          "name": "old_shape",
+          "category": "primitives",
+          "message": "Permanently deleted 'old_shape' from bin"
+        },
+        "error_not_found": {
+          "success": false,
+          "error": "Bin entry 'old_shape' not found in category 'primitives'."
+        }
+      }
+    }
+  }
+}
