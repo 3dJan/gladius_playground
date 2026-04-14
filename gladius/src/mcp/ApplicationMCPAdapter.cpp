@@ -1407,6 +1407,28 @@ nlohmann::json gladius::ApplicationMCPAdapter::deleteLibraryEntry(std::string co
     return m_libraryTool->deleteLibraryEntry(category, name);
 }
 
+nlohmann::json gladius::ApplicationMCPAdapter::browseBin(std::string const & category) const
+{
+    return m_libraryTool->browseBin(category);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::restoreBinEntry(std::string const & category,
+                                                                std::string const & name)
+{
+    return m_libraryTool->restoreBinEntry(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::deleteBinEntry(std::string const & category,
+                                                               std::string const & name)
+{
+    return m_libraryTool->deleteBinEntry(category, name);
+}
+
+nlohmann::json gladius::ApplicationMCPAdapter::emptyBin()
+{
+    return m_libraryTool->emptyBin();
+}
+
 nlohmann::json gladius::ApplicationMCPAdapter::getFunctionSnippet(uint32_t functionId) const
 {
     return m_functionOperationsTool->getFunctionSnippet(functionId);

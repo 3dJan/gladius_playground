@@ -1341,14 +1341,23 @@ namespace gladius::mcp::tools
 
         try
         {
-            fs::remove(entryPath);
+            auto const binCategoryDir = getBinDir() / category;
+            fs::create_directories(binCategoryDir);
+
+            auto const destPath =
+              disambiguateFilename(binCategoryDir, name, ".3mf");
+            fs::rename(entryPath, destPath);
+
             return {{"success", true},
                     {"name", name},
                     {"category", category},
+                    {"bin_path", destPath.string()},
                     {"message",
-                     fmt::format("Deleted library entry '{}' from category '{}'",
-                                 name,
-                                 category)}};
+                     fmt::format(
+                       "Moved library entry '{}' from category '{}' to bin. "
+                       "Use browse_bin to see binned items or restore_bin_entry to recover.",
+                       name,
+                       category)}};
         }
         catch (std::exception const & e)
         {
@@ -1488,7 +1497,7 @@ namespace gladius::mcp::tools
         auto userPath = getUserLibraryDir() / category / fileName;
         if (fs::exists(userPath))
         {
-            isShipped = false;
+            isShipped = isShippedEntry(category, name);
             return userPath;
         }
 
@@ -1519,6 +1528,10 @@ namespace gladius::mcp::tools
                 if (entry.is_directory())
                 {
                     auto const name = entry.path().filename().string();
+                    if (!name.empty() && name[0] == '.')
+                    {
+                        continue;
+                    }
                     if (seen.insert(name).second)
                     {
                         categories.push_back(name);
@@ -1549,6 +1562,10 @@ namespace gladius::mcp::tools
                 if (entry.is_regular_file() && entry.path().extension() == ".3mf")
                 {
                     auto const name = entry.path().stem().string();
+                    if (!name.empty() && name[0] == '.')
+                    {
+                        continue;
+                    }
                     if (seen.insert(name).second)
                     {
                         entries.push_back(name);
@@ -1561,6 +1578,170 @@ namespace gladius::mcp::tools
         addEntries(getShippedLibraryDir());
         std::sort(entries.begin(), entries.end());
         return entries;
+    }
+
+    nlohmann::json LibraryTool::browseBin(std::string const & category) const
+    {
+        auto const binDir = getBinDir();
+        if (!fs::exists(binDir))
+        {
+            return {{"success", true},
+                    {"categories", nlohmann::json::array()},
+                    {"total_entries", 0},
+                    {"message", "Bin is empty."}};
+        }
+
+        nlohmann::json categories = nlohmann::json::array();
+        std::size_t totalEntries = 0;
+
+        for (auto const & catEntry : fs::directory_iterator(binDir))
+        {
+            if (!catEntry.is_directory())
+            {
+                continue;
+            }
+            auto const catName = catEntry.path().filename().string();
+            if (!category.empty() && catName != category)
+            {
+                continue;
+            }
+
+            nlohmann::json entries = nlohmann::json::array();
+            for (auto const & fileEntry : fs::directory_iterator(catEntry.path()))
+            {
+                if (fileEntry.is_regular_file() && fileEntry.path().extension() == ".3mf")
+                {
+                    entries.push_back({{"name", fileEntry.path().stem().string()}});
+                }
+            }
+
+            if (!entries.empty())
+            {
+                categories.push_back({{"name", catName}, {"entries", entries}});
+                totalEntries += entries.size();
+            }
+        }
+
+        return {{"success", true},
+                {"categories", categories},
+                {"total_entries", totalEntries},
+                {"message",
+                 totalEntries == 0 ? "Bin is empty."
+                                   : fmt::format("Bin contains {} entry/entries.", totalEntries)}};
+    }
+
+    nlohmann::json LibraryTool::restoreBinEntry(std::string const & category,
+                                                 std::string const & name)
+    {
+        auto const binPath = getBinDir() / category / (name + ".3mf");
+        if (!fs::exists(binPath))
+        {
+            return createToolError(
+              fmt::format("Entry '{}' not found in bin category '{}'", name, category));
+        }
+
+        try
+        {
+            auto const userCatDir = getUserLibraryDir() / category;
+            fs::create_directories(userCatDir);
+
+            auto const destPath = disambiguateFilename(userCatDir, name, ".3mf");
+            fs::rename(binPath, destPath);
+
+            // Clean up empty bin category dir
+            if (fs::is_empty(getBinDir() / category))
+            {
+                fs::remove(getBinDir() / category);
+            }
+
+            auto const restoredName = destPath.stem().string();
+            return {{"success", true},
+                    {"name", restoredName},
+                    {"category", category},
+                    {"path", destPath.string()},
+                    {"message",
+                     fmt::format("Restored '{}' to category '{}'.", restoredName, category)}};
+        }
+        catch (std::exception const & e)
+        {
+            return createToolError(
+              fmt::format("Failed to restore bin entry: {}", e.what()));
+        }
+    }
+
+    nlohmann::json LibraryTool::deleteBinEntry(std::string const & category,
+                                                std::string const & name)
+    {
+        auto const binPath = getBinDir() / category / (name + ".3mf");
+        if (!fs::exists(binPath))
+        {
+            return createToolError(
+              fmt::format("Entry '{}' not found in bin category '{}'", name, category));
+        }
+
+        try
+        {
+            fs::remove(binPath);
+
+            // Clean up empty bin category dir
+            if (fs::is_empty(getBinDir() / category))
+            {
+                fs::remove(getBinDir() / category);
+            }
+
+            return {{"success", true},
+                    {"name", name},
+                    {"category", category},
+                    {"message",
+                     fmt::format(
+                       "Permanently deleted '{}' from bin category '{}'.", name, category)}};
+        }
+        catch (std::exception const & e)
+        {
+            return createToolError(
+              fmt::format("Failed to delete bin entry: {}", e.what()));
+        }
+    }
+
+    nlohmann::json LibraryTool::emptyBin()
+    {
+        auto const binDir = getBinDir();
+        if (!fs::exists(binDir))
+        {
+            return {{"success", true},
+                    {"removed_count", 0},
+                    {"message", "Bin was already empty."}};
+        }
+
+        try
+        {
+            std::size_t removedCount = 0;
+            for (auto const & catEntry : fs::directory_iterator(binDir))
+            {
+                if (!catEntry.is_directory())
+                {
+                    continue;
+                }
+                for (auto const & fileEntry : fs::directory_iterator(catEntry.path()))
+                {
+                    if (fileEntry.is_regular_file())
+                    {
+                        fs::remove(fileEntry.path());
+                        ++removedCount;
+                    }
+                }
+                fs::remove(catEntry.path());
+            }
+
+            return {{"success", true},
+                    {"removed_count", removedCount},
+                    {"message",
+                     fmt::format("Permanently deleted {} entry/entries from bin.", removedCount)}};
+        }
+        catch (std::exception const & e)
+        {
+            return createToolError(fmt::format("Failed to empty bin: {}", e.what()));
+        }
     }
 
 } // namespace gladius::mcp::tools

@@ -4,6 +4,7 @@
 #include "AsyncThumbnailLoader.h"
 #include "ThreemfThumbnailExtractor.h"
 #include <filesystem>
+#include <functional>
 #include <list>
 #include <memory>
 #include <string>
@@ -61,6 +62,43 @@ namespace gladius::ui
          */
         void render(SharedDocument doc);
 
+        /// @brief Callback signature: receives file path of the entry to delete.
+        /// Return true if the entry was successfully handled.
+        using DeleteCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user deletes an entry via context menu.
+        void setOnDeleteCallback(DeleteCallback callback)
+        {
+            m_onDelete = std::move(callback);
+        }
+
+        /// @brief Callback for restoring an entry (used in bin mode).
+        using RestoreCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user restores a bin entry.
+        void setOnRestoreCallback(RestoreCallback callback)
+        {
+            m_onRestore = std::move(callback);
+        }
+
+        /// @brief Callback for permanent deletion (used in bin mode).
+        using PermanentDeleteCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user permanently deletes a bin entry.
+        void setOnPermanentDeleteCallback(PermanentDeleteCallback callback)
+        {
+            m_onPermanentDelete = std::move(callback);
+        }
+
+        /// @brief Predicate to check if an entry is shipped (non-deletable).
+        using IsShippedPredicate = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the predicate used to determine if an entry is shipped.
+        void setIsShippedPredicate(IsShippedPredicate predicate)
+        {
+            m_isShipped = std::move(predicate);
+        }
+
       private:
         /**
          * @brief Scan the directory for 3MF files and queue thumbnails for async loading
@@ -97,6 +135,11 @@ namespace gladius::ui
 
         std::unique_ptr<ThreemfThumbnailExtractor> m_thumbnailExtractor; ///< Thumbnail extractor
         std::unique_ptr<AsyncThumbnailLoader> m_asyncLoader;             ///< Async loader
+
+        DeleteCallback m_onDelete;                     ///< Delete callback
+        RestoreCallback m_onRestore;                   ///< Restore callback (bin mode)
+        PermanentDeleteCallback m_onPermanentDelete;   ///< Permanent delete callback (bin mode)
+        IsShippedPredicate m_isShipped;                ///< Shipped entry predicate
     };
 
 } // namespace gladius::ui

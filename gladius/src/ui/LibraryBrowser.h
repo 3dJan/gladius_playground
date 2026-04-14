@@ -3,6 +3,7 @@
 #include "../Document.h"
 #include "ThreemfFileViewer.h"
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -77,6 +78,15 @@ namespace gladius::ui
          */
         void createFileBrowsers();
 
+        /// @brief Render the bin tab contents.
+        void renderBinTab(SharedDocument doc);
+
+        /// @brief Scan the bin directory for category subfolders.
+        void scanBinFolder();
+
+        /// @brief Create ThreemfFileViewer instances for bin subfolders.
+        void createBinBrowsers();
+
         std::filesystem::path m_rootDirectory;           ///< Root directory to scan for subfolders
         std::vector<std::filesystem::path> m_subfolders; ///< Found subfolders
         /// Whether the browser is visible.
@@ -87,5 +97,10 @@ namespace gladius::ui
         events::SharedLogger m_logger; ///< Logger for events
         std::unordered_map<std::string, std::unique_ptr<ThreemfFileViewer>>
           m_fileBrowsers; ///< File browsers for each subfolder
+
+        std::vector<std::filesystem::path> m_binSubfolders;  ///< Bin category subfolders
+        bool m_binNeedsRefresh = true;                       ///< Whether bin dirs need rescan
+        std::unordered_map<std::string, std::unique_ptr<ThreemfFileViewer>>
+          m_binBrowsers; ///< File browsers for each bin subfolder
     };
 }

@@ -97,4 +97,40 @@ namespace gladius
     {
         return syncLibraryDirectory(getShippedLibraryDir(), getUserLibraryDir());
     }
+
+    std::filesystem::path getBinDir()
+    {
+        return getUserLibraryDir() / ".bin";
+    }
+
+    bool isShippedEntry(std::string const & category, std::string const & name)
+    {
+        auto const shippedPath = getShippedLibraryDir() / category / (name + ".3mf");
+        return std::filesystem::exists(shippedPath);
+    }
+
+    std::filesystem::path disambiguateFilename(std::filesystem::path const & directory,
+                                               std::string const & stem,
+                                               std::string const & extension)
+    {
+        auto basePath = directory / (stem + extension);
+        if (!std::filesystem::exists(basePath))
+        {
+            return basePath;
+        }
+
+        for (int i = 1; i <= 999; ++i)
+        {
+            auto candidate = directory / (stem + "_" + std::to_string(i) + extension);
+            if (!std::filesystem::exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        // Practically unreachable
+        throw std::runtime_error(
+          "Cannot disambiguate filename: all 999 suffix slots exhausted for '" + stem + extension +
+          "' in " + directory.string());
+    }
 }

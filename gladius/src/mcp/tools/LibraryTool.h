@@ -109,12 +109,35 @@ namespace mcp::tools
         nlohmann::json importLibraryEntry(std::string const & category,
                                           std::string const & name);
 
-        /// @brief Delete a library entry from the user library.
+        /// @brief Delete a library entry from the user library (soft-delete to bin).
         /// @param category Category subdirectory name.
         /// @param name Entry name (filename without .3mf extension).
         /// @return JSON with deletion result.
         nlohmann::json deleteLibraryEntry(std::string const & category,
                                           std::string const & name);
+
+        /// @brief List all entries in the bin, optionally filtered by category.
+        /// @param category Optional category filter.
+        /// @return JSON with binned entries grouped by category.
+        nlohmann::json browseBin(std::string const & category = "") const;
+
+        /// @brief Restore a binned entry back to the user library.
+        /// @param category Category subdirectory name in the bin.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with restore result.
+        nlohmann::json restoreBinEntry(std::string const & category,
+                                       std::string const & name);
+
+        /// @brief Permanently delete a single entry from the bin.
+        /// @param category Category subdirectory name in the bin.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with deletion result.
+        nlohmann::json deleteBinEntry(std::string const & category,
+                                      std::string const & name);
+
+        /// @brief Permanently delete all entries in the bin.
+        /// @return JSON with count of removed entries.
+        nlohmann::json emptyBin();
 
       private:
         /// @brief Resolve a library entry path, checking both user and shipped dirs.

@@ -1,4 +1,5 @@
 #include "LibraryBrowser.h"
+#include "../FileSystemUtils.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
 #include "FileChooser.h"
 #include "imgui.h"
@@ -60,6 +61,11 @@ namespace gladius::ui
             {
                 if (entry.is_directory())
                 {
+                    auto const folderName = entry.path().filename().string();
+                    if (!folderName.empty() && folderName[0] == '.')
+                    {
+                        continue; // Skip dot-prefixed folders (e.g. .bin)
+                    }
                     m_subfolders.push_back(entry.path());
                 }
             }
@@ -88,6 +94,41 @@ namespace gladius::ui
             {
                 auto browser = std::make_unique<ThreemfFileViewer>(m_logger);
                 browser->setDirectory(subfolder);
+                browser->setIsShippedPredicate(
+                  [](std::filesystem::path const & filePath) -> bool
+                  {
+                      auto const category =
+                        filePath.parent_path().filename().string();
+                      auto const name = filePath.stem().string();
+                      return isShippedEntry(category, name);
+                  });
+                browser->setOnDeleteCallback(
+                  [this](std::filesystem::path const & filePath) -> bool
+                  {
+                      try
+                      {
+                          auto const category =
+                            filePath.parent_path().filename().string();
+                          auto const name = filePath.stem().string();
+
+                          if (isShippedEntry(category, name))
+                          {
+                              return false;
+                          }
+
+                          auto const binCategoryDir = getBinDir() / category;
+                          std::filesystem::create_directories(binCategoryDir);
+                          auto const destPath =
+                            disambiguateFilename(binCategoryDir, name, ".3mf");
+                          std::filesystem::rename(filePath, destPath);
+                          m_binNeedsRefresh = true;
+                          return true;
+                      }
+                      catch (std::exception const &)
+                      {
+                          return false;
+                      }
+                  });
                 m_fileBrowsers[folderName] = std::move(browser);
             }
             else
@@ -138,10 +179,190 @@ namespace gladius::ui
                             ImGui::EndTabItem();
                         }
                     }
+
+                    // Bin tab
+                    if (ImGui::BeginTabItem(ICON_FA_TRASH_ALT " Bin"))
+                    {
+                        renderBinTab(doc);
+                        ImGui::EndTabItem();
+                    }
+
                     ImGui::EndTabBar();
                 }
             }
         }
         ImGui::End();
     }
+
+    void LibraryBrowser::scanBinFolder()
+    {
+        if (!m_binNeedsRefresh)
+        {
+            return;
+        }
+
+        m_binSubfolders.clear();
+        m_binBrowsers.clear();
+
+        auto const binDir = getBinDir();
+        if (!std::filesystem::exists(binDir) || !std::filesystem::is_directory(binDir))
+        {
+            m_binNeedsRefresh = false;
+            return;
+        }
+
+        try
+        {
+            for (auto const & entry : std::filesystem::directory_iterator(binDir))
+            {
+                if (entry.is_directory())
+                {
+                    m_binSubfolders.push_back(entry.path());
+                }
+            }
+        }
+        catch (std::filesystem::filesystem_error const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent({e.what(), events::Severity::Error});
+            }
+        }
+
+        createBinBrowsers();
+        m_binNeedsRefresh = false;
+    }
+
+    void LibraryBrowser::createBinBrowsers()
+    {
+        for (auto const & subfolder : m_binSubfolders)
+        {
+            auto const folderName = subfolder.filename().string();
+            auto browser = std::make_unique<ThreemfFileViewer>(m_logger);
+            browser->setDirectory(subfolder);
+
+            browser->setOnRestoreCallback(
+              [this](std::filesystem::path const & filePath) -> bool
+              {
+                  try
+                  {
+                      auto const category =
+                        filePath.parent_path().filename().string();
+                      auto const name = filePath.stem().string();
+                      auto const userCatDir = getUserLibraryDir() / category;
+                      std::filesystem::create_directories(userCatDir);
+                      auto const destPath =
+                        disambiguateFilename(userCatDir, name, ".3mf");
+                      std::filesystem::rename(filePath, destPath);
+
+                      // Clean up empty bin category dir
+                      auto const binCatDir = getBinDir() / category;
+                      if (std::filesystem::is_empty(binCatDir))
+                      {
+                          std::filesystem::remove(binCatDir);
+                      }
+
+                      m_needsRefresh = true;
+                      m_binNeedsRefresh = true;
+                      return true;
+                  }
+                  catch (std::exception const &)
+                  {
+                      return false;
+                  }
+              });
+
+            browser->setOnPermanentDeleteCallback(
+              [this](std::filesystem::path const & filePath) -> bool
+              {
+                  try
+                  {
+                      auto const category =
+                        filePath.parent_path().filename().string();
+                      std::filesystem::remove(filePath);
+
+                      auto const binCatDir = getBinDir() / category;
+                      if (std::filesystem::exists(binCatDir) &&
+                          std::filesystem::is_empty(binCatDir))
+                      {
+                          std::filesystem::remove(binCatDir);
+                      }
+
+                      m_binNeedsRefresh = true;
+                      return true;
+                  }
+                  catch (std::exception const &)
+                  {
+                      return false;
+                  }
+              });
+
+            m_binBrowsers[folderName] = std::move(browser);
+        }
+    }
+
+    void LibraryBrowser::renderBinTab(SharedDocument doc)
+    {
+        scanBinFolder();
+
+        // "Empty Bin" button
+        if (!m_binSubfolders.empty())
+        {
+            if (ImGui::Button(ICON_FA_TRASH " Empty Bin"))
+            {
+                ImGui::OpenPopup("ConfirmEmptyBin");
+            }
+
+            if (ImGui::BeginPopupModal("ConfirmEmptyBin", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                ImGui::TextUnformatted(
+                  "Permanently delete all items in the bin?\nThis cannot be undone.");
+                ImGui::Separator();
+                if (ImGui::Button("Delete All", ImVec2(120, 0)))
+                {
+                    auto const binDir = getBinDir();
+                    try
+                    {
+                        for (auto const & catEntry :
+                             std::filesystem::directory_iterator(binDir))
+                        {
+                            if (catEntry.is_directory())
+                            {
+                                std::filesystem::remove_all(catEntry.path());
+                            }
+                        }
+                    }
+                    catch (std::exception const &)
+                    {
+                    }
+                    m_binNeedsRefresh = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            ImGui::Separator();
+        }
+
+        if (m_binBrowsers.empty())
+        {
+            ImGui::TextDisabled("Bin is empty");
+            return;
+        }
+
+        for (auto const & [name, browser] : m_binBrowsers)
+        {
+            if (ImGui::CollapsingHeader(name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                browser->render(doc);
+            }
+        }
+    }
+
 } // namespace gladius::ui

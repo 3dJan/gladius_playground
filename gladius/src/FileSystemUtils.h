@@ -26,4 +26,23 @@ namespace gladius
     /// Existing user files are never overwritten. Sub-folder structure is preserved.
     /// @return The number of files that were copied.
     [[nodiscard]] std::size_t syncShippedLibrary();
+
+    /// @brief Returns the bin directory for soft-deleted library entries: <userLib>/.bin
+    std::filesystem::path getBinDir();
+
+    /// @brief Checks whether a library entry is a shipped entry (or synced copy).
+    /// Returns true if a file with the same category/name exists in the shipped library dir.
+    /// @param category Category subdirectory name (e.g., "primitives").
+    /// @param name Entry name without extension (e.g., "sphere").
+    bool isShippedEntry(std::string const & category, std::string const & name);
+
+    /// @brief Returns a non-colliding path in the given directory by appending _1, _2, etc.
+    /// If the base path does not exist, returns it unchanged.
+    /// @param directory Target directory.
+    /// @param stem Filename stem (e.g., "sphere").
+    /// @param extension File extension including dot (e.g., ".3mf").
+    /// @return A path that does not yet exist on disk.
+    std::filesystem::path disambiguateFilename(std::filesystem::path const & directory,
+                                               std::string const & stem,
+                                               std::string const & extension);
 }

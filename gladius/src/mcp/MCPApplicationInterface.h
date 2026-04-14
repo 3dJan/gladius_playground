@@ -416,12 +416,35 @@ namespace gladius
         virtual nlohmann::json importLibraryEntry(std::string const & category,
                                                   std::string const & name) = 0;
 
-        /// @brief Delete a library entry from the user library.
+        /// @brief Delete a library entry from the user library (soft-delete to bin).
         /// @param category Category subdirectory name.
         /// @param name Entry name (filename without .3mf extension).
         /// @return JSON with deletion result (fails for shipped/read-only entries).
         virtual nlohmann::json deleteLibraryEntry(std::string const & category,
                                                   std::string const & name) = 0;
+
+        /// @brief List all entries currently in the bin, optionally filtered by category.
+        /// @param category Optional category filter (empty = all categories).
+        /// @return JSON with binned entries grouped by category.
+        virtual nlohmann::json browseBin(std::string const & category = "") const = 0;
+
+        /// @brief Restore a binned entry back to the user library.
+        /// @param category Category subdirectory name inside the bin.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with restore result.
+        virtual nlohmann::json restoreBinEntry(std::string const & category,
+                                               std::string const & name) = 0;
+
+        /// @brief Permanently delete a single entry from the bin.
+        /// @param category Category subdirectory name inside the bin.
+        /// @param name Entry name (filename without .3mf extension).
+        /// @return JSON with deletion result.
+        virtual nlohmann::json deleteBinEntry(std::string const & category,
+                                              std::string const & name) = 0;
+
+        /// @brief Permanently delete all entries in the bin.
+        /// @return JSON with count of removed entries.
+        virtual nlohmann::json emptyBin() = 0;
 
 #ifdef ENABLE_UI_TESTING
         /// @brief Perform a UI click on the specified ImGui test engine path.

@@ -2044,11 +2044,12 @@ namespace gladius::mcp
               return m_application->importLibraryEntry(category, name);
           });
 
-        // DELETE LIBRARY ENTRY
+        // DELETE LIBRARY ENTRY (soft-delete to bin)
         registerTool(
           "delete_library_entry",
-          "Delete a library entry from the user library. Cannot delete shipped "
-          "(read-only) library entries.",
+          "Soft-delete a library entry by moving it to the bin (.bin/ directory). "
+          "The entry can be restored later with restore_bin_entry. "
+          "Cannot delete shipped (read-only) library entries.",
           {{"type", "object"},
            {"properties",
             {{"category",
@@ -2074,6 +2075,110 @@ namespace gladius::mcp
               std::string category = params["category"];
               std::string name = params["name"];
               return m_application->deleteLibraryEntry(category, name);
+          });
+
+        // BROWSE BIN
+        registerTool(
+          "browse_bin",
+          "List all soft-deleted library entries in the bin, optionally filtered by category.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description",
+                "Optional category filter. Omit to list all categories."}}}}},
+           {"required", json::array()}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              std::string category;
+              if (params.contains("category"))
+              {
+                  category = params["category"];
+              }
+              return m_application->browseBin(category);
+          });
+
+        // RESTORE BIN ENTRY
+        registerTool(
+          "restore_bin_entry",
+          "Restore a previously deleted library entry from the bin back to the user library. "
+          "If a name conflict exists, a numeric suffix is appended automatically.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Bin category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "my-sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->restoreBinEntry(category, name);
+          });
+
+        // DELETE BIN ENTRY (permanent)
+        registerTool(
+          "delete_bin_entry",
+          "Permanently delete a single entry from the bin. This is irreversible.",
+          {{"type", "object"},
+           {"properties",
+            {{"category",
+              {{"type", "string"},
+               {"description", "Bin category (subdirectory name)"}}},
+             {"name",
+              {{"type", "string"},
+               {"description", "Entry name (filename without .3mf extension)"}}}}},
+           {"required", {"category", "name"}}},
+          [this](json const & params) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              if (!params.contains("category") || !params.contains("name"))
+              {
+                  return {{"success", false},
+                          {"error", "Missing required parameters: category and name"},
+                          {"usage_example",
+                           {{"category", "primitives"}, {"name", "my-sphere"}}}};
+              }
+              std::string category = params["category"];
+              std::string name = params["name"];
+              return m_application->deleteBinEntry(category, name);
+          });
+
+        // EMPTY BIN (permanent, all entries)
+        registerTool(
+          "empty_bin",
+          "Permanently delete all entries from the bin. This is irreversible.",
+          {{"type", "object"},
+           {"properties", json::object()},
+           {"required", json::array()}},
+          [this](json const & /*params*/) -> json
+          {
+              if (!m_application)
+              {
+                  return {{"success", false}, {"error", "No application available"}};
+              }
+              return m_application->emptyBin();
           });
 
         // SET LIBRARY METADATA

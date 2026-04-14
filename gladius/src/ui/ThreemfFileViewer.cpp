@@ -244,6 +244,51 @@ namespace gladius::ui
             ImGui::EndDragDropSource();
         }
 
+        // Right-click context menu
+        if (ImGui::BeginPopupContextItem("##entryCtx"))
+        {
+            bool const shipped = m_isShipped ? m_isShipped(info.filePath) : false;
+
+            if (m_onDelete)
+            {
+                if (shipped)
+                {
+                    ImGui::BeginDisabled();
+                    ImGui::MenuItem(ICON_FA_TRASH_ALT "  Delete");
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    {
+                        ImGui::SetTooltip("Shipped entries cannot be deleted");
+                    }
+                }
+                else if (ImGui::MenuItem(ICON_FA_TRASH_ALT "  Delete"))
+                {
+                    if (m_onDelete(info.filePath))
+                    {
+                        m_needsRefresh = true;
+                    }
+                }
+            }
+
+            if (m_onRestore && ImGui::MenuItem(ICON_FA_UNDO "  Restore"))
+            {
+                if (m_onRestore(info.filePath))
+                {
+                    m_needsRefresh = true;
+                }
+            }
+
+            if (m_onPermanentDelete && ImGui::MenuItem(ICON_FA_TIMES "  Delete permanently"))
+            {
+                if (m_onPermanentDelete(info.filePath))
+                {
+                    m_needsRefresh = true;
+                }
+            }
+
+            ImGui::EndPopup();
+        }
+
         // Draw thumbnail / placeholder over the button
         ImGui::SetItemAllowOverlap();
         ImGui::SetCursorPos(itemPos);

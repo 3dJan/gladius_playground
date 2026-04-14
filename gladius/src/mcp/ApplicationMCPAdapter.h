@@ -283,6 +283,12 @@ namespace gladius
                                           std::string const & name) override;
         nlohmann::json deleteLibraryEntry(std::string const & category,
                                           std::string const & name) override;
+        nlohmann::json browseBin(std::string const & category = "") const override;
+        nlohmann::json restoreBinEntry(std::string const & category,
+                                       std::string const & name) override;
+        nlohmann::json deleteBinEntry(std::string const & category,
+                                      std::string const & name) override;
+        nlohmann::json emptyBin() override;
 
 #ifdef ENABLE_UI_TESTING
         std::vector<std::string> uiDumpItems(std::string const & parentPath) override;
