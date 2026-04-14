@@ -193,6 +193,22 @@ namespace gladius::tests
                     deleteLibraryEntry,
                     (std::string const &, std::string const &),
                     (override));
+        MOCK_METHOD(nlohmann::json,
+                    browseBin,
+                    (std::string const &),
+                    (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    restoreBinEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    deleteBinEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    emptyBin,
+                    (),
+                    (override));
 
 #ifdef ENABLE_UI_TESTING
         bool uiClick(std::string const & /*path*/) override { return false; }
@@ -806,14 +822,16 @@ namespace gladius::tests
     // Phase 9: Delete — delete_library_entry
     // ────────────────────────────────────────────────────────────────
 
-    TEST_F(MCPLibraryToolTest, DeleteLibraryEntry_UserEntry_DeletesFile)
+    TEST_F(MCPLibraryToolTest, DeleteLibraryEntry_UserEntry_MovesToBin)
     {
         // Arrange
         json mockResult = {
           {"success", true},
           {"name", "my-sphere"},
           {"category", "primitives"},
-          {"message", "Deleted library entry 'my-sphere' from category 'primitives'"}
+          {"bin_path", "/home/user/.local/share/gladius/library/.bin/primitives/my-sphere.3mf"},
+          {"message", "Moved library entry 'my-sphere' from category 'primitives' to bin. "
+                      "Use browse_bin to see binned items or restore_bin_entry to recover."}
         };
         EXPECT_CALL(*m_mockApp,
                     deleteLibraryEntry(std::string("primitives"), std::string("my-sphere")))
@@ -826,8 +844,9 @@ namespace gladius::tests
         // Assert
         EXPECT_TRUE(result["success"].get<bool>());
         EXPECT_EQ(result["name"], "my-sphere");
-        EXPECT_EQ(result["category"], "primitives");
-        EXPECT_TRUE(result.contains("message"));
+        EXPECT_TRUE(result.contains("bin_path"));
+        EXPECT_THAT(result["message"].get<std::string>(),
+                    ::testing::HasSubstr("bin"));
     }
 
     TEST_F(MCPLibraryToolTest, DeleteLibraryEntry_ShippedEntry_ReturnsReadOnlyError)
@@ -849,6 +868,225 @@ namespace gladius::tests
         EXPECT_FALSE(result["success"].get<bool>());
         EXPECT_THAT(result["error"].get<std::string>(),
                     ::testing::HasSubstr("shipped"));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Phase 10: Bin operations — browse_bin, restore_bin_entry,
+    //           delete_bin_entry, empty_bin
+    // ────────────────────────────────────────────────────────────────
+
+    TEST_F(MCPLibraryToolTest, BrowseBin_EmptyBin_ReturnsEmptyCategories)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"categories", json::array()},
+          {"total_entries", 0},
+          {"message", "Bin is empty."}
+        };
+        EXPECT_CALL(*m_mockApp, browseBin(std::string("")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("browse_bin");
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_TRUE(result["categories"].empty());
+        EXPECT_EQ(result["total_entries"], 0u);
+    }
+
+    TEST_F(MCPLibraryToolTest, BrowseBin_WithEntries_ReturnsCategoriesAndEntries)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"categories", {{{"name", "primitives"},
+                           {"entries", {{{"name", "my-sphere"}}, {{"name", "old-cube"}}}}}}},
+          {"total_entries", 2},
+          {"message", "Bin contains 2 entry/entries."}
+        };
+        EXPECT_CALL(*m_mockApp, browseBin(std::string("")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("browse_bin");
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["categories"].size(), 1u);
+        EXPECT_EQ(result["categories"][0]["entries"].size(), 2u);
+        EXPECT_EQ(result["total_entries"], 2u);
+    }
+
+    TEST_F(MCPLibraryToolTest, BrowseBin_WithCategoryFilter_FiltersResult)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"categories", {{{"name", "lattices"},
+                           {"entries", {{{"name", "my-gyroid"}}}}}}},
+          {"total_entries", 1},
+          {"message", "Bin contains 1 entry/entries."}
+        };
+        EXPECT_CALL(*m_mockApp, browseBin(std::string("lattices")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("browse_bin", {{"category", "lattices"}});
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["categories"].size(), 1u);
+        EXPECT_EQ(result["categories"][0]["name"], "lattices");
+    }
+
+    TEST_F(MCPLibraryToolTest, RestoreBinEntry_ValidEntry_RestoresToLibrary)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"name", "my-sphere"},
+          {"category", "primitives"},
+          {"path", "/home/user/.local/share/gladius/library/primitives/my-sphere.3mf"},
+          {"message", "Restored 'my-sphere' to category 'primitives'."}
+        };
+        EXPECT_CALL(*m_mockApp,
+                    restoreBinEntry(std::string("primitives"), std::string("my-sphere")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("restore_bin_entry",
+                               {{"category", "primitives"}, {"name", "my-sphere"}});
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["name"], "my-sphere");
+        EXPECT_EQ(result["category"], "primitives");
+        EXPECT_TRUE(result.contains("path"));
+    }
+
+    TEST_F(MCPLibraryToolTest, RestoreBinEntry_NonexistentEntry_ReturnsError)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", false},
+          {"error", "Entry 'bogus' not found in bin category 'primitives'"}
+        };
+        EXPECT_CALL(*m_mockApp,
+                    restoreBinEntry(std::string("primitives"), std::string("bogus")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("restore_bin_entry",
+                               {{"category", "primitives"}, {"name", "bogus"}});
+
+        // Assert
+        EXPECT_FALSE(result["success"].get<bool>());
+        EXPECT_THAT(result["error"].get<std::string>(),
+                    ::testing::HasSubstr("not found"));
+    }
+
+    TEST_F(MCPLibraryToolTest, RestoreBinEntry_MissingParams_ReturnsUsageExample)
+    {
+        // Act
+        auto result = callTool("restore_bin_entry", {{"category", "primitives"}});
+
+        // Assert
+        EXPECT_FALSE(result["success"].get<bool>());
+        EXPECT_TRUE(result.contains("usage_example"));
+    }
+
+    TEST_F(MCPLibraryToolTest, DeleteBinEntry_ValidEntry_PermanentlyDeletes)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"name", "old-sphere"},
+          {"category", "primitives"},
+          {"message", "Permanently deleted 'old-sphere' from bin category 'primitives'."}
+        };
+        EXPECT_CALL(*m_mockApp,
+                    deleteBinEntry(std::string("primitives"), std::string("old-sphere")))
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("delete_bin_entry",
+                               {{"category", "primitives"}, {"name", "old-sphere"}});
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["name"], "old-sphere");
+    }
+
+    TEST_F(MCPLibraryToolTest, DeleteBinEntry_MissingParams_ReturnsUsageExample)
+    {
+        // Act
+        auto result = callTool("delete_bin_entry", {{"category", "primitives"}});
+
+        // Assert
+        EXPECT_FALSE(result["success"].get<bool>());
+        EXPECT_TRUE(result.contains("usage_example"));
+    }
+
+    TEST_F(MCPLibraryToolTest, EmptyBin_WithEntries_DeletesAll)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"removed_count", 5},
+          {"message", "Permanently deleted 5 entry/entries from bin."}
+        };
+        EXPECT_CALL(*m_mockApp, emptyBin())
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("empty_bin");
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["removed_count"], 5u);
+    }
+
+    TEST_F(MCPLibraryToolTest, EmptyBin_AlreadyEmpty_ReturnsZeroCount)
+    {
+        // Arrange
+        json mockResult = {
+          {"success", true},
+          {"removed_count", 0},
+          {"message", "Bin was already empty."}
+        };
+        EXPECT_CALL(*m_mockApp, emptyBin())
+          .WillOnce(::testing::Return(mockResult));
+
+        // Act
+        auto result = callTool("empty_bin");
+
+        // Assert
+        EXPECT_TRUE(result["success"].get<bool>());
+        EXPECT_EQ(result["removed_count"], 0u);
+    }
+
+    TEST_F(MCPLibraryToolTest, BinToolsRegistered_ServerInitialized_ToolsAppearInList)
+    {
+        // Arrange
+        json request = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}};
+
+        // Act
+        json response = m_server->processJSONRPCRequest(request);
+
+        // Assert — verify all bin tools are registered
+        auto const & tools = response["result"]["tools"];
+        std::vector<std::string> toolNames;
+        for (auto const & tool : tools)
+        {
+            toolNames.push_back(tool["name"].get<std::string>());
+        }
+
+        EXPECT_THAT(toolNames, ::testing::Contains("browse_bin"));
+        EXPECT_THAT(toolNames, ::testing::Contains("restore_bin_entry"));
+        EXPECT_THAT(toolNames, ::testing::Contains("delete_bin_entry"));
+        EXPECT_THAT(toolNames, ::testing::Contains("empty_bin"));
     }
 
 } // namespace gladius::tests

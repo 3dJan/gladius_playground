@@ -311,6 +311,26 @@ namespace gladius::tests
         {
             return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
         }
+        nlohmann::json browseBin(std::string const & /*category*/) const override
+        {
+            return nlohmann::json{{"success", true},
+                                  {"categories", nlohmann::json::array()},
+                                  {"total_entries", 0}};
+        }
+        nlohmann::json restoreBinEntry(std::string const & /*category*/,
+                                        std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json deleteBinEntry(std::string const & /*category*/,
+                                       std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json emptyBin() override
+        {
+            return nlohmann::json{{"success", true}, {"removed_count", 0}};
+        }
 
 #ifdef ENABLE_UI_TESTING
         bool uiClick(std::string const & /*path*/) override

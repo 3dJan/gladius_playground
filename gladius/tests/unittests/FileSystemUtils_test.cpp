@@ -141,4 +141,88 @@ namespace gladius::tests
           m_user / "deep" / "nested" / "folder" / "item.3mf"));
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // getBinDir tests
+    // ────────────────────────────────────────────────────────────────
+
+    TEST(GetBinDir, ReturnsPathEndingWithDotBin)
+    {
+        auto const binDir = getBinDir();
+        EXPECT_EQ(binDir.filename().string(), ".bin");
+    }
+
+    TEST(GetBinDir, IsInsideUserLibraryDir)
+    {
+        auto const binDir = getBinDir();
+        auto const userLib = getUserLibraryDir();
+        EXPECT_EQ(binDir.parent_path(), userLib);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // isShippedEntry tests
+    // ────────────────────────────────────────────────────────────────
+
+    TEST(IsShippedEntry, NonexistentEntry_ReturnsFalse)
+    {
+        // A totally fabricated name that won't exist in the shipped dir
+        EXPECT_FALSE(isShippedEntry("nonexistent_category_xyz", "nonexistent_entry_xyz"));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // disambiguateFilename tests
+    // ────────────────────────────────────────────────────────────────
+
+    class DisambiguateFilename_Test : public ::testing::Test
+    {
+      protected:
+        void SetUp() override
+        {
+            m_tempDir =
+              std::filesystem::temp_directory_path() / "gladius_disambiguate_test";
+            std::filesystem::remove_all(m_tempDir);
+            std::filesystem::create_directories(m_tempDir);
+        }
+
+        void TearDown() override
+        {
+            std::filesystem::remove_all(m_tempDir);
+        }
+
+        std::filesystem::path m_tempDir;
+    };
+
+    TEST_F(DisambiguateFilename_Test,
+           NoConflict_ReturnsBasePath)
+    {
+        auto result = disambiguateFilename(m_tempDir, "sphere", ".3mf");
+        EXPECT_EQ(result, m_tempDir / "sphere.3mf");
+    }
+
+    TEST_F(DisambiguateFilename_Test,
+           OneConflict_ReturnsSuffix1)
+    {
+        createTestFile(m_tempDir / "sphere.3mf");
+        auto result = disambiguateFilename(m_tempDir, "sphere", ".3mf");
+        EXPECT_EQ(result, m_tempDir / "sphere_1.3mf");
+    }
+
+    TEST_F(DisambiguateFilename_Test,
+           TwoConflicts_ReturnsSuffix2)
+    {
+        createTestFile(m_tempDir / "sphere.3mf");
+        createTestFile(m_tempDir / "sphere_1.3mf");
+        auto result = disambiguateFilename(m_tempDir, "sphere", ".3mf");
+        EXPECT_EQ(result, m_tempDir / "sphere_2.3mf");
+    }
+
+    TEST_F(DisambiguateFilename_Test,
+           GapInNumbers_UsesFirstAvailable)
+    {
+        createTestFile(m_tempDir / "sphere.3mf");
+        // sphere_1 does not exist
+        createTestFile(m_tempDir / "sphere_2.3mf");
+        auto result = disambiguateFilename(m_tempDir, "sphere", ".3mf");
+        EXPECT_EQ(result, m_tempDir / "sphere_1.3mf");
+    }
+
 } // namespace gladius::tests

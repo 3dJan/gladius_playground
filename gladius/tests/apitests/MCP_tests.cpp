@@ -188,6 +188,22 @@ namespace gladius::tests
                     deleteLibraryEntry,
                     (std::string const &, std::string const &),
                     (override));
+        MOCK_METHOD(nlohmann::json,
+                    browseBin,
+                    (std::string const &),
+                    (const, override));
+        MOCK_METHOD(nlohmann::json,
+                    restoreBinEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    deleteBinEntry,
+                    (std::string const &, std::string const &),
+                    (override));
+        MOCK_METHOD(nlohmann::json,
+                    emptyBin,
+                    (),
+                    (override));
 
 #ifdef ENABLE_UI_TESTING
         bool uiClick(std::string const & /*path*/) override { return false; }
