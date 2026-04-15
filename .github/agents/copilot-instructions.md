@@ -24,6 +24,8 @@ Auto-generated from all feature plans. Last updated: 2025-12-29
 - N/A (in-memory mesh processing) (026-fast-mesh-simplification)
 - C++20 (Clang, Linux primary target) + lib3mf, ImGui (for UI), fmt (for string formatting), nlohmann/json (MCP JSON), sago::platform_folders (user paths), std::filesystem (001-library-item-deletion)
 - Local filesystem — user library at `~/.local/share/gladius/library/`, shipped library at `<appDir>/library/` (001-library-item-deletion)
+- C++20 (Clang) + ImGui (UI), OpenCL 1.2+ (GPU compute), libcoro (C++20 coroutines), lib3mf (file I/O) (028-async-graph-editing)
+- N/A (in-memory Assembly graph + OpenCL GPU buffers) (028-async-graph-editing)
 
 - C++20 + OpenCL 1.2+, existing gladius compute infrastructure (001-spatial-sdf)
 
@@ -43,9 +45,9 @@ tests/
 C++20: Follow standard conventions
 
 ## Recent Changes
+- 028-async-graph-editing: Added C++20 (Clang) + ImGui (UI), OpenCL 1.2+ (GPU compute), libcoro (C++20 coroutines), lib3mf (file I/O)
 - 001-library-item-deletion: Added C++20 (Clang, Linux primary target) + lib3mf, ImGui (for UI), fmt (for string formatting), nlohmann/json (MCP JSON), sago::platform_folders (user paths), std::filesystem
 - 026-fast-mesh-simplification: Added C++20 + Eigen (linear algebra), ImGui (UI), lib3mf (export), GTest/GMock (testing)
-- 025-mesh-color-export: Added C++20 + lib3mf, OpenCL 1.2+, Eigen3, ImGui, fmt, STL
 
 
 <!-- MANUAL ADDITIONS START -->
