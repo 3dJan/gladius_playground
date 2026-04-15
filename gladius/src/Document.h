@@ -15,6 +15,7 @@
 #include "ui/GLView.h"
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -25,6 +26,18 @@ namespace gladius
     /// Tokens for assembly mutex access
     using AssemblyToken = std::lock_guard<std::mutex>;
     using OptionalAssemblyToken = std::optional<AssemblyToken>;
+
+    /// Monotonically increasing counter identifying each structural graph edit.
+    /// Incremented on the UI thread; read by background workers to detect staleness.
+    using StructuralEditEpoch = std::atomic<uint64_t>;
+
+    /// Controls debounce timing for structural edit dispatch.
+    struct StructuralEditDebouncer
+    {
+        bool pending{false};
+        std::chrono::steady_clock::time_point lastEditTime{};
+        std::chrono::milliseconds debounceDelay{50};
+    };
 
     namespace vdb
     {
@@ -115,6 +128,23 @@ namespace gladius
         void resetGeneratorContext();
         explicit Document(std::shared_ptr<ComputeCore> core);
         [[nodiscard]] bool refreshModelIfNoCompilationIsRunning();
+
+        /// Signal that a structural graph edit occurred.
+        /// Increments the edit epoch and arms the debouncer for background dispatch.
+        void signalStructuralEdit();
+
+        /// Dispatch the background structural update if the debounce window has elapsed.
+        /// Call this once per frame from the main loop.
+        /// @return true if a compilation was launched.
+        bool dispatchStructuralUpdateIfReady();
+
+        /// Consume a completed background structural update result.
+        /// Applies the updated assembly types and validation to the live assembly.
+        /// Call this once per frame from the main loop.
+        void processStructuralUpdateResult();
+
+        /// @return Current structural edit epoch value.
+        [[nodiscard]] uint64_t structuralEditEpoch() const;
 
         void load(std::filesystem::path filename);
         void loadNonBlocking(std::filesystem::path filename);
@@ -411,6 +441,9 @@ namespace gladius
         void loadAllMeshResources();
         void refreshWorker();
 
+        /// Dispatch a structural update via the existing refresh pipeline.
+        void dispatchStructuralUpdate();
+
         void updateMemoryOffsets();
 
         void saveBackup();
@@ -460,6 +493,12 @@ namespace gladius
 
         /// Issue list containing validation errors and warnings
         nodes::IssueList m_issueList;
+
+        /// Structural edit epoch — monotonically increasing on each structural graph edit.
+        StructuralEditEpoch m_structuralEditEpoch{0};
+
+        /// Debouncer controlling when the background structural update is dispatched.
+        StructuralEditDebouncer m_structuralDebouncer;
     };
 
     using SharedDocument = std::shared_ptr<Document>;

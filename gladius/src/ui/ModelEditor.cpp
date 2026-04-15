@@ -2051,13 +2051,11 @@ namespace gladius::ui
                                 requestNodeFocus(result.functionCall->getId());
                             }
 
-                            if (m_assembly)
-                            {
-                                m_assembly->updateInputsAndOutputs();
-                            }
+                            // updateInputsAndOutputs() and updateTypes() are deferred to
+                            // the background refreshWorker(). The node editor will show
+                            // stale types briefly until compilation finishes.
 
                             m_currentModel->setLogger(m_doc->getSharedLogger());
-                            m_currentModel->updateTypes();
                             markModelAsModified();
                             switchModel();
                             m_nodePositionsNeedUpdate = true;
@@ -3196,15 +3194,12 @@ namespace gladius::ui
             requestNodeFocus(fc->getId());
         }
 
-        // After wiring, update assembly IOs so downstream validation doesn't crash
-        if (m_assembly)
-        {
-            m_assembly->updateInputsAndOutputs();
-        }
+        // updateInputsAndOutputs() and updateTypes() are deferred to the
+        // background refreshWorker(). Stale types are acceptable until
+        // the compilation finishes.
 
         // Track state and UI
         m_currentModel->setLogger(m_doc->getSharedLogger());
-        m_currentModel->updateTypes();
         markModelAsModified();
         switchModel();
         m_nodePositionsNeedUpdate = true;

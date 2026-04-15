@@ -1126,33 +1126,25 @@ namespace gladius::ui
               }
 
               // Refresh model when compile is explicitly requested (structural changes)
+              // Instead of triggering immediately, signal a structural edit so the
+              // debouncer can coalesce rapid sequential edits (e.g. paste, multi-link).
               if (compileRequested)
               {
-                  refreshModel();
+                  m_doc->signalStructuralEdit();
                   m_parameterThrottle.reset(); // Full compile resets throttle state
                   m_contoursDirty = true;
-                  // If compilation was successfully launched, the async worker
-                  // handles parameter updates — skip the redundant main-thread path
-                  // that would block on Queue.finish() while the worker runs.
-                  if (!m_modelEditor.isCompileRequested())
-                  {
-                      m_parameterDirty = false;
-                  }
               }
               // For parameter-only changes, m_parameterDirty is already set above.
               // updateModel() will handle it using the fast updateParameter() path
               // and call invalidateViewDueToParameterChange() which bumps the epoch.
 
-              // Only clear the modified flags when no compile request is
-              // pending.  If refreshModel() was skipped because a
-              // compilation was already in-progress, the flags must
-              // survive so the next frame retries the compilation.
-              if (!m_modelEditor.isCompileRequested())
+              // Clear modified flags after signaling. The debouncer in
+              // Document::dispatchStructuralUpdateIfReady() handles retry
+              // when a compilation is already in-progress — the UI-side
+              // flags no longer need to survive across frames.
+              if (modelWasModified || parameterModifiedByModelEditor)
               {
-                  if (modelWasModified || parameterModifiedByModelEditor)
-                  {
-                      m_modelEditor.markModelAsUpToDate();
-                  }
+                  m_modelEditor.markModelAsUpToDate();
               }
           });
     }
@@ -2484,6 +2476,21 @@ namespace gladius::ui
         if (m_doc && m_doc->isLoadingInProgress())
         {
             return;
+        }
+
+        // Process any completed structural update result first.
+        if (m_doc)
+        {
+            m_doc->processStructuralUpdateResult();
+        }
+
+        // Dispatch debounced structural edits to the background worker.
+        if (m_doc && m_doc->dispatchStructuralUpdateIfReady())
+        {
+            // A compilation was launched — mirror the side-effects of refreshModel().
+            m_logger->clear();
+            m_renderWindow.invalidateViewDuetoModelUpdate();
+            m_renderWindow.invalidateView();
         }
 
         // Suppress HQ front-buffer display when a parameter change is pending.

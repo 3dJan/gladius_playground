@@ -115,7 +115,28 @@ namespace gladius
 
         // saveBackup();
         {
-            m_futureModelRefresh = std::async(std::launch::async, [&]() { refreshWorker(); });
+            m_futureModelRefresh = std::async(std::launch::async,
+                                              [&]()
+                                              {
+                                                  try
+                                                  {
+                                                      refreshWorker();
+                                                  }
+                                                  catch (std::exception const & e)
+                                                  {
+                                                      auto logger = getSharedLogger();
+                                                      if (logger)
+                                                      {
+                                                          logger->addEvent(
+                                                            {std::string(
+                                                               "Background compilation failed: ") +
+                                                               e.what(),
+                                                             events::Severity::Error});
+                                                      }
+                                                      m_core->getMeshResourceState()
+                                                        ->signalCompilationFinished();
+                                                  }
+                                              });
         }
         return true;
     }
@@ -140,10 +161,25 @@ namespace gladius
         auto meshResourceState = m_core->getMeshResourceState();
         meshResourceState->signalCompilationStarted();
 
+        // Capture the structural edit epoch at the start of this worker run.
+        // If a new structural edit arrives while we're working, the epoch will
+        // differ and we can exit early instead of completing stale work.
+        auto const startEpoch = m_structuralEditEpoch.load(std::memory_order_relaxed);
+        auto const isStale = [this, startEpoch]()
+        {
+            return m_structuralEditEpoch.load(std::memory_order_relaxed) != startEpoch;
+        };
+
         // Validate early: skip expensive compilation if model is in an invalid
         // state (e.g. nodes with missing connections during graph editing).
         // This used to run on the UI thread; running here avoids blocking it.
         if (!validateAssembly())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
+        if (isStale())
         {
             meshResourceState->signalCompilationFinished();
             return;
@@ -158,6 +194,12 @@ namespace gladius
         m_parameterDirty = true;
         m_contoursDirty = true;
 
+        if (isStale())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
         // Rebuild resource dependency graph
         rebuildResourceDependencyGraph();
         updateFlatAssembly();
@@ -170,6 +212,11 @@ namespace gladius
         // Wait for compilation to complete with periodic checks
         while (m_core->isCompilationInProgress())
         {
+            if (isStale())
+            {
+                meshResourceState->signalCompilationFinished();
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
@@ -2037,5 +2084,57 @@ namespace gladius
     bool Document::isUiMode() const
     {
         return m_uiMode;
+    }
+
+    void Document::signalStructuralEdit()
+    {
+        m_structuralEditEpoch.fetch_add(1, std::memory_order_relaxed);
+        m_structuralDebouncer.pending = true;
+        m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
+    }
+
+    uint64_t Document::structuralEditEpoch() const
+    {
+        return m_structuralEditEpoch.load(std::memory_order_relaxed);
+    }
+
+    bool Document::dispatchStructuralUpdateIfReady()
+    {
+        if (!m_structuralDebouncer.pending)
+        {
+            return false;
+        }
+
+        auto const now = std::chrono::steady_clock::now();
+        auto const elapsed = now - m_structuralDebouncer.lastEditTime;
+        if (elapsed < m_structuralDebouncer.debounceDelay)
+        {
+            return false;
+        }
+
+        m_structuralDebouncer.pending = false;
+        dispatchStructuralUpdate();
+        return true;
+    }
+
+    void Document::dispatchStructuralUpdate()
+    {
+        if (refreshModelIfNoCompilationIsRunning())
+        {
+            // Compilation was launched successfully.
+            return;
+        }
+        // A compilation is already in progress — re-arm the debouncer so we
+        // retry on the next frame once the current run finishes.
+        m_structuralDebouncer.pending = true;
+        m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
+    }
+
+    void Document::processStructuralUpdateResult()
+    {
+        // Currently a no-op. The existing refreshWorker() pipeline applies
+        // results directly to Document members. This hook exists so that
+        // future snapshot-based isolation can publish results through a
+        // thread-safe slot without changing the call-site in MainWindow.
     }
 }
