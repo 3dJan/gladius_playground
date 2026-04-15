@@ -2478,17 +2478,14 @@ namespace gladius::ui
             return;
         }
 
-        // Process any completed structural update result first.
-        if (m_doc)
-        {
-            m_doc->processStructuralUpdateResult();
-        }
-
         // Dispatch debounced structural edits to the background worker.
         if (m_doc && m_doc->dispatchStructuralUpdateIfReady())
         {
             // A compilation was launched — mirror the side-effects of refreshModel().
-            m_logger->clear();
+            if (m_logger)
+            {
+                m_logger->clear();
+            }
             m_renderWindow.invalidateViewDuetoModelUpdate();
             m_renderWindow.invalidateView();
         }

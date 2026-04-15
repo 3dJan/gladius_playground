@@ -32,9 +32,10 @@ namespace gladius
     using StructuralEditEpoch = std::atomic<uint64_t>;
 
     /// Controls debounce timing for structural edit dispatch.
+    /// All members are accessed on the UI thread only.
     struct StructuralEditDebouncer
     {
-        bool pending{false};
+        std::atomic<bool> pending{false};
         std::chrono::steady_clock::time_point lastEditTime{};
         std::chrono::milliseconds debounceDelay{50};
     };
@@ -135,13 +136,8 @@ namespace gladius
 
         /// Dispatch the background structural update if the debounce window has elapsed.
         /// Call this once per frame from the main loop.
-        /// @return true if a compilation was launched.
+        /// @return true if a compilation was actually launched.
         bool dispatchStructuralUpdateIfReady();
-
-        /// Consume a completed background structural update result.
-        /// Applies the updated assembly types and validation to the live assembly.
-        /// Call this once per frame from the main loop.
-        void processStructuralUpdateResult();
 
         /// @return Current structural edit epoch value.
         [[nodiscard]] uint64_t structuralEditEpoch() const;
@@ -442,7 +438,8 @@ namespace gladius
         void refreshWorker();
 
         /// Dispatch a structural update via the existing refresh pipeline.
-        void dispatchStructuralUpdate();
+        /// @return true if a compilation was launched, false if one was already running.
+        bool dispatchStructuralUpdate();
 
         void updateMemoryOffsets();
 

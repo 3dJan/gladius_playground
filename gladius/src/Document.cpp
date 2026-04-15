@@ -164,10 +164,10 @@ namespace gladius
         // Capture the structural edit epoch at the start of this worker run.
         // If a new structural edit arrives while we're working, the epoch will
         // differ and we can exit early instead of completing stale work.
-        auto const startEpoch = m_structuralEditEpoch.load(std::memory_order_relaxed);
+        auto const startEpoch = m_structuralEditEpoch.load(std::memory_order_acquire);
         auto const isStale = [this, startEpoch]()
         {
-            return m_structuralEditEpoch.load(std::memory_order_relaxed) != startEpoch;
+            return m_structuralEditEpoch.load(std::memory_order_acquire) != startEpoch;
         };
 
         // Validate early: skip expensive compilation if model is in an invalid
@@ -214,6 +214,14 @@ namespace gladius
         {
             if (isStale())
             {
+                // Wait for the in-flight GPU compile to finish so ModelState
+                // stays consistent. The GPU work is already submitted — waiting
+                // here avoids signalling "finished" while programs are still
+                // being compiled by the driver.
+                while (m_core->isCompilationInProgress())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
                 meshResourceState->signalCompilationFinished();
                 return;
             }
@@ -2088,19 +2096,19 @@ namespace gladius
 
     void Document::signalStructuralEdit()
     {
-        m_structuralEditEpoch.fetch_add(1, std::memory_order_relaxed);
-        m_structuralDebouncer.pending = true;
+        m_structuralEditEpoch.fetch_add(1, std::memory_order_release);
+        m_structuralDebouncer.pending.store(true, std::memory_order_relaxed);
         m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
     }
 
     uint64_t Document::structuralEditEpoch() const
     {
-        return m_structuralEditEpoch.load(std::memory_order_relaxed);
+        return m_structuralEditEpoch.load(std::memory_order_acquire);
     }
 
     bool Document::dispatchStructuralUpdateIfReady()
     {
-        if (!m_structuralDebouncer.pending)
+        if (!m_structuralDebouncer.pending.load(std::memory_order_relaxed))
         {
             return false;
         }
@@ -2112,29 +2120,20 @@ namespace gladius
             return false;
         }
 
-        m_structuralDebouncer.pending = false;
-        dispatchStructuralUpdate();
-        return true;
+        m_structuralDebouncer.pending.store(false, std::memory_order_relaxed);
+        return dispatchStructuralUpdate();
     }
 
-    void Document::dispatchStructuralUpdate()
+    bool Document::dispatchStructuralUpdate()
     {
         if (refreshModelIfNoCompilationIsRunning())
         {
-            // Compilation was launched successfully.
-            return;
+            return true;
         }
         // A compilation is already in progress — re-arm the debouncer so we
         // retry on the next frame once the current run finishes.
-        m_structuralDebouncer.pending = true;
+        m_structuralDebouncer.pending.store(true, std::memory_order_relaxed);
         m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
-    }
-
-    void Document::processStructuralUpdateResult()
-    {
-        // Currently a no-op. The existing refreshWorker() pipeline applies
-        // results directly to Document members. This hook exists so that
-        // future snapshot-based isolation can publish results through a
-        // thread-safe slot without changing the call-site in MainWindow.
+        return false;
     }
 }

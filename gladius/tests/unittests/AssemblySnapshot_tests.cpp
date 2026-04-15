@@ -19,6 +19,8 @@ namespace gladius_tests
             m_original->assemblyModel()->createValidVoid();
         }
 
+        static auto constexpr UNUSED_MODEL_ID_A = 999;
+        static auto constexpr UNUSED_MODEL_ID_B = 998;
         SharedAssembly m_original;
     };
 
@@ -37,7 +39,7 @@ namespace gladius_tests
         auto const snapshotModelCount = snapshot->getFunctions().size();
 
         // Add a new model to the original.
-        m_original->addModelIfNotExisting(999);
+        m_original->addModelIfNotExisting(UNUSED_MODEL_ID_A);
 
         // The snapshot must NOT see the new model.
         EXPECT_EQ(snapshot->getFunctions().size(), snapshotModelCount);
@@ -50,7 +52,7 @@ namespace gladius_tests
         auto const originalModelCount = m_original->getFunctions().size();
 
         // Add a new model to the snapshot.
-        snapshot->addModelIfNotExisting(998);
+        snapshot->addModelIfNotExisting(UNUSED_MODEL_ID_B);
 
         // The original must NOT see the new model.
         EXPECT_EQ(m_original->getFunctions().size(), originalModelCount);

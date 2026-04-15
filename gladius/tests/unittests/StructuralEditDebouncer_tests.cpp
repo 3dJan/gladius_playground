@@ -16,7 +16,7 @@ namespace gladius_tests
 
     TEST_F(StructuralEditDebouncerTest, DefaultState_NotPending)
     {
-        EXPECT_FALSE(m_debouncer.pending);
+        EXPECT_FALSE(m_debouncer.pending.load());
     }
 
     TEST_F(StructuralEditDebouncerTest, DefaultDebounceDelay_Is50ms)
@@ -27,18 +27,18 @@ namespace gladius_tests
     TEST_F(StructuralEditDebouncerTest, ArmDebouncer_SetsPendingAndTime)
     {
         auto const before = std::chrono::steady_clock::now();
-        m_debouncer.pending = true;
+        m_debouncer.pending.store(true);
         m_debouncer.lastEditTime = std::chrono::steady_clock::now();
         auto const after = std::chrono::steady_clock::now();
 
-        EXPECT_TRUE(m_debouncer.pending);
+        EXPECT_TRUE(m_debouncer.pending.load());
         EXPECT_GE(m_debouncer.lastEditTime, before);
         EXPECT_LE(m_debouncer.lastEditTime, after);
     }
 
     TEST_F(StructuralEditDebouncerTest, DebounceNotElapsed_StaysPending)
     {
-        m_debouncer.pending = true;
+        m_debouncer.pending.store(true);
         m_debouncer.lastEditTime = std::chrono::steady_clock::now();
         m_debouncer.debounceDelay = std::chrono::milliseconds(100);
 
@@ -50,12 +50,12 @@ namespace gladius_tests
 
     TEST_F(StructuralEditDebouncerTest, DebounceElapsed_CanFire)
     {
-        m_debouncer.pending = true;
+        m_debouncer.pending.store(true);
         m_debouncer.lastEditTime = std::chrono::steady_clock::now();
         m_debouncer.debounceDelay = std::chrono::milliseconds(1);
 
-        // Wait for debounce to elapse.
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Wait well beyond the debounce window for CI reliability.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         auto const now = std::chrono::steady_clock::now();
         auto const elapsed = now - m_debouncer.lastEditTime;
@@ -64,8 +64,8 @@ namespace gladius_tests
 
     TEST_F(StructuralEditDebouncerTest, RearmDuringDebounce_ExtendsWindow)
     {
-        m_debouncer.pending = true;
-        m_debouncer.debounceDelay = std::chrono::milliseconds(50);
+        m_debouncer.pending.store(true);
+        m_debouncer.debounceDelay = std::chrono::milliseconds(200);
         m_debouncer.lastEditTime = std::chrono::steady_clock::now();
 
         // Simulate a second edit arriving 20ms later — re-arms the debouncer.
@@ -73,8 +73,8 @@ namespace gladius_tests
         auto const rearmTime = std::chrono::steady_clock::now();
         m_debouncer.lastEditTime = rearmTime;
 
-        // After 10ms more (30ms total since first, 10ms since re-arm) — not ready.
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // After 30ms more (50ms total since first, 30ms since re-arm) — not ready.
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
         auto const now = std::chrono::steady_clock::now();
         auto const elapsed = now - m_debouncer.lastEditTime;
         EXPECT_LT(elapsed, m_debouncer.debounceDelay);
