@@ -12,6 +12,8 @@
 
 namespace gladius::io
 {
+    class ResourceDependencyGraph;
+
     /// @brief Metadata stored at model level in a 3MF library file.
     ///
     /// The `libraryFunctions` field contains semicolon-separated model resource IDs
@@ -89,6 +91,11 @@ namespace gladius::io
     computeSelectiveImportClosure(Lib3MF::PModel sourceModel,
                                   std::vector<Lib3MF_uint32> const & taggedModelResourceIds,
                                   events::SharedLogger logger);
+
+    /// @brief Overload that reuses an already-built ResourceDependencyGraph.
+    [[nodiscard]] std::optional<std::unordered_set<Lib3MF_uint32>>
+    computeSelectiveImportClosure(ResourceDependencyGraph const & depGraph,
+                                  std::vector<Lib3MF_uint32> const & taggedModelResourceIds);
 
     /// @brief Prepares a pruned copy of a library file for selective import.
     ///

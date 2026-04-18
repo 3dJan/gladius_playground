@@ -197,21 +197,30 @@ namespace gladius::io
         ResourceDependencyGraph depGraph(sourceModel, logger);
         depGraph.buildGraph();
 
+        return computeSelectiveImportClosure(depGraph, taggedModelResourceIds);
+    }
+
+    std::optional<std::unordered_set<Lib3MF_uint32>>
+    computeSelectiveImportClosure(ResourceDependencyGraph const & depGraph,
+                                  std::vector<Lib3MF_uint32> const & taggedModelResourceIds)
+    {
+        if (taggedModelResourceIds.empty())
+        {
+            return std::nullopt;
+        }
+
         std::unordered_set<Lib3MF_uint32> closure;
 
         for (auto const taggedModelId : taggedModelResourceIds)
         {
-            // Find the resource with this model resource ID
             auto resource = depGraph.getResourceById(taggedModelId);
             if (!resource)
             {
-                // Tagged ID does not exist — fall back to full merge
                 return std::nullopt;
             }
 
             closure.insert(resource->GetModelResourceID());
 
-            // Add transitive dependencies
             auto deps = depGraph.getAllRequiredResources(resource);
             for (auto const & dep : deps)
             {
@@ -248,8 +257,11 @@ namespace gladius::io
                 return std::nullopt;
             }
 
-            // 3. Compute transitive dependency closure.
-            auto closure = computeSelectiveImportClosure(sourceModel, taggedIds, logger);
+            // 3. Compute transitive dependency closure (reuses the graph for step 4).
+            ResourceDependencyGraph depGraph(sourceModel, logger);
+            depGraph.buildGraph();
+
+            auto closure = computeSelectiveImportClosure(depGraph, taggedIds);
             if (!closure.has_value())
             {
                 return std::nullopt;
@@ -257,8 +269,6 @@ namespace gladius::io
 
             // 4. Expand closure with build items that depend on tagged functions
             //    (keeps the example levelset / mesh chain).
-            ResourceDependencyGraph depGraph(sourceModel, logger);
-            depGraph.buildGraph();
 
             // Find build items whose object transitively depends on a tagged function.
             std::vector<Lib3MF::PBuildItem> buildItemsToRemove;

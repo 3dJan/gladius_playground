@@ -2048,7 +2048,7 @@ namespace gladius::io
         merge(modelToMergeFrom, filename, doc);
     }
 
-    void Importer3mf::merge(Lib3MF::PModel modelToMergeFrom,
+    void Importer3mf::merge(Lib3MF::PModel const & modelToMergeFrom,
                              std::filesystem::path const & sourceFilename,
                              Document & doc)
     {
@@ -2059,7 +2059,7 @@ namespace gladius::io
         }
 
         auto core = doc.getCore();
-        auto computenToken = core->waitForComputeToken();
+        auto computeToken = core->waitForComputeToken();
 
         try
         {
@@ -2138,8 +2138,8 @@ namespace gladius::io
             {
                 m_eventLogger->addEvent(
                   {fmt::format("Error #{} while merging 3mf file {}: {}",
-                               sourceFilename.string(),
                                e.getErrorCode(),
+                               sourceFilename.string(),
                                e.what()),
                    events::Severity::Error});
             }
@@ -2174,7 +2174,7 @@ namespace gladius::io
         importer.merge(filename, doc);
     }
 
-    void mergeModelInto3mfDoc(Lib3MF::PModel sourceModel,
+    void mergeModelInto3mfDoc(Lib3MF::PModel const & sourceModel,
                               std::filesystem::path const & sourceFilename,
                               Document & doc)
     {

@@ -865,7 +865,6 @@ namespace gladius
             if (prunedModel.has_value())
             {
                 io::mergeModelInto3mfDoc(*prunedModel, filename, *this);
-                m_primitiveDateNeedsUpdate = true;
             }
             else
             {
@@ -876,6 +875,7 @@ namespace gladius
         {
             mergeImpl(filename);
         }
+        m_primitiveDateNeedsUpdate = true;
 
         if (!m_assembly)
         {
