@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iostream>
 #include <string>
+#include <tracy/Tracy.hpp>
 
 namespace gladius::nodes
 {
@@ -643,6 +644,7 @@ namespace gladius::nodes
         {
             if (m_graphRequiresUpdate)
             {
+                ZoneScopedN("RebuildGraph");
                 buildGraph();
                 m_outputOrder = topologicalSort(m_graph);
                 m_graphRequiresUpdate = false;
@@ -935,6 +937,7 @@ namespace gladius::nodes
 
     graph::AdjacencyListDirectedGraph & Model::buildGraph()
     {
+        ZoneScopedN("BuildGraph");
         m_allInputReferencesAreValid = false;
         m_graph = graph::AdjacencyListDirectedGraph(m_lastId);
 

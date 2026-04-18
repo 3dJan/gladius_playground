@@ -407,7 +407,7 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar();
-        if (core.isSlicingInProgress() || core.isAnyCompilationInProgress())
+        if (core.isSlicingInProgress() || core.isAnyCompilationInProgressNonBlocking())
         {
             view.startAnimationMode();
             ImGuiWindowFlags window_flags =

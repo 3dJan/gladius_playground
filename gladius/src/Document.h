@@ -134,6 +134,9 @@ namespace gladius
         /// Increments the edit epoch and arms the debouncer for background dispatch.
         void signalStructuralEdit();
 
+        /// @return true if a structural edit is pending dispatch (debouncer armed).
+        [[nodiscard]] bool hasStructuralEditPending() const;
+
         /// Dispatch the background structural update if the debounce window has elapsed.
         /// Call this once per frame from the main loop.
         /// @return true if a compilation was actually launched.

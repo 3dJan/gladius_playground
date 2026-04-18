@@ -42,6 +42,7 @@
 #include <nodes/Assembly.h>
 #include <nodes/FunctionDeduplicator.h>
 #include <nodes/Model.h>
+#include <tracy/Tracy.hpp>
 
 namespace gladius::ui
 {
@@ -1590,10 +1591,16 @@ namespace gladius::ui
                 }
 
                 // VALIDATION ISSUES OVERLAY (collapsible)
-                // Validate on demand - only when graph has changed (dirty flag)
+                // Validate on demand - only when graph has changed (dirty flag).
+                // Skip validation while structural edits are pending — the graph is
+                // about to be recompiled so validation results would be immediately stale.
                 if (m_doc != nullptr)
                 {
-                    m_doc->validateAssemblyIfDirty(nodes::ValidationContext::Interactive);
+                    if (!m_doc->hasStructuralEditPending())
+                    {
+                        ZoneScopedN("ValidateAssemblyIfDirty");
+                        m_doc->validateAssemblyIfDirty(nodes::ValidationContext::Interactive);
+                    }
                     m_validationOverlay.render(m_doc->getIssueList());
                 }
 
@@ -1712,6 +1719,7 @@ namespace gladius::ui
                     m_nodeViewVisitor.setExportState(m_exportState);
                     if (m_currentModel)
                     {
+                        ZoneScopedN("VisitNodes");
                         m_currentModel->visitNodes(m_nodeViewVisitor);
 
                         // Update node groups after nodes are rendered and positioned

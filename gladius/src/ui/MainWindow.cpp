@@ -2535,7 +2535,11 @@ namespace gladius::ui
 
         if (m_modelEditor.isCompileRequested() && m_core->isRendererReady())
         {
-            refreshModel();
+            // Route manual compile requests through the debouncer instead of
+            // calling refreshModel() directly, which would bypass the async
+            // structural-edit pipeline and block the UI thread.
+            m_doc->signalStructuralEdit();
+            m_modelEditor.markModelAsUpToDate();
         }
 
         if (m_core->getSlicerProgram()->isCompilationInProgress() ||

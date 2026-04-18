@@ -3,6 +3,7 @@
 #include "DerivedNodes.h"
 #include "graph/GraphAlgorithms.h"
 #include <fmt/format.h>
+#include <tracy/Tracy.hpp>
 
 namespace gladius::nodes
 {
@@ -28,6 +29,7 @@ namespace gladius::nodes
 
     bool Validator::validate(Assembly & assembly, IssueList & issueList)
     {
+        ZoneScopedN("ValidateAssembly");
         m_errors.clear();
         issueList.clear();
 
@@ -58,6 +60,7 @@ namespace gladius::nodes
 
     void Validator::validateModel(Model & model, Assembly & assembly, IssueList & issueList)
     {
+        ZoneScopedN("ValidateModel");
         model.updateGraphAndOrderIfNeeded();
         model.updateTypes();
 

@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <tracy/Tracy.hpp>
 #include <utility>
 
 #include <cmrc/cmrc.hpp>
@@ -2032,6 +2033,7 @@ namespace gladius
         {
             return !m_issueList.hasErrors();
         }
+        ZoneScopedN("ValidateAssemblyIfDirty");
         m_validationDirty = false;
         return validateAssembly(context);
     }
@@ -2099,6 +2101,11 @@ namespace gladius
         m_structuralEditEpoch.fetch_add(1, std::memory_order_release);
         m_structuralDebouncer.pending.store(true, std::memory_order_relaxed);
         m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
+    }
+
+    bool Document::hasStructuralEditPending() const
+    {
+        return m_structuralDebouncer.pending.load(std::memory_order_relaxed);
     }
 
     uint64_t Document::structuralEditEpoch() const

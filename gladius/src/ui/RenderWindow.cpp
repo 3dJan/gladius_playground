@@ -454,7 +454,7 @@ namespace gladius::ui
             overflow.end();
 
             // Compilation status indicator
-            if (m_core->isAnyCompilationInProgress())
+            if (m_core->isAnyCompilationInProgressNonBlocking())
             {
                 ImGui::TextUnformatted("Compilation in progress");
             }
@@ -569,7 +569,7 @@ namespace gladius::ui
         // Show progress indicator only during actual kernel compilation
         // (not during parameter changes which just update SDF/bounding box)
         bool const showBusyIndicator = !m_core->isRendererReady() 
-            || m_core->isAnyCompilationInProgress();
+            || m_core->isAnyCompilationInProgressNonBlocking();
         if (showBusyIndicator)
         {
             m_view->startAnimationMode();
@@ -1197,7 +1197,7 @@ namespace gladius::ui
             processAsyncPreviewResults();
         }
 
-        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgress())
+        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgressNonBlocking())
         {
             m_view->startAnimationMode();
             state.isRendering = false;
@@ -1432,7 +1432,7 @@ namespace gladius::ui
         auto constexpr tolerance_ms = 1;
         auto constexpr targetFrameTime_ms = 25; // Target ~40 FPS during interaction
         float error = targetFrameTime_ms - executionDuration_ms;
-        if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgress()) &&
+        if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgressNonBlocking()) &&
             executionDuration_ms > 0 && fabs(error) > 0)
         {
             state.fpsIntegral *= 0.8f;
@@ -1445,7 +1445,7 @@ namespace gladius::ui
             state.renderQualityWhileMoving =
               std::clamp(state.renderQualityWhileMoving, 0.05f, state.renderQuality);
         }
-        if (!state.isMoving && !m_core->isAnyCompilationInProgress() && executionDuration_ms > 0)
+        if (!state.isMoving && !m_core->isAnyCompilationInProgressNonBlocking() && executionDuration_ms > 0)
         {
             if (executionDuration_ms > progressiveTargetRenderTime_ms + tolerance_ms)
             {
@@ -2299,7 +2299,7 @@ namespace gladius::ui
         auto constexpr progressiveTargetRenderTime_ms = 100.0f;
         auto constexpr tolerance_ms = 1.0f;
 
-        if (state.isMoving || m_core->isAnyCompilationInProgress())
+        if (state.isMoving || m_core->isAnyCompilationInProgressNonBlocking())
         {
             return;
         }
