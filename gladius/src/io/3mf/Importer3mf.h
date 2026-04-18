@@ -56,6 +56,13 @@ namespace gladius::io
         void load(std::filesystem::path const & filename, Document & doc);
 
         void merge(std::filesystem::path const & filename, Document & doc);
+
+        /// Merge a pre-loaded model into the document.
+        /// Use this when the source model has already been pruned (e.g. selective import).
+        void merge(Lib3MF::PModel sourceModel,
+                   std::filesystem::path const & sourceFilename,
+                   Document & doc);
+
         [[nodiscard]] Lib3MF::PWrapper get3mfWrapper() const;
 
         /**
@@ -244,4 +251,9 @@ namespace gladius::io
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);
     void mergeFrom3mfFile(std::filesystem::path filename, Document & doc);
+
+    /// Merge a pre-loaded (potentially pruned) model into the document.
+    void mergeModelInto3mfDoc(Lib3MF::PModel sourceModel,
+                              std::filesystem::path const & sourceFilename,
+                              Document & doc);
 }

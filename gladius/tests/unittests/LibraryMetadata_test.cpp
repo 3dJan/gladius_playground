@@ -375,4 +375,142 @@ namespace gladius_tests
         std::filesystem::remove(outputPath);
     }
 
+    // =========================================================================
+    // pruneSourceForImport tests
+    // =========================================================================
+
+    class PruneSourceForImport_Test : public ::testing::Test
+    {
+      protected:
+        void SetUp() override
+        {
+            m_wrapper = Lib3MF::CWrapper::loadLibrary();
+            m_model = m_wrapper->CreateModel();
+
+            // Create two independent functions: FuncA (tagged) and FuncUnrelated.
+            m_funcUnrelated = m_model->AddImplicitFunction();
+            m_funcUnrelated->SetDisplayName("Unrelated");
+            m_funcUnrelated->AddInput("pos", "position", Lib3MF::eImplicitPortType::Vector);
+            m_funcUnrelated->AddOutput("shape", "output", Lib3MF::eImplicitPortType::Scalar);
+
+            m_funcHelper = m_model->AddImplicitFunction();
+            m_funcHelper->SetDisplayName("Helper");
+            m_funcHelper->AddInput("pos", "position", Lib3MF::eImplicitPortType::Vector);
+            m_funcHelper->AddOutput("shape", "output", Lib3MF::eImplicitPortType::Scalar);
+
+            m_funcA = m_model->AddImplicitFunction();
+            m_funcA->SetDisplayName("FuncA");
+            m_funcA->AddInput("pos", "position", Lib3MF::eImplicitPortType::Vector);
+            m_funcA->AddOutput("shape", "output", Lib3MF::eImplicitPortType::Scalar);
+            // FuncA depends on Helper via a ResourceIdNode.
+            auto resIdNode = m_funcA->AddResourceIdNode("ref_helper", "Reference to Helper", "");
+            resIdNode->SetResource(m_funcHelper.get());
+
+            m_tempDir = std::filesystem::temp_directory_path();
+        }
+
+        /// Write the model with metadata to a temp file and return the path.
+        std::filesystem::path writeLibraryFile(std::string const & name,
+                                               Lib3MF_uint32 taggedId)
+        {
+            auto const path = m_tempDir / name;
+
+            LibraryMetadata metadata;
+            metadata.libraryFunctions = serializeResourceIds({taggedId});
+            metadata.libraryDescription = "test";
+            writeLibraryMetadata(m_model, metadata);
+
+            auto writer = m_model->QueryWriter("3mf");
+            writer->WriteToFile(path.string());
+
+            removeLibraryMetadata(m_model);
+            return path;
+        }
+
+        Lib3MF::PWrapper m_wrapper;
+        Lib3MF::PModel m_model;
+        Lib3MF::PImplicitFunction m_funcUnrelated;
+        Lib3MF::PImplicitFunction m_funcHelper;
+        Lib3MF::PImplicitFunction m_funcA;
+        std::filesystem::path m_tempDir;
+    };
+
+    TEST_F(PruneSourceForImport_Test,
+           PruneSourceForImport_WithTaggedFunction_RemovesUnrelated)
+    {
+        auto const path = writeLibraryFile(
+          "prune_test_removes_unrelated.3mf", m_funcA->GetModelResourceID());
+
+        auto result = pruneSourceForImport(path, nullptr);
+        ASSERT_TRUE(result.has_value());
+
+        // The pruned model should contain FuncA and Helper but NOT Unrelated.
+        auto prunedModel = *result;
+        auto funcIter = prunedModel->GetFunctions();
+
+        std::set<std::string> functionNames;
+        while (funcIter->MoveNext())
+        {
+            functionNames.insert(funcIter->GetCurrentFunction()->GetDisplayName());
+        }
+
+        EXPECT_TRUE(functionNames.count("FuncA") > 0) << "Tagged function should be kept";
+        EXPECT_TRUE(functionNames.count("Helper") > 0) << "Dependency should be kept";
+        EXPECT_TRUE(functionNames.count("Unrelated") == 0)
+          << "Unrelated function should be pruned";
+
+        std::filesystem::remove(path);
+    }
+
+    TEST_F(PruneSourceForImport_Test,
+           PruneSourceForImport_WithNoMetadata_ReturnsNullopt)
+    {
+        // Write a file without library metadata.
+        auto const path = m_tempDir / "prune_test_no_metadata.3mf";
+        {
+            auto writer = m_model->QueryWriter("3mf");
+            writer->WriteToFile(path.string());
+        }
+
+        auto result = pruneSourceForImport(path, nullptr);
+        EXPECT_FALSE(result.has_value()) << "Should fall back when no metadata";
+
+        std::filesystem::remove(path);
+    }
+
+    TEST_F(PruneSourceForImport_Test,
+           PruneSourceForImport_WithNonexistentFile_ReturnsNullopt)
+    {
+        auto result = pruneSourceForImport("/tmp/nonexistent_library_file.3mf", nullptr);
+        EXPECT_FALSE(result.has_value()) << "Should fall back on read error";
+    }
+
+    TEST_F(PruneSourceForImport_Test,
+           PruneSourceForImport_PrunedModelCanBeMergedIntoFreshModel)
+    {
+        auto const path = writeLibraryFile(
+          "prune_test_mergeable.3mf", m_funcA->GetModelResourceID());
+
+        auto result = pruneSourceForImport(path, nullptr);
+        ASSERT_TRUE(result.has_value());
+
+        // Create a fresh target model and merge the pruned model into it.
+        auto targetModel = m_wrapper->CreateModel();
+        EXPECT_NO_THROW(targetModel->MergeFromModel(result->get()));
+
+        // Verify the merged model has the expected functions.
+        auto funcIter = targetModel->GetFunctions();
+        std::set<std::string> functionNames;
+        while (funcIter->MoveNext())
+        {
+            functionNames.insert(funcIter->GetCurrentFunction()->GetDisplayName());
+        }
+
+        EXPECT_TRUE(functionNames.count("FuncA") > 0);
+        EXPECT_TRUE(functionNames.count("Helper") > 0);
+        EXPECT_TRUE(functionNames.count("Unrelated") == 0);
+
+        std::filesystem::remove(path);
+    }
+
 } // namespace gladius_tests

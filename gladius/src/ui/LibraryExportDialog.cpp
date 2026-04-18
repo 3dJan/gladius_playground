@@ -356,10 +356,9 @@ namespace gladius::ui
             auto const & selectedFunc = m_functions[m_selectedFunctionIndex];
 
             // 1. Stamp library metadata on the source model before serialization.
-            //    We export the full model (no pruning) because lib3mf's
-            //    RemoveResource breaks internal state on models with cross-function
-            //    ResourceIdNode references. Selective import at merge time already
-            //    prunes correctly using the metadata tags.
+            //    We export the full model (no pruning on the live model) and prune
+            //    the written file afterwards. Selective import at merge time also
+            //    prunes the source via an in-memory round-trip before merging.
             std::vector<Lib3MF_uint32> taggedIds;
             taggedIds.push_back(
               static_cast<Lib3MF_uint32>(selectedFunc.resourceId));

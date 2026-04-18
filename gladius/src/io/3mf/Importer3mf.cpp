@@ -2022,9 +2022,6 @@ namespace gladius::io
             return;
         }
 
-        auto core = doc.getCore();
-        auto computenToken = core->waitForComputeToken();
-
         auto const modelToMergeFrom = m_wrapper->CreateModel();
         auto const reader = modelToMergeFrom->QueryReader("3mf");
 
@@ -2048,18 +2045,24 @@ namespace gladius::io
         }
 
         logWarnings(filename, reader);
+        merge(modelToMergeFrom, filename, doc);
+    }
+
+    void Importer3mf::merge(Lib3MF::PModel modelToMergeFrom,
+                             std::filesystem::path const & sourceFilename,
+                             Document & doc)
+    {
+        ProfileFunction auto targetModel = doc.get3mfModel();
+        if (!targetModel)
+        {
+            return;
+        }
+
+        auto core = doc.getCore();
+        auto computenToken = core->waitForComputeToken();
 
         try
         {
-            // NOTE: Selective import pruning is intentionally disabled here.
-            // Library files carry gladius:library-functions metadata that identifies
-            // which functions to import, but pruning the source model before merge
-            // requires lib3mf's RemoveResource, which corrupts internal state on
-            // models with cross-function ResourceIdNode references.
-            // The metadata is still used by the drag-and-drop handler
-            // (ModelEditor::handleLibraryDrop) to identify which function to
-            // create a FunctionCall node for.
-
             // backup the list of function ids
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions
@@ -2080,7 +2083,8 @@ namespace gladius::io
             if (m_eventLogger)
             {
                 m_eventLogger->addEvent(
-                  {fmt::format("Merge: MergeFromModel succeeded for {}", filename.string()),
+                  {fmt::format("Merge: MergeFromModel succeeded for {}",
+                               sourceFilename.string()),
                    events::Severity::Info});
             }
 
@@ -2100,11 +2104,12 @@ namespace gladius::io
 
             } while (numDuplicatesPrevious != numDuplicatesCurrent);
 
-            // NOTE: We intentionally do NOT call RemoveResource on duplicate functions.
-            // lib3mf's RemoveResource corrupts internal state on models with
-            // cross-function ResourceIdNode references. The duplicates are already
-            // harmless: references have been redirected by replaceDuplicatedFunctionReferences,
-            // and loadImplicitFunctionsFiltered skips loading them into the Document.
+            // NOTE: We intentionally do NOT call RemoveResource on duplicate functions
+            // in the live target model. lib3mf's RemoveResource corrupts internal state
+            // on models with cross-function ResourceIdNode references. The duplicates
+            // are harmless: references have been redirected by
+            // replaceDuplicatedFunctionReferences, and loadImplicitFunctionsFiltered
+            // skips loading them into the Document.
 
             if (m_eventLogger)
             {
@@ -2114,7 +2119,7 @@ namespace gladius::io
                    events::Severity::Info});
             }
 
-            loadImageStacks(filename, targetModel, doc);
+            loadImageStacks(sourceFilename, targetModel, doc);
             loadImplicitFunctionsFiltered(targetModel, doc, duplicates);
 
             if (m_eventLogger)
@@ -2131,11 +2136,12 @@ namespace gladius::io
         {
             if (m_eventLogger)
             {
-                m_eventLogger->addEvent({fmt::format("Error #{} while merging 3mf file {}: {}",
-                                                     filename.string(),
-                                                     e.getErrorCode(),
-                                                     e.what()),
-                                         events::Severity::Error});
+                m_eventLogger->addEvent(
+                  {fmt::format("Error #{} while merging 3mf file {}: {}",
+                               sourceFilename.string(),
+                               e.getErrorCode(),
+                               e.what()),
+                   events::Severity::Error});
             }
         }
         catch (std::exception const & e)
@@ -2143,7 +2149,9 @@ namespace gladius::io
             if (m_eventLogger)
             {
                 m_eventLogger->addEvent(
-                  {fmt::format("Error while merging 3mf file {}: {}", filename.string(), e.what()),
+                  {fmt::format("Error while merging 3mf file {}: {}",
+                               sourceFilename.string(),
+                               e.what()),
                    events::Severity::Error});
             }
         }
@@ -2164,5 +2172,13 @@ namespace gladius::io
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
         importer.merge(filename, doc);
+    }
+
+    void mergeModelInto3mfDoc(Lib3MF::PModel sourceModel,
+                              std::filesystem::path const & sourceFilename,
+                              Document & doc)
+    {
+        ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.merge(sourceModel, sourceFilename, doc);
     }
 } // namespace gladius::io

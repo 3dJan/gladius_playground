@@ -4,6 +4,7 @@
 
 #include <lib3mf_implicit.hpp>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -89,18 +90,21 @@ namespace gladius::io
                                   std::vector<Lib3MF_uint32> const & taggedModelResourceIds,
                                   events::SharedLogger logger);
 
-    /// @brief Removes resources from a model that are outside the import closure.
+    /// @brief Prepares a pruned copy of a library file for selective import.
     ///
-    /// Removes all build items and any implicit functions / FunctionFromImage3D
-    /// resources whose model resource ID is not in the provided closure set.
-    /// Mesh objects referenced only by removed build items can be cleaned up
-    /// separately via lib3mf's unused resource removal.
+    /// Reads the file, extracts library metadata, computes the transitive dependency
+    /// closure for the tagged functions, removes everything else, and returns a clean
+    /// model via an in-memory serialize/deserialize round-trip. The round-trip ensures
+    /// no dangling ResourceIdNode references survive from the pruning step.
     ///
-    /// @param model The 3MF model to prune.
-    /// @param closureModelResourceIds Set of model resource IDs to keep.
-    /// @return true if pruning was successful, false on error.
-    [[nodiscard]] bool pruneModelForSelectiveImport(
-      Lib3MF::PModel model,
-      std::unordered_set<Lib3MF_uint32> const & closureModelResourceIds);
+    /// If the file has no library metadata or pruning fails, returns std::nullopt so
+    /// the caller can fall back to a full-file merge.
+    ///
+    /// @param filePath  Path to the .3mf library file.
+    /// @param logger    Logger for warnings and errors (may be nullptr).
+    /// @return A pruned model ready for MergeFromModel, or std::nullopt.
+    [[nodiscard]] std::optional<Lib3MF::PModel>
+    pruneSourceForImport(std::filesystem::path const & filePath,
+                         events::SharedLogger logger);
 
 } // namespace gladius::io

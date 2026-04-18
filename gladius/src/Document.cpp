@@ -15,6 +15,7 @@
 #include "io/3mf/BeamLatticeExporter.h"
 #include "io/3mf/ImageExtractor.h"
 #include "io/3mf/ImageStackCreator.h"
+#include "io/3mf/LibraryMetadata.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
@@ -856,7 +857,25 @@ namespace gladius
             }
         }
 
-        mergeImpl(filename);
+        // Try selective import: prune the source to only the tagged function
+        // and its transitive dependencies before merging.
+        if (filename.extension() == ".3mf")
+        {
+            auto prunedModel = io::pruneSourceForImport(filename, getSharedLogger());
+            if (prunedModel.has_value())
+            {
+                io::mergeModelInto3mfDoc(*prunedModel, filename, *this);
+                m_primitiveDateNeedsUpdate = true;
+            }
+            else
+            {
+                mergeImpl(filename);
+            }
+        }
+        else
+        {
+            mergeImpl(filename);
+        }
 
         if (!m_assembly)
         {

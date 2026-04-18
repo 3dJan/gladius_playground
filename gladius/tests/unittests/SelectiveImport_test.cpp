@@ -5,6 +5,7 @@
 #include <lib3mf_implicit.hpp>
 
 #include <algorithm>
+#include <filesystem>
 
 namespace gladius_tests
 {
@@ -183,22 +184,61 @@ namespace gladius_tests
         EXPECT_FALSE(closure.has_value()) << "Should return nullopt for empty tag list";
     }
 
-    // ---- pruneModelForSelectiveImport tests ----
+    // ---- pruneSourceForImport tests ----
 
-    TEST_F(SelectiveImport_Test, PruneModel_WithClosure_RemovesNonClosureResources)
+    /// Helper: writes a model with library metadata to a temp file.
+    static std::filesystem::path writeTestLibraryFile(
+      Lib3MF::PModel model,
+      std::string const & name,
+      Lib3MF_uint32 taggedId)
+    {
+        auto const path = std::filesystem::temp_directory_path() / name;
+        io::LibraryMetadata metadata;
+        metadata.libraryFunctions = io::serializeResourceIds({taggedId});
+        metadata.libraryDescription = "test";
+        io::writeLibraryMetadata(model, metadata);
+
+        auto writer = model->QueryWriter("3mf");
+        writer->WriteToFile(path.string());
+
+        io::removeLibraryMetadata(model);
+        return path;
+    }
+
+    /// Helper: writes a model with multiple tagged IDs.
+    static std::filesystem::path writeTestLibraryFileMulti(
+      Lib3MF::PModel model,
+      std::string const & name,
+      std::vector<Lib3MF_uint32> const & taggedIds)
+    {
+        auto const path = std::filesystem::temp_directory_path() / name;
+        io::LibraryMetadata metadata;
+        metadata.libraryFunctions = io::serializeResourceIds(taggedIds);
+        metadata.libraryDescription = "test";
+        io::writeLibraryMetadata(model, metadata);
+
+        auto writer = model->QueryWriter("3mf");
+        writer->WriteToFile(path.string());
+
+        io::removeLibraryMetadata(model);
+        return path;
+    }
+
+    TEST_F(SelectiveImport_Test, PruneSourceForImport_WithClosure_RemovesNonClosureResources)
     {
         // Arrange
-        auto [model, ids] = createSourceModel();
-        std::unordered_set<Lib3MF_uint32> closure = {ids.funcA_modelId, ids.funcB_modelId};
+        auto [model, ids] = createSourceModelWithMetadata();
+        auto const path = writeTestLibraryFile(model, "prune_removes_nonclosure.3mf",
+                                               ids.funcA_modelId);
 
         // Act
-        auto result = io::pruneModelForSelectiveImport(model, closure);
+        auto result = io::pruneSourceForImport(path, m_logger);
 
         // Assert
-        EXPECT_TRUE(result);
+        ASSERT_TRUE(result.has_value());
 
         // Count remaining implicit functions
-        auto resources = model->GetResources();
+        auto resources = (*result)->GetResources();
         int funcCount = 0;
         while (resources->MoveNext())
         {
@@ -209,49 +249,51 @@ namespace gladius_tests
             }
         }
         EXPECT_EQ(funcCount, 2) << "Should have exactly 2 implicit functions (A and B)";
+
+        std::filesystem::remove(path);
     }
 
-    TEST_F(SelectiveImport_Test, PruneModel_WithClosure_RemovesBuildItems)
+    TEST_F(SelectiveImport_Test, PruneSourceForImport_WithClosure_RemovesBuildItems)
     {
         // Arrange
-        auto [model, ids] = createSourceModel();
-        std::unordered_set<Lib3MF_uint32> closure = {ids.funcA_modelId, ids.funcB_modelId};
+        auto [model, ids] = createSourceModelWithMetadata();
+        auto const path = writeTestLibraryFile(model, "prune_removes_builditems.3mf",
+                                               ids.funcA_modelId);
 
         // Act
-        bool const result = io::pruneModelForSelectiveImport(model, closure);
+        auto result = io::pruneSourceForImport(path, m_logger);
 
-        // Assert — build items should be removed
-        EXPECT_TRUE(result) << "Pruning should succeed";
+        // Assert
+        ASSERT_TRUE(result.has_value());
 
-        // Assert — build items should be removed
-        auto buildItems = model->GetBuildItems();
+        auto buildItems = (*result)->GetBuildItems();
         int itemCount = 0;
         while (buildItems->MoveNext())
         {
             ++itemCount;
         }
         EXPECT_EQ(itemCount, 0) << "All build items should be removed during pruning";
+
+        std::filesystem::remove(path);
     }
 
-    // ---- Full workflow: metadata read → closure → prune → merge ----
+    // ---- Full workflow: pruneSourceForImport → merge ----
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithMetadata_ImportsOnlyTaggedFunction)
     {
         // Arrange — create source with metadata, create empty target
         auto [source, ids] = createSourceModelWithMetadata();
+        auto const path = writeTestLibraryFile(source, "prune_merge_tagged.3mf",
+                                               ids.funcA_modelId);
+
         auto target = m_wrapper->CreateModel();
         auto targetFunc = target->AddImplicitFunction();
         targetFunc->SetDisplayName("ExistingFunc");
 
-        // Act — read metadata, compute closure, prune, merge
-        auto metadata = io::readLibraryMetadata(source);
-        ASSERT_TRUE(metadata.has_value());
-        auto taggedIds = io::parseResourceIds(metadata->libraryFunctions);
-        auto closure = io::computeSelectiveImportClosure(source, taggedIds, m_logger);
-        ASSERT_TRUE(closure.has_value());
-        bool const pruneResult = io::pruneModelForSelectiveImport(source, *closure);
-        EXPECT_TRUE(pruneResult) << "Pruning should succeed";
-        target->MergeFromModel(source.get());
+        // Act — prune via file round-trip, then merge
+        auto prunedModel = io::pruneSourceForImport(path, m_logger);
+        ASSERT_TRUE(prunedModel.has_value());
+        target->MergeFromModel(prunedModel->get());
 
         // Assert — target should have ExistingFunc + LibFuncA + LibFuncB (3 functions)
         auto resources = target->GetResources();
@@ -276,55 +318,66 @@ namespace gladius_tests
           << "Dependency function B should be imported";
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncC") == funcNames.end())
           << "Unrelated function C should NOT be imported";
+
+        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithoutMetadata_FallsToFullMerge)
     {
-        // Arrange — source without metadata
+        // Arrange — source without metadata, written to file
         auto [source, ids] = createSourceModel();
-        auto target = m_wrapper->CreateModel();
+        auto const path = std::filesystem::temp_directory_path() / "prune_no_metadata.3mf";
+        {
+            auto writer = source->QueryWriter("3mf");
+            writer->WriteToFile(path.string());
+        }
 
         // Act
-        auto metadata = io::readLibraryMetadata(source);
+        auto result = io::pruneSourceForImport(path, m_logger);
 
-        // Assert — no metadata means full merge path
-        EXPECT_FALSE(metadata.has_value()) << "Model without metadata should return nullopt";
-        // In the merge flow, when metadata is absent, we skip pruning and do full merge.
+        // Assert — no metadata means fallback (nullopt)
+        EXPECT_FALSE(result.has_value()) << "Model without metadata should return nullopt";
+
+        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithInvalidFunctionId_FallsToFullMerge)
     {
         // Arrange — source with metadata pointing to nonexistent IDs
         auto [source, ids] = createSourceModel();
-        io::LibraryMetadata metadata;
-        metadata.libraryFunctions = "99999";
-        io::writeLibraryMetadata(source, metadata);
+        auto const path = std::filesystem::temp_directory_path() / "prune_invalid_id.3mf";
+        {
+            io::LibraryMetadata metadata;
+            metadata.libraryFunctions = "99999";
+            io::writeLibraryMetadata(source, metadata);
+            auto writer = source->QueryWriter("3mf");
+            writer->WriteToFile(path.string());
+            io::removeLibraryMetadata(source);
+        }
 
         // Act
-        auto meta = io::readLibraryMetadata(source);
-        ASSERT_TRUE(meta.has_value());
-        auto taggedIds = io::parseResourceIds(meta->libraryFunctions);
-        auto closure = io::computeSelectiveImportClosure(source, taggedIds, m_logger);
+        auto result = io::pruneSourceForImport(path, m_logger);
 
         // Assert — invalid IDs → nullopt → full merge fallback
-        EXPECT_FALSE(closure.has_value()) << "Invalid ID should cause fallback to full merge";
+        EXPECT_FALSE(result.has_value()) << "Invalid ID should cause fallback to full merge";
+
+        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithMultipleFunctions_ImportsAll)
     {
         // Arrange
         auto [source, ids] = createSourceModelWithMultipleFunctionsTagged();
+        auto const path = writeTestLibraryFileMulti(
+          source, "prune_multi_func.3mf",
+          {ids.funcA_modelId, ids.funcC_modelId});
+
         auto target = m_wrapper->CreateModel();
 
         // Act
-        auto metadata = io::readLibraryMetadata(source);
-        ASSERT_TRUE(metadata.has_value());
-        auto taggedIds = io::parseResourceIds(metadata->libraryFunctions);
-        auto closure = io::computeSelectiveImportClosure(source, taggedIds, m_logger);
-        ASSERT_TRUE(closure.has_value());
-        bool const pruneResult = io::pruneModelForSelectiveImport(source, *closure);
-        EXPECT_TRUE(pruneResult) << "Pruning should succeed";
-        target->MergeFromModel(source.get());
+        auto prunedModel = io::pruneSourceForImport(path, m_logger);
+        ASSERT_TRUE(prunedModel.has_value());
+        target->MergeFromModel(prunedModel->get());
 
         // Assert — target should have A, B, C (all tagged + deps)
         auto resources = target->GetResources();
@@ -343,6 +396,8 @@ namespace gladius_tests
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncA") != funcNames.end());
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncB") != funcNames.end());
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncC") != funcNames.end());
+
+        std::filesystem::remove(path);
     }
 
 } // namespace gladius_tests
