@@ -11,6 +11,16 @@ namespace gladius_tests
 {
     using namespace gladius;
 
+    /// RAII guard that removes a temp file on destruction (even if a test assertion fails).
+    struct TempFileGuard
+    {
+        std::filesystem::path path;
+        ~TempFileGuard()
+        {
+            std::filesystem::remove(path);
+        }
+    };
+
     /// @brief Test fixture for selective import functionality.
     ///
     /// Creates a minimal 3MF source model with:
@@ -230,6 +240,7 @@ namespace gladius_tests
         auto [model, ids] = createSourceModelWithMetadata();
         auto const path = writeTestLibraryFile(model, "prune_removes_nonclosure.3mf",
                                                ids.funcA_modelId);
+        TempFileGuard guard{path};
 
         // Act
         auto result = io::pruneSourceForImport(path, m_logger);
@@ -249,8 +260,6 @@ namespace gladius_tests
             }
         }
         EXPECT_EQ(funcCount, 2) << "Should have exactly 2 implicit functions (A and B)";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, PruneSourceForImport_WithClosure_RemovesBuildItems)
@@ -259,6 +268,7 @@ namespace gladius_tests
         auto [model, ids] = createSourceModelWithMetadata();
         auto const path = writeTestLibraryFile(model, "prune_removes_builditems.3mf",
                                                ids.funcA_modelId);
+        TempFileGuard guard{path};
 
         // Act
         auto result = io::pruneSourceForImport(path, m_logger);
@@ -273,8 +283,6 @@ namespace gladius_tests
             ++itemCount;
         }
         EXPECT_EQ(itemCount, 0) << "All build items should be removed during pruning";
-
-        std::filesystem::remove(path);
     }
 
     // ---- Full workflow: pruneSourceForImport → merge ----
@@ -285,6 +293,7 @@ namespace gladius_tests
         auto [source, ids] = createSourceModelWithMetadata();
         auto const path = writeTestLibraryFile(source, "prune_merge_tagged.3mf",
                                                ids.funcA_modelId);
+        TempFileGuard guard{path};
 
         auto target = m_wrapper->CreateModel();
         auto targetFunc = target->AddImplicitFunction();
@@ -318,8 +327,6 @@ namespace gladius_tests
           << "Dependency function B should be imported";
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncC") == funcNames.end())
           << "Unrelated function C should NOT be imported";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithoutMetadata_FallsToFullMerge)
@@ -327,6 +334,7 @@ namespace gladius_tests
         // Arrange — source without metadata, written to file
         auto [source, ids] = createSourceModel();
         auto const path = std::filesystem::temp_directory_path() / "prune_no_metadata.3mf";
+        TempFileGuard guard{path};
         {
             auto writer = source->QueryWriter("3mf");
             writer->WriteToFile(path.string());
@@ -337,8 +345,6 @@ namespace gladius_tests
 
         // Assert — no metadata means fallback (nullopt)
         EXPECT_FALSE(result.has_value()) << "Model without metadata should return nullopt";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithInvalidFunctionId_FallsToFullMerge)
@@ -346,6 +352,7 @@ namespace gladius_tests
         // Arrange — source with metadata pointing to nonexistent IDs
         auto [source, ids] = createSourceModel();
         auto const path = std::filesystem::temp_directory_path() / "prune_invalid_id.3mf";
+        TempFileGuard guard{path};
         {
             io::LibraryMetadata metadata;
             metadata.libraryFunctions = "99999";
@@ -360,8 +367,6 @@ namespace gladius_tests
 
         // Assert — invalid IDs → nullopt → full merge fallback
         EXPECT_FALSE(result.has_value()) << "Invalid ID should cause fallback to full merge";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(SelectiveImport_Test, MergeSelective_WithMultipleFunctions_ImportsAll)
@@ -371,6 +376,7 @@ namespace gladius_tests
         auto const path = writeTestLibraryFileMulti(
           source, "prune_multi_func.3mf",
           {ids.funcA_modelId, ids.funcC_modelId});
+        TempFileGuard guard{path};
 
         auto target = m_wrapper->CreateModel();
 
@@ -396,8 +402,6 @@ namespace gladius_tests
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncA") != funcNames.end());
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncB") != funcNames.end());
         EXPECT_TRUE(std::find(funcNames.begin(), funcNames.end(), "LibFuncC") != funcNames.end());
-
-        std::filesystem::remove(path);
     }
 
 } // namespace gladius_tests

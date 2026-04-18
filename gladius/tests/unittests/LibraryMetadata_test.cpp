@@ -10,6 +10,16 @@ namespace gladius_tests
 {
     using namespace gladius::io;
 
+    /// RAII guard that removes a temp file on destruction (even if a test assertion fails).
+    struct TempFileGuard
+    {
+        std::filesystem::path path;
+        ~TempFileGuard()
+        {
+            std::filesystem::remove(path);
+        }
+    };
+
     // =========================================================================
     // parseResourceIds tests
     // =========================================================================
@@ -440,6 +450,7 @@ namespace gladius_tests
     {
         auto const path = writeLibraryFile(
           "prune_test_removes_unrelated.3mf", m_funcA->GetModelResourceID());
+        TempFileGuard guard{path};
 
         auto result = pruneSourceForImport(path, nullptr);
         ASSERT_TRUE(result.has_value());
@@ -458,8 +469,6 @@ namespace gladius_tests
         EXPECT_TRUE(functionNames.count("Helper") > 0) << "Dependency should be kept";
         EXPECT_TRUE(functionNames.count("Unrelated") == 0)
           << "Unrelated function should be pruned";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(PruneSourceForImport_Test,
@@ -467,6 +476,7 @@ namespace gladius_tests
     {
         // Write a file without library metadata.
         auto const path = m_tempDir / "prune_test_no_metadata.3mf";
+        TempFileGuard guard{path};
         {
             auto writer = m_model->QueryWriter("3mf");
             writer->WriteToFile(path.string());
@@ -474,8 +484,6 @@ namespace gladius_tests
 
         auto result = pruneSourceForImport(path, nullptr);
         EXPECT_FALSE(result.has_value()) << "Should fall back when no metadata";
-
-        std::filesystem::remove(path);
     }
 
     TEST_F(PruneSourceForImport_Test,
@@ -490,6 +498,7 @@ namespace gladius_tests
     {
         auto const path = writeLibraryFile(
           "prune_test_mergeable.3mf", m_funcA->GetModelResourceID());
+        TempFileGuard guard{path};
 
         auto result = pruneSourceForImport(path, nullptr);
         ASSERT_TRUE(result.has_value());
@@ -509,8 +518,6 @@ namespace gladius_tests
         EXPECT_TRUE(functionNames.count("FuncA") > 0);
         EXPECT_TRUE(functionNames.count("Helper") > 0);
         EXPECT_TRUE(functionNames.count("Unrelated") == 0);
-
-        std::filesystem::remove(path);
     }
 
 } // namespace gladius_tests
