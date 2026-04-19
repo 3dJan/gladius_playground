@@ -360,7 +360,9 @@ namespace gladius::ui
         {
             if (ImGui::CollapsingHeader(name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
             {
+                ImGui::PushID(name.c_str());
                 browser->render(doc);
+                ImGui::PopID();
             }
         }
     }
