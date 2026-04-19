@@ -3230,3 +3230,168 @@ __kernel void evaluate_sdf_gradient_batch(
     vstore3(grad, id, gradients);
 }
 
+/// Fused bisection + gradient kernel: each work item runs the full bisection loop
+/// for one edge, then computes the gradient at the zero-crossing position.
+/// This replaces 10 bisection dispatches + 1 gradient dispatch with a single dispatch.
+///
+/// Input:  starts[i*3..], ends[i*3..] = edge endpoint positions
+///         startValues[i], endValues[i] = SDF at endpoints (sign must differ)
+/// Output: outPositions[i*3..] = zero-crossing position
+///         outGradients[i*3..] = unnormalized gradient at zero-crossing
+__kernel void hermite_bisect_and_gradient(
+    __global const float* starts,       // 3 floats per edge
+    __global const float* ends,         // 3 floats per edge
+    __global const float* startValues,  // 1 float per edge
+    __global const float* endValues,    // 1 float per edge
+    __global float* outPositions,       // 3 floats per edge (output)
+    __global float* outGradients,       // 3 floats per edge (output)
+    const uint edgeCount,
+    const float isoValue,
+    const float epsilon
+    , PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= edgeCount)
+    {
+        return;
+    }
+
+    float3 lo = vload3(id, starts);
+    float3 hi = vload3(id, ends);
+    float vLo = startValues[id];
+    float vHi = endValues[id];
+
+    float const TOLERANCE = 1e-5f;
+
+    // Quick convergence: endpoint already at surface
+    if (fabs(vLo) <= TOLERANCE)
+    {
+        float3 grad = (float3)(0.0f);
+        vstore3(lo, id, outPositions);
+        vstore3(grad, id, outGradients);
+        return;
+    }
+    if (fabs(vHi) <= TOLERANCE)
+    {
+        float3 grad = (float3)(0.0f);
+        vstore3(hi, id, outPositions);
+        vstore3(grad, id, outGradients);
+        return;
+    }
+
+    // 10 bisection iterations
+    for (uint iter = 0; iter < 10; ++iter)
+    {
+        float3 mid = (lo + hi) * 0.5f;
+        float vMid = model(mid, PASS_PAYLOAD_ARGS).w - isoValue;
+
+        if (fabs(vMid) < TOLERANCE)
+        {
+            lo = mid;
+            hi = mid;
+            break;
+        }
+
+        if (vMid * vLo < 0.0f)
+        {
+            hi = mid;
+            vHi = vMid;
+        }
+        else
+        {
+            lo = mid;
+            vLo = vMid;
+        }
+    }
+
+    float3 pos = (lo + hi) * 0.5f;
+    vstore3(pos, id, outPositions);
+
+    // Central-difference gradient (unnormalized)
+    float h = epsilon;
+    float h2 = 2.0f * h;
+    float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+    vstore3((float3)(gx, gy, gz), id, outGradients);
+}
+
+/// Fused Newton projection kernel: each work item iteratively projects a point onto the
+/// surface using Newton steps (SDF / |grad|² * grad), then outputs the final position
+/// and unnormalized gradient (for normals). Replaces up to 17 dispatches with 1.
+///
+/// Input:  positions[i*3..] = initial position (e.g. cell center)
+///         bboxMins[i*3..], bboxMaxs[i*3..] = clamping bounds
+/// Output: outPositions[i*3..] = projected position on surface
+///         outGradients[i*3..] = unnormalized gradient at final position
+__kernel void newton_project_to_surface(
+    __global float* positions,       // 3 floats per point (input, overwritten)
+    __global const float* bboxMins,  // 3 floats per point
+    __global const float* bboxMaxs,  // 3 floats per point
+    __global float* outGradients,    // 3 floats per point (output)
+    const uint pointCount,
+    const float isoValue,
+    const float epsilon
+    , PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= pointCount)
+    {
+        return;
+    }
+
+    float3 pos = vload3(id, positions);
+    float3 bMin = vload3(id, bboxMins);
+    float3 bMax = vload3(id, bboxMaxs);
+
+    float const TOLERANCE = 1e-5f;
+    float const h = epsilon;
+    float const h2 = 2.0f * h;
+
+    // Up to 16 Newton iterations
+    for (uint iter = 0; iter < 16; ++iter)
+    {
+        float value = model(pos, PASS_PAYLOAD_ARGS).w - isoValue;
+        if (fabs(value) < TOLERANCE)
+        {
+            break;
+        }
+
+        // Central-difference gradient
+        float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+        float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+        float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+        float g2 = gx * gx + gy * gy + gz * gz;
+        if (g2 < 1e-20f)
+        {
+            break;
+        }
+
+        float step = value / g2;
+        pos -= step * (float3)(gx, gy, gz);
+
+        // Clamp to bounding box
+        pos = clamp(pos, bMin, bMax);
+    }
+
+    vstore3(pos, id, positions);
+
+    // Final gradient for normal computation
+    float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+    vstore3((float3)(gx, gy, gz), id, outGradients);
+}
+
