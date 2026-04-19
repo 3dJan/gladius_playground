@@ -889,11 +889,22 @@ namespace gladius
     {
         if (filename.extension() == ".3mf")
         {
-            // Only acquire a compute token if we need to render a thumbnail.
-            if (writeThumbnail)
+            if (writeThumbnail && m_core)
             {
                 auto computeToken = m_core->waitForComputeToken();
-                (void) computeToken; // suppress unused warning in Release
+                (void) computeToken;
+
+                // Ensure the GPU pipeline is fully up-to-date so the
+                // thumbnail reflects the latest model state (colors, geometry, etc.).
+                updateParameterRegistration();
+                updateParameter();
+                updateFlatAssembly();
+                m_core->tryRefreshProgramProtected(getFlatAssembly());
+
+                if (!m_core->prepareImageRendering())
+                {
+                    writeThumbnail = false;
+                }
             }
             io::saveTo3mfFile(filename, *this, writeThumbnail);
         }

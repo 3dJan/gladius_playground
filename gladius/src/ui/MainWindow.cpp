@@ -1009,11 +1009,7 @@ namespace gladius::ui
         {
             auto savePath = filename;
             savePath.replace_extension(".3mf");
-            bool writeThumbnail = false;
-            if (m_computeAvailable && m_core)
-            {
-                writeThumbnail = m_core->isRendererReady();
-            }
+            bool writeThumbnail = m_computeAvailable && m_core;
             m_doc->saveAs(savePath, writeThumbnail);
             m_renderWindow.invalidateViewDuetoModelUpdate();
             m_fileChanged = false;
@@ -1708,11 +1704,7 @@ namespace gladius::ui
             saveAs();
             return;
         }
-        bool writeThumbnail = false;
-        if (m_computeAvailable && m_core)
-        {
-            writeThumbnail = m_core->isRendererReady();
-        }
+        bool writeThumbnail = m_computeAvailable && m_core;
         m_doc->saveAs(m_currentAssemblyFileName.value(), writeThumbnail);
         m_renderWindow.invalidateViewDuetoModelUpdate();
         m_fileChanged = false;
