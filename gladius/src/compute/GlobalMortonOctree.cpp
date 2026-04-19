@@ -2235,6 +2235,12 @@ namespace gladius::compute
         }
         logPhaseTime("degenerateRemoval");
 
+        // Resolve non-manifold edges caused by thin-wall topology (e.g. gyroid structures
+        // where quads from different axes share perimeter edges). Partitions triangles into
+        // manifold-connected components and gives each component its own vertex copies.
+        splitNonManifoldEdges(positions, normals, indices);
+        logPhaseTime("splitNonManifoldEdges");
+
         // Note: Boundary hole filling is intentionally disabled here.
         // The current naive loop triangulation can introduce significant non-manifold
         // topology. Holes must be fixed by correct quad generation / neighbor completion.
@@ -2575,6 +2581,8 @@ namespace gladius::compute
 
                     for (auto const& loop : loops)
                     {
+                        std::size_t const loopFillStart = filledIndices.size();
+
                         if (loop.size() == 3U)
                         {
                             filledIndices.push_back(loop[0]);
@@ -2687,16 +2695,43 @@ namespace gladius::compute
 
                             if (!triangulated)
                             {
-                                canFill = false;
-                                break;
+                                // Ear-clipping failed (likely thin-wall geometry where diagonals
+                                // would collide with edges on the other sheet). Fall back to
+                                // centroid fan triangulation: create a new vertex at the loop
+                                // centroid and connect it to all consecutive boundary vertex pairs.
+                                // Since the centroid is a new vertex, its edges can't collide.
+                                Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+                                Eigen::Vector3f centroidNormal = Eigen::Vector3f::Zero();
+                                for (auto const vi : loop)
+                                {
+                                    centroid += positions[vi];
+                                    centroidNormal += normals[vi];
+                                }
+                                centroid /= static_cast<float>(loop.size());
+                                centroidNormal.normalize();
+
+                                auto const centroidIdx = static_cast<std::uint32_t>(positions.size());
+                                positions.push_back(centroid);
+                                normals.push_back(centroidNormal);
+
+                                // Remove any ear-clipping triangles that were partially added for this loop.
+                                filledIndices.resize(loopFillStart);
+
+                                for (std::size_t li = 0U; li < loop.size(); ++li)
+                                {
+                                    std::uint32_t const a = loop[li];
+                                    std::uint32_t const b = loop[(li + 1U) % loop.size()];
+                                    filledIndices.push_back(a);
+                                    filledIndices.push_back(b);
+                                    filledIndices.push_back(centroidIdx);
+                                }
                             }
                         }
                     }
 
                     if (!canFill)
                     {
-                        // Abort filling attempt.
-                        // We keep the original mesh and let the caller decide on fallback.
+                        // Ear-clipping failed; mesh may still be usable.
                     }
                     else
                     {
@@ -2742,6 +2777,10 @@ namespace gladius::compute
                             m_stats.boundaryEdges = 0U;
                             m_stats.nonManifoldEdges = 0U;
                             std::cout << "  Filled small boundary holes: boundaryEdges " << boundaryEdgeKeys.size() << " -> 0" << std::endl;
+                        }
+                        else
+                        {
+                            // Fill revalidation found residual issues — keep original mesh.
                         }
                     }
                 }
@@ -3400,59 +3439,9 @@ namespace gladius::compute
             }
         }
 
-        // If a perimeter edge would be used by more than 2 quads, the resulting triangle mesh
-        // contains non-manifold edges. This can happen in rare corner cases where multiple
-        // quads collapse onto the same vertex pair.
-        //
-        // We choose to emit only the two "best" quads (largest geometric area) for each such
-        // overused perimeter edge. This is a pragmatic, local repair that aims to preserve a
-        // watertight 2-manifold mesh for export.
-        std::vector<bool> forceSkipCandidate;
-        forceSkipCandidate.assign(candidates.size(), false);
-
-        if (perimeterEdgesOverused > 0U)
-        {
-            std::unordered_map<std::uint64_t, std::vector<std::pair<float, std::size_t>>> edgeToCandidateQuality;
-            edgeToCandidateQuality.reserve(perimeterEdgesOverused * 2U);
-
-            auto candidateQuality = [&](QuadCandidate const& c) -> float
-            {
-                float const q12 = std::min(c.area12a, c.area12b);
-                float const q03 = std::min(c.area03a, c.area03b);
-                return std::max(q12, q03);
-            };
-
-            for (std::size_t i = 0U; i < candidates.size(); ++i)
-            {
-                auto const& c = candidates[i];
-                float const q = candidateQuality(c);
-                for (auto const e : c.perimeterEdges)
-                {
-                    auto const it = perimeterEdgeCount.find(e);
-                    if (it != perimeterEdgeCount.end() && it->second > 2U)
-                    {
-                        edgeToCandidateQuality[e].push_back({q, i});
-                    }
-                }
-            }
-
-            for (auto& [edgeKey, list] : edgeToCandidateQuality)
-            {
-                if (list.size() <= 2U)
-                {
-                    continue;
-                }
-
-                std::sort(list.begin(), list.end(), [](auto const& a, auto const& b) {
-                    return a.first > b.first;
-                });
-
-                for (std::size_t k = 2U; k < list.size(); ++k)
-                {
-                    forceSkipCandidate[list[k].second] = true;
-                }
-            }
-        }
+        // Non-manifold perimeter edges are resolved in extractMesh() via vertex
+        // duplication (splitNonManifoldEdges), so we emit ALL quads here and let
+        // the post-process handle topology repair.
 
         if (perimeterEdgesOverused > 0U)
         {
@@ -3514,10 +3503,6 @@ namespace gladius::compute
         for (std::size_t candidateIndex = 0U; candidateIndex < candidates.size(); ++candidateIndex)
         {
             auto const& c = candidates[candidateIndex];
-            if (!forceSkipCandidate.empty() && forceSkipCandidate[candidateIndex])
-            {
-                continue;
-            }
             if (c.diag12Key == 0U || c.diag03Key == 0U)
             {
                 ++zeroDiagonalKeys;
@@ -3695,6 +3680,210 @@ namespace gladius::compute
             }
         }
 #endif
+    }
+
+    void GlobalMortonOctree::splitNonManifoldEdges(std::vector<Eigen::Vector3f>& positions,
+                                                    std::vector<Eigen::Vector3f>& normals,
+                                                    std::vector<std::uint32_t>& indices)
+    {
+        // Resolve non-manifold edges (edges shared by 3+ triangles) by splitting vertex fans.
+        //
+        // For each vertex that participates in a non-manifold edge, partition its incident
+        // triangle fan into edge-connected components (using only manifold edges for
+        // connectivity). Each component beyond the first gets its own copy of the vertex.
+        //
+        // To avoid cascading issues from stale edge counts, we make multiple passes:
+        // after splitting a batch of vertices, recompute edge counts and repeat until
+        // no non-manifold edges remain.
+
+        constexpr std::size_t MAX_PASSES = 8U;
+        std::size_t totalSplitVertices = 0U;
+        std::size_t totalNewComponents = 0U;
+
+        for (std::size_t pass = 0U; pass < MAX_PASSES; ++pass)
+        {
+            if (indices.size() < 3U)
+            {
+                break;
+            }
+
+            auto makeEdgeKey = [](std::uint32_t a, std::uint32_t b) -> std::uint64_t
+            {
+                if (a > b)
+                {
+                    std::swap(a, b);
+                }
+                return (static_cast<std::uint64_t>(a) << 32U) | b;
+            };
+
+            // Count edge usage (fresh each pass).
+            std::unordered_map<std::uint64_t, std::uint16_t> edgeCount;
+            edgeCount.reserve(indices.size());
+
+            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
+            {
+                ++edgeCount[makeEdgeKey(indices[i], indices[i + 1U])];
+                ++edgeCount[makeEdgeKey(indices[i + 1U], indices[i + 2U])];
+                ++edgeCount[makeEdgeKey(indices[i + 2U], indices[i])];
+            }
+
+            // Collect non-manifold vertices.
+            std::unordered_set<std::uint32_t> nonManifoldVertices;
+            for (auto const& [edgeKey, count] : edgeCount)
+            {
+                if (count > 2U)
+                {
+                    nonManifoldVertices.insert(static_cast<std::uint32_t>(edgeKey >> 32U));
+                    nonManifoldVertices.insert(static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFFU));
+                }
+            }
+
+            if (nonManifoldVertices.empty())
+            {
+                break;
+            }
+
+            // Vertex → incident triangles (as base index into indices array).
+            std::unordered_map<std::uint32_t, std::vector<std::size_t>> vertexToTriangles;
+            vertexToTriangles.reserve(nonManifoldVertices.size());
+
+            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
+            {
+                for (std::size_t k = 0U; k < 3U; ++k)
+                {
+                    std::uint32_t const v = indices[i + k];
+                    if (nonManifoldVertices.count(v) > 0U)
+                    {
+                        vertexToTriangles[v].push_back(i);
+                    }
+                }
+            }
+
+            std::size_t passSplits = 0U;
+
+            for (auto const& [vertex, triList] : vertexToTriangles)
+            {
+                if (triList.size() <= 2U)
+                {
+                    continue;
+                }
+
+                std::size_t const N = triList.size();
+
+                // Build fan adjacency: two fan-triangles are adjacent if they share
+                // a manifold fan edge (vertex, other) with count <= 2.
+                std::unordered_map<std::uint32_t, std::vector<std::size_t>> fanEdgeToTriIdx;
+                for (std::size_t ti = 0U; ti < N; ++ti)
+                {
+                    std::size_t const triBase = triList[ti];
+                    for (std::size_t k = 0U; k < 3U; ++k)
+                    {
+                        std::uint32_t const v = indices[triBase + k];
+                        if (v != vertex)
+                        {
+                            std::uint64_t const ek = makeEdgeKey(vertex, v);
+                            auto const it = edgeCount.find(ek);
+                            if (it != edgeCount.end() && it->second <= 2U)
+                            {
+                                fanEdgeToTriIdx[v].push_back(ti);
+                            }
+                        }
+                    }
+                }
+
+                // Union-Find.
+                std::vector<std::size_t> parent(N);
+                std::iota(parent.begin(), parent.end(), 0U);
+                auto find = [&](std::size_t x) -> std::size_t
+                {
+                    while (parent[x] != x)
+                    {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    return x;
+                };
+                auto unite = [&](std::size_t a, std::size_t b)
+                {
+                    a = find(a);
+                    b = find(b);
+                    if (a != b)
+                    {
+                        parent[a] = b;
+                    }
+                };
+
+                for (auto const& [other, triIdxList] : fanEdgeToTriIdx)
+                {
+                    for (std::size_t j = 1U; j < triIdxList.size(); ++j)
+                    {
+                        unite(triIdxList[0], triIdxList[j]);
+                    }
+                }
+
+                std::unordered_map<std::size_t, std::vector<std::size_t>> components;
+                for (std::size_t ti = 0U; ti < N; ++ti)
+                {
+                    components[find(ti)].push_back(ti);
+                }
+
+                if (components.size() <= 1U)
+                {
+                    continue;
+                }
+
+                // Keep largest component on original vertex.
+                std::size_t largestComp = 0U;
+                std::size_t largestSize = 0U;
+                for (auto const& [root, members] : components)
+                {
+                    if (members.size() > largestSize)
+                    {
+                        largestSize = members.size();
+                        largestComp = root;
+                    }
+                }
+
+                for (auto const& [root, members] : components)
+                {
+                    if (root == largestComp)
+                    {
+                        continue;
+                    }
+
+                    auto const newIdx = static_cast<std::uint32_t>(positions.size());
+                    positions.push_back(positions[vertex]);
+                    normals.push_back(normals[vertex]);
+
+                    for (auto const ti : members)
+                    {
+                        std::size_t const triBase = triList[ti];
+                        for (std::size_t k = 0U; k < 3U; ++k)
+                        {
+                            if (indices[triBase + k] == vertex)
+                            {
+                                indices[triBase + k] = newIdx;
+                            }
+                        }
+                    }
+                    ++passSplits;
+                }
+                ++totalSplitVertices;
+            }
+
+            totalNewComponents += passSplits;
+            if (passSplits == 0U)
+            {
+                break;
+            }
+        }
+
+        if (totalNewComponents > 0U)
+        {
+            std::cout << "  splitNonManifoldEdges: split " << totalSplitVertices
+                      << " non-manifold vertices into " << totalNewComponents
+                      << " additional components" << std::endl;
+        }
     }
 
     void GlobalMortonOctree::fillBoundaryHoles(std::vector<std::uint32_t>& indices,

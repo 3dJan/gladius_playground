@@ -347,6 +347,9 @@ namespace gladius::compute
 
         // Phase 4: Mesh extraction
         void generateQuads(std::vector<std::uint32_t>& indices);
+        void splitNonManifoldEdges(std::vector<Eigen::Vector3f>& positions,
+                                   std::vector<Eigen::Vector3f>& normals,
+                                   std::vector<std::uint32_t>& indices);
         void fillBoundaryHoles(std::vector<std::uint32_t>& indices,
                                std::vector<Eigen::Vector3f> const& positions);
         void fixTriangleOrientation(std::vector<std::uint32_t>& indices);
