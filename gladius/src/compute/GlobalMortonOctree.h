@@ -318,10 +318,17 @@ namespace gladius::compute
         void ensureNeighborsExist(std::size_t nodeIndex);
         [[nodiscard]] std::size_t createNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
                                                            std::uint32_t z, std::uint8_t depth);
+        /// Allocate a node without evaluating its corners (for deferred batch evaluation).
+        [[nodiscard]] std::size_t allocateNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
+                                                             std::uint32_t z, std::uint8_t depth);
+        /// Batch-evaluate corners and classify (intersecting/edge mask) for a set of nodes.
+        void evaluateAndClassifyNodes(std::vector<std::size_t> const& nodeIndices);
 
         // Phase 3b: Halo vertex generation (neighbors that must exist for quad closure)
         void generateHaloVerticesForWatertightness();
         void ensureProjectedVertex(GlobalOctreeNode& node);
+        /// Batch Newton-project halo vertices onto the surface using GPU analytical SDF.
+        void projectVerticesBatchGpu(std::vector<std::size_t> const& nodeIndices);
 
         // Phase 2: Adaptive refinement
         void refineAdaptively();
