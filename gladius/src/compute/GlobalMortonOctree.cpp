@@ -1383,14 +1383,32 @@ namespace gladius::compute
 
     void GlobalMortonOctree::estimateCurvatureGpu(std::vector<std::size_t> const& leafIndices)
     {
-        // For now, use CPU curvature estimation
-        // TODO: GPU acceleration using HierarchicalDCProgram::estimateCurvature
+        if (leafIndices.empty())
+        {
+            return;
+        }
+
+        auto const primitives = m_core.getPrimitives();
+        if (!primitives || !m_program)
+        {
+            return;
+        }
 
         float const epsilon = m_globalBboxSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth) * 0.5F;
 
+        // Collect all sample positions: 7 per leaf (center + 6 axis neighbors).
+        std::size_t const samplesPerLeaf = 7U;
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(leafIndices.size() * samplesPerLeaf);
+
+        static Eigen::Vector3f const axisOffsets[6] = {
+            {1.0F, 0.0F, 0.0F}, {-1.0F, 0.0F, 0.0F},
+            {0.0F, 1.0F, 0.0F}, {0.0F, -1.0F, 0.0F},
+            {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, -1.0F}};
+
         for (std::size_t nodeIdx : leafIndices)
         {
-            auto& node = m_nodes[nodeIdx];
+            auto const& node = m_nodes[nodeIdx];
             BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
                                                            static_cast<std::uint32_t>(m_config.maxDepth));
 
@@ -1399,21 +1417,31 @@ namespace gladius::compute
                 (bounds.min.s[1] + bounds.max.s[1]) * 0.5F,
                 (bounds.min.s[2] + bounds.max.s[2]) * 0.5F);
 
-            // Central gradient
-            Eigen::Vector3f const gradCenter = sampleEffectiveGradient(center, epsilon);
-            Eigen::Vector3f const normCenter = gradCenter.normalized();
+            positions.push_back(center);
+            for (auto const& offset : axisOffsets)
+            {
+                positions.push_back(center + offset * epsilon);
+            }
+        }
 
-            // Sample gradients at 6 neighbors and compute variance
-            Eigen::Vector3f const offsets[6] = {
-                {epsilon, 0.0F, 0.0F}, {-epsilon, 0.0F, 0.0F},
-                {0.0F, epsilon, 0.0F}, {0.0F, -epsilon, 0.0F},
-                {0.0F, 0.0F, epsilon}, {0.0F, 0.0F, -epsilon}};
+        // Single GPU dispatch for all gradient evaluations.
+        std::vector<float> sdfValues;
+        std::vector<Eigen::Vector3f> gradients;
+        m_program->evaluateSdfGradientBatch(positions, *primitives, m_config.isoValue, epsilon,
+                                            sdfValues, gradients);
+
+        // Scatter results back to nodes.
+        for (std::size_t li = 0U; li < leafIndices.size(); ++li)
+        {
+            auto& node = m_nodes[leafIndices[li]];
+            std::size_t const base = li * samplesPerLeaf;
+
+            Eigen::Vector3f const normCenter = gradients[base].normalized();
 
             float variance = 0.0F;
-            for (auto const& offset : offsets)
+            for (std::size_t j = 1U; j < samplesPerLeaf; ++j)
             {
-                Eigen::Vector3f const gradNeighbor = sampleEffectiveGradient(center + offset, epsilon);
-                Eigen::Vector3f const normNeighbor = gradNeighbor.normalized();
+                Eigen::Vector3f const normNeighbor = gradients[base + j].normalized();
                 Eigen::Vector3f const diff = normCenter - normNeighbor;
                 variance += diff.squaredNorm();
             }
@@ -2074,22 +2102,36 @@ namespace gladius::compute
 
                 centroid /= static_cast<float>(samples.size());
 
+                // Regularized SVD solve (Lindstrom approach):
+                // Solve the QEF in well-determined directions, bias toward the mass point
+                // (centroid of intersection points) in degenerate directions.
+                // This prevents vertex oscillation along sharp edges and corners where
+                // the ATA matrix has near-zero singular values.
                 Eigen::JacobiSVD<Eigen::Matrix3f> svd(ata, Eigen::ComputeFullU | Eigen::ComputeFullV);
-                Eigen::Vector3f const solved = svd.solve(atb);
+                auto const& singularValues = svd.singularValues();
+                auto const& V = svd.matrixV();
 
-                // If the unconstrained solution is outside the cell, use the component centroid.
-                // This avoids multiple adjacent cells clamping to the same boundary corner/edge,
-                // which can collapse edges and create topological cracks.
-                float const cellSizeX = bounds.max.s[0] - bounds.min.s[0];
-                float const cellSizeY = bounds.max.s[1] - bounds.min.s[1];
-                float const cellSizeZ = bounds.max.s[2] - bounds.min.s[2];
-                float const eps = 1e-6F * std::max({cellSizeX, cellSizeY, cellSizeZ, 1.0F});
+                // Threshold: singular values below this fraction of the largest are degenerate.
+                // For a 90° edge: 2 large σ, 1 tiny σ. For a corner: 3 large σ.
+                // For a flat surface: 1 large σ, 2 tiny σ.
+                float const svdThreshold = singularValues(0) * 0.1F;
 
-                bool const outside = (solved.x() < bounds.min.s[0] - eps) || (solved.x() > bounds.max.s[0] + eps) ||
-                                     (solved.y() < bounds.min.s[1] - eps) || (solved.y() > bounds.max.s[1] + eps) ||
-                                     (solved.z() < bounds.min.s[2] - eps) || (solved.z() > bounds.max.s[2] + eps);
+                // x = massPoint + Σ_i [σ_i > threshold] V_i * (V_i^T * ATA^{-1} * ATb - V_i^T * massPoint)
+                // JacobiSVD of ATA gives eigenvalues λ_i as singular values (ATA is symmetric PSD).
+                // ATA^{-1} projected onto eigenvector V_i gives: (V_i^T * ATb) / λ_i
+                Eigen::Vector3f solved = centroid;
+                for (int i = 0; i < 3; ++i)
+                {
+                    float const sigma = singularValues(i);
+                    if (sigma > svdThreshold)
+                    {
+                        float const qefComponent = V.col(i).dot(atb) / sigma;
+                        float const massComponent = V.col(i).dot(centroid);
+                        solved += V.col(i) * (qefComponent - massComponent);
+                    }
+                }
 
-                vertex = outside ? centroid : solved;
+                vertex = solved;
             }
             else if (!samples.empty())
             {
