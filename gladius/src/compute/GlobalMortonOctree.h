@@ -368,6 +368,18 @@ namespace gladius::compute
         [[nodiscard]] Eigen::Vector3f sampleGradient(Eigen::Vector3f const& position,
                                                       float epsilon) const;
 
+        // Analytical GPU SDF evaluation (bypasses precomputed voxel grid)
+        [[nodiscard]] float sampleSdfAnalytical(Eigen::Vector3f const& position) const;
+        [[nodiscard]] Eigen::Vector3f sampleGradientAnalytical(Eigen::Vector3f const& position,
+                                                                float epsilon) const;
+
+        /// Batch-evaluate analytical SDF at all corner positions for a set of nodes.
+        void evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices);
+
+        /// Batch gather Hermite samples for all intersecting leaves using GPU SDF.
+        void gatherHermiteSamplesBatchGpu();
+
+
         // Thickness field support
         [[nodiscard]] float sampleThicknessField(std::vector<float> const& field,
                                                   Eigen::Vector3f const& position) const;

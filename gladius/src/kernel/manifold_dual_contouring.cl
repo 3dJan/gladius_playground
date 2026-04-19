@@ -3165,3 +3165,68 @@ __kernel void count_discontinuities_diagnostic(
     }
 }
 
+// ============================================================================
+// Batch SDF evaluation kernels for analytical (non-voxelized) SDF sampling
+// ============================================================================
+
+/// Evaluate analytical SDF at multiple positions in parallel.
+/// Used by GlobalMortonOctree for corner evaluation and zero-crossing refinement
+/// to avoid sampling from the low-resolution precomputed voxel grid.
+__kernel void evaluate_sdf_batch(
+    __global const float* positions,  // 3 floats per position (x, y, z)
+    __global float* sdfValues,        // 1 float per position (output)
+    const uint positionCount,
+    const float isoValue,
+    PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= positionCount)
+    {
+        return;
+    }
+
+    float3 const pos = vload3(id, positions);
+    float4 const result = model(pos, PASS_PAYLOAD_ARGS);
+    sdfValues[id] = result.w - isoValue;
+}
+
+/// Evaluate analytical SDF and gradient at multiple positions in parallel.
+/// The gradient is computed via central finite differences on the analytical model.
+__kernel void evaluate_sdf_gradient_batch(
+    __global const float* positions,  // 3 floats per position
+    __global float* sdfValues,        // 1 float per position (output)
+    __global float* gradients,        // 3 floats per position (output, unnormalized)
+    const uint positionCount,
+    const float isoValue,
+    const float epsilon,
+    PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= positionCount)
+    {
+        return;
+    }
+
+    float3 const pos = vload3(id, positions);
+
+    float4 const result = model(pos, PASS_PAYLOAD_ARGS);
+    sdfValues[id] = result.w - isoValue;
+
+    float const h = epsilon;
+    float const h2 = 2.0f * h;
+
+    float const sdfXp = model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfXn = model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfYp = model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfYn = model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfZp = model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w;
+    float const sdfZn = model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w;
+
+    float3 grad;
+    grad.x = (sdfXp - sdfXn) / h2;
+    grad.y = (sdfYp - sdfYn) / h2;
+    grad.z = (sdfZp - sdfZn) / h2;
+
+    vstore3(grad, id, gradients);
+}
+

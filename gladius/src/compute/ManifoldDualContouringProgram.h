@@ -207,7 +207,32 @@ namespace gladius::compute
             Primitives const & primitives,
             float isoValue,
             float gradientEpsilon);
-            
+
+        /// Evaluate analytical SDF at multiple positions using the GPU model function.
+        /// @param positions  Flat array of 3D positions (x,y,z triples)
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @return SDF values (one per position)
+        [[nodiscard]] std::vector<float> evaluateSdfBatch(
+            std::vector<Eigen::Vector3f> const & positions,
+            Primitives const & primitives,
+            float isoValue);
+
+        /// Evaluate analytical SDF and gradient at multiple positions using the GPU.
+        /// @param positions  Flat array of 3D positions
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @param epsilon    Finite difference step size for gradient computation
+        /// @param[out] outSdfValues  SDF values (one per position)
+        /// @param[out] outGradients  Gradient vectors (one per position, unnormalized)
+        void evaluateSdfGradientBatch(
+            std::vector<Eigen::Vector3f> const & positions,
+            Primitives const & primitives,
+            float isoValue,
+            float epsilon,
+            std::vector<float> & outSdfValues,
+            std::vector<Eigen::Vector3f> & outGradients);
+
       private:
         void ensureCompiled();
     };

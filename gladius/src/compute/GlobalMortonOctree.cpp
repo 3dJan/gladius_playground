@@ -324,8 +324,8 @@ namespace gladius::compute
             return;
         }
 
-        // Evaluate corners
-        evaluateCornersCpu(level.nodeIndices);
+        // Evaluate corners using GPU analytical SDF
+        evaluateCornersGpuBatch(level.nodeIndices);
 
         // Detect intersections
         detectIntersections(level.nodeIndices);
@@ -421,6 +421,55 @@ namespace gladius::compute
                 #ifdef GLOBALMORTON_DEBUG_OUTPUT
                 std::cout << std::endl;
                 #endif
+            }
+        }
+    }
+
+    void GlobalMortonOctree::evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices)
+    {
+        if (nodeIndices.empty() || !m_program)
+        {
+            evaluateCornersCpu(nodeIndices);
+            return;
+        }
+
+        auto const primitives = m_core.getPrimitives();
+        if (!primitives)
+        {
+            evaluateCornersCpu(nodeIndices);
+            return;
+        }
+
+        // Collect all corner positions: 8 corners per node
+        std::size_t const totalCorners = nodeIndices.size() * 8U;
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(totalCorners);
+
+        for (std::size_t nodeIdx : nodeIndices)
+        {
+            auto const& node = m_nodes[nodeIdx];
+            BoundingBox const bounds = node.computeBounds(
+                m_globalBboxMin, m_globalBboxSize,
+                static_cast<std::uint32_t>(m_config.maxDepth));
+
+            for (std::uint8_t c = 0U; c < 8U; ++c)
+            {
+                positions.push_back(cornerPosition(c, bounds));
+            }
+        }
+
+        // Dispatch GPU batch evaluation
+        std::vector<float> const sdfValues =
+            m_program->evaluateSdfBatch(positions, *primitives, m_config.isoValue);
+
+        // Scatter results back to nodes
+        std::size_t idx = 0U;
+        for (std::size_t nodeIdx : nodeIndices)
+        {
+            auto& node = m_nodes[nodeIdx];
+            for (std::uint8_t c = 0U; c < 8U; ++c)
+            {
+                node.cornerValues[c] = sdfValues[idx++];
             }
         }
     }
@@ -1277,10 +1326,10 @@ namespace gladius::compute
             std::cout << "  Generating vertices for " << intersectingLeaves << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
         }
 
-        // Phase 1 (parallel): Gather Hermite samples and solve QEF for each
-        // intersecting leaf. Each node's work is fully independent — the SDF
-        // buffer is read-only and all writes go to per-node fields
-        // (hermiteSamples, computedVertices, edgeComponents).
+        // Phase 1: Gather Hermite samples for all intersecting leaves.
+        // Uses the existing per-node CPU path (bisection + gradient on precomputed SDF).
+        // The corner values are already analytically evaluated (GPU batch), so the voxel
+        // buffer is only used for bisection refinement and gradients, which is sufficient.
         auto const nodeCount = static_cast<std::ptrdiff_t>(m_nodes.size());
         #pragma omp parallel for schedule(dynamic, 64)
         for (std::ptrdiff_t i = 0; i < nodeCount; ++i)
@@ -1292,6 +1341,18 @@ namespace gladius::compute
             }
 
             gatherHermiteSamples(node);
+        }
+
+        // Phase 1b: Solve QEF for each intersecting leaf (CPU, parallelizable)
+        #pragma omp parallel for schedule(dynamic, 64)
+        for (std::ptrdiff_t i = 0; i < nodeCount; ++i)
+        {
+            auto& node = m_nodes[static_cast<std::size_t>(i)];
+            if (!node.isLeaf || !node.isIntersecting)
+            {
+                continue;
+            }
+
             solveQefForNode(node);
         }
 
@@ -1410,6 +1471,199 @@ namespace gladius::compute
         }
 
         outPosition = (lo + hi) * 0.5F;
+    }
+
+    void GlobalMortonOctree::gatherHermiteSamplesBatchGpu()
+    {
+        auto const primitives = m_core.getPrimitives();
+        if (!primitives || !m_program)
+        {
+            // Fall back to per-node CPU path
+            for (auto& node : m_nodes)
+            {
+                if (node.isLeaf && node.isIntersecting)
+                {
+                    gatherHermiteSamples(node);
+                }
+            }
+            return;
+        }
+
+        // --- Step 1: Collect all intersecting edges across all leaf nodes ---
+        struct EdgeWork
+        {
+            std::size_t nodeIndex;
+            std::uint8_t edgeIndex;
+            Eigen::Vector3f start;
+            Eigen::Vector3f end;
+            float startValue;
+            float endValue;
+            float epsilon;
+        };
+
+        std::vector<EdgeWork> edges;
+        for (std::size_t i = 0U; i < m_nodes.size(); ++i)
+        {
+            auto const& node = m_nodes[i];
+            if (!node.isLeaf || !node.isIntersecting)
+            {
+                continue;
+            }
+
+            BoundingBox const bounds = node.computeBounds(
+                m_globalBboxMin, m_globalBboxSize,
+                static_cast<std::uint32_t>(m_config.maxDepth));
+            float const eps = (bounds.max.s[0] - bounds.min.s[0]) * 0.01F;
+
+            for (std::uint8_t e = 0U; e < 12U; ++e)
+            {
+                if (!(node.edgeMask & (1U << e)))
+                {
+                    continue;
+                }
+
+                std::uint8_t const c0 = EDGE_CORNERS[e][0];
+                std::uint8_t const c1 = EDGE_CORNERS[e][1];
+
+                EdgeWork ew;
+                ew.nodeIndex = i;
+                ew.edgeIndex = e;
+                ew.start = cornerPosition(c0, bounds);
+                ew.end = cornerPosition(c1, bounds);
+                ew.startValue = node.cornerValues[c0];
+                ew.endValue = node.cornerValues[c1];
+                ew.epsilon = eps;
+                edges.push_back(ew);
+            }
+        }
+
+        if (edges.empty())
+        {
+            return;
+        }
+
+        // --- Step 2: Batched bisection using GPU ---
+        // Each edge has its own lo/hi interval. We iterate bisection steps
+        // synchronously, dispatching all midpoints at once per iteration.
+        std::vector<Eigen::Vector3f> lo(edges.size());
+        std::vector<Eigen::Vector3f> hi(edges.size());
+        std::vector<float> vLo(edges.size());
+        std::vector<float> vHi(edges.size());
+        std::vector<bool> converged(edges.size(), false);
+
+        for (std::size_t i = 0U; i < edges.size(); ++i)
+        {
+            auto const& ew = edges[i];
+
+            // Quick convergence checks
+            if (std::abs(ew.startValue) <= ZERO_CROSSING_TOLERANCE)
+            {
+                lo[i] = hi[i] = ew.start;
+                converged[i] = true;
+                continue;
+            }
+            if (std::abs(ew.endValue) <= ZERO_CROSSING_TOLERANCE)
+            {
+                lo[i] = hi[i] = ew.end;
+                converged[i] = true;
+                continue;
+            }
+            if ((ew.startValue < 0.0F) == (ew.endValue < 0.0F))
+            {
+                lo[i] = hi[i] = (ew.start + ew.end) * 0.5F;
+                converged[i] = true;
+                continue;
+            }
+
+            lo[i] = ew.start;
+            hi[i] = ew.end;
+            vLo[i] = ew.startValue;
+            vHi[i] = ew.endValue;
+        }
+
+        for (std::size_t iter = 0U; iter < MAX_BISECTION_ITERATIONS; ++iter)
+        {
+            // Collect midpoints for all unconverged edges
+            std::vector<std::size_t> activeIndices;
+            std::vector<Eigen::Vector3f> midpoints;
+
+            for (std::size_t i = 0U; i < edges.size(); ++i)
+            {
+                if (!converged[i])
+                {
+                    activeIndices.push_back(i);
+                    midpoints.push_back((lo[i] + hi[i]) * 0.5F);
+                }
+            }
+
+            if (activeIndices.empty())
+            {
+                break;
+            }
+
+            // GPU batch evaluate SDF at all midpoints
+            std::vector<float> const midValues =
+                m_program->evaluateSdfBatch(midpoints, *primitives, m_config.isoValue);
+
+            // Update intervals
+            for (std::size_t j = 0U; j < activeIndices.size(); ++j)
+            {
+                std::size_t const i = activeIndices[j];
+                float const vMid = midValues[j];
+                Eigen::Vector3f const mid = midpoints[j];
+
+                if (std::abs(vMid) < ZERO_CROSSING_TOLERANCE)
+                {
+                    lo[i] = hi[i] = mid;
+                    converged[i] = true;
+                    continue;
+                }
+
+                if (vMid * vLo[i] < 0.0F)
+                {
+                    hi[i] = mid;
+                    vHi[i] = vMid;
+                }
+                else
+                {
+                    lo[i] = mid;
+                    vLo[i] = vMid;
+                }
+            }
+        }
+
+        // --- Step 3: Compute final zero-crossing positions ---
+        std::vector<Eigen::Vector3f> zeroCrossings(edges.size());
+        for (std::size_t i = 0U; i < edges.size(); ++i)
+        {
+            zeroCrossings[i] = (lo[i] + hi[i]) * 0.5F;
+        }
+
+        // --- Step 4: Batch GPU gradient evaluation at all zero-crossings ---
+        // Group edges by epsilon value (different leaf sizes can differ)
+        // For simplicity, use the smallest epsilon across all edges — all leaf cells
+        // at max depth have the same size, and that is the common case.
+        float const commonEpsilon = edges.front().epsilon;
+
+        std::vector<float> sdfAtCrossings;
+        std::vector<Eigen::Vector3f> gradients;
+        m_program->evaluateSdfGradientBatch(
+            zeroCrossings, *primitives, m_config.isoValue, commonEpsilon,
+            sdfAtCrossings, gradients);
+
+        // --- Step 5: Scatter results back into node Hermite samples ---
+        for (std::size_t i = 0U; i < edges.size(); ++i)
+        {
+            auto& node = m_nodes[edges[i].nodeIndex];
+
+            HermiteSample sample;
+            sample.position = zeroCrossings[i];
+            sample.gradient = gradients[i];
+            sample.value = 0.0F;
+            sample.edgeIndex = edges[i].edgeIndex;
+
+            node.hermiteSamples.push_back(sample);
+        }
     }
 
     void GlobalMortonOctree::solveQefForNode(GlobalOctreeNode& node)
@@ -3988,6 +4242,36 @@ namespace gladius::compute
         return Eigen::Vector3f(dx, dy, dz) / (2.0F * epsilon);
     }
 
+    float GlobalMortonOctree::sampleSdfAnalytical(Eigen::Vector3f const& position) const
+    {
+        auto const primitives = m_core.getPrimitives();
+        if (!primitives || !m_program)
+        {
+            return sampleSdf(position);
+        }
+
+        std::vector<Eigen::Vector3f> const positions{position};
+        auto const values = m_program->evaluateSdfBatch(positions, *primitives, m_config.isoValue);
+        return values.front();
+    }
+
+    Eigen::Vector3f GlobalMortonOctree::sampleGradientAnalytical(Eigen::Vector3f const& position,
+                                                                   float epsilon) const
+    {
+        auto const primitives = m_core.getPrimitives();
+        if (!primitives || !m_program)
+        {
+            return sampleGradient(position, epsilon);
+        }
+
+        std::vector<Eigen::Vector3f> const positions{position};
+        std::vector<float> sdfValues;
+        std::vector<Eigen::Vector3f> gradients;
+        m_program->evaluateSdfGradientBatch(
+            positions, *primitives, m_config.isoValue, epsilon, sdfValues, gradients);
+        return gradients.front();
+    }
+
     float GlobalMortonOctree::sampleEffectiveSdf(Eigen::Vector3f const& position) const
     {
         if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
@@ -3996,7 +4280,7 @@ namespace gladius::compute
         }
         else
         {
-            return sampleSdf(position) - m_config.isoValue;
+            return sampleSdf(position);
         }
     }
 
