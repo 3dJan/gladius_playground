@@ -80,6 +80,7 @@ namespace gladius::ui
         void dragParameter(const std::string & label, float * valuePtr, float minVal, float maxVal);
         void renderSettingsDialog();
         void open(const std::filesystem::path & filename);
+        void setStartupFile(std::filesystem::path filename);
         void startMainLoop();
         void setup();
 
@@ -262,6 +263,7 @@ namespace gladius::ui
         bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;
+        std::optional<std::filesystem::path> m_startupFile;
 
         float m_mainMenuPosX{-400.f}; // used for the move in animation
 

@@ -1,4 +1,5 @@
 #include "ThreemfFileViewer.h"
+#include "../FileSystemUtils.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
 #include "LibraryDragPayload.h"
 #include "imgui.h"
@@ -284,6 +285,13 @@ namespace gladius::ui
                 {
                     m_needsRefresh = true;
                 }
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem(ICON_FA_EXTERNAL_LINK_ALT "  Open in Gladius"))
+            {
+                openFileInNewInstance(info.filePath);
             }
 
             ImGui::EndPopup();

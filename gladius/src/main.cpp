@@ -227,7 +227,7 @@ int main(int argc, char ** argv)
                     logger->logInfo("Opening file: " + filename->string());
                 }
             }
-            app.getMainWindow().open(*filename);
+            app.getMainWindow().setStartupFile(*filename);
         }
         else
         {

@@ -419,6 +419,13 @@ namespace gladius::ui
                 // Complete full setup with compute
                 setup(m_core, m_doc, m_logger);
 
+                // Open the startup file now that compute is available
+                if (m_startupFile)
+                {
+                    loadFileDeferred(*m_startupFile);
+                    m_startupFile.reset();
+                }
+
                 if (m_logger)
                 {
                     m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
@@ -1658,6 +1665,11 @@ namespace gladius::ui
         }
 
         loadFileDeferred(filename);
+    }
+
+    void MainWindow::setStartupFile(std::filesystem::path filename)
+    {
+        m_startupFile = std::move(filename);
     }
 
     void MainWindow::loadFileDeferred(const std::filesystem::path & filename)

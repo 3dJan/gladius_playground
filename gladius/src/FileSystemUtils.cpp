@@ -133,4 +133,52 @@ namespace gladius
           "Cannot disambiguate filename: all 999 suffix slots exhausted for '" + stem + extension +
           "' in " + directory.string());
     }
+
+    std::filesystem::path getExecutablePath()
+    {
+#ifdef WIN32
+        char * executablePath;
+        if (_get_pgmptr(&executablePath) != 0)
+        {
+            return {};
+        }
+        return std::filesystem::path{executablePath};
+#else
+        char executablePath[PATH_MAX];
+        ssize_t len = ::readlink("/proc/self/exe", executablePath, sizeof(executablePath));
+        if (len == -1 || len >= static_cast<ssize_t>(sizeof(executablePath)))
+        {
+            return {};
+        }
+        executablePath[len] = '\0';
+        return std::filesystem::path{executablePath};
+#endif
+    }
+
+    bool openFileInNewInstance(std::filesystem::path const & filePath)
+    {
+        auto const exe = getExecutablePath();
+        if (exe.empty())
+        {
+            return false;
+        }
+
+#ifdef WIN32
+        // ShellExecuteW detaches by default.
+        auto const wExe = exe.wstring();
+        auto const wArg = filePath.wstring();
+        auto result = ShellExecuteW(nullptr, L"open", wExe.c_str(), wArg.c_str(), nullptr, SW_SHOWNORMAL);
+        return reinterpret_cast<intptr_t>(result) > 32;
+#else
+        pid_t const pid = fork();
+        if (pid == 0)
+        {
+            // Child — detach from parent and exec.
+            setsid();
+            execl(exe.c_str(), exe.c_str(), filePath.c_str(), nullptr);
+            _exit(127); // exec failed
+        }
+        return pid > 0;
+#endif
+    }
 }

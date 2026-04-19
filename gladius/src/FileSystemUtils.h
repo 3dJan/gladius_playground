@@ -45,4 +45,12 @@ namespace gladius
     std::filesystem::path disambiguateFilename(std::filesystem::path const & directory,
                                                std::string const & stem,
                                                std::string const & extension);
+
+    /// @brief Returns the full path to the currently running executable.
+    std::filesystem::path getExecutablePath();
+
+    /// @brief Opens a file in a new (detached) instance of Gladius.
+    /// @param filePath The file to open.
+    /// @return true if the process was spawned successfully.
+    bool openFileInNewInstance(std::filesystem::path const & filePath);
 }

@@ -257,7 +257,7 @@ namespace gladius::io
                 return std::nullopt;
             }
 
-            // 3. Compute transitive dependency closure (reuses the graph for step 4).
+            // 3. Compute transitive dependency closure.
             ResourceDependencyGraph depGraph(sourceModel, logger);
             depGraph.buildGraph();
 
@@ -267,71 +267,23 @@ namespace gladius::io
                 return std::nullopt;
             }
 
-            // 4. Expand closure with build items that depend on tagged functions
-            //    (keeps the example levelset / mesh chain).
-
-            // Find build items whose object transitively depends on a tagged function.
-            std::vector<Lib3MF::PBuildItem> buildItemsToRemove;
-            auto buildItemIter = sourceModel->GetBuildItems();
-            while (buildItemIter->MoveNext())
+            // 4. Remove all build items — they reference the example/main function
+            //    and its mesh chain which are only needed for standalone viewing,
+            //    not for merging the library function into another document.
             {
-                auto buildItem = buildItemIter->GetCurrent();
-                if (!buildItem)
+                std::vector<Lib3MF::PBuildItem> buildItemsToRemove;
+                auto buildItemIter = sourceModel->GetBuildItems();
+                while (buildItemIter->MoveNext())
                 {
-                    continue;
+                    buildItemsToRemove.push_back(buildItemIter->GetCurrent());
                 }
-
-                auto objectId = buildItem->GetObjectResourceID();
-                auto objResource = sourceModel->GetResourceByID(objectId);
-                bool referencesTagged = false;
-
-                if (objResource)
+                for (auto const & item : buildItemsToRemove)
                 {
-                    // Check if the object itself or any of its transitive deps
-                    // are in the closure.
-                    if (closure->count(objResource->GetModelResourceID()) > 0)
-                    {
-                        referencesTagged = true;
-                    }
-                    else
-                    {
-                        auto objDeps = depGraph.getAllRequiredResources(objResource);
-                        for (auto const & dep : objDeps)
-                        {
-                            if (closure->count(dep->GetModelResourceID()) > 0)
-                            {
-                                referencesTagged = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (referencesTagged)
-                {
-                    // Keep this build item — add its object + deps to the closure.
-                    if (objResource)
-                    {
-                        closure->insert(objResource->GetModelResourceID());
-                        for (auto const & dep : depGraph.getAllRequiredResources(objResource))
-                        {
-                            closure->insert(dep->GetModelResourceID());
-                        }
-                    }
-                }
-                else
-                {
-                    buildItemsToRemove.push_back(buildItem);
+                    sourceModel->RemoveBuildItem(item.get());
                 }
             }
 
-            // 5. Remove unrelated build items.
-            for (auto const & item : buildItemsToRemove)
-            {
-                sourceModel->RemoveBuildItem(item.get());
-            }
-
-            // 6. Remove all resources outside the closure.
+            // 5. Remove all resources outside the closure.
             std::vector<Lib3MF::PResource> resourcesToRemove;
             auto resIter = sourceModel->GetResources();
             while (resIter->MoveNext())
@@ -351,11 +303,9 @@ namespace gladius::io
             if (logger)
             {
                 logger->addEvent(
-                  {fmt::format("Selective import: kept {} resources, removed {} resources "
-                               "and {} build items",
+                  {fmt::format("Selective import: kept {} resources, removed {}",
                                closure->size(),
-                               resourcesToRemove.size(),
-                               buildItemsToRemove.size()),
+                               resourcesToRemove.size()),
                    events::Severity::Info});
             }
 
