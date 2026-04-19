@@ -1326,24 +1326,12 @@ namespace gladius::compute
             std::cout << "  Generating vertices for " << intersectingLeaves << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
         }
 
-        // Phase 1: Gather Hermite samples for all intersecting leaves.
-        // Uses the existing per-node CPU path (bisection + gradient on precomputed SDF).
-        // The corner values are already analytically evaluated (GPU batch), so the voxel
-        // buffer is only used for bisection refinement and gradients, which is sufficient.
-        auto const nodeCount = static_cast<std::ptrdiff_t>(m_nodes.size());
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (std::ptrdiff_t i = 0; i < nodeCount; ++i)
-        {
-            auto& node = m_nodes[static_cast<std::size_t>(i)];
-            if (!node.isLeaf || !node.isIntersecting)
-            {
-                continue;
-            }
-
-            gatherHermiteSamples(node);
-        }
+        // Phase 1: Gather Hermite samples for all intersecting leaves using GPU
+        // analytical SDF evaluation (batched bisection + gradient).
+        gatherHermiteSamplesBatchGpu();
 
         // Phase 1b: Solve QEF for each intersecting leaf (CPU, parallelizable)
+        auto const nodeCount = static_cast<std::ptrdiff_t>(m_nodes.size());
         #pragma omp parallel for schedule(dynamic, 64)
         for (std::ptrdiff_t i = 0; i < nodeCount; ++i)
         {
@@ -1604,6 +1592,7 @@ namespace gladius::compute
             // GPU batch evaluate SDF at all midpoints
             std::vector<float> const midValues =
                 m_program->evaluateSdfBatch(midpoints, *primitives, m_config.isoValue);
+
 
             // Update intervals
             for (std::size_t j = 0U; j < activeIndices.size(); ++j)
