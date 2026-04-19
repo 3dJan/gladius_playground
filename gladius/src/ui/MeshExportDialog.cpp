@@ -741,18 +741,18 @@ namespace gladius::ui
             {
                 ImGui::Indent();
                 
-                char const * const terminationModes[] = {"Target Count", "Reduction %", "Error-Bounded"};
-                ImGui::Combo("Termination##simplterm", &m_manifoldSimplificationTerminationMode,
-                             terminationModes, 3);
-                
-                if (m_manifoldSimplificationTerminationMode == 2)  // Error-bounded
+                ImGui::SliderFloat("Tolerance##simpltol",
+                                   &m_manifoldSimplificationTolerance,
+                                   0.001F, 1.0F,
+                                   "%.3f mm",
+                                   ImGuiSliderFlags_Logarithmic);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
                 {
-                    ImGui::SliderFloat("Max error##simplerr",
-                                       &m_manifoldSimplificationMaxError,
-                                       0.001F, 10.0F,
-                                       "%.3f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("squared world units");
+                    ImGui::SetTooltip("Maximum surface deviation allowed during\n"
+                                      "simplification. Set this to your printer's\n"
+                                      "layer height or XY resolution.");
                 }
                 
                 ImGui::Unindent();
@@ -1225,8 +1225,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-        options.simplificationMaxError = m_manifoldSimplificationMaxError;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1308,8 +1308,8 @@ namespace gladius::ui
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
         options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-        options.simplificationMaxError = m_manifoldSimplificationMaxError;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
         options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
         options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
         options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
@@ -1462,8 +1462,8 @@ namespace gladius::ui
             // Mesh simplification options
             options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
             options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
-            options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-            options.simplificationMaxError = m_manifoldSimplificationMaxError;
+            options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+            options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
             // QEM SDF-aware options
             options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
             options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;

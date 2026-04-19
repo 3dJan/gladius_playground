@@ -118,8 +118,8 @@ namespace gladius::ui
         // Mesh simplification
         bool m_manifoldEnableSimplification = false;
         int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemFast, 2=QemSdfAware
-        int m_manifoldSimplificationTerminationMode = 0;  ///< 0=TargetCount, 1=ReductionPercent, 2=ErrorBounded
-        float m_manifoldSimplificationMaxError = 1.0F;  ///< Max error for error-bounded mode
+        int m_manifoldSimplificationTerminationMode = 2;  ///< 0=TargetCount, 1=ReductionPercent, 2=ErrorBounded
+        float m_manifoldSimplificationTolerance = 0.05F;  ///< Tolerance in mm (world units)
         float m_manifoldSimplificationMaxSdfError = 0.01F;
         float m_manifoldSimplificationSdfWeight = 0.5F;
         float m_manifoldSimplificationNormalWeight = 0.3F;
