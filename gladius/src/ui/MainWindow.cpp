@@ -1011,7 +1011,7 @@ namespace gladius::ui
             savePath.replace_extension(".3mf");
             bool writeThumbnail = m_computeAvailable && m_core;
             m_doc->saveAs(savePath, writeThumbnail);
-            m_renderWindow.invalidateViewDuetoModelUpdate();
+            // No invalidation needed — saving doesn't change the model.
             m_fileChanged = false;
             m_currentAssemblyFileName = savePath;
             addToRecentFiles(savePath);
@@ -1084,10 +1084,17 @@ namespace gladius::ui
             // Clear errors and warnings from events list when compilation is successful
             m_logger->clear();
 
+            // invalidateViewDuetoModelUpdate() already calls invalidateView() internally —
+            // no separate invalidateView() needed (that would cause a redundant epoch bump).
             m_renderWindow.invalidateViewDuetoModelUpdate();
             m_modelEditor.markModelAsUpToDate();
         }
-        m_renderWindow.invalidateView();
+        else
+        {
+            // Compilation is still running — just mark dirty for visual feedback
+            // without bumping the epoch (which would cancel in-flight work).
+            m_renderWindow.invalidateView();
+        }
     }
 
     void MainWindow::nodeEditor()
@@ -1510,9 +1517,13 @@ namespace gladius::ui
         const auto deltaTime = ImGui::GetIO().DeltaTime;
         m_mainMenuPosX -= m_mainMenuPosX * 20.f * deltaTime;
         m_mainMenuPosX = std::min(m_mainMenuPosX, 0.f);
-        if (m_mainMenuPosX < 0.f)
+        if (m_mainMenuPosX < -0.5f)
         {
             m_mainView.startAnimationMode();
+        }
+        else
+        {
+            m_mainMenuPosX = 0.f;
         }
         const auto window_pos = ImVec2(m_mainMenuPosX, menuBarHeight);
         ImGui::SetWindowPos("Menu", window_pos, ImGuiCond_Always);
@@ -1535,7 +1546,6 @@ namespace gladius::ui
         if (m_meshExporterDialog.isVisible())
         {
             m_mainView.startAnimationMode();
-            m_renderWindow.invalidateView();
         }
         m_meshExporterDialog.render(*m_core);
     }
@@ -1545,7 +1555,6 @@ namespace gladius::ui
         if (m_cliExportDialog.isVisible())
         {
             m_mainView.startAnimationMode();
-            m_renderWindow.invalidateView();
         }
         m_cliExportDialog.render(*m_core);
     }
@@ -2490,8 +2499,9 @@ namespace gladius::ui
             {
                 m_logger->clear();
             }
+            // invalidateViewDuetoModelUpdate() already calls invalidateView() internally —
+            // no separate invalidateView() needed (that would cause a redundant epoch bump).
             m_renderWindow.invalidateViewDuetoModelUpdate();
-            m_renderWindow.invalidateView();
         }
 
         // Suppress HQ front-buffer display when a parameter change is pending.
