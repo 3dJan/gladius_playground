@@ -406,10 +406,12 @@ if(WIN32 AND NOT UNIX)
   set(GLADIUS_EOSPRINT_MIN_VERSION "2.24.0"
       CACHE STRING "Minimum EOSPRINT version required for this gladius build")
 
-  # Plugin API version implemented by this build.  Must be <= 1.2 (EOSPRINT's
-  # MAX_API_VERSION_MAJOR=1, MAX_API_VERSION_MINOR=2).
-  set(GLADIUS_PLUGIN_API_VERSION "1.1"
-      CACHE STRING "Plugin API version implemented by this gladius build")
+  # Read the plugin API version from Gladius.xml (<component … version="M.m.p">).
+  # EOSPRINT accepts ApiVersion <= 1.2 (MAX_API_VERSION_MAJOR=1, MINOR=2).
+  file(READ "${CMAKE_SOURCE_DIR}/src/api/Gladius.xml" _gladius_xml_content)
+  string(REGEX MATCH "version=\"([0-9]+)\\.([0-9]+)\\.[0-9]+\""
+      _gladius_api_match "${_gladius_xml_content}")
+  set(GLADIUS_PLUGIN_API_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
 
   set(GLADIUS_VERSION
       "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
