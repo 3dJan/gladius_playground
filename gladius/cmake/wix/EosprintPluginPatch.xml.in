@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    CPack WiX patch file: adds a FeatureRef for the optional EOSPRINT plugin
+    registration feature into the Product element.
+
+    #PRODUCT is a built-in CPack WiX patch point that targets the <Product>
+    element in main.wxs.
+-->
+<CPackWiXPatch>
+    <CPackWiXFragment Id="#PRODUCT">
+        <FeatureRef Id="F_EosprintPlugin" />
+    </CPackWiXFragment>
+</CPackWiXPatch>
