@@ -327,7 +327,9 @@ namespace gladius::compute
                         continue;
                     }
 
-                    auto const [a, b] = unpackEdgeKey(key);
+                    auto const ab = unpackEdgeKey(key);
+                    std::uint32_t const a = ab.first;
+                    std::uint32_t const b = ab.second;
                     std::array<std::uint32_t, 4> triIds = it->second.triIds;
 
                     // Skip if any triangle already changed in this pass.

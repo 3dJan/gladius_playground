@@ -393,6 +393,43 @@ if(WIN32 AND NOT UNIX)
   set(CPACK_WIX_UI_DIALOG ${CMAKE_SOURCE_DIR}/documentation/img/dialog.png)
   set(CPACK_WIX_PRODUCT_ICON ${CMAKE_SOURCE_DIR}/documentation/img/gladius.ico)
   set(CPACK_WIX_PROGRAM_MENU_FOLDER .)
+
+  # Use FeatureTree UI so the user can opt in/out of the EOSPRINT plugin
+  # registration during installation.  WixUI_InstallDir (the CPack default)
+  # does not show a feature selection page.
+  set(CPACK_WIX_UI_REF "WixUI_FeatureTree")
+
+  # --- Optional EOSPRINT 2 plugin registration ---
+  # Minimum EOSPRINT version that this gladius build is compatible with.
+  # Do NOT use the latest EOSPRINT version here; use the oldest release that
+  # actually works so the plugin is not rejected on older EOSPRINT installations.
+  set(GLADIUS_EOSPRINT_MIN_VERSION "2.24.0"
+      CACHE STRING "Minimum EOSPRINT version required for this gladius build")
+
+  # Read the plugin API version from Gladius.xml (<component … version="M.m.p">).
+  # EOSPRINT accepts ApiVersion <= 1.2 (MAX_API_VERSION_MAJOR=1, MINOR=2).
+  file(READ "${CMAKE_SOURCE_DIR}/src/api/Gladius.xml" _gladius_xml_content)
+  string(REGEX MATCH "version=\"([0-9]+)\\.([0-9]+)\\.[0-9]+\""
+      _gladius_api_match "${_gladius_xml_content}")
+  set(GLADIUS_PLUGIN_API_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+
+  set(GLADIUS_VERSION
+      "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
+
+  configure_file(
+      "${CMAKE_SOURCE_DIR}/cmake/wix/EosprintPlugin.wxs.in"
+      "${CMAKE_BINARY_DIR}/cmake/wix/EosprintPlugin.wxs"
+      @ONLY)
+
+  configure_file(
+      "${CMAKE_SOURCE_DIR}/cmake/wix/EosprintPluginPatch.xml.in"
+      "${CMAKE_BINARY_DIR}/cmake/wix/EosprintPluginPatch.xml"
+      @ONLY)
+
+  list(APPEND CPACK_WIX_EXTRA_SOURCES
+      "${CMAKE_BINARY_DIR}/cmake/wix/EosprintPlugin.wxs")
+  list(APPEND CPACK_WIX_PATCH_FILE
+      "${CMAKE_BINARY_DIR}/cmake/wix/EosprintPluginPatch.xml")
 endif()
 
 if (UNIX)
@@ -412,6 +449,6 @@ add_custom_target(Generate_Installer
   COMMAND "${CMAKE_CPACK_COMMAND}"
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
   # Make sure both desktop app variants are built before packaging
-  DEPENDS gladius gladiusmcp gladius_lib
+  DEPENDS gladius gladiusmcp gladius_lib gladiuslib
   COMMENT "Running CPack. Please wait...")
 

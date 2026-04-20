@@ -474,8 +474,9 @@ namespace gladius::ui
                             view.setImageStack(imgStack);
 
                             // T059/T060/T061: Set up transform callback with undo support
+                            auto const resourceKey = key; // copy to avoid capturing structured binding
                             view.setTransformCallback(
-                                [this, document, key, &view](ImageStackTransform transform)
+                                [this, document, resourceKey, &view](ImageStackTransform transform)
                                 {
                                     // Get mutable ImageStack
                                     auto & resourceManager =
@@ -485,7 +486,7 @@ namespace gladius::ui
                                     io::ImageStack * mutableStack = nullptr;
                                     for (auto & [resKey, res] : resources)
                                     {
-                                        if (resKey == key)
+                                        if (resKey == resourceKey)
                                         {
                                             auto * stackRes =
                                                 dynamic_cast<ImageStackResource *>(res.get());
