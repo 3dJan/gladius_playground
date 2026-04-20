@@ -394,6 +394,11 @@ if(WIN32 AND NOT UNIX)
   set(CPACK_WIX_PRODUCT_ICON ${CMAKE_SOURCE_DIR}/documentation/img/gladius.ico)
   set(CPACK_WIX_PROGRAM_MENU_FOLDER .)
 
+  # Use FeatureTree UI so the user can opt in/out of the EOSPRINT plugin
+  # registration during installation.  WixUI_InstallDir (the CPack default)
+  # does not show a feature selection page.
+  set(CPACK_WIX_UI_REF "WixUI_FeatureTree")
+
   # --- Optional EOSPRINT 2 plugin registration ---
   # Minimum EOSPRINT version that this gladius build is compatible with.
   # Do NOT use the latest EOSPRINT version here; use the oldest release that
