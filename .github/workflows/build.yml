@@ -63,7 +63,7 @@ jobs:
         arch: x64
     - name: Install dependencies of glfw on linux
       if: matrix.os == 'ubuntu-latest'
-      run: sudo apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev build-essential libglfw3-dev ninja-build
+      run: sudo apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev build-essential libglfw3-dev ninja-build libomp-dev
     - name: Install Ninja with Chocolatey on Windows
       if: runner.os == 'Windows'
       run: choco install ninja -y
