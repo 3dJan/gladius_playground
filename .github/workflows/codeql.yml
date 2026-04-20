@@ -46,7 +46,7 @@ jobs:
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        vcpkgGitCommitId: 'f2bf7d935af722c0cd8219c1f6e30d5ae3d666f2'
+        vcpkgGitCommitId: '6ecbbbdf31cba47aafa7cf6189b1e73e10ac61f8'
         vcpkgJsonGlob: '${{ github.workspace }}/gladius/vcpkg.json'
       env:
         VCPKG_OVERLAY_PORTS: '${{ github.workspace }}/gladius/vcpkg-overlay-ports'
