@@ -748,6 +748,8 @@ namespace gladius::ui
 
         if (!m_enableHQRendering)
         {
+            // Clear dirty flag — with HQ disabled, low-res preview is the final output.
+            m_dirty = false;
             return;
         }
 
@@ -1790,6 +1792,9 @@ namespace gladius::ui
         if (!m_enableHQRendering)
         {
             m_core->setPreCompSdfSize(128u);
+            // Clear dirty flag — with HQ disabled, low-res preview is the final output.
+            // Without this, m_dirty stays true forever and the UI loop never settles.
+            m_dirty = false;
             return;
         }
 

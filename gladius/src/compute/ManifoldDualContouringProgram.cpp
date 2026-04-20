@@ -777,4 +777,278 @@ namespace gladius::compute
         // their exact positions will be computed with thickness in emit_vertices_with_thickness.
         addHaloNodes(octreeBuffer, nodeCount, maxCoord, depth, bboxMin, bboxMax, primitives, 0.0F);
     }
+
+    std::vector<float> ManifoldDualContouringProgram::evaluateSdfBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        Primitives const & primitives,
+        float isoValue)
+    {
+        std::vector<float> results(positions.size(), 0.0F);
+        if (positions.empty())
+        {
+            return results;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const posCount = static_cast<cl_uint>(positions.size());
+
+        // Pack positions into flat float array
+        std::vector<float> posFlat(positions.size() * 3U);
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer posBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer sdfBuf(ctx, CL_MEM_WRITE_ONLY,
+                          results.size() * sizeof(float));
+
+        cl::NDRange global(positions.size());
+
+        m_programFront->run("evaluate_sdf_batch",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           sdfBuf,
+                           posCount,
+                           isoValue,
+                           PAYLOAD_ARGUMENTS);
+
+        m_ComputeContext->GetQueue().enqueueReadBuffer(
+            sdfBuf, CL_TRUE, 0, results.size() * sizeof(float), results.data());
+
+        return results;
+    }
+
+    void ManifoldDualContouringProgram::evaluateSdfGradientBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<float> & outSdfValues,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        outSdfValues.assign(positions.size(), 0.0F);
+        outGradients.assign(positions.size(), Eigen::Vector3f::Zero());
+        if (positions.empty())
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const posCount = static_cast<cl_uint>(positions.size());
+
+        // Pack positions into flat float array
+        std::vector<float> posFlat(positions.size() * 3U);
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer posBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer sdfBuf(ctx, CL_MEM_WRITE_ONLY,
+                          positions.size() * sizeof(float));
+        cl::Buffer gradBuf(ctx, CL_MEM_WRITE_ONLY,
+                           positions.size() * 3U * sizeof(float));
+
+        cl::NDRange global(positions.size());
+
+        m_programFront->run("evaluate_sdf_gradient_batch",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           sdfBuf,
+                           gradBuf,
+                           posCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+        queue.enqueueReadBuffer(
+            sdfBuf, CL_TRUE, 0, positions.size() * sizeof(float), outSdfValues.data());
+
+        std::vector<float> gradFlat(positions.size() * 3U);
+        queue.enqueueReadBuffer(
+            gradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U + 0U],
+                                               gradFlat[i * 3U + 1U],
+                                               gradFlat[i * 3U + 2U]);
+        }
+    }
+
+    void ManifoldDualContouringProgram::hermiteBisectAndGradientBatch(
+        std::vector<Eigen::Vector3f> const & starts,
+        std::vector<Eigen::Vector3f> const & ends,
+        std::vector<float> const & startValues,
+        std::vector<float> const & endValues,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<Eigen::Vector3f> & outPositions,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        auto const count = starts.size();
+        outPositions.resize(count);
+        outGradients.resize(count);
+
+        if (count == 0U)
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const edgeCount = static_cast<cl_uint>(count);
+
+        // Pack into flat arrays
+        std::vector<float> startsFlat(count * 3U);
+        std::vector<float> endsFlat(count * 3U);
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            startsFlat[i * 3U + 0U] = starts[i].x();
+            startsFlat[i * 3U + 1U] = starts[i].y();
+            startsFlat[i * 3U + 2U] = starts[i].z();
+            endsFlat[i * 3U + 0U] = ends[i].x();
+            endsFlat[i * 3U + 1U] = ends[i].y();
+            endsFlat[i * 3U + 2U] = ends[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer startsBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             startsFlat.size() * sizeof(float), startsFlat.data());
+        cl::Buffer endsBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           endsFlat.size() * sizeof(float), endsFlat.data());
+        cl::Buffer startValBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                               count * sizeof(float), const_cast<float*>(startValues.data()));
+        cl::Buffer endValBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             count * sizeof(float), const_cast<float*>(endValues.data()));
+        cl::Buffer outPosBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+        cl::Buffer outGradBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+
+        cl::NDRange global(count);
+
+        m_programFront->run("hermite_bisect_and_gradient",
+                           cl::NullRange,
+                           global,
+                           startsBuf,
+                           endsBuf,
+                           startValBuf,
+                           endValBuf,
+                           outPosBuf,
+                           outGradBuf,
+                           edgeCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        std::vector<float> posFlat(count * 3U);
+        queue.enqueueReadBuffer(outPosBuf, CL_TRUE, 0, posFlat.size() * sizeof(float), posFlat.data());
+
+        std::vector<float> gradFlat(count * 3U);
+        queue.enqueueReadBuffer(outGradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            outPositions[i] = Eigen::Vector3f(posFlat[i * 3U], posFlat[i * 3U + 1U], posFlat[i * 3U + 2U]);
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U], gradFlat[i * 3U + 1U], gradFlat[i * 3U + 2U]);
+        }
+    }
+
+    void ManifoldDualContouringProgram::newtonProjectToSurfaceBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<Eigen::Vector3f> const & bboxMins,
+        std::vector<Eigen::Vector3f> const & bboxMaxs,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<Eigen::Vector3f> & outPositions,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        auto const count = positions.size();
+        outPositions.resize(count);
+        outGradients.resize(count);
+
+        if (count == 0U)
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const pointCount = static_cast<cl_uint>(count);
+
+        // Pack into flat arrays
+        std::vector<float> posFlat(count * 3U);
+        std::vector<float> bMinFlat(count * 3U);
+        std::vector<float> bMaxFlat(count * 3U);
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+            bMinFlat[i * 3U + 0U] = bboxMins[i].x();
+            bMinFlat[i * 3U + 1U] = bboxMins[i].y();
+            bMinFlat[i * 3U + 2U] = bboxMins[i].z();
+            bMaxFlat[i * 3U + 0U] = bboxMaxs[i].x();
+            bMaxFlat[i * 3U + 1U] = bboxMaxs[i].y();
+            bMaxFlat[i * 3U + 2U] = bboxMaxs[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        // positions buffer is read-write (kernel overwrites with projected positions)
+        cl::Buffer posBuf(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer bMinBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           bMinFlat.size() * sizeof(float), bMinFlat.data());
+        cl::Buffer bMaxBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           bMaxFlat.size() * sizeof(float), bMaxFlat.data());
+        cl::Buffer outGradBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+
+        cl::NDRange global(count);
+
+        m_programFront->run("newton_project_to_surface",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           bMinBuf,
+                           bMaxBuf,
+                           outGradBuf,
+                           pointCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        queue.enqueueReadBuffer(posBuf, CL_TRUE, 0, posFlat.size() * sizeof(float), posFlat.data());
+
+        std::vector<float> gradFlat(count * 3U);
+        queue.enqueueReadBuffer(outGradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            outPositions[i] = Eigen::Vector3f(posFlat[i * 3U], posFlat[i * 3U + 1U], posFlat[i * 3U + 2U]);
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U], gradFlat[i * 3U + 1U], gradFlat[i * 3U + 2U]);
+        }
+    }
 }

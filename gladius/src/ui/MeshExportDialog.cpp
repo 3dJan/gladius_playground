@@ -626,12 +626,6 @@ namespace gladius::ui
                         qualityIndex = i;
                         m_manifoldQualityPreset =
                           static_cast<io::ManifoldDualContouringQuality>(i);
-                        
-                        // Sync maxDepth with the selected preset
-                        io::ManifoldDualContouringOptions tempOpts{};
-                        tempOpts.qualityPreset = m_manifoldQualityPreset;
-                        tempOpts.applyPreset();
-                        m_manifoldMaxDepth = tempOpts.maxDepth;
                     }
                     if (selected)
                     {
@@ -640,30 +634,6 @@ namespace gladius::ui
                 }
                 ImGui::EndCombo();
             }
-
-            ImGui::Checkbox("Enable GPU acceleration", &m_manifoldEnableGpu);
-            ImGui::Checkbox("Allow CPU fallback", &m_manifoldAllowCpuFallback);
-            ImGui::Checkbox("Enable Morton caching", &m_manifoldEnableCaching);
-
-            ImGui::InputFloat("ISO value", &m_manifoldIsoValue, 0.01F, 0.1F, "%.4f");
-
-            int depthInput = static_cast<int>(m_manifoldMaxDepth);
-            if (ImGui::InputInt("Maximum depth", &depthInput))
-            {
-                depthInput = std::max(depthInput, 1);
-                m_manifoldMaxDepth = static_cast<std::size_t>(depthInput);
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("higher values capture more detail");
-
-                        ImGui::Separator();
-                        ImGui::Text("Watertightness (Experimental)");
-                        ImGui::Checkbox("Enable hierarchical octree", &m_manifoldEnableHierarchicalOctree);
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("global Morton octree with 2:1 balancing");
-                        ImGui::TextWrapped(
-                            "When enabled, Gladius uses a global balanced octree intended to improve watertightness/manifoldness. "
-                            "This may increase memory usage and runtime.");
 
             ImGui::Separator();
             ImGui::Text("Minimum Feature Size (Thin Walls)");
@@ -675,112 +645,39 @@ namespace gladius::ui
             }
             ImGui::SameLine();
             ImGui::TextDisabled("world units; 0 = disabled");
-            
-            if (m_manifoldMinFeatureSize > 0.0F)
-            {
-                ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
-                ImGui::SameLine();
-                ImGui::TextDisabled("divide-and-conquer for memory efficiency");
-
-                if (m_manifoldEnableHierarchicalOctree)
-                {
-                    ImGui::TextDisabled("Note: chunking is ignored when hierarchical octree is enabled.");
-                }
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Sharp Feature Post-Processing");
-            
-            ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
-            if (m_manifoldEnableSharpFeaturePostProcess)
-            {
-                ImGui::Indent();
-                
-                ImGui::SliderFloat("Angle threshold", 
-                                   &m_manifoldSharpFeatureAngleThreshold, 
-                                   0.0F, 1.0F, 
-                                   "cos(angle) = %.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("lower = more sensitive (0.5 = ~60°)");
-                
-                int subdivIters = static_cast<int>(m_manifoldSubdivisionIterations);
-                if (ImGui::SliderInt("Subdivision iterations", &subdivIters, 1, 3))
-                {
-                    m_manifoldSubdivisionIterations = static_cast<std::size_t>(subdivIters);
-                }
-                
-                ImGui::Checkbox("Project to surface", &m_manifoldProjectToSurface);
-                
-                ImGui::Unindent();
-            }
 
             ImGui::Separator();
             ImGui::Text("Mesh Simplification");
             
-            // Simplification method selection
-            char const * const simplificationMethods[] = {"None", "Fast (Geometric)", "QEM (SDF-aware)"};
-            int const numMethods = 3;
-            if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
+            ImGui::Checkbox("Enable mesh simplification", &m_manifoldEnableSimplification);
+            if (m_exportWithColors && m_modelHasVolumetricColor)
             {
-                for (int i = 0; i < numMethods; ++i)
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0F, 0.7F, 0.0F, 1.0F), "(!)" );
+                if (ImGui::IsItemHovered())
                 {
-                    bool const isSelected = (m_manifoldSimplificationMethod == i);
-                    if (ImGui::Selectable(simplificationMethods[i], isSelected))
-                    {
-                        m_manifoldSimplificationMethod = i;
-                    }
-                    if (isSelected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
+                    ImGui::SetTooltip("Color exports may look better with\n"
+                                      "simplification disabled.");
                 }
-                ImGui::EndCombo();
             }
             
-            if (m_manifoldSimplificationMethod == 1)  // Fast (Geometric)
+            if (m_manifoldEnableSimplification)
             {
                 ImGui::Indent();
                 
-                char const * const terminationModes[] = {"Target Count", "Reduction %", "Error-Bounded"};
-                ImGui::Combo("Termination##simplterm", &m_manifoldSimplificationTerminationMode,
-                             terminationModes, 3);
-                
-                if (m_manifoldSimplificationTerminationMode == 2)  // Error-bounded
+                ImGui::SliderFloat("Tolerance##simpltol",
+                                   &m_manifoldSimplificationTolerance,
+                                   0.001F, 1.0F,
+                                   "%.3f mm",
+                                   ImGuiSliderFlags_Logarithmic);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
                 {
-                    ImGui::SliderFloat("Max error##simplerr",
-                                       &m_manifoldSimplificationMaxError,
-                                       0.001F, 10.0F,
-                                       "%.3f");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("squared world units");
+                    ImGui::SetTooltip("Maximum surface deviation allowed during\n"
+                                      "simplification. Set this to your printer's\n"
+                                      "layer height or XY resolution.");
                 }
-                
-                ImGui::Unindent();
-            }
-            else if (m_manifoldSimplificationMethod == 2)  // QEM SDF-aware
-            {
-                ImGui::Indent();
-                
-                ImGui::SliderFloat("Max SDF error", 
-                                   &m_manifoldSimplificationMaxSdfError, 
-                                   0.001F, 0.1F, 
-                                   "%.3f mm");
-                ImGui::SameLine();
-                ImGui::TextDisabled("maximum deviation from surface");
-                
-                ImGui::SliderFloat("SDF weight", 
-                                   &m_manifoldSimplificationSdfWeight, 
-                                   0.0F, 1.0F, 
-                                   "%.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("weight for position error");
-                
-                ImGui::SliderFloat("Normal weight", 
-                                   &m_manifoldSimplificationNormalWeight, 
-                                   0.0F, 1.0F, 
-                                   "%.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("weight for triangle orientation error");
                 
                 ImGui::Unindent();
             }
@@ -1207,31 +1104,18 @@ namespace gladius::ui
         options.enableGpu = m_manifoldEnableGpu;
         options.enableCpuFallback = m_manifoldAllowCpuFallback;
         options.enableCaching = m_manifoldEnableCaching;
-        options.isoValue = m_manifoldIsoValue;
-        if (m_manifoldMaxDepth > 0U)
-        {
-            options.maxDepth = m_manifoldMaxDepth;
-            if (options.initialDepth > options.maxDepth)
-            {
-                options.initialDepth = options.maxDepth;
-            }
-        }
         options.minFeatureSize = m_manifoldMinFeatureSize;
-        options.enableChunking = m_manifoldEnableChunking;
         options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
         options.projectToSurface = m_manifoldProjectToSurface;
-        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-        options.simplificationMaxError = m_manifoldSimplificationMaxError;
-        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-        options.simplificationQemWeight = std::max(0.0F,
-          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+        options.simplificationMethod = m_manifoldEnableSimplification
+            ? io::SimplificationMethod::QemFast
+            : io::SimplificationMethod::None;
+        options.enableSimplification = m_manifoldEnableSimplification;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
         auto * core = m_computeCore;
         io::PaletteExtractionOptions paletteOptions{};
@@ -1290,31 +1174,18 @@ namespace gladius::ui
         options.enableGpu = m_manifoldEnableGpu;
         options.enableCpuFallback = m_manifoldAllowCpuFallback;
         options.enableCaching = m_manifoldEnableCaching;
-        options.isoValue = m_manifoldIsoValue;
-        if (m_manifoldMaxDepth > 0U)
-        {
-            options.maxDepth = m_manifoldMaxDepth;
-            if (options.initialDepth > options.maxDepth)
-            {
-                options.initialDepth = options.maxDepth;
-            }
-        }
         options.minFeatureSize = m_manifoldMinFeatureSize;
-        options.enableChunking = m_manifoldEnableChunking;
         options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
         options.projectToSurface = m_manifoldProjectToSurface;
-        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-        options.simplificationMaxError = m_manifoldSimplificationMaxError;
-        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-        options.simplificationQemWeight = std::max(0.0F,
-          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+        options.simplificationMethod = m_manifoldEnableSimplification
+            ? io::SimplificationMethod::QemFast
+            : io::SimplificationMethod::None;
+        options.enableSimplification = m_manifoldEnableSimplification;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
         // Build shell export config
         io::ShellExportConfig config;
@@ -1441,18 +1312,8 @@ namespace gladius::ui
             options.enableGpu = m_manifoldEnableGpu;
             options.enableCpuFallback = m_manifoldAllowCpuFallback;
             options.enableCaching = m_manifoldEnableCaching;
-            options.isoValue = m_manifoldIsoValue;
-            if (m_manifoldMaxDepth > 0U)
-            {
-                options.maxDepth = m_manifoldMaxDepth;
-                if (options.initialDepth > options.maxDepth)
-                {
-                    options.initialDepth = options.maxDepth;
-                }
-            }
             // Minimum feature size and chunking
             options.minFeatureSize = m_manifoldMinFeatureSize;
-            options.enableChunking = m_manifoldEnableChunking;
             options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
             // Sharp feature post-processing options
             options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
@@ -1460,17 +1321,12 @@ namespace gladius::ui
             options.subdivisionIterations = m_manifoldSubdivisionIterations;
             options.projectToSurface = m_manifoldProjectToSurface;
             // Mesh simplification options
-            options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-            options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
-            options.simplificationTerminationMode = static_cast<io::SimplificationTerminationMode>(m_manifoldSimplificationTerminationMode);
-            options.simplificationMaxError = m_manifoldSimplificationMaxError;
-            // QEM SDF-aware options
-            options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-            options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-            options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-            // QEM weight is the remainder after SDF and normal weights
-            options.simplificationQemWeight = std::max(0.0F, 
-                1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+            options.simplificationMethod = m_manifoldEnableSimplification
+                ? io::SimplificationMethod::QemFast
+                : io::SimplificationMethod::None;
+            options.enableSimplification = m_manifoldEnableSimplification;
+            options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+            options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
             m_manifoldExporter.setOptions(options);
             // Set output format and document for 3MF support

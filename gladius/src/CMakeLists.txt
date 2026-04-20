@@ -106,8 +106,11 @@ target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
 
 # Enable AVX2 SIMD instructions for Phase 3 optimization
+# PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
+# avoiding ODR violations from mismatched struct layouts.
 if (NOT WIN32)
-    target_compile_options(${BINARY}_lib PRIVATE -mavx2 -mfma)
+    target_compile_options(${BINARY}_lib PUBLIC -mavx2 -mfma)
+    target_compile_options(${BINARY}_lib_mcp PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
 endif()
 

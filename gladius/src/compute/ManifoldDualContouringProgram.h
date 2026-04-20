@@ -207,7 +207,75 @@ namespace gladius::compute
             Primitives const & primitives,
             float isoValue,
             float gradientEpsilon);
-            
+
+        /// Evaluate analytical SDF at multiple positions using the GPU model function.
+        /// @param positions  Flat array of 3D positions (x,y,z triples)
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @return SDF values (one per position)
+        [[nodiscard]] std::vector<float> evaluateSdfBatch(
+            std::vector<Eigen::Vector3f> const & positions,
+            Primitives const & primitives,
+            float isoValue);
+
+        /// Evaluate analytical SDF and gradient at multiple positions using the GPU.
+        /// @param positions  Flat array of 3D positions
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @param epsilon    Finite difference step size for gradient computation
+        /// @param[out] outSdfValues  SDF values (one per position)
+        /// @param[out] outGradients  Gradient vectors (one per position, unnormalized)
+        void evaluateSdfGradientBatch(
+            std::vector<Eigen::Vector3f> const & positions,
+            Primitives const & primitives,
+            float isoValue,
+            float epsilon,
+            std::vector<float> & outSdfValues,
+            std::vector<Eigen::Vector3f> & outGradients);
+
+        /// Fused bisection + gradient: runs full bisection loop and gradient computation
+        /// in a single GPU dispatch per edge (replaces 11 separate dispatches).
+        /// @param starts     Edge start positions
+        /// @param ends       Edge end positions
+        /// @param startValues SDF values at start positions
+        /// @param endValues  SDF values at end positions
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @param epsilon    Finite difference step for gradient
+        /// @param[out] outPositions  Zero-crossing positions
+        /// @param[out] outGradients  Unnormalized gradients at zero-crossings
+        void hermiteBisectAndGradientBatch(
+            std::vector<Eigen::Vector3f> const & starts,
+            std::vector<Eigen::Vector3f> const & ends,
+            std::vector<float> const & startValues,
+            std::vector<float> const & endValues,
+            Primitives const & primitives,
+            float isoValue,
+            float epsilon,
+            std::vector<Eigen::Vector3f> & outPositions,
+            std::vector<Eigen::Vector3f> & outGradients);
+
+        /// Fused Newton projection: iteratively projects points onto the surface
+        /// and returns final positions + gradients in a single GPU dispatch
+        /// (replaces up to 17 separate dispatches).
+        /// @param positions  Initial positions (e.g. cell centers)
+        /// @param bboxMins   Per-point clamping bounds (min)
+        /// @param bboxMaxs   Per-point clamping bounds (max)
+        /// @param primitives Current model primitives
+        /// @param isoValue   Iso-surface value
+        /// @param epsilon    Finite difference step for gradient
+        /// @param[out] outPositions  Final projected positions on surface
+        /// @param[out] outGradients  Unnormalized gradients at final positions
+        void newtonProjectToSurfaceBatch(
+            std::vector<Eigen::Vector3f> const & positions,
+            std::vector<Eigen::Vector3f> const & bboxMins,
+            std::vector<Eigen::Vector3f> const & bboxMaxs,
+            Primitives const & primitives,
+            float isoValue,
+            float epsilon,
+            std::vector<Eigen::Vector3f> & outPositions,
+            std::vector<Eigen::Vector3f> & outGradients);
+
       private:
         void ensureCompiled();
     };
