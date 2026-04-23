@@ -239,6 +239,19 @@ rayCast(float3 eyePosition, float3 rayDirection, float startDistance, bool useDi
     {
         ++actualSteps;  // Count each iteration for metrics
         float3 rayPos = eyePosition + traveledDistance * rayDirection;
+
+        // Set early-exit hint for mesh BVH queries: the previous SDF reading is a safe
+        // lower bound on the next reading (sphere-trace invariant). Using half of it as
+        // the early-exit radius lets BVH traversal abort as soon as it has confirmed the
+        // distance is below that, which is the dominant cost for far raymarch queries.
+        // The returned distance is then a safe under-estimate, never an over-estimate.
+        // Disabled (0) on the first step or close to a surface to preserve accuracy.
+        float const earlyExitRadius = 0.5f * prevAbsDistance;
+        renderingSettings.earlyExitDistanceSq = (i > 0 && prevAbsDistance < FLT_MAX
+                                                 && earlyExitRadius > closeEnough * 4.f)
+            ? (earlyExitRadius * earlyExitRadius)
+            : 0.0f;
+
         // Use PASS_PAYLOAD_ARGS when calling the function
         hitObject = mapCached(rayPos, PASS_PAYLOAD_ARGS);
         float currentSignedDistance = hitObject.signedDistance;

@@ -161,6 +161,14 @@ struct RenderingSettings // Note that the alignment has to be considered
     float weightDistToNb;
     float weightMidPoint;
     float normalOffset;
+
+    /// Squared early-exit distance hint for mesh SDF queries.
+    /// When > 0, BVH traversal in spatialMeshSDFWithEarlyExit() can terminate as soon as
+    /// it has found a triangle within sqrt(earlyExitDistanceSq) of the query point.
+    /// The returned distance is then a safe lower bound (sphere-trace safe). Set to 0
+    /// to find the exact minimum distance. The raymarcher updates this each step from
+    /// the previous SDF reading, allowing far queries to skip most of the BVH.
+    float earlyExitDistanceSq;
 };
 
 struct DistanceColor

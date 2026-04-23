@@ -1574,17 +1574,22 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             }
             else
             {
-                // Fall back to pure BVH traversal
-                meshDist = spatialMeshSDF((float3)(pos),
-                                          nodesOffset,
-                                          trianglesOffset,
-                                          normalsOffset,
-                                          indicesOffset,
-                                          edgeNeighborsOffset,
-                                          nodeCount,
-                                          triCount,
-                                          vertexNormalCount,
-                                          data);
+                // Fall back to pure BVH traversal.
+                // Pass the raymarcher's early-exit hint: when > 0, BVH traversal can stop
+                // as soon as it finds a triangle within sqrt(earlyExitDistanceSq). The
+                // returned distance is a safe lower bound on the true distance, so the
+                // raymarcher will not overshoot.
+                meshDist = spatialMeshSDFWithEarlyExit((float3)(pos),
+                                                       nodesOffset,
+                                                       trianglesOffset,
+                                                       normalsOffset,
+                                                       indicesOffset,
+                                                       edgeNeighborsOffset,
+                                                       nodeCount,
+                                                       triCount,
+                                                       vertexNormalCount,
+                                                       data,
+                                                       renderingSettings.earlyExitDistanceSq);
             }
             
             sdf = uniteSmooth(sdf, meshDist, 0.0f);
