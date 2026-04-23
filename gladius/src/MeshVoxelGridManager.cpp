@@ -37,6 +37,7 @@ namespace gladius
                                                   params.trianglesOffset,
                                                   params.normalsOffset,
                                                   params.indicesOffset,
+                                                  params.edgeNeighborsOffset,
                                                   params.nodeCount,
                                                   params.triCount,
                                                   params.vertexNormalCount);

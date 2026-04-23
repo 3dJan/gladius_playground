@@ -1526,7 +1526,8 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
             // [16-25]: Voxel grid header (10 floats: origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding)
             // [26-27]: Voxel grid info (2 floats: voxelDataOffset, voxelCount)
-            // [28-31]: Reserved (4 floats)
+            // [28]:    Edge-neighbour face normals offset (per-edge adjacent face normals)
+            // [29-31]: Reserved (3 floats)
             // ====================================================================
 
             int const headerStart = primitive.start;
@@ -1545,6 +1546,9 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // Read voxel grid info (offset 26)
             int const voxelDataOffset = (int)data[headerStart + 26];
             int const voxelCount = (int)data[headerStart + 27];
+
+            // Read edge-neighbour face normals offset (offset 28)
+            int const edgeNeighborsOffset = (int)data[headerStart + 28];
             
             // Use voxel-accelerated path if voxel grid is available and populated
             // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
@@ -1562,6 +1566,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                                            trianglesOffset,
                                                            normalsOffset,
                                                            indicesOffset,
+                                                           edgeNeighborsOffset,
                                                            nodeCount,
                                                            triCount,
                                                            vertexNormalCount,
@@ -1575,6 +1580,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                           trianglesOffset,
                                           normalsOffset,
                                           indicesOffset,
+                                          edgeNeighborsOffset,
                                           nodeCount,
                                           triCount,
                                           vertexNormalCount,

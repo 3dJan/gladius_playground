@@ -119,6 +119,7 @@ namespace gladius
         size_t m_trianglesOffset = 0;
         size_t m_normalsOffset = 0;
         size_t m_indicesOffset = 0;
+        size_t m_edgeNeighborsOffset = 0;
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
     };

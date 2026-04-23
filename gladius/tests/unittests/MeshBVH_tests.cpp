@@ -181,4 +181,78 @@ namespace gladius::tests
         }
     }
 
+    // ========================================================================
+    // Edge-neighbour face normals: cube is closed and 2-manifold, so every
+    // triangle edge must have a present (w=1) unit-length adjacent normal.
+    // ========================================================================
+
+    TEST_F(MeshBVHBuilder_Test, Build_Cube_EdgeNeighborNormals_AllPresentAndUnit)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        auto result = builder.build(vertices, indices);
+
+        ASSERT_EQ(result.edgeNeighborNormals.size(), result.triangles.size() * 3u);
+
+        for (size_t i = 0; i < result.edgeNeighborNormals.size(); ++i)
+        {
+            auto const & n = result.edgeNeighborNormals[i].normal;
+            EXPECT_NEAR(n.w, 1.0f, 1e-5f)
+                << "Edge slot " << i << " marked missing on closed cube";
+            float const len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            EXPECT_NEAR(len, 1.0f, 1e-4f)
+                << "Edge slot " << i << " normal not unit length";
+        }
+    }
+
+    // ========================================================================
+    // Edge-neighbour face normals on a 2-triangle crease: exactly one shared
+    // edge per triangle, the rest are boundary (w=0). The shared-edge entry
+    // must hold the *other* triangle's unit face normal.
+    // ========================================================================
+
+    TEST_F(MeshBVHBuilder_Test, Build_Crease_EdgeNeighborNormals_SharedEdgeOnly)
+    {
+        // Two triangles meeting at a 90° crease along the x-axis.
+        std::vector<float4> const vertices = {
+            {0.0f, 0.0f, 0.0f, 0.f},
+            {1.0f, 0.0f, 0.0f, 0.f},
+            {0.5f, 1.0f, 0.0f, 0.f},
+            {0.5f, 0.0f, 1.0f, 0.f},
+        };
+        std::vector<TriangleIndices> const indices = {
+            {0, 1, 2},  // XY plane,  face normal = (0, 0, +1)
+            {1, 0, 3},  // XZ plane,  face normal = (0, +1, 0)
+        };
+
+        auto result = builder.build(vertices, indices);
+
+        ASSERT_EQ(result.triangles.size(), 2u);
+        ASSERT_EQ(result.edgeNeighborNormals.size(), 6u);
+
+        int presentCount = 0;
+        for (auto const & en : result.edgeNeighborNormals)
+        {
+            presentCount += (en.normal.w > 0.5f) ? 1 : 0;
+        }
+        // Exactly one shared edge → contributes one entry per side = 2 present.
+        EXPECT_EQ(presentCount, 2);
+
+        // The two present neighbour normals must be unit vectors, and their
+        // sum (per Bærentzen-Aanæs edge pseudo-normal) must bisect the dihedral
+        // — i.e. point along (0, 1, 1)/√2.
+        for (auto const & en : result.edgeNeighborNormals)
+        {
+            if (en.normal.w > 0.5f)
+            {
+                float const len = std::sqrt(en.normal.x * en.normal.x +
+                                            en.normal.y * en.normal.y +
+                                            en.normal.z * en.normal.z);
+                EXPECT_NEAR(len, 1.0f, 1e-4f);
+            }
+        }
+    }
+
 }  // namespace gladius::tests

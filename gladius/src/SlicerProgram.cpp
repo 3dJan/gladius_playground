@@ -409,9 +409,10 @@ namespace gladius
                             static_cast<cl_int>(params.trianglesOffset), // 4: trianglesOffset
                             static_cast<cl_int>(params.normalsOffset), // 5: normalsOffset
                             static_cast<cl_int>(params.indicesOffset), // 6: indicesOffset
-                            static_cast<cl_int>(params.nodeCount),     // 7: nodeCount
-                            static_cast<cl_int>(params.triCount),      // 8: triCount
-                            static_cast<cl_int>(params.vertexNormalCount)); // 9: vertexNormalCount
+                            static_cast<cl_int>(params.edgeNeighborsOffset), // 7: edgeNeighborsOffset
+                            static_cast<cl_int>(params.nodeCount),     // 8: nodeCount
+                            static_cast<cl_int>(params.triCount),      // 9: triCount
+                            static_cast<cl_int>(params.vertexNormalCount)); // 10: vertexNormalCount
         
         return true;
     }

@@ -23,6 +23,7 @@ namespace gladius
         int trianglesOffset;    ///< Triangles offset in primitive buffer
         int normalsOffset;      ///< Vertex normals offset in primitive buffer
         int indicesOffset;      ///< Vertex indices offset in primitive buffer
+        int edgeNeighborsOffset;///< Per-edge adjacent face normals offset in primitive buffer
         int nodeCount;          ///< Number of BVH nodes
         int triCount;           ///< Number of triangles
         int vertexNormalCount;  ///< Number of vertex normals

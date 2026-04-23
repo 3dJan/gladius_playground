@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <numbers>
 #include <numeric>
+#include <unordered_map>
 
 namespace gladius
 {
@@ -133,17 +135,26 @@ namespace gladius
         // Reserve space for nodes (upper bound: 2n-1 for n primitives)
         ctx.nodes.reserve(2 * triCount);
 
-        // Build BVH recursively
-        buildRecursive(ctx, 0, static_cast<int>(triCount), 0, params);
+        // Build BVH recursively (pass scene + centroid bounds down to skip
+        // recomputation on the root node).
+        buildRecursive(ctx,
+                       0,
+                       static_cast<int>(triCount),
+                       0,
+                       params,
+                       ctx.sceneBounds,
+                       ctx.centroidBounds);
 
         // Reorder triangles according to BVH leaf order
         result.triangles.resize(triCount);
         std::vector<TriangleIndices> newTriangleIndices(triCount);
+        std::vector<int> bvhToOriginalTriangle(triCount);
         for (size_t i = 0; i < triCount; ++i)
         {
             int origIdx = ctx.triangleIndices[i];
             result.triangles[i] = ctx.triangles[origIdx];
             newTriangleIndices[i] = result.triangleIndices[origIdx];
+            bvhToOriginalTriangle[i] = origIdx;
         }
         result.triangleIndices = std::move(newTriangleIndices);
 
@@ -154,6 +165,10 @@ namespace gladius
 
         // Compute angle-weighted vertex normals
         computeAngleWeightedNormals(vertices, indices, result);
+
+        // Compute per-edge adjacent face normals (in BVH order) for robust sign
+        // determination on edge features in mesh_sdf.cl::computePseudoNormalFast.
+        computeEdgeNeighborNormals(vertices, indices, bvhToOriginalTriangle, result);
 
         // Compute statistics
         auto endTime = std::chrono::high_resolution_clock::now();
@@ -225,6 +240,20 @@ namespace gladius
                 continue;
             }
 
+            // Normalise the face normal so the per-vertex contribution is weighted purely by
+            // the corner angle (Bærentzen & Aanæs 2005). Without this, contributions are
+            // additionally scaled by 2 * area, which biases the vertex pseudo-normal toward
+            // large adjacent faces and produces sign artifacts near sharp creases.
+            float const faceNormalLenSq = fnx * fnx + fny * fny + fnz * fnz;
+            if (faceNormalLenSq < 1e-20f)
+            {
+                continue;
+            }
+            float const invFaceNormalLen = 1.0f / std::sqrt(faceNormalLenSq);
+            fnx *= invFaceNormalLen;
+            fny *= invFaceNormalLen;
+            fnz *= invFaceNormalLen;
+
             // Angle at vertex 0: between e0 and e1
             float dot01 = e0x * e1x + e0y * e1y + e0z * e1z;
             float cosAngle0 = dot01 / (len_e0 * len_e1);
@@ -268,6 +297,121 @@ namespace gladius
         }
     }
 
+    void MeshBVHBuilder::computeEdgeNeighborNormals(std::span<float4 const> vertices,
+                                                    std::span<TriangleIndices const> originalIndices,
+                                                    std::vector<int> const & bvhToOriginalTriangle,
+                                                    SpatialMeshData & data)
+    {
+        size_t const triCount = originalIndices.size();
+        data.edgeNeighborNormals.assign(triCount * 3u, MeshEdgeNeighborNormal{});
+
+        if (triCount == 0u)
+        {
+            return;
+        }
+
+        // Edge index convention (must match sqTriangleWithClosestPoint in mesh_sdf.cl):
+        //   edge 0 = v0–v1, edge 1 = v1–v2, edge 2 = v0–v2.
+        auto const edgeVertices = [](TriangleIndices const & idx, int edge) -> std::pair<uint32_t, uint32_t>
+        {
+            switch (edge)
+            {
+            case 0: return {idx.i0, idx.i1};
+            case 1: return {idx.i1, idx.i2};
+            default: return {idx.i0, idx.i2};
+            }
+        };
+
+        // Precompute unit face normals in original triangle order
+        std::vector<float4> faceNormals(triCount, float4{0.f, 0.f, 0.f, 0.f});
+        for (size_t t = 0; t < triCount; ++t)
+        {
+            TriangleIndices const & idx = originalIndices[t];
+            float4 const & p0 = vertices[idx.i0];
+            float4 const & p1 = vertices[idx.i1];
+            float4 const & p2 = vertices[idx.i2];
+
+            float const e0x = p1.x - p0.x, e0y = p1.y - p0.y, e0z = p1.z - p0.z;
+            float const e1x = p2.x - p0.x, e1y = p2.y - p0.y, e1z = p2.z - p0.z;
+            float fnx = e0y * e1z - e0z * e1y;
+            float fny = e0z * e1x - e0x * e1z;
+            float fnz = e0x * e1y - e0y * e1x;
+            float const lenSq = fnx * fnx + fny * fny + fnz * fnz;
+            if (lenSq < 1e-20f)
+            {
+                continue;
+            }
+            float const invLen = 1.0f / std::sqrt(lenSq);
+            faceNormals[t] = float4{fnx * invLen, fny * invLen, fnz * invLen, 1.0f};
+        }
+
+        // Hash undirected edges to (triIdx, edgeIdx). On second hit we know both sides.
+        struct EdgeKey
+        {
+            uint64_t key;
+            bool operator==(EdgeKey const & o) const { return key == o.key; }
+        };
+        struct EdgeKeyHash
+        {
+            size_t operator()(EdgeKey const & k) const noexcept { return std::hash<uint64_t>{}(k.key); }
+        };
+
+        auto const makeKey = [](uint32_t a, uint32_t b) -> EdgeKey
+        {
+            uint32_t lo = std::min(a, b);
+            uint32_t hi = std::max(a, b);
+            return EdgeKey{(static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo)};
+        };
+
+        struct EdgeRef
+        {
+            int triIdx;
+            int edgeIdx;
+        };
+
+        std::unordered_map<EdgeKey, EdgeRef, EdgeKeyHash> edgeMap;
+        edgeMap.reserve(triCount * 3u);
+
+        // Result in original-triangle order; reorder at the end.
+        std::vector<MeshEdgeNeighborNormal> origOrder(triCount * 3u);
+
+        for (size_t t = 0; t < triCount; ++t)
+        {
+            TriangleIndices const & idx = originalIndices[t];
+            for (int e = 0; e < 3; ++e)
+            {
+                auto [va, vb] = edgeVertices(idx, e);
+                EdgeKey const key = makeKey(va, vb);
+                auto it = edgeMap.find(key);
+                if (it == edgeMap.end())
+                {
+                    edgeMap.emplace(key, EdgeRef{static_cast<int>(t), e});
+                }
+                else
+                {
+                    int const otherTri = it->second.triIdx;
+                    int const otherEdge = it->second.edgeIdx;
+                    // Cross-link the two adjacent triangles.
+                    origOrder[t * 3u + static_cast<size_t>(e)].normal = faceNormals[otherTri];
+                    origOrder[static_cast<size_t>(otherTri) * 3u + static_cast<size_t>(otherEdge)].normal = faceNormals[t];
+                    // Erase to mark consumed; further hits on this key are non-manifold and ignored.
+                    edgeMap.erase(it);
+                }
+            }
+        }
+
+        // Reorder into BVH triangle order
+        for (size_t i = 0; i < triCount; ++i)
+        {
+            int const orig = bvhToOriginalTriangle[i];
+            for (int e = 0; e < 3; ++e)
+            {
+                data.edgeNeighborNormals[i * 3u + static_cast<size_t>(e)] =
+                    origOrder[static_cast<size_t>(orig) * 3u + static_cast<size_t>(e)];
+            }
+        }
+    }
+
     BoundingBox MeshBVHBuilder::computeTriangleBounds(MeshTriangle const & tri)
     {
         BoundingBox bounds;
@@ -288,209 +432,280 @@ namespace gladius
                                        int start,
                                        int end,
                                        int depth,
-                                       MeshBVHBuildParams const & params)
+                                       MeshBVHBuildParams const & params,
+                                       BoundingBox const & nodeBounds,
+                                       BoundingBox const & centroidBounds)
     {
         int const primCount = end - start;
 
-        // Create node
+        // Allocate node and write its bbox up-front. Note: ctx.nodes was reserved to
+        // upper bound (2*triCount) in build(), so this reference remains valid across
+        // recursive emplace_back calls.
         int const nodeIndex = static_cast<int>(ctx.nodes.size());
         ctx.nodes.emplace_back();
-        MeshBVHNode & node = ctx.nodes[nodeIndex];
+        ctx.nodes[nodeIndex].bboxMin = nodeBounds.min;
+        ctx.nodes[nodeIndex].bboxMax = nodeBounds.max;
 
-        // Compute bounds for this node
-        BoundingBox nodeBounds{};
-        for (int i = start; i < end; ++i)
+        auto const makeLeaf = [&]()
         {
-            int origIdx = ctx.triangleIndices[i];
-            auto const & b = ctx.triangleBounds[origIdx];
-            nodeBounds.min.x = std::min(nodeBounds.min.x, b.min.x);
-            nodeBounds.min.y = std::min(nodeBounds.min.y, b.min.y);
-            nodeBounds.min.z = std::min(nodeBounds.min.z, b.min.z);
-            nodeBounds.max.x = std::max(nodeBounds.max.x, b.max.x);
-            nodeBounds.max.y = std::max(nodeBounds.max.y, b.max.y);
-            nodeBounds.max.z = std::max(nodeBounds.max.z, b.max.z);
-        }
+            ctx.nodes[nodeIndex].leftChild = -1;
+            ctx.nodes[nodeIndex].rightChild = -1;
+            ctx.nodes[nodeIndex].primStart = start;
+            ctx.nodes[nodeIndex].primCount = primCount;
+        };
 
-        node.bboxMin = nodeBounds.min;
-        node.bboxMax = nodeBounds.max;
-
-        // Check if should create leaf
         if (primCount <= params.maxPrimitivesPerLeaf || depth >= params.maxDepth)
         {
-            node.leftChild = -1;
-            node.rightChild = -1;
-            node.primStart = start;
-            node.primCount = primCount;
+            makeLeaf();
             return nodeIndex;
         }
-
-        // Find best split using SAH
-        // Use binned SAH for efficiency
-        constexpr int numBins = 32;
-
-        float bestCost = std::numeric_limits<float>::max();
-        int bestAxis = 0;
-        int bestSplit = start + primCount / 2;
 
         float const parentArea = surfaceArea(nodeBounds);
         if (parentArea < 1e-10f)
         {
-            // Degenerate case: create leaf
-            node.leftChild = -1;
-            node.rightChild = -1;
-            node.primStart = start;
-            node.primCount = primCount;
+            makeLeaf();
             return nodeIndex;
         }
 
-        // Try each axis
-        for (int axis = 0; axis < 3; ++axis)
+        // ----------------------------------------------------------------
+        // Single-pass 3-axis binning. All 3 axes are filled in one traversal
+        // of the primitive range, eliminating the previous 3 separate sweeps.
+        // Bins are stack-allocated (no per-call vector heap allocation).
+        // ----------------------------------------------------------------
+        constexpr int kNumBins = 32;
+        struct Bin
         {
-            // Compute centroid extent on this axis
-            float minC = std::numeric_limits<float>::max();
-            float maxC = -std::numeric_limits<float>::max();
-            for (int i = start; i < end; ++i)
+            int count = 0;
+            BoundingBox bounds{};
+        };
+        Bin bins[3][kNumBins];
+
+        float const axisMin[3] = {centroidBounds.min.x, centroidBounds.min.y, centroidBounds.min.z};
+        float const axisMax[3] = {centroidBounds.max.x, centroidBounds.max.y, centroidBounds.max.z};
+        float axisExtent[3];
+        bool axisActive[3];
+        float axisScale[3];
+        for (int a = 0; a < 3; ++a)
+        {
+            axisExtent[a] = axisMax[a] - axisMin[a];
+            axisActive[a] = axisExtent[a] > 1e-10f;
+            axisScale[a] = axisActive[a] ? static_cast<float>(kNumBins) / axisExtent[a] : 0.0f;
+        }
+
+        if (!axisActive[0] && !axisActive[1] && !axisActive[2])
+        {
+            // All centroids coincide: cannot split meaningfully.
+            makeLeaf();
+            return nodeIndex;
+        }
+
+        for (int i = start; i < end; ++i)
+        {
+            int const origIdx = ctx.triangleIndices[i];
+            float4 const & cen = ctx.centroids[origIdx];
+            BoundingBox const & b = ctx.triangleBounds[origIdx];
+            float const c[3] = {cen.x, cen.y, cen.z};
+
+            for (int a = 0; a < 3; ++a)
             {
-                int origIdx = ctx.triangleIndices[i];
-                float c = (axis == 0) ? ctx.centroids[origIdx].x :
-                          (axis == 1) ? ctx.centroids[origIdx].y :
-                                        ctx.centroids[origIdx].z;
-                minC = std::min(minC, c);
-                maxC = std::max(maxC, c);
-            }
-
-            if (maxC - minC < 1e-10f)
-            {
-                continue;  // No split possible on this axis
-            }
-
-            // Bin primitives
-            struct Bin
-            {
-                int count = 0;
-                BoundingBox bounds{};
-            };
-            std::vector<Bin> bins(numBins);
-
-            float scale = static_cast<float>(numBins) / (maxC - minC);
-            for (int i = start; i < end; ++i)
-            {
-                int origIdx = ctx.triangleIndices[i];
-                float c = (axis == 0) ? ctx.centroids[origIdx].x :
-                          (axis == 1) ? ctx.centroids[origIdx].y :
-                                        ctx.centroids[origIdx].z;
-                int binIdx = std::min(static_cast<int>((c - minC) * scale), numBins - 1);
-                bins[binIdx].count++;
-
-                auto const & b = ctx.triangleBounds[origIdx];
-                bins[binIdx].bounds.min.x = std::min(bins[binIdx].bounds.min.x, b.min.x);
-                bins[binIdx].bounds.min.y = std::min(bins[binIdx].bounds.min.y, b.min.y);
-                bins[binIdx].bounds.min.z = std::min(bins[binIdx].bounds.min.z, b.min.z);
-                bins[binIdx].bounds.max.x = std::max(bins[binIdx].bounds.max.x, b.max.x);
-                bins[binIdx].bounds.max.y = std::max(bins[binIdx].bounds.max.y, b.max.y);
-                bins[binIdx].bounds.max.z = std::max(bins[binIdx].bounds.max.z, b.max.z);
-            }
-
-            // Evaluate SAH for each split
-            for (int splitBin = 1; splitBin < numBins; ++splitBin)
-            {
-                BoundingBox leftBounds{}, rightBounds{};
-                int leftCount = 0, rightCount = 0;
-
-                for (int b = 0; b < splitBin; ++b)
+                if (!axisActive[a])
                 {
-                    if (bins[b].count > 0)
-                    {
-                        leftCount += bins[b].count;
-                        leftBounds.min.x = std::min(leftBounds.min.x, bins[b].bounds.min.x);
-                        leftBounds.min.y = std::min(leftBounds.min.y, bins[b].bounds.min.y);
-                        leftBounds.min.z = std::min(leftBounds.min.z, bins[b].bounds.min.z);
-                        leftBounds.max.x = std::max(leftBounds.max.x, bins[b].bounds.max.x);
-                        leftBounds.max.y = std::max(leftBounds.max.y, bins[b].bounds.max.y);
-                        leftBounds.max.z = std::max(leftBounds.max.z, bins[b].bounds.max.z);
-                    }
+                    continue;
                 }
+                int binIdx = static_cast<int>((c[a] - axisMin[a]) * axisScale[a]);
+                if (binIdx < 0) binIdx = 0;
+                if (binIdx >= kNumBins) binIdx = kNumBins - 1;
+                Bin & bin = bins[a][binIdx];
+                ++bin.count;
+                bin.bounds.min.x = std::min(bin.bounds.min.x, b.min.x);
+                bin.bounds.min.y = std::min(bin.bounds.min.y, b.min.y);
+                bin.bounds.min.z = std::min(bin.bounds.min.z, b.min.z);
+                bin.bounds.max.x = std::max(bin.bounds.max.x, b.max.x);
+                bin.bounds.max.y = std::max(bin.bounds.max.y, b.max.y);
+                bin.bounds.max.z = std::max(bin.bounds.max.z, b.max.z);
+            }
+        }
 
-                for (int b = splitBin; b < numBins; ++b)
+        auto const expandBoundsInto = [](BoundingBox & dst, BoundingBox const & src)
+        {
+            dst.min.x = std::min(dst.min.x, src.min.x);
+            dst.min.y = std::min(dst.min.y, src.min.y);
+            dst.min.z = std::min(dst.min.z, src.min.z);
+            dst.max.x = std::max(dst.max.x, src.max.x);
+            dst.max.y = std::max(dst.max.y, src.max.y);
+            dst.max.z = std::max(dst.max.z, src.max.z);
+        };
+
+        // ----------------------------------------------------------------
+        // SAH evaluation via O(numBins) prefix/suffix sweeps per axis instead
+        // of the previous O(numBins^2) split scan.
+        // ----------------------------------------------------------------
+        float bestCost = std::numeric_limits<float>::max();
+        int bestAxis = -1;
+        int bestSplitBin = -1;
+        BoundingBox bestLeftBounds{};
+        BoundingBox bestRightBounds{};
+
+        BoundingBox prefixBounds[kNumBins];
+        int prefixCount[kNumBins];
+        BoundingBox suffixBounds[kNumBins];
+        int suffixCount[kNumBins];
+
+        for (int a = 0; a < 3; ++a)
+        {
+            if (!axisActive[a])
+            {
+                continue;
+            }
+
+            BoundingBox accBounds{};
+            int accCount = 0;
+            for (int i = 0; i < kNumBins; ++i)
+            {
+                if (bins[a][i].count > 0)
                 {
-                    if (bins[b].count > 0)
-                    {
-                        rightCount += bins[b].count;
-                        rightBounds.min.x = std::min(rightBounds.min.x, bins[b].bounds.min.x);
-                        rightBounds.min.y = std::min(rightBounds.min.y, bins[b].bounds.min.y);
-                        rightBounds.min.z = std::min(rightBounds.min.z, bins[b].bounds.min.z);
-                        rightBounds.max.x = std::max(rightBounds.max.x, bins[b].bounds.max.x);
-                        rightBounds.max.y = std::max(rightBounds.max.y, bins[b].bounds.max.y);
-                        rightBounds.max.z = std::max(rightBounds.max.z, bins[b].bounds.max.z);
-                    }
+                    accCount += bins[a][i].count;
+                    expandBoundsInto(accBounds, bins[a][i].bounds);
                 }
+                prefixBounds[i] = accBounds;
+                prefixCount[i] = accCount;
+            }
 
+            accBounds = BoundingBox{};
+            accCount = 0;
+            for (int i = kNumBins - 1; i >= 0; --i)
+            {
+                if (bins[a][i].count > 0)
+                {
+                    accCount += bins[a][i].count;
+                    expandBoundsInto(accBounds, bins[a][i].bounds);
+                }
+                suffixBounds[i] = accBounds;
+                suffixCount[i] = accCount;
+            }
+
+            for (int i = 0; i < kNumBins - 1; ++i)
+            {
+                int const leftCount = prefixCount[i];
+                int const rightCount = suffixCount[i + 1];
                 if (leftCount == 0 || rightCount == 0)
                 {
                     continue;
                 }
 
-                float cost = params.traversalCost +
-                    (surfaceArea(leftBounds) * leftCount +
-                     surfaceArea(rightBounds) * rightCount) *
+                float const cost = params.traversalCost +
+                    (surfaceArea(prefixBounds[i]) * leftCount +
+                     surfaceArea(suffixBounds[i + 1]) * rightCount) *
                     params.intersectionCost / parentArea;
 
                 if (cost < bestCost)
                 {
                     bestCost = cost;
-                    bestAxis = axis;
-                    // Compute actual split position
-                    float splitPos = minC + (maxC - minC) * splitBin / numBins;
-                    (void)splitPos;  // Used for reference, actual split by sorting
-
-                    // Track the split bin for partitioning
-                    bestSplit = start + leftCount;
+                    bestAxis = a;
+                    bestSplitBin = i;
+                    bestLeftBounds = prefixBounds[i];
+                    bestRightBounds = suffixBounds[i + 1];
                 }
             }
         }
 
-        // Check if split is beneficial
-        float leafCost = primCount * params.intersectionCost;
-        if (bestCost >= leafCost || bestSplit == start || bestSplit == end)
+        float const leafCost = primCount * params.intersectionCost;
+        if (bestAxis < 0 || bestCost >= leafCost)
         {
-            // Create leaf
-            node.leftChild = -1;
-            node.rightChild = -1;
-            node.primStart = start;
-            node.primCount = primCount;
+            makeLeaf();
             return nodeIndex;
         }
 
-        // Sort triangles by centroid on best axis
-        std::sort(
+        // ----------------------------------------------------------------
+        // Partition by chosen split. std::partition is O(n) and stable enough
+        // for our use (BVH order doesn't depend on pre-existing order). The
+        // predicate must reproduce the same binning used in the SAH eval to
+        // keep prefix/suffix counts and per-side bounds consistent.
+        // ----------------------------------------------------------------
+        int const splitAxis = bestAxis;
+        float const splitMin = axisMin[splitAxis];
+        float const splitScale = axisScale[splitAxis];
+        int const splitBin = bestSplitBin;
+
+        auto const partIt = std::partition(
             ctx.triangleIndices.begin() + start,
             ctx.triangleIndices.begin() + end,
-            [&ctx, bestAxis](int a, int b) {
-                float cA = (bestAxis == 0) ? ctx.centroids[a].x :
-                           (bestAxis == 1) ? ctx.centroids[a].y :
-                                             ctx.centroids[a].z;
-                float cB = (bestAxis == 0) ? ctx.centroids[b].x :
-                           (bestAxis == 1) ? ctx.centroids[b].y :
-                                             ctx.centroids[b].z;
-                return cA < cB;
+            [&ctx, splitAxis, splitMin, splitScale, splitBin](int idx)
+            {
+                float4 const & cen = ctx.centroids[idx];
+                float const c = (splitAxis == 0) ? cen.x : (splitAxis == 1) ? cen.y : cen.z;
+                int binIdx = static_cast<int>((c - splitMin) * splitScale);
+                if (binIdx < 0) binIdx = 0;
+                if (binIdx >= kNumBins) binIdx = kNumBins - 1;
+                return binIdx <= splitBin;
             });
 
-        // Use middle split after sorting
-        int mid = start + primCount / 2;
-        if (mid <= start)
+        int mid = static_cast<int>(partIt - ctx.triangleIndices.begin());
+        if (mid == start || mid == end)
         {
-            mid = start + 1;
-        }
-        if (mid >= end)
-        {
-            mid = end - 1;
+            // Degenerate partition (all primitives ended up on one side, e.g. due
+            // to floating-point edge cases at bin boundaries). Fall back to a median
+            // split via nth_element so we still make progress.
+            mid = start + primCount / 2;
+            std::nth_element(
+                ctx.triangleIndices.begin() + start,
+                ctx.triangleIndices.begin() + mid,
+                ctx.triangleIndices.begin() + end,
+                [&ctx, splitAxis](int a, int b)
+                {
+                    float4 const & ca = ctx.centroids[a];
+                    float4 const & cb = ctx.centroids[b];
+                    float const va = (splitAxis == 0) ? ca.x : (splitAxis == 1) ? ca.y : ca.z;
+                    float const vb = (splitAxis == 0) ? cb.x : (splitAxis == 1) ? cb.y : cb.z;
+                    return va < vb;
+                });
+            // Recompute child bounds from scratch since the SAH-derived ones no
+            // longer match this split.
+            bestLeftBounds = BoundingBox{};
+            bestRightBounds = BoundingBox{};
+            for (int i = start; i < mid; ++i)
+            {
+                expandBoundsInto(bestLeftBounds, ctx.triangleBounds[ctx.triangleIndices[i]]);
+            }
+            for (int i = mid; i < end; ++i)
+            {
+                expandBoundsInto(bestRightBounds, ctx.triangleBounds[ctx.triangleIndices[i]]);
+            }
         }
 
-        // Build children
-        node.primStart = 0;
-        node.primCount = 0;
-        node.leftChild = buildRecursive(ctx, start, mid, depth + 1, params);
-        node.rightChild = buildRecursive(ctx, mid, end, depth + 1, params);
+        // Compute child centroid bounds in one pass each. We already have the
+        // child node-bounds from the SAH sweep (or the fallback above).
+        BoundingBox leftCentroidBounds{};
+        BoundingBox rightCentroidBounds{};
+        for (int i = start; i < mid; ++i)
+        {
+            float4 const & c = ctx.centroids[ctx.triangleIndices[i]];
+            leftCentroidBounds.min.x = std::min(leftCentroidBounds.min.x, c.x);
+            leftCentroidBounds.min.y = std::min(leftCentroidBounds.min.y, c.y);
+            leftCentroidBounds.min.z = std::min(leftCentroidBounds.min.z, c.z);
+            leftCentroidBounds.max.x = std::max(leftCentroidBounds.max.x, c.x);
+            leftCentroidBounds.max.y = std::max(leftCentroidBounds.max.y, c.y);
+            leftCentroidBounds.max.z = std::max(leftCentroidBounds.max.z, c.z);
+        }
+        for (int i = mid; i < end; ++i)
+        {
+            float4 const & c = ctx.centroids[ctx.triangleIndices[i]];
+            rightCentroidBounds.min.x = std::min(rightCentroidBounds.min.x, c.x);
+            rightCentroidBounds.min.y = std::min(rightCentroidBounds.min.y, c.y);
+            rightCentroidBounds.min.z = std::min(rightCentroidBounds.min.z, c.z);
+            rightCentroidBounds.max.x = std::max(rightCentroidBounds.max.x, c.x);
+            rightCentroidBounds.max.y = std::max(rightCentroidBounds.max.y, c.y);
+            rightCentroidBounds.max.z = std::max(rightCentroidBounds.max.z, c.z);
+        }
+
+        ctx.nodes[nodeIndex].primStart = 0;
+        ctx.nodes[nodeIndex].primCount = 0;
+        int const leftIdx = buildRecursive(ctx, start, mid, depth + 1, params,
+                                           bestLeftBounds, leftCentroidBounds);
+        int const rightIdx = buildRecursive(ctx, mid, end, depth + 1, params,
+                                            bestRightBounds, rightCentroidBounds);
+        ctx.nodes[nodeIndex].leftChild = leftIdx;
+        ctx.nodes[nodeIndex].rightChild = rightIdx;
 
         return nodeIndex;
     }

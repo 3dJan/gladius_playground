@@ -99,13 +99,30 @@ namespace gladius
         }
     };
 
+    /// Edge pseudo-normal data for sign determination on edge features
+    /// @note Size: 16 bytes per edge, 3 edges per triangle = 48 bytes per triangle
+    /// @details Stores the unit face normal of the triangle adjacent across this edge.
+    ///          For boundary or non-manifold edges, stored as (0, 0, 0) with w = 0.
+    ///          Edge index convention matches sqTriangleWithClosestPoint in mesh_sdf.cl:
+    ///            edge 0 = v0–v1, edge 1 = v1–v2, edge 2 = v0–v2.
+    struct MeshEdgeNeighborNormal
+    {
+        float4 normal;      ///< Adjacent face unit normal (xyz); w = 1 if present, 0 if missing
+
+        MeshEdgeNeighborNormal()
+            : normal{0.f, 0.f, 0.f, 0.f}
+        {
+        }
+    };
+
     /// Host-side container for mesh BVH data before serialization
     struct SpatialMeshData
     {
         std::vector<MeshBVHNode> nodes;           ///< BVH node array (root at index 0)
         std::vector<MeshTriangle> triangles;      ///< Triangle data in BVH order
         std::vector<MeshVertexNormal> vertexNormals; ///< Angle-weighted vertex normals
-        std::vector<TriangleIndices> triangleIndices; ///< Vertex indices per triangle
+        std::vector<TriangleIndices> triangleIndices; ///< Vertex indices per triangle (BVH order)
+        std::vector<MeshEdgeNeighborNormal> edgeNeighborNormals; ///< 3 entries per triangle (BVH order)
         size_t originalTriangleCount = 0;         ///< Source mesh triangle count
         BoundingBox boundingBox;                  ///< Axis-aligned bounding box
 
@@ -172,15 +189,34 @@ namespace gladius
                                          std::span<TriangleIndices const> indices,
                                          SpatialMeshData & data);
 
+        /// Compute the unit face normal of the triangle adjacent across each edge of
+        /// every triangle. Result is written into data.edgeNeighborNormals in BVH order.
+        /// Boundary or non-manifold edges yield a zero vector with w = 0.
+        void computeEdgeNeighborNormals(std::span<float4 const> vertices,
+                                        std::span<TriangleIndices const> originalIndices,
+                                        std::vector<int> const & bvhToOriginalTriangle,
+                                        SpatialMeshData & data);
+
         /// Compute AABB for a triangle
         BoundingBox computeTriangleBounds(MeshTriangle const & tri);
 
         /// Recursive BVH construction using SAH
+        /// @param ctx Build context (mutable: nodes are appended, indices partitioned in place)
+        /// @param start First primitive index in this node's range (inclusive)
+        /// @param end Last primitive index in this node's range (exclusive)
+        /// @param depth Current recursion depth
+        /// @param params Build configuration
+        /// @param nodeBounds Pre-computed AABB enclosing this node's primitives (passed down
+        ///                   from the parent's split sweep to avoid recomputing)
+        /// @param centroidBounds Pre-computed AABB of this node's primitive centroids
+        ///                       (drives axis selection without an extra sweep)
         int buildRecursive(BuildContext & ctx,
                            int start,
                            int end,
                            int depth,
-                           MeshBVHBuildParams const & params);
+                           MeshBVHBuildParams const & params,
+                           BoundingBox const & nodeBounds,
+                           BoundingBox const & centroidBounds);
 
         /// Calculate surface area of bounding box
         static float surfaceArea(BoundingBox const & box);

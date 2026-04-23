@@ -459,96 +459,80 @@ inline float sqDistanceToNodeAABB(__global float const* nodes, int nodeIdx, floa
     return sqDistanceToAABB(pos, bboxMin.xyz, bboxMax.xyz);
 }
 
-/// Compute pseudo-normal for sign determination (Option D - uses precomputed face normal)
+/// Compute pseudo-normal for sign determination (Bærentzen & Aanæs 2005)
 /// @param result Closest point query result
 /// @param v0, v1, v2 Triangle vertices
-/// @param precomputedFaceNormal Precomputed face normal from triangle data (avoids cross product)
-/// @param vertexNormals Array of vertex normals
+/// @param precomputedFaceNormal Precomputed unit face normal of the host triangle
+/// @param vertexNormals Array of angle-weighted vertex normals
 /// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param idx0, idx1, idx2 Vertex indices for this triangle
-/// @return Pseudo-normal at closest point (may need normalization check)
+/// @param edgeNeighbors Per-edge adjacent face normals; xyz = unit normal of opposite face,
+///                     w = 1 if edge is shared, 0 if boundary/non-manifold
+/// @param triIdx Index of the host triangle (used to address edgeNeighbors)
+/// @return Pseudo-normal at closest point. Always returned in the host triangle's outward
+///         hemisphere — i.e. dot(result, precomputedFaceNormal) >= 0.
 inline float3 computePseudoNormalFast(struct ClosestPointResult const* result,
                                       float3 v0, float3 v1, float3 v2,
                                       float3 precomputedFaceNormal,
                                       __global struct MeshVertexNormalGPU const* vertexNormals,
                                       int vertexNormalCount,
-                                      int idx0, int idx1, int idx2)
+                                      int idx0, int idx1, int idx2,
+                                      __global float4 const* edgeNeighbors,
+                                      int triIdx)
 {
     float3 pseudoNormal;
-    
+
     if (result->featureType == 0)
     {
-        // Face: use precomputed face normal directly (Option D - no cross product needed)
+        // Face: use precomputed unit face normal directly.
         pseudoNormal = precomputedFaceNormal;
     }
     else if (result->featureType == 2)
     {
-        // Vertex: use precomputed angle-weighted normal
+        // Vertex: use precomputed angle-weighted normal.
         int vIdx;
         if (result->vertexIndex == 0) vIdx = idx0;
         else if (result->vertexIndex == 1) vIdx = idx1;
         else vIdx = idx2;
-        
-        // Bounds check for safety
+
         if (vIdx >= 0 && vIdx < vertexNormalCount)
         {
             pseudoNormal = vertexNormals[vIdx].normal.xyz;
         }
         else
         {
-            // Fallback to precomputed face normal if index is out of bounds
             pseudoNormal = precomputedFaceNormal;
         }
     }
     else
     {
-        // Edge: interpolate vertex normals at edge endpoints
-        int vIdxA, vIdxB;
-        float t;
-        
-        if (result->edgeIndex == 0)
+        // Edge: per Bærentzen & Aanæs the edge pseudo-normal is the *sum of the two
+        // adjacent face normals*. This is independent of the position along the edge
+        // and is the only edge-formulation that yields a correct sign for arbitrary
+        // dihedral angles. The previous version interpolated the angle-weighted vertex
+        // normals along the edge, which collapses near sharp creases and produces sign
+        // artifacts streaking away from the larger adjacent face's normal.
+        float4 const neighbor = edgeNeighbors[triIdx * 3 + result->edgeIndex];
+        if (neighbor.w > 0.5f)
         {
-            // Edge v0-v1
-            vIdxA = idx0;
-            vIdxB = idx1;
-            t = result->baryU;
-        }
-        else if (result->edgeIndex == 1)
-        {
-            // Edge v1-v2
-            vIdxA = idx1;
-            vIdxB = idx2;
-            t = result->baryV;
+            pseudoNormal = precomputedFaceNormal + neighbor.xyz;
         }
         else
         {
-            // Edge v0-v2
-            vIdxA = idx0;
-            vIdxB = idx2;
-            t = result->baryV;
-        }
-        
-        // Bounds check for safety
-        if (vIdxA >= 0 && vIdxA < vertexNormalCount && vIdxB >= 0 && vIdxB < vertexNormalCount)
-        {
-            float3 nA = vertexNormals[vIdxA].normal.xyz;
-            float3 nB = vertexNormals[vIdxB].normal.xyz;
-            pseudoNormal = (1.0f - t) * nA + t * nB;
-        }
-        else
-        {
-            // Fallback to precomputed face normal if indices are out of bounds
+            // Boundary edge: only one face contributes — use it.
             pseudoNormal = precomputedFaceNormal;
         }
     }
-    
-    // Robustness: if pseudo-normal is near-zero, fall back to precomputed face normal
+
+    // Robustness: if pseudo-normal is degenerate (e.g. exactly opposing faces),
+    // fall back to the host triangle's face normal so the sign reflects the front
+    // we actually hit.
     float lenSq = dot(pseudoNormal, pseudoNormal);
     if (lenSq < 1e-10f)
     {
         pseudoNormal = precomputedFaceNormal;
     }
-    
+
     return pseudoNormal;
 }
 
@@ -685,6 +669,7 @@ inline float2 spatialMeshSDF_Core(float3 pos,
                                   int trianglesOffset,
                                   int normalsOffset,
                                   int indicesOffset,
+                                  int edgeNeighborsOffset,
                                   int nodeCount,
                                   int triCount,
                                   int vertexNormalCount,
@@ -703,6 +688,8 @@ inline float2 spatialMeshSDF_Core(float3 pos,
         (__global struct MeshVertexNormalGPU const*)(data + normalsOffset);
     __global int const* vertexIndices = 
         (__global int const*)(data + indicesOffset);
+    __global float4 const* edgeNeighbors =
+        (__global float4 const*)(data + edgeNeighborsOffset);
     
     // Stack-based BVH traversal with safety limits
     int stack[64];
@@ -843,7 +830,8 @@ inline float2 spatialMeshSDF_Core(float3 pos,
     
     float3 pseudoNormal = computePseudoNormalFast(&bestResult,
         bestV0, bestV1, bestV2, bestFaceNormal,
-        vertexNormals, vertexNormalCount, idx0, idx1, idx2);
+        vertexNormals, vertexNormalCount, idx0, idx1, idx2,
+        edgeNeighbors, bestTriIdx);
     
     float3 toQuery = pos - bestResult.closestPoint;
     float sign = (dot(toQuery, pseudoNormal) < 0.0f) ? -1.0f : 1.0f;
@@ -872,6 +860,7 @@ inline float spatialMeshSDFWithEarlyExit(float3 pos,
                                          int trianglesOffset,
                                          int normalsOffset,
                                          int indicesOffset,
+                                         int edgeNeighborsOffset,
                                          int nodeCount,
                                          int triCount,
                                          int vertexNormalCount,
@@ -879,7 +868,8 @@ inline float spatialMeshSDFWithEarlyExit(float3 pos,
                                          float earlyExitDistanceSq)
 {
     return spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
-                               indicesOffset, nodeCount, triCount, vertexNormalCount,
+                               indicesOffset, edgeNeighborsOffset,
+                               nodeCount, triCount, vertexNormalCount,
                                data, earlyExitDistanceSq).x;
 }
 
@@ -900,6 +890,7 @@ inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
                                                 int trianglesOffset,
                                                 int normalsOffset,
                                                 int indicesOffset,
+                                                int edgeNeighborsOffset,
                                                 int nodeCount,
                                                 int triCount,
                                                 int vertexNormalCount,
@@ -907,7 +898,8 @@ inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
 {
     // Call core with early exit disabled (0.0 = find exact minimum)
     return spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
-                               indicesOffset, nodeCount, triCount, vertexNormalCount,
+                               indicesOffset, edgeNeighborsOffset,
+                               nodeCount, triCount, vertexNormalCount,
                                data, 0.0f);
 }
 
@@ -927,6 +919,7 @@ inline float spatialMeshSDF(float3 pos,
                             int trianglesOffset,
                             int normalsOffset,
                             int indicesOffset,
+                            int edgeNeighborsOffset,
                             int nodeCount,
                             int triCount,
                             int vertexNormalCount,
@@ -936,6 +929,7 @@ inline float spatialMeshSDF(float3 pos,
     return spatialMeshSDFWithEarlyExit(pos,
                                        nodesOffset, trianglesOffset,
                                        normalsOffset, indicesOffset,
+                                       edgeNeighborsOffset,
                                        nodeCount, triCount, vertexNormalCount,
                                        data, 0.0f);
 }
@@ -1141,6 +1135,7 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
                                               int trianglesOffset,
                                               int normalsOffset,
                                               int indicesOffset,
+                                              int edgeNeighborsOffset,
                                               int nodeCount,
                                               int triCount,
                                               int vertexNormalCount,
@@ -1163,7 +1158,8 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
     if (nearestTriIdx < 0 || nearestTriIdx >= triCount)
     {
         return spatialMeshSDF(pos, nodesOffset, trianglesOffset, normalsOffset,
-                              indicesOffset, nodeCount, triCount, vertexNormalCount, data);
+                              indicesOffset, edgeNeighborsOffset,
+                              nodeCount, triCount, vertexNormalCount, data);
     }
     
     // If far from surface, use approximate distance with sign from cached value
@@ -1184,7 +1180,8 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
     
     // Near surface - fall back to full BVH traversal for accuracy
     return spatialMeshSDF(pos, nodesOffset, trianglesOffset, normalsOffset,
-                          indicesOffset, nodeCount, triCount, vertexNormalCount, data);
+                          indicesOffset, edgeNeighborsOffset,
+                          nodeCount, triCount, vertexNormalCount, data);
 }
 
 // ============================================================================
@@ -1212,6 +1209,7 @@ __kernel void buildMeshVoxelGrid(
     int trianglesOffset,
     int normalsOffset,
     int indicesOffset,
+    int edgeNeighborsOffset,
     int nodeCount,
     int triCount,
     int vertexNormalCount)
@@ -1253,6 +1251,7 @@ __kernel void buildMeshVoxelGrid(
                                                             trianglesOffset,
                                                             normalsOffset,
                                                             indicesOffset,
+                                                            edgeNeighborsOffset,
                                                             nodeCount,
                                                             triCount,
                                                             vertexNormalCount,

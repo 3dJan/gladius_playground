@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -458,6 +459,76 @@ namespace gladius::tests
 
         std::cout << "\nNote: Memory increase from 48->64 bytes/triangle is offset by avoiding" << std::endl;
         std::cout << "      runtime cross-product computation for face normals." << std::endl;
+    }
+
+    /// Phase 3 step 9: sweep maxPrimitivesPerLeaf to compare build cost and tree
+    /// shape proxies (node count, max depth, avg primitives per leaf). Helps
+    /// pick a sensible default after Phase 2 made SAH-driven leaf creation work
+    /// correctly.
+    TEST_F(MeshSdfPerformance_Test, BvhBuild_LeafSizeSweep_ComparesQualityAndBuildCost)
+    {
+        constexpr int kSubdivisions = 5;  // ~20480 triangles
+        constexpr int kRuns = 5;
+        std::array<int, 4> const leafSizes = {2, 4, 8, 16};
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createIcosphere(vertices, indices, 1.0f, kSubdivisions);
+        ASSERT_FALSE(indices.empty());
+
+        std::cout << "\n=== BVH Leaf-Size Sweep (" << indices.size() << " triangles) ==="
+                  << std::endl;
+        std::cout << std::setw(12) << "MaxPrims"
+                  << std::setw(15) << "Build (us)"
+                  << std::setw(15) << "TotalNodes"
+                  << std::setw(15) << "LeafNodes"
+                  << std::setw(15) << "MaxDepth"
+                  << std::setw(15) << "AvgPrim/Leaf" << std::endl;
+        std::cout << std::string(87, '-') << std::endl;
+
+        for (int leafSize : leafSizes)
+        {
+            MeshBVHBuildParams params;
+            params.maxPrimitivesPerLeaf = leafSize;
+
+            std::vector<double> buildTimes;
+            buildTimes.reserve(kRuns);
+            MeshBVHBuildStats lastStats;
+            for (int i = 0; i < kRuns; ++i)
+            {
+                MeshBVHBuilder builder;
+                auto const start = std::chrono::high_resolution_clock::now();
+                auto data = builder.build(vertices, indices, params);
+                auto const end = std::chrono::high_resolution_clock::now();
+                ASSERT_FALSE(data.triangles.empty()) << "BVH build failed";
+                buildTimes.push_back(static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()));
+                lastStats = builder.getLastBuildStats();
+            }
+
+            double const avgBuildUs =
+                std::accumulate(buildTimes.begin(), buildTimes.end(), 0.0) /
+                static_cast<double>(buildTimes.size());
+
+            std::cout << std::setw(12) << leafSize
+                      << std::setw(15) << std::fixed << std::setprecision(1) << avgBuildUs
+                      << std::setw(15) << lastStats.totalNodes
+                      << std::setw(15) << lastStats.leafNodes
+                      << std::setw(15) << lastStats.maxDepth
+                      << std::setw(15) << std::fixed << std::setprecision(2)
+                      << lastStats.avgPrimitivesPerLeaf << std::endl;
+
+            // Sanity: every configuration must build a non-trivial tree.
+            EXPECT_GT(lastStats.totalNodes, 0);
+            EXPECT_GT(lastStats.leafNodes, 0);
+            EXPECT_LE(lastStats.maxDepth, 24)
+                << "Max depth exceeds builder's hard cap";
+        }
+
+        std::cout << "\nNote: Smaller leaves => more nodes + deeper trees + slightly slower"
+                  << " build,\n      but better pruning during queries. Pick the smallest"
+                  << " leaf size whose\n      build cost is acceptable for your typical mesh"
+                  << " size." << std::endl;
     }
 
     /// T038: Validate face normals are correctly computed during build

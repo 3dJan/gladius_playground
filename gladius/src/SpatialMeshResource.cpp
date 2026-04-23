@@ -84,10 +84,11 @@ namespace gladius
     static constexpr size_t kBvhOffsetsFloats = 4;     // nodesOffset, trianglesOffset, normalsOffset, indicesOffset
     static constexpr size_t kVoxelHeaderFloats = 10;   // origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding
     static constexpr size_t kVoxelInfoFloats = 2;      // voxelDataOffset, voxelCount
-    static constexpr size_t kReservedFloats = 4;       // Reserved for future use
+    static constexpr size_t kReservedFloats = 4;       // [edgeNeighborsOffset, reserved, reserved, reserved]
     
     static constexpr size_t kBvhOffsetsOffset = kBboxFloats + kCountsFloats;  // 12
     static constexpr size_t kVoxelInfoOffset = kBvhOffsetsOffset + kBvhOffsetsFloats + kVoxelHeaderFloats;  // 26
+    static constexpr size_t kEdgeNeighborsOffsetIndex = kVoxelInfoOffset + kVoxelInfoFloats;                // 28
     
     void SpatialMeshResource::write(Primitives & primitives)
     {
@@ -104,6 +105,8 @@ namespace gladius
         m_payloadData.data[bvhOffsetsIndex + 2] = static_cast<float>(m_dataBaseOffset + m_normalsOffset);
         m_payloadData.data[bvhOffsetsIndex + 3] = static_cast<float>(m_dataBaseOffset + m_indicesOffset);
         m_payloadData.data[voxelInfoIndex] = static_cast<float>(m_dataBaseOffset + m_voxelDataOffset);
+        m_payloadData.data[m_headerStart + kEdgeNeighborsOffsetIndex] =
+            static_cast<float>(m_dataBaseOffset + m_edgeNeighborsOffset);
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
@@ -126,6 +129,7 @@ namespace gladius
         params.trianglesOffset = m_dataBaseOffset + static_cast<int>(m_trianglesOffset);
         params.normalsOffset = m_dataBaseOffset + static_cast<int>(m_normalsOffset);
         params.indicesOffset = m_dataBaseOffset + static_cast<int>(m_indicesOffset);
+        params.edgeNeighborsOffset = m_dataBaseOffset + static_cast<int>(m_edgeNeighborsOffset);
         params.nodeCount = static_cast<int>(m_data.nodes.size());
         params.triCount = static_cast<int>(m_data.triangles.size());
         params.vertexNormalCount = static_cast<int>(m_data.vertexNormals.size());
@@ -282,6 +286,17 @@ namespace gladius
             m_payloadData.data.push_back(0.0f);  // Padding for alignment
         }
 
+        // Serialize per-edge adjacent face normals (3 entries per triangle, 4 floats each).
+        // Used by computePseudoNormalFast in mesh_sdf.cl for robust sign on edge features.
+        m_edgeNeighborsOffset = m_payloadData.data.size();
+        for (auto const & en : m_data.edgeNeighborNormals)
+        {
+            m_payloadData.data.push_back(en.normal.x);
+            m_payloadData.data.push_back(en.normal.y);
+            m_payloadData.data.push_back(en.normal.z);
+            m_payloadData.data.push_back(en.normal.w);
+        }
+
         // Reserve space for voxel grid data (2 floats per voxel: nearestTriIdx, signedDist)
         // This space will be filled by the buildMeshVoxelGrid kernel on GPU
         m_voxelDataOffset = m_payloadData.data.size();
@@ -297,6 +312,7 @@ namespace gladius
         m_payloadData.data[bvhOffsetsIndex + 2] = static_cast<float>(m_normalsOffset);
         m_payloadData.data[bvhOffsetsIndex + 3] = static_cast<float>(m_indicesOffset);
         m_payloadData.data[voxelInfoIndex] = static_cast<float>(m_voxelDataOffset);
+        m_payloadData.data[m_headerStart + kEdgeNeighborsOffsetIndex] = static_cast<float>(m_edgeNeighborsOffset);
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);
