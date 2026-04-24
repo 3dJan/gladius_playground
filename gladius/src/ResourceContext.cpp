@@ -27,6 +27,9 @@ namespace gladius
         m_renderingSettings.weightDistToNb = 1000.0f;
         m_renderingSettings.weightMidPoint = 1.f;
         m_renderingSettings.normalOffset = 0.0001f;
+        m_renderingSettings.earlyExitDistanceSq = 0.0f;
+        m_renderingSettings.meshInflationDistance = 0.0f;
+        m_renderingSettings.meshFwnBeta = 2.0f;
 
         initResolutions();
         createBuffer();

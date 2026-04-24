@@ -1549,13 +1549,32 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
 
             // Read edge-neighbour face normals offset (offset 28)
             int const edgeNeighborsOffset = (int)data[headerStart + 28];
+            // Read FWN aggregates offset (offset 29)
+            int const fwnAggregatesOffset = (int)data[headerStart + 29];
             
             // Use voxel-accelerated path if voxel grid is available and populated
             // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
             bool const hasVoxelGrid = (voxelCount > 0) && (voxelDataOffset > 0);
+            bool const useFwn = ((renderingSettings.flags & RF_USE_MESH_FWN) != 0)
+                                && (fwnAggregatesOffset > 0);
             
             float meshDist;
-            if (hasVoxelGrid)
+            if (useFwn)
+            {
+                meshDist = spatialMeshSDF_FastWindingNumber((float3)(pos),
+                                                            nodesOffset,
+                                                            trianglesOffset,
+                                                            normalsOffset,
+                                                            indicesOffset,
+                                                            edgeNeighborsOffset,
+                                                            fwnAggregatesOffset,
+                                                            nodeCount,
+                                                            triCount,
+                                                            vertexNormalCount,
+                                                            data,
+                                                            renderingSettings.meshFwnBeta);
+            }
+            else if (hasVoxelGrid)
             {
                 // Voxel grid header starts at offset 16
                 int const voxelHeaderOffset = headerStart + 16;

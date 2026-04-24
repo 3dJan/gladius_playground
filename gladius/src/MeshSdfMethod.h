@@ -30,6 +30,12 @@ namespace gladius
         /// Reserved for a future NanoVDB-based path. Not implemented in any
         /// kernel today; the UI surfaces this value as disabled.
         NanoVDB = 2,
+        /// Fast Winding Number (Barill et al., SIGGRAPH 2018). Uses a
+        /// hierarchical Barnes-Hut sum of per-node multipole aggregates on
+        /// the BVH for the sign and the standard closest-point traversal for
+        /// the magnitude. Robust against open / non-manifold / inconsistently
+        /// oriented triangle soups.
+        FastWindingNumber = 3,
     };
 
     /// Convert a method enum to its persistent string name (used by ConfigManager).
@@ -40,6 +46,7 @@ namespace gladius
         case MeshSdfMethod::PureBVH:          return "PureBVH";
         case MeshSdfMethod::VoxelAccelerated: return "VoxelAccelerated";
         case MeshSdfMethod::NanoVDB:          return "NanoVDB";
+        case MeshSdfMethod::FastWindingNumber: return "FastWindingNumber";
         }
         return "PureBVH";
     }
@@ -52,6 +59,7 @@ namespace gladius
         if (s == "PureBVH")          return MeshSdfMethod::PureBVH;
         if (s == "VoxelAccelerated") return MeshSdfMethod::VoxelAccelerated;
         if (s == "NanoVDB")          return MeshSdfMethod::NanoVDB;
+        if (s == "FastWindingNumber") return MeshSdfMethod::FastWindingNumber;
         std::fprintf(stderr,
                      "[MeshSdfMethod] Unknown method '%.*s' in config; falling back to "
                      "VoxelAccelerated.\n",
@@ -84,6 +92,12 @@ namespace gladius
         /// scale to keep cubic voxels. Matches `kDefaultVoxelGridResolution`
         /// from `MeshVoxelGrid.h`. **Rebuild trigger**.
         int voxelGridResolution = 32;
+
+        /// Barnes-Hut acceptance threshold for the Fast-Winding-Number method.
+        /// Higher values are more accurate, lower values are faster.
+        /// Typical range: 1.5 – 4.0. **Runtime only**: forwarded into
+        /// `RenderingSettings.meshFwnBeta`.
+        float fwnBeta = 2.0f;
     };
 
     /// Determine whether changing @p oldCfg → @p newCfg requires acceleration

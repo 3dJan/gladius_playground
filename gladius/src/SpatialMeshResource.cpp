@@ -85,6 +85,9 @@ namespace gladius
         params.intersectionCost = 1.0f;
 
         m_data = builder.build(vertices, indices, params);
+        // Pre-compute Fast-Winding-Number multipole aggregates so the GPU side
+        // can switch between methods without rebuilding the BVH.
+        computeFwnAggregates(m_data);
         m_needsRebuild = false;
         m_needsVoxelGridBuild = true;
 
@@ -103,11 +106,13 @@ namespace gladius
     static constexpr size_t kVoxelHeaderFloats = 10;   // origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding
     static constexpr size_t kVoxelInfoFloats = 2;      // voxelDataOffset, voxelCount
     static constexpr size_t kEdgeNeighborsSlot = 1;    // edgeNeighborsOffset
-    static constexpr size_t kReservedFloats = 3;       // free slots for future use; total trailing block stays 4 floats
+    static constexpr size_t kFwnAggregatesSlot = 1;    // fwnAggregatesOffset
+    static constexpr size_t kReservedFloats = 2;       // free slots for future use; total trailing block stays 4 floats
 
     static constexpr size_t kBvhOffsetsOffset = kBboxFloats + kCountsFloats;  // 12
     static constexpr size_t kVoxelInfoOffset = kBvhOffsetsOffset + kBvhOffsetsFloats + kVoxelHeaderFloats;  // 26
     static constexpr size_t kEdgeNeighborsOffsetIndex = kVoxelInfoOffset + kVoxelInfoFloats;                // 28
+    static constexpr size_t kFwnAggregatesOffsetIndex = kEdgeNeighborsOffsetIndex + kEdgeNeighborsSlot;     // 29
     
     void SpatialMeshResource::write(Primitives & primitives)
     {
@@ -126,6 +131,8 @@ namespace gladius
         m_payloadData.data[voxelInfoIndex] = static_cast<float>(m_dataBaseOffset + m_voxelDataOffset);
         m_payloadData.data[m_headerStart + kEdgeNeighborsOffsetIndex] =
             static_cast<float>(m_dataBaseOffset + m_edgeNeighborsOffset);
+        m_payloadData.data[m_headerStart + kFwnAggregatesOffsetIndex] =
+            static_cast<float>(m_dataBaseOffset + m_fwnAggregatesOffset);
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
@@ -324,6 +331,22 @@ namespace gladius
             m_payloadData.data.push_back(en.normal.w);
         }
 
+        // Serialize per-node Fast-Winding-Number aggregates (8 floats per node).
+        // Layout: [weightedNormal.xyz, radius] [areaCentroid.xyz, totalArea].
+        // Used by spatialMeshSDF_FastWindingNumber in mesh_sdf.cl.
+        m_fwnAggregatesOffset = m_payloadData.data.size();
+        for (auto const & ag : m_data.fwnAggregates)
+        {
+            m_payloadData.data.push_back(ag.weightedNormalSum.x);
+            m_payloadData.data.push_back(ag.weightedNormalSum.y);
+            m_payloadData.data.push_back(ag.weightedNormalSum.z);
+            m_payloadData.data.push_back(ag.weightedNormalSum.w);
+            m_payloadData.data.push_back(ag.areaCentroid.x);
+            m_payloadData.data.push_back(ag.areaCentroid.y);
+            m_payloadData.data.push_back(ag.areaCentroid.z);
+            m_payloadData.data.push_back(ag.areaCentroid.w);
+        }
+
         // Reserve space for voxel grid data (2 floats per voxel: nearestTriIdx, signedDist)
         // This space will be filled by the buildMeshVoxelGrid kernel on GPU
         m_voxelDataOffset = m_payloadData.data.size();
@@ -340,6 +363,7 @@ namespace gladius
         m_payloadData.data[bvhOffsetsIndex + 3] = static_cast<float>(m_indicesOffset);
         m_payloadData.data[voxelInfoIndex] = static_cast<float>(m_voxelDataOffset);
         m_payloadData.data[m_headerStart + kEdgeNeighborsOffsetIndex] = static_cast<float>(m_edgeNeighborsOffset);
+        m_payloadData.data[m_headerStart + kFwnAggregatesOffsetIndex] = static_cast<float>(m_fwnAggregatesOffset);
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);

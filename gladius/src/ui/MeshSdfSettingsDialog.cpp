@@ -48,9 +48,10 @@ namespace gladius::ui
         {
             switch (m)
             {
-            case MeshSdfMethod::PureBVH:          return "Pure BVH";
-            case MeshSdfMethod::VoxelAccelerated: return "Voxel-accelerated BVH";
-            case MeshSdfMethod::NanoVDB:          return "NanoVDB (not implemented)";
+            case MeshSdfMethod::PureBVH:           return "Pure BVH";
+            case MeshSdfMethod::VoxelAccelerated:  return "Voxel-accelerated BVH";
+            case MeshSdfMethod::NanoVDB:           return "NanoVDB (not implemented)";
+            case MeshSdfMethod::FastWindingNumber: return "Fast winding number";
             }
             return "Pure BVH";
         }
@@ -84,6 +85,7 @@ namespace gladius::ui
             {
                 for (auto m : {MeshSdfMethod::PureBVH,
                                MeshSdfMethod::VoxelAccelerated,
+                               MeshSdfMethod::FastWindingNumber,
                                MeshSdfMethod::NanoVDB})
                 {
                     bool const disabled = (m == MeshSdfMethod::NanoVDB);
@@ -122,6 +124,18 @@ namespace gladius::ui
                 }
                 ImGui::TextDisabled(
                     "Higher = finer cache, slower build, more memory. Default 32.");
+            }
+
+            if (m_eval.method == MeshSdfMethod::FastWindingNumber)
+            {
+                if (ImGui::SliderFloat(
+                        "Barnes-Hut \xCE\xB2", &m_eval.fwnBeta, 1.0f, 4.0f, "%.2f"))
+                {
+                    m_dirty = true;
+                }
+                ImGui::TextDisabled(
+                    "Larger \xCE\xB2 \xE2\x86\x92 more accurate winding sign, slower. "
+                    "Default 2.0 (Barill et al. 2018).");
             }
 
             if (ImGui::Checkbox("Use early-exit hint", &m_eval.useEarlyExit))

@@ -311,7 +311,7 @@ namespace gladius::ui
 
         bool m_initialized = false;
 
-        bool m_showSettings = false;
+        bool m_showSettings = true;
 
         size_t m_lastEventCount{};
 

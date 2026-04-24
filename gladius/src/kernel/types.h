@@ -64,6 +64,8 @@ enum RenderingFlags
     RF_DISABLE_SHADOWS = (1u << 16),  // Skip soft-shadow computation (low-res preview)
     RF_DISABLE_AO = (1u << 17),  // Skip ambient occlusion computation (low-res preview)
     RF_DISABLE_MESH_EARLY_EXIT = (1u << 18)  // Force exact mesh SDF (ignore raymarcher hint)
+    ,
+    RF_USE_MESH_FWN = (1u << 19)  // Evaluate mesh SDF via Fast Winding Number (Barill et al. 2018)
 };
 
 enum SamplingFilter
@@ -175,13 +177,20 @@ struct RenderingSettings // Note that the alignment has to be considered
     /// participates in CSG. Closes pinholes/cracks up to ~2× this value at the cost of
     /// rounding sharp features. 0 disables inflation. Configured via MeshSdfSettings.
     float meshInflationDistance;
+
+    /// Barnes-Hut acceptance threshold for the Fast-Winding-Number method.
+    /// A BVH subtree is approximated by its dipole when the query distance to the
+    /// area-weighted centroid exceeds @c meshFwnBeta times the subtree's bounding
+    /// radius. Higher values are more accurate, lower values are faster. Typical
+    /// range: 1.5 – 4.0. Default 2.0 (Barill et al. 2018, §4.1).
+    float meshFwnBeta;
 };
 
 #ifdef COMPILING_FOR_HOST
 // Lock down the host/device layout: every member is 4 bytes and tightly packed,
 // so any future field additions in this struct must be mirrored in every OpenCL
 // translation unit that declares the same struct (see kernel/sdf.cl and friends).
-static_assert(sizeof(RenderingSettings) == 10 * sizeof(float),
+static_assert(sizeof(RenderingSettings) == 11 * sizeof(float),
               "RenderingSettings layout drift: update kernel-side declarations and bump this assert.");
 #endif
 

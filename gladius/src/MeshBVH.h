@@ -115,6 +115,30 @@ namespace gladius
         }
     };
 
+    /// Per-node multipole aggregate for the Fast Winding Number method
+    /// (Barill et al., SIGGRAPH 2018).
+    /// @note Size: 32 bytes (2× float4) — laid out as two GPU-friendly vectors.
+    /// @details
+    ///   * `weightedNormalSum`: sum of (2 × area × faceNormal) over all triangles
+    ///     in the subtree. Doubling the area absorbs the ½ factor of triangle
+    ///     area → consistency with the dipole approximation.
+    ///   * `areaCentroid`: sum of (area × triangleCentroid) over the subtree
+    ///     (xyz) and the total area in w. The centroid is `xyz / w`.
+    ///   * `radius` (stored in `weightedNormalSum.w`): distance from the area
+    ///     centroid to the farthest enclosed vertex; used for the Barnes-Hut
+    ///     β-acceptance criterion `dist > β * radius`.
+    struct MeshBVHFwnAggregate
+    {
+        float4 weightedNormalSum; ///< Σ(2·area·n) in xyz; bounding radius in w
+        float4 areaCentroid;      ///< Σ(area·centroid) in xyz; total area in w
+
+        MeshBVHFwnAggregate()
+            : weightedNormalSum{0.f, 0.f, 0.f, 0.f}
+            , areaCentroid{0.f, 0.f, 0.f, 0.f}
+        {
+        }
+    };
+
     /// Host-side container for mesh BVH data before serialization
     struct SpatialMeshData
     {
@@ -123,6 +147,7 @@ namespace gladius
         std::vector<MeshVertexNormal> vertexNormals; ///< Angle-weighted vertex normals
         std::vector<TriangleIndices> triangleIndices; ///< Vertex indices per triangle (BVH order)
         std::vector<MeshEdgeNeighborNormal> edgeNeighborNormals; ///< 3 entries per triangle (BVH order)
+        std::vector<MeshBVHFwnAggregate> fwnAggregates;          ///< 1 aggregate per BVH node (same order as nodes); empty when not built
         size_t originalTriangleCount = 0;         ///< Source mesh triangle count
         BoundingBox boundingBox;                  ///< Axis-aligned bounding box
 
@@ -232,4 +257,10 @@ namespace gladius
         /// Calculate surface area of bounding box
         static float surfaceArea(BoundingBox const & box);
     };
+
+    /// Compute per-node Fast-Winding-Number multipole aggregates and store them
+    /// into @p data.fwnAggregates (one entry per BVH node, in node order).
+    /// Must be called after a successful @c MeshBVHBuilder::build pass.
+    /// O(N) over triangles + O(M) over nodes; safe to call on empty data.
+    void computeFwnAggregates(SpatialMeshData & data);
 }

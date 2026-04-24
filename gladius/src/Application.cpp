@@ -300,6 +300,35 @@ namespace gladius
 
         // 2) Evaluation config: push to existing SpatialMeshResource instances.
         auto const evalCfg = m_meshSdfSettings.evaluationConfig();
+
+        // 2a) Forward runtime knobs into the active rendering settings so kernel
+        //     dispatch picks the chosen method on the next frame.
+        if (auto core = document->getCore())
+        {
+            if (auto resources = core->getResourceContext())
+            {
+                auto & settings = resources->getRenderingSettings();
+                settings.meshInflationDistance = evalCfg.inflationDistance;
+                settings.meshFwnBeta = evalCfg.fwnBeta;
+                if (evalCfg.method == MeshSdfMethod::FastWindingNumber)
+                {
+                    settings.flags |= RF_USE_MESH_FWN;
+                }
+                else
+                {
+                    settings.flags &= ~RF_USE_MESH_FWN;
+                }
+                if (evalCfg.useEarlyExit)
+                {
+                    settings.flags &= ~RF_DISABLE_MESH_EARLY_EXIT;
+                }
+                else
+                {
+                    settings.flags |= RF_DISABLE_MESH_EARLY_EXIT;
+                }
+            }
+        }
+
         std::size_t rebuilt = 0;
         auto & resources = document->getResourceManager();
         for (auto const & [key, resource] : resources.getResourceMap())

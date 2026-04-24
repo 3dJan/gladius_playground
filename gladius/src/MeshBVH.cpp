@@ -783,4 +783,183 @@ namespace gladius
         return 2.0f * (dx * dy + dy * dz + dz * dx);
     }
 
+    // ========================================================================
+    // Fast-Winding-Number aggregate computation (Barill et al. 2018)
+    // ========================================================================
+
+    void computeFwnAggregates(SpatialMeshData & data)
+    {
+        data.fwnAggregates.clear();
+        if (data.nodes.empty())
+        {
+            return;
+        }
+        data.fwnAggregates.resize(data.nodes.size());
+
+        // Recursive bottom-up accumulation. Iterative form using an explicit
+        // post-order stack keeps the call depth bounded for huge BVHs.
+        struct Frame
+        {
+            int nodeIndex;
+            bool childrenProcessed;
+        };
+        std::vector<Frame> stack;
+        stack.reserve(static_cast<std::size_t>(64));
+        stack.push_back({0, false});
+
+        while (!stack.empty())
+        {
+            Frame & top = stack.back();
+            MeshBVHNode const & node = data.nodes[static_cast<std::size_t>(top.nodeIndex)];
+
+            if (node.isLeaf())
+            {
+                MeshBVHFwnAggregate aggregate{};
+                float weightedSumX = 0.f;
+                float weightedSumY = 0.f;
+                float weightedSumZ = 0.f;
+                float centroidX = 0.f;
+                float centroidY = 0.f;
+                float centroidZ = 0.f;
+                float totalArea = 0.f;
+                int const start = node.primStart;
+                int const end = start + node.primCount;
+                for (int i = start; i < end; ++i)
+                {
+                    MeshTriangle const & tri = data.triangles[static_cast<std::size_t>(i)];
+                    float const ex = tri.v1.x - tri.v0.x;
+                    float const ey = tri.v1.y - tri.v0.y;
+                    float const ez = tri.v1.z - tri.v0.z;
+                    float const fx = tri.v2.x - tri.v0.x;
+                    float const fy = tri.v2.y - tri.v0.y;
+                    float const fz = tri.v2.z - tri.v0.z;
+                    // Cross(e, f); 0.5 * |cross| is the area; faceNormal is unit.
+                    float const cx = ey * fz - ez * fy;
+                    float const cy = ez * fx - ex * fz;
+                    float const cz = ex * fy - ey * fx;
+                    float const area = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+                    // Use 2·area·n  (collapses to raw cross/2 contributions: simpler GPU formula).
+                    float const w2a = 2.f * area;
+                    weightedSumX += w2a * tri.faceNormal.x;
+                    weightedSumY += w2a * tri.faceNormal.y;
+                    weightedSumZ += w2a * tri.faceNormal.z;
+                    float const cxC = (tri.v0.x + tri.v1.x + tri.v2.x) * (1.f / 3.f);
+                    float const cyC = (tri.v0.y + tri.v1.y + tri.v2.y) * (1.f / 3.f);
+                    float const czC = (tri.v0.z + tri.v1.z + tri.v2.z) * (1.f / 3.f);
+                    centroidX += area * cxC;
+                    centroidY += area * cyC;
+                    centroidZ += area * czC;
+                    totalArea += area;
+                }
+
+                aggregate.weightedNormalSum = {weightedSumX, weightedSumY, weightedSumZ, 0.f};
+                aggregate.areaCentroid = {centroidX, centroidY, centroidZ, totalArea};
+
+                // Bounding radius: distance from area-weighted centroid to the
+                // farthest enclosed vertex.
+                float radiusSq = 0.f;
+                if (totalArea > 0.f)
+                {
+                    float const ax = centroidX / totalArea;
+                    float const ay = centroidY / totalArea;
+                    float const az = centroidZ / totalArea;
+                    for (int i = start; i < end; ++i)
+                    {
+                        MeshTriangle const & tri = data.triangles[static_cast<std::size_t>(i)];
+                        for (int v = 0; v < 3; ++v)
+                        {
+                            float4 const & pv = (v == 0) ? tri.v0 : (v == 1 ? tri.v1 : tri.v2);
+                            float const dx = pv.x - ax;
+                            float const dy = pv.y - ay;
+                            float const dz = pv.z - az;
+                            float const d2 = dx * dx + dy * dy + dz * dz;
+                            if (d2 > radiusSq)
+                            {
+                                radiusSq = d2;
+                            }
+                        }
+                    }
+                }
+                aggregate.weightedNormalSum.w = std::sqrt(radiusSq);
+                data.fwnAggregates[static_cast<std::size_t>(top.nodeIndex)] = aggregate;
+                stack.pop_back();
+                continue;
+            }
+
+            if (!top.childrenProcessed)
+            {
+                top.childrenProcessed = true;
+                int const left = node.leftChild;
+                int const right = node.rightChild;
+                if (right >= 0)
+                {
+                    stack.push_back({right, false});
+                }
+                if (left >= 0)
+                {
+                    stack.push_back({left, false});
+                }
+                continue;
+            }
+
+            // Both children done — combine.
+            MeshBVHFwnAggregate combined{};
+            float radiusSq = 0.f;
+            float ax = 0.f, ay = 0.f, az = 0.f;
+            for (int childIdx : {node.leftChild, node.rightChild})
+            {
+                if (childIdx < 0)
+                {
+                    continue;
+                }
+                MeshBVHFwnAggregate const & ch =
+                    data.fwnAggregates[static_cast<std::size_t>(childIdx)];
+                combined.weightedNormalSum.x += ch.weightedNormalSum.x;
+                combined.weightedNormalSum.y += ch.weightedNormalSum.y;
+                combined.weightedNormalSum.z += ch.weightedNormalSum.z;
+                combined.areaCentroid.x += ch.areaCentroid.x;
+                combined.areaCentroid.y += ch.areaCentroid.y;
+                combined.areaCentroid.z += ch.areaCentroid.z;
+                combined.areaCentroid.w += ch.areaCentroid.w;
+            }
+            if (combined.areaCentroid.w > 0.f)
+            {
+                ax = combined.areaCentroid.x / combined.areaCentroid.w;
+                ay = combined.areaCentroid.y / combined.areaCentroid.w;
+                az = combined.areaCentroid.z / combined.areaCentroid.w;
+                // Combined radius = max over children of (distance from new centroid
+                // to child centroid + child radius). Conservative upper bound that
+                // still gives a tight Barnes-Hut threshold.
+                for (int childIdx : {node.leftChild, node.rightChild})
+                {
+                    if (childIdx < 0)
+                    {
+                        continue;
+                    }
+                    MeshBVHFwnAggregate const & ch =
+                        data.fwnAggregates[static_cast<std::size_t>(childIdx)];
+                    if (ch.areaCentroid.w <= 0.f)
+                    {
+                        continue;
+                    }
+                    float const cx = ch.areaCentroid.x / ch.areaCentroid.w;
+                    float const cy = ch.areaCentroid.y / ch.areaCentroid.w;
+                    float const cz = ch.areaCentroid.z / ch.areaCentroid.w;
+                    float const dx = cx - ax;
+                    float const dy = cy - ay;
+                    float const dz = cz - az;
+                    float const dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    float const total = dist + ch.weightedNormalSum.w;
+                    if (total * total > radiusSq)
+                    {
+                        radiusSq = total * total;
+                    }
+                }
+            }
+            combined.weightedNormalSum.w = std::sqrt(radiusSq);
+            data.fwnAggregates[static_cast<std::size_t>(top.nodeIndex)] = combined;
+            stack.pop_back();
+        }
+    }
+
 }  // namespace gladius

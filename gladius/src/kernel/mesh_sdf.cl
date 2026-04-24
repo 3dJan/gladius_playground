@@ -1185,6 +1185,166 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
 }
 
 // ============================================================================
+// Fast Winding Number (Barill et al., SIGGRAPH 2018)
+// ============================================================================
+//
+// Aggregate buffer layout (8 floats per BVH node, indexed by node index):
+//   [0..2] weightedNormalSum.xyz  ( = Σ 2·area·n over the subtree )
+//   [3]    bounding radius about the area-weighted centroid
+//   [4..6] areaCentroid.xyz       ( = Σ area·centroid )
+//   [7]    totalArea              ( = Σ area )
+//
+// The Barnes-Hut acceptance criterion is `dist > beta * radius`; when met the
+// subtree contributes via the dipole formula
+//     w_dipole(p) = (1 / (4π)) · ( (c - p) · N̂ ) / |c - p|^3
+// where c is the area-weighted centroid and N̂ = Σ 2·area·n  is the doubled
+// area-weighted normal sum stored above.  When the criterion is not met and
+// the node is internal, traversal recurses; at a leaf the exact per-triangle
+// solid-angle formula (Van Oosterom-Strang) is used.
+
+/// Solid angle subtended at the origin by a triangle (a, b, c).
+/// @return Signed solid angle in (-2π, 2π].
+inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
+{
+    float const la = length(a);
+    float const lb = length(b);
+    float const lc = length(c);
+    float const numerator = dot(a, cross(b, c));
+    float const denominator = la * lb * lc + dot(a, b) * lc + dot(b, c) * la + dot(c, a) * lb;
+    return 2.0f * atan2(numerator, denominator);
+}
+
+/// Compute the generalised winding number at `pos` using a Barnes-Hut
+/// hierarchical traversal of the BVH augmented with per-node multipole
+/// aggregates.
+/// @param beta Barnes-Hut acceptance threshold (typical 1.5 – 4.0).
+/// @return winding number (~1 inside, ~0 outside; signed for non-closed input).
+inline float fwnHierarchical(float3 pos,
+                             int nodesOffset,
+                             int trianglesOffset,
+                             int fwnAggregatesOffset,
+                             int nodeCount,
+                             __global float const * data,
+                             float beta)
+{
+    if (nodeCount == 0)
+    {
+        return 0.0f;
+    }
+
+    __global float const * nodes = data + nodesOffset;
+    __global float const * triangles = data + trianglesOffset;
+    __global float const * aggregates = data + fwnAggregatesOffset;
+
+    // Iterative DFS with explicit stack. Depth 64 covers > 16 M triangles.
+    int stack[64];
+    int stackTop = 0;
+    stack[stackTop++] = 0; // root
+
+    float windingSum = 0.0f;
+    float const betaSq = beta * beta;
+    float const invFourPi = 1.0f / (4.0f * M_PI_F);
+
+    while (stackTop > 0)
+    {
+        int const nodeIdx = stack[--stackTop];
+
+        // Load aggregate (8 floats = 2 × float4).
+        int const agBase = nodeIdx * 8;
+        float4 const wnRadius = vload4(0, aggregates + agBase);     // weightedSum.xyz, radius
+        float4 const acTotal = vload4(0, aggregates + agBase + 4);  // centroid.xyz, totalArea
+
+        if (acTotal.w <= 0.0f)
+        {
+            continue; // empty subtree
+        }
+
+        float3 const centroid = acTotal.xyz / acTotal.w;
+        float3 const diff = centroid - pos;
+        float const distSq = dot(diff, diff);
+        float const radius = wnRadius.w;
+
+        // Barnes-Hut acceptance: dist > beta * radius
+        // (compare squared to avoid a sqrt)
+        if (distSq > betaSq * radius * radius && distSq > 0.0f)
+        {
+            // Dipole approximation: contribution is (diff · N) / (4π · |diff|^3)
+            // where N here is wnRadius.xyz (already includes the 2·area factor).
+            float const invDist = rsqrt(distSq);
+            float const invDistCubed = invDist * invDist * invDist;
+            // Note: wnRadius.xyz = Σ 2·area·n  → divide by 2 for dipole formula.
+            float3 const N = 0.5f * wnRadius.xyz;
+            windingSum += invFourPi * dot(diff, N) * invDistCubed;
+            continue;
+        }
+
+        // Recurse / evaluate exactly. Re-read children from the BVH node.
+        int const baseOffset = nodeIdx * 12;
+        float4 const intData = vload4(0, nodes + baseOffset + 8);
+        int const leftChild = as_int(intData.x);
+        int const rightChild = as_int(intData.y);
+        int const primStart = as_int(intData.z);
+        int const primCount = as_int(intData.w);
+
+        bool const isLeaf = (leftChild == -1 && rightChild == -1);
+        if (isLeaf)
+        {
+            int const end = primStart + primCount;
+            for (int i = primStart; i < end; ++i)
+            {
+                int const triBase = i * 16;
+                float3 const v0 = vload4(0, triangles + triBase).xyz - pos;
+                float3 const v1 = vload4(0, triangles + triBase + 4).xyz - pos;
+                float3 const v2 = vload4(0, triangles + triBase + 8).xyz - pos;
+                windingSum += invFourPi * fwnSolidAngleAtOrigin(v0, v1, v2);
+            }
+        }
+        else
+        {
+            if (rightChild >= 0 && stackTop < 64)
+            {
+                stack[stackTop++] = rightChild;
+            }
+            if (leftChild >= 0 && stackTop < 64)
+            {
+                stack[stackTop++] = leftChild;
+            }
+        }
+    }
+
+    return windingSum;
+}
+
+/// Signed distance via Fast Winding Number sign + closest-point magnitude.
+/// Robust to open/non-manifold/self-intersecting meshes.
+inline float spatialMeshSDF_FastWindingNumber(float3 pos,
+                                              int nodesOffset,
+                                              int trianglesOffset,
+                                              int normalsOffset,
+                                              int indicesOffset,
+                                              int edgeNeighborsOffset,
+                                              int fwnAggregatesOffset,
+                                              int nodeCount,
+                                              int triCount,
+                                              int vertexNormalCount,
+                                              __global float const * data,
+                                              float beta)
+{
+    // Magnitude: reuse the existing closest-point traversal (unsigned distance
+    // is the |signedDist| from the pseudo-normal path; we discard its sign).
+    float2 const closest =
+        spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
+                            indicesOffset, edgeNeighborsOffset,
+                            nodeCount, triCount, vertexNormalCount, data, 0.0f);
+    float const unsignedDist = fabs(closest.x);
+
+    // Sign: hierarchical winding number.
+    float const winding = fwnHierarchical(pos, nodesOffset, trianglesOffset,
+                                          fwnAggregatesOffset, nodeCount, data, beta);
+    return (winding > 0.5f) ? -unsignedDist : unsignedDist;
+}
+
+// ============================================================================
 // Voxel Grid Build Kernel
 // ============================================================================
 
