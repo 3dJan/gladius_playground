@@ -1429,8 +1429,14 @@ namespace gladius::ui
         auto const executionDuration_ms =
           measure<std::chrono::milliseconds>::execution(renderFrame);
 
-        // Progressive rendering: max time to render complete frame before forcing completion
-        auto constexpr progressiveTargetRenderTime_ms = 20000; // 20 seconds max progressive render
+        // Progressive rendering: cap the time the UI thread spends blocked
+        // inside a single renderScene() chunk. Each call to renderScene queues
+        // ONE OpenCL kernel covering [currentLine, currentLine+stepSize) and
+        // waits for it to complete, so a too-large step on a heavy SDF can
+        // freeze the UI for hundreds of milliseconds. The adaptive logic below
+        // shrinks the step when a chunk exceeds this target and grows it back
+        // when chunks are comfortably under it.
+        auto constexpr progressiveTargetRenderTime_ms = 150;
         auto constexpr tolerance_ms = 1;
         auto constexpr targetFrameTime_ms = 25; // Target ~40 FPS during interaction
         float error = targetFrameTime_ms - executionDuration_ms;

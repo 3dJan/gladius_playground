@@ -7,26 +7,35 @@
 #include "ComputeCore.h"
 #include "Document.h"
 #include "EventLogger.h"
+#include "ImageRGBA.h"
 #include "MeshBVH.h"
+#include "MeshSdfMethod.h"
 #include "Primitives.h"
 #include "ResourceContext.h"
+#include "ResourceManager.h"
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGridManager.h"
 #include "io/3mf/Lib3mfLoader.h"
+#include "kernel/types.h"
+#include "ui/OrbitalCamera.h"
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <numeric>
 #include <random>
+#include <thread>
 #include <vector>
 
 namespace gladius::tests
@@ -367,16 +376,250 @@ namespace gladius::tests
         SUCCEED() << "Benchmark mesh loads successfully";
     }
 
-    /// Placeholder for GPU-based SDF query benchmark
-    /// This will be enabled when ComputeCore integration is complete
-    TEST_F(MeshSdfPerformance_Test, DISABLED_GpuSdfQueries_MeasuresThroughput)
+    /// GPU-based SDF render benchmark across mesh-SDF acceleration methods.
+    /// Renders a fixed view of the benchmark mesh with each evaluation method
+    /// (PureBVH, VoxelAccelerated, FastWindingNumber) and reports wall-clock
+    /// frame time so the relative cost of each kernel path can be compared.
+    ///
+    /// **DEFAULT-SKIPPED.** This benchmark dispatches a long-running SDF
+    /// kernel for each method back-to-back; on systems with a strict GPU
+    /// watchdog (TDR / Linux amdgpu hang detection) the FWN path on a
+    /// non-trivial mesh has been observed to crash the display driver. Set
+    /// `GLADIUS_RUN_GPU_BENCH=1` to enable. Use a small mesh.
+    TEST_F(MeshSdfPerformance_Test, GpuSdfRender_AllMethods_PrintsThroughput)
     {
-        // TODO: Implement GPU-based SDF query timing
-        // 1. Load mesh and build BVH on GPU
-        // 2. Generate random query points
-        // 3. Execute SDF queries on GPU
-        // 4. Measure and report timing
-        GTEST_SKIP() << "GPU SDF query benchmark not yet implemented";
+        if (std::getenv("GLADIUS_RUN_GPU_BENCH") == nullptr)
+        {
+            GTEST_SKIP() << "GPU benchmark default-skipped. Set "
+                            "GLADIUS_RUN_GPU_BENCH=1 to enable. WARNING: "
+                            "may hit the GPU TDR watchdog on heavy meshes.";
+        }
+        // Search both integration- and unit-test data directories so the
+        // benchmark mesh can be picked up regardless of which testdata folder
+        // happens to ship it.
+        std::array<std::filesystem::path, 3> const candidates = {{
+            std::filesystem::path(kBenchmarkMesh),
+            std::filesystem::path("../unittests") / kBenchmarkMesh,
+            std::filesystem::path("../../tests/unittests") / kBenchmarkMesh,
+        }};
+        std::filesystem::path meshPath;
+        for (auto const & p : candidates)
+        {
+            if (std::filesystem::exists(p))
+            {
+                meshPath = p;
+                break;
+            }
+        }
+        if (meshPath.empty())
+        {
+            GTEST_SKIP() << "Benchmark mesh not found: " << kBenchmarkMesh;
+        }
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        auto bundle = loadDocument(meshPath);
+        ASSERT_TRUE(bundle.document != nullptr);
+        ASSERT_TRUE(bundle.core->updateBBox()) << "updateBBox failed";
+        ASSERT_TRUE(bundle.core->prepareImageRendering()) << "prepareImageRendering failed";
+
+        auto const bbox = bundle.core->getBoundingBox();
+        ASSERT_TRUE(bbox.has_value()) << "No bounding box";
+
+        // Verify the document actually contains a SpatialMeshResource — without
+        // one, the FWN/Voxel kernel paths are never exercised and the test is
+        // not meaningful.
+        SpatialMeshResource * spatialMesh = nullptr;
+        for (auto const & [key, resource] : bundle.document->getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            if (auto * sm = dynamic_cast<SpatialMeshResource *>(resource.get()))
+            {
+                spatialMesh = sm;
+                break;
+            }
+        }
+        if (spatialMesh == nullptr)
+        {
+            GTEST_SKIP() << "Benchmark document contains no SpatialMeshResource";
+        }
+
+        // Camera setup mirrors RayMarchPerf_tests.cpp::RenderWithMetrics_MeasuresStepCount.
+        // Small render size keeps each kernel dispatch well under typical GPU
+        // watchdog limits (TDR ~2 s on Windows, ~5 s on Linux amdgpu).
+        constexpr size_t kWidth = 64;
+        constexpr size_t kHeight = 64;
+        ui::OrbitalCamera camera;
+        camera.setAngle(0.6f, -2.0f);
+        camera.centerView(*bbox);
+        camera.update(10000.f);
+        camera.adjustDistanceToTarget(*bbox, static_cast<int>(kWidth), static_cast<int>(kHeight));
+        camera.update(10000.f);
+
+        auto resources = bundle.core->getResourceContext();
+        resources->setEyePosition(camera.getEyePosition());
+        resources->setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
+
+        auto targetImage = std::make_unique<ImageRGBA>(*bundle.core->getComputeContext(), kWidth, kHeight);
+        targetImage->allocateOnDevice();
+
+        auto const & queue = bundle.core->getComputeContext()->GetQueue();
+
+        struct MethodCase
+        {
+            char const * label;
+            MeshSdfMethod method;
+        };
+        std::array<MethodCase, 3> const cases = {{
+            {"PureBVH",            MeshSdfMethod::PureBVH},
+            {"VoxelAccelerated",   MeshSdfMethod::VoxelAccelerated},
+            {"FastWindingNumber",  MeshSdfMethod::FastWindingNumber},
+        }};
+
+        constexpr int kWarmupFrames = 1;
+        constexpr int kTimedFrames = 3;
+
+        struct Result
+        {
+            std::string label;
+            double meanMs{0.0};
+            double minMs{0.0};
+            double maxMs{0.0};
+        };
+        std::vector<Result> results;
+        results.reserve(cases.size());
+
+        for (auto const & c : cases)
+        {
+            // 1) Push evaluation method to the resource. Triggers a rebuild
+            //    when the method or grid resolution differs from the current
+            //    config (return value indicates a rebuild happened).
+            MeshSdfEvaluationConfig cfg{};
+            cfg.method = c.method;
+            cfg.useEarlyExit = true;
+            cfg.fwnBeta = 2.0f;
+            spatialMesh->setEvaluationConfig(cfg);
+
+            // 2) Forward runtime knobs into RenderingSettings so the kernel
+            //    dispatch picks the correct branch.
+            auto & settings = resources->getRenderingSettings();
+            settings.meshFwnBeta = cfg.fwnBeta;
+            if (c.method == MeshSdfMethod::FastWindingNumber)
+            {
+                settings.flags |= RF_USE_MESH_FWN;
+            }
+            else
+            {
+                settings.flags &= ~RF_USE_MESH_FWN;
+            }
+            settings.flags &= ~RF_DISABLE_MESH_EARLY_EXIT;
+
+            // 3) Flush resource changes (BVH/voxel grid/FWN aggregates) into
+            //    the GPU primitives buffer.
+            bundle.document->refreshModelBlocking();
+
+            // Re-apply camera (refresh may have touched parameter buffer).
+            resources->setEyePosition(camera.getEyePosition());
+            resources->setModelViewPerspectiveMat(camera.computeModelViewPerspectiveMatrix());
+
+            // 4) Warmup so first-launch costs (kernel JIT, buffer migration,
+            //    voxel grid lazy build) don't pollute the timed samples.
+            //    Each render is wrapped in a host-side timeout: if a kernel
+            //    runs for too long (driver TDR usually fires around 2-5 s)
+            //    the test aborts cleanly with a clear error rather than
+            //    blocking the test runner indefinitely on a hung GPU.
+            //
+            //    NOTE: OpenCL has no kernel preemption — on a true hang the
+            //    in-flight work continues until the driver resets it. The
+            //    timeout's job is to make the *host process* exit gracefully
+            //    so subsequent tests / shells aren't deadlocked on event.wait().
+            constexpr auto kKernelTimeout = std::chrono::seconds(8);
+            auto runRender = [&] {
+                cl::Event ev;
+                bool const ok = bundle.core->renderSceneWithMetrics(
+                    queue, 0, kHeight, *targetImage, &ev);
+                if (ok && ev())
+                {
+                    ev.wait();
+                }
+                return ok;
+            };
+            for (int i = 0; i < kWarmupFrames; ++i)
+            {
+                auto fut = std::async(std::launch::async, runRender);
+                if (fut.wait_for(kKernelTimeout) == std::future_status::timeout)
+                {
+                    // Detach the future via a shared_ptr trick: move into a
+                    // long-lived std::async wrapper so its destructor doesn't
+                    // block the test on shutdown. We *don't* abort here —
+                    // FAIL is reported and we break out of the method loop.
+                    auto leaked = std::make_shared<std::future<bool>>(std::move(fut));
+                    std::thread([leaked] { leaked->wait(); }).detach();
+                    FAIL() << "GPU kernel timeout (>" << kKernelTimeout.count()
+                           << "s) during warmup for " << c.label
+                           << "; aborting benchmark to avoid display driver crash.";
+                    return;
+                }
+                ASSERT_TRUE(fut.get()) << "warmup render failed for " << c.label;
+            }
+
+            // 5) Timed runs — wall-clock around event.wait() since the default
+            //    queue is not created with CL_QUEUE_PROFILING_ENABLE.
+            std::vector<double> framesMs;
+            framesMs.reserve(kTimedFrames);
+            for (int i = 0; i < kTimedFrames; ++i)
+            {
+                auto const t0 = std::chrono::steady_clock::now();
+                auto fut = std::async(std::launch::async, runRender);
+                if (fut.wait_for(kKernelTimeout) == std::future_status::timeout)
+                {
+                    auto leaked = std::make_shared<std::future<bool>>(std::move(fut));
+                    std::thread([leaked] { leaked->wait(); }).detach();
+                    FAIL() << "GPU kernel timeout (>" << kKernelTimeout.count()
+                           << "s) on timed frame " << i << " for " << c.label
+                           << "; aborting benchmark to avoid display driver crash.";
+                    return;
+                }
+                ASSERT_TRUE(fut.get()) << "render failed for " << c.label;
+                auto const t1 = std::chrono::steady_clock::now();
+                framesMs.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            }
+
+            Result r;
+            r.label = c.label;
+            r.meanMs = std::accumulate(framesMs.begin(), framesMs.end(), 0.0)
+                       / static_cast<double>(framesMs.size());
+            auto const [mn, mx] = std::minmax_element(framesMs.begin(), framesMs.end());
+            r.minMs = *mn;
+            r.maxMs = *mx;
+            results.push_back(std::move(r));
+        }
+
+        // Report
+        fmt::print("\n=== GPU Mesh SDF Render Benchmark ===\n");
+        fmt::print("Mesh:        {}\n", meshPath.filename().string());
+        fmt::print("Triangles:   {}\n", spatialMesh->getTriangleCount());
+        fmt::print("Resolution:  {}x{}\n", kWidth, kHeight);
+        fmt::print("Frames:      {} warmup + {} timed\n", kWarmupFrames, kTimedFrames);
+        fmt::print("{:<20} {:>10} {:>10} {:>10}\n", "Method", "mean ms", "min ms", "max ms");
+        fmt::print("{}\n", std::string(52, '-'));
+        for (auto const & r : results)
+        {
+            fmt::print("{:<20} {:>10.2f} {:>10.2f} {:>10.2f}\n",
+                       r.label, r.meanMs, r.minMs, r.maxMs);
+        }
+        fmt::print("======================================\n\n");
+
+        // Sanity: all three paths should produce some non-zero render time.
+        for (auto const & r : results)
+        {
+            EXPECT_GT(r.meanMs, 0.0) << r.label << " produced zero frame time";
+        }
     }
 
     /// T038: Measure BVH data structure sizes for export performance

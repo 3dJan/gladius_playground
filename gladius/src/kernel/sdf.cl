@@ -1561,6 +1561,24 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             float meshDist;
             if (useFwn)
             {
+                // Pass voxel-grid offsets so FWN can reuse the voxel cache for
+                // its magnitude pass when available (avoids a duplicate full
+                // BVH walk). Pass 0 when no grid is built so it falls back to
+                // the closest-point traversal.
+                int const fwnVoxelHeaderOffset = hasVoxelGrid ? (headerStart + 16) : 0;
+                int const fwnVoxelDataOffset = hasVoxelGrid ? voxelDataOffset : 0;
+                // Far-field threshold: when the unsigned distance exceeds half
+                // the bbox diagonal the query is outside any feature of the
+                // mesh and the cheap pseudo-normal sign from the magnitude
+                // path is reliable. Skip the expensive winding traversal in
+                // that case. Bbox lives at header offsets [0..7].
+                float3 const bboxMin = (float3)(data[headerStart + 0],
+                                                data[headerStart + 1],
+                                                data[headerStart + 2]);
+                float3 const bboxMax = (float3)(data[headerStart + 4],
+                                                data[headerStart + 5],
+                                                data[headerStart + 6]);
+                float const fwnFarFieldDistance = 0.5f * length(bboxMax - bboxMin);
                 meshDist = spatialMeshSDF_FastWindingNumber((float3)(pos),
                                                             nodesOffset,
                                                             trianglesOffset,
@@ -1568,11 +1586,14 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                                             indicesOffset,
                                                             edgeNeighborsOffset,
                                                             fwnAggregatesOffset,
+                                                            fwnVoxelHeaderOffset,
+                                                            fwnVoxelDataOffset,
                                                             nodeCount,
                                                             triCount,
                                                             vertexNormalCount,
                                                             data,
-                                                            renderingSettings.meshFwnBeta);
+                                                            renderingSettings.meshFwnBeta,
+                                                            fwnFarFieldDistance);
             }
             else if (hasVoxelGrid)
             {

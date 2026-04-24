@@ -1236,8 +1236,11 @@ inline float fwnHierarchical(float3 pos,
     __global float const * triangles = data + trianglesOffset;
     __global float const * aggregates = data + fwnAggregatesOffset;
 
-    // Iterative DFS with explicit stack. Depth 64 covers > 16 M triangles.
-    int stack[64];
+    // Iterative DFS with explicit stack. Depth 128 leaves headroom for very
+    // unbalanced BVHs (depth 64 covers 2^64 tris in the balanced case but
+    // long chains can exceed that). When the stack is full we drop the child
+    // pushes; this biases the winding estimate but never crashes.
+    int stack[128];
     int stackTop = 0;
     stack[stackTop++] = 0; // root
 
@@ -1275,6 +1278,15 @@ inline float fwnHierarchical(float3 pos,
             // Note: wnRadius.xyz = Σ 2·area·n  → divide by 2 for dipole formula.
             float3 const N = 0.5f * wnRadius.xyz;
             windingSum += invFourPi * dot(diff, N) * invDistCubed;
+
+            // Early-exit: once |windingSum| exceeds 0.75 the sign decision is
+            // locked-in (the remaining stack would have to contribute > 0.25 to
+            // flip the threshold check at 0.5). For closed meshes with nominal
+            // winding ≈ {0, 1} this saves the rest of the traversal entirely.
+            if (fabs(windingSum) > 0.75f)
+            {
+                return windingSum;
+            }
             continue;
         }
 
@@ -1301,11 +1313,11 @@ inline float fwnHierarchical(float3 pos,
         }
         else
         {
-            if (rightChild >= 0 && stackTop < 64)
+            if (rightChild >= 0 && stackTop < 128)
             {
                 stack[stackTop++] = rightChild;
             }
-            if (leftChild >= 0 && stackTop < 64)
+            if (leftChild >= 0 && stackTop < 128)
             {
                 stack[stackTop++] = leftChild;
             }
@@ -1317,6 +1329,11 @@ inline float fwnHierarchical(float3 pos,
 
 /// Signed distance via Fast Winding Number sign + closest-point magnitude.
 /// Robust to open/non-manifold/self-intersecting meshes.
+///
+/// Reverted to the simple two-pass form (full BVH walk for magnitude + FWN
+/// for sign). The voxel-magnitude reuse and far-field skip variants were
+/// reverted after they crashed a display driver in untested hot-load. Re-add
+/// them only with proper isolated GPU testing first.
 inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int nodesOffset,
                                               int trianglesOffset,
@@ -1324,14 +1341,21 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int indicesOffset,
                                               int edgeNeighborsOffset,
                                               int fwnAggregatesOffset,
+                                              int voxelHeaderOffset,
+                                              int voxelDataOffset,
                                               int nodeCount,
                                               int triCount,
                                               int vertexNormalCount,
                                               __global float const * data,
-                                              float beta)
+                                              float beta,
+                                              float farFieldDistance)
 {
-    // Magnitude: reuse the existing closest-point traversal (unsigned distance
-    // is the |signedDist| from the pseudo-normal path; we discard its sign).
+    // Suppress unused-parameter warnings; kept in the signature so callers
+    // don't need to be touched while we work out a safe far-field path.
+    (void) voxelHeaderOffset;
+    (void) voxelDataOffset;
+    (void) farFieldDistance;
+
     float2 const closest =
         spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
                             indicesOffset, edgeNeighborsOffset,

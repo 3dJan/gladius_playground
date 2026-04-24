@@ -175,6 +175,15 @@ namespace gladius
             return;
         }
 
+        // Ensure Fast-Winding-Number aggregates exist. The (key, SpatialMeshData&&)
+        // constructor (used by 3MF import via Document::addMeshResource) does not
+        // run computeFwnAggregates, so without this lazy build the FWN dispatch
+        // would read uninitialised payload memory and produce wrong-sign artifacts.
+        if (m_data.fwnAggregates.empty() && !m_data.nodes.empty())
+        {
+            computeFwnAggregates(m_data);
+        }
+
         // Clear previous payload
         m_payloadData.meta.clear();
 
