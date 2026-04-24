@@ -90,6 +90,7 @@ namespace gladius
                                     size_t startHeight,
                                     size_t endHeight)
     {
+        ProfileFunction;
         try
         {
             cl::Event const event =

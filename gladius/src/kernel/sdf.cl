@@ -1561,24 +1561,32 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             float meshDist;
             if (useFwn)
             {
-                // Pass voxel-grid offsets so FWN can reuse the voxel cache for
-                // its magnitude pass when available (avoids a duplicate full
-                // BVH walk). Pass 0 when no grid is built so it falls back to
-                // the closest-point traversal.
-                int const fwnVoxelHeaderOffset = hasVoxelGrid ? (headerStart + 16) : 0;
-                int const fwnVoxelDataOffset = hasVoxelGrid ? voxelDataOffset : 0;
-                // Far-field threshold: when the unsigned distance exceeds half
-                // the bbox diagonal the query is outside any feature of the
-                // mesh and the cheap pseudo-normal sign from the magnitude
-                // path is reliable. Skip the expensive winding traversal in
-                // that case. Bbox lives at header offsets [0..7].
+                // NOTE: voxel-magnitude reuse is disabled here even when a
+                // voxel grid is allocated. The grid is zero-initialised at
+                // load time and only populated by the async
+                // `buildMeshVoxelGrid` kernel afterwards; reading from it
+                // before that completes returns garbage and forces FWN into a
+                // double full-BVH walk per pixel, which can TDR the GPU
+                // driver on the bbox-precompute pass. Until we expose a
+                // "voxel grid populated" flag readable from the kernel, FWN
+                // uses `spatialMeshSDF_Core` for the magnitude pass (safe).
+                int const fwnVoxelHeaderOffset = 0;
+                int const fwnVoxelDataOffset = 0;
+                // Far-field threshold: when the unsigned distance exceeds
+                // `meshFwnFarFieldFactor * 0.5 * bbox_diagonal` the query is
+                // outside any feature of the mesh and the cheap pseudo-normal
+                // sign from the magnitude path is reliable. Skip the
+                // expensive winding traversal in that case. A factor of 0
+                // disables the skip (always run winding — exact). Bbox lives
+                // at header offsets [0..7].
                 float3 const bboxMin = (float3)(data[headerStart + 0],
                                                 data[headerStart + 1],
                                                 data[headerStart + 2]);
                 float3 const bboxMax = (float3)(data[headerStart + 4],
                                                 data[headerStart + 5],
                                                 data[headerStart + 6]);
-                float const fwnFarFieldDistance = 0.5f * length(bboxMax - bboxMin);
+                float const fwnFarFieldDistance =
+                    renderingSettings.meshFwnFarFieldFactor * 0.5f * length(bboxMax - bboxMin);
                 meshDist = spatialMeshSDF_FastWindingNumber((float3)(pos),
                                                             nodesOffset,
                                                             trianglesOffset,

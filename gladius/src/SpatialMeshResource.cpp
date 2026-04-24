@@ -58,7 +58,38 @@ namespace gladius
 
     bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
     {
-        bool const rebuildRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
+        bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
+
+        // Even when the *method* changed, the existing payload may already
+        // contain everything the new method needs:
+        //   - PureBVH:           always satisfied (BVH is always present).
+        //   - FastWindingNumber: needs FWN aggregates, which loadImpl now
+        //                        builds lazily on every load.
+        //   - VoxelAccelerated:  needs a populated voxel grid (m_voxelCount>0).
+        // The voxel-grid resolution is the only setting that *requires* a
+        // payload rebuild. Detecting payload sufficiency here avoids a costly
+        // re-serialise on the auto-apply that fires immediately after a fresh
+        // 3MF import (settings persist across sessions, but the freshly
+        // constructed resource starts with the default VoxelAccelerated
+        // method).
+        bool const resolutionChanged =
+            m_evaluationConfig.voxelGridResolution != cfg.voxelGridResolution;
+        bool const newMethodSatisfied = [&]() {
+            switch (cfg.method)
+            {
+            case MeshSdfMethod::PureBVH:
+                return true;
+            case MeshSdfMethod::FastWindingNumber:
+                return !m_data.fwnAggregates.empty();
+            case MeshSdfMethod::VoxelAccelerated:
+                return m_voxelCount > 0;
+            case MeshSdfMethod::NanoVDB:
+                return false;
+            }
+            return false;
+        }();
+        bool const rebuildRequired = resolutionChanged || !newMethodSatisfied;
+
         m_evaluationConfig = cfg;
         if (rebuildRequired)
         {
@@ -71,7 +102,10 @@ namespace gladius
             m_needsVoxelGridBuild = (cfg.method == MeshSdfMethod::VoxelAccelerated);
             reload();
         }
-        return rebuildRequired;
+        // Report rebuildPotentiallyRequired so callers see "the config changed"
+        // even when we skipped the heavy reload — they may still need to
+        // refresh other state (e.g. RenderingSettings flags).
+        return rebuildPotentiallyRequired;
     }
 
     void SpatialMeshResource::rebuild(std::span<float4 const> vertices,

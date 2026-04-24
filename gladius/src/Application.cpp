@@ -310,6 +310,7 @@ namespace gladius
                 auto & settings = resources->getRenderingSettings();
                 settings.meshInflationDistance = evalCfg.inflationDistance;
                 settings.meshFwnBeta = evalCfg.fwnBeta;
+                settings.meshFwnFarFieldFactor = evalCfg.fwnFarFieldFactor;
                 if (evalCfg.method == MeshSdfMethod::FastWindingNumber)
                 {
                     settings.flags |= RF_USE_MESH_FWN;

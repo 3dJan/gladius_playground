@@ -337,6 +337,11 @@ namespace gladius::ui
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         ShortcutSettingsDialog m_shortcutSettingsDialog;
         MeshSdfSettingsDialog m_meshSdfSettingsDialog;
+        /// Mirror of the dialog's Apply callback so we can invoke it
+        /// programmatically after a freshly loaded document — otherwise the
+        /// persisted mesh-SDF method (e.g. FastWindingNumber) is never pushed
+        /// into the renderer until the user opens the dialog and clicks Apply.
+        MeshSdfSettingsDialog::ApplyCallback m_meshSdfApplyCallback;
 
         // Compute availability flag. If false, UI runs in a limited mode without rendering.
         bool m_computeAvailable{true};

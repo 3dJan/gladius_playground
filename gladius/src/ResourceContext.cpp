@@ -30,6 +30,7 @@ namespace gladius
         m_renderingSettings.earlyExitDistanceSq = 0.0f;
         m_renderingSettings.meshInflationDistance = 0.0f;
         m_renderingSettings.meshFwnBeta = 2.0f;
+        m_renderingSettings.meshFwnFarFieldFactor = 0.5f;
 
         initResolutions();
         createBuffer();

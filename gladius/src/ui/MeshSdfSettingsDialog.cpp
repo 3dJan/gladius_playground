@@ -136,6 +136,19 @@ namespace gladius::ui
                 ImGui::TextDisabled(
                     "Larger \xCE\xB2 \xE2\x86\x92 more accurate winding sign, slower. "
                     "Default 2.0 (Barill et al. 2018).");
+
+                if (ImGui::SliderFloat("Far-field skip factor",
+                                       &m_eval.fwnFarFieldFactor,
+                                       0.0f,
+                                       2.0f,
+                                       "%.2f"))
+                {
+                    m_dirty = true;
+                }
+                ImGui::TextDisabled(
+                    "Skip winding traversal beyond factor \xC3\x97 half-bbox-diagonal. "
+                    "0 = exact (slow). 0.5 = recommended. >1 = aggressive (may show "
+                    "sign artifacts on thin features).");
             }
 
             if (ImGui::Checkbox("Use early-exit hint", &m_eval.useEarlyExit))

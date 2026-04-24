@@ -184,13 +184,20 @@ struct RenderingSettings // Note that the alignment has to be considered
     /// radius. Higher values are more accurate, lower values are faster. Typical
     /// range: 1.5 – 4.0. Default 2.0 (Barill et al. 2018, §4.1).
     float meshFwnBeta;
+
+    /// Far-field skip factor for the Fast-Winding-Number method. Multiplied
+    /// with the mesh's bbox half-diagonal to obtain the unsigned-distance
+    /// threshold beyond which the cheap closest-point sign is trusted and the
+    /// expensive winding traversal is skipped. 0 disables the skip (always
+    /// run winding — exact). 0.5 is a safe default.
+    float meshFwnFarFieldFactor;
 };
 
 #ifdef COMPILING_FOR_HOST
 // Lock down the host/device layout: every member is 4 bytes and tightly packed,
 // so any future field additions in this struct must be mirrored in every OpenCL
 // translation unit that declares the same struct (see kernel/sdf.cl and friends).
-static_assert(sizeof(RenderingSettings) == 11 * sizeof(float),
+static_assert(sizeof(RenderingSettings) == 12 * sizeof(float),
               "RenderingSettings layout drift: update kernel-side declarations and bump this assert.");
 #endif
 

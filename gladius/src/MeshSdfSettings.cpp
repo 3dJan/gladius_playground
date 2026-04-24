@@ -31,7 +31,8 @@ namespace gladius
             return a.method == b.method && a.useEarlyExit == b.useEarlyExit &&
                    a.inflationDistance == b.inflationDistance &&
                    a.voxelGridResolution == b.voxelGridResolution &&
-                   a.fwnBeta == b.fwnBeta;
+                   a.fwnBeta == b.fwnBeta &&
+                   a.fwnFarFieldFactor == b.fwnFarFieldFactor;
         }
     } // namespace
 
@@ -84,6 +85,8 @@ namespace gladius
             SECTION_EVALUATION, "voxelGridResolution", m_evaluation.voxelGridResolution);
         m_evaluation.fwnBeta = m_config->getValue<float>(
             SECTION_EVALUATION, "fwnBeta", m_evaluation.fwnBeta);
+        m_evaluation.fwnFarFieldFactor = m_config->getValue<float>(
+            SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
     }
 
     void MeshSdfSettings::save()
@@ -112,6 +115,8 @@ namespace gladius
             SECTION_EVALUATION, "voxelGridResolution", m_evaluation.voxelGridResolution);
         m_config->setValue<float>(
             SECTION_EVALUATION, "fwnBeta", m_evaluation.fwnBeta);
+        m_config->setValue<float>(
+            SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
         m_config->save();
     }
 

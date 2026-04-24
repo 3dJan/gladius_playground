@@ -98,6 +98,16 @@ namespace gladius
         /// Typical range: 1.5 – 4.0. **Runtime only**: forwarded into
         /// `RenderingSettings.meshFwnBeta`.
         float fwnBeta = 2.0f;
+
+        /// Far-field skip factor for the Fast-Winding-Number method.
+        /// Multiplied with the mesh's bbox half-diagonal to obtain the
+        /// distance threshold beyond which the cheap closest-point sign is
+        /// trusted and the expensive winding traversal is skipped.
+        /// `0.0` disables the skip (always run winding — exact, slow).
+        /// `0.5` is a safe default. Larger values are faster but may show
+        /// sign artifacts on thin features. **Runtime only**: forwarded into
+        /// `RenderingSettings.meshFwnFarFieldFactor`.
+        float fwnFarFieldFactor = 0.5f;
     };
 
     /// Determine whether changing @p oldCfg → @p newCfg requires acceleration

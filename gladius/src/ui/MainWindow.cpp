@@ -540,6 +540,14 @@ namespace gladius::ui
                     m_renderWindow.centerView();
                 }
                 m_asyncLoadState = AsyncLoadState::Idle;
+                // Push persisted mesh-SDF settings (method, β, etc.) into the
+                // freshly loaded document. Without this the renderer would
+                // ignore the saved method and silently fall back to its
+                // default until the user opens the settings dialog.
+                if (m_meshSdfApplyCallback)
+                {
+                    m_meshSdfApplyCallback();
+                }
             }
         }
 
@@ -3279,6 +3287,7 @@ namespace gladius::ui
                                         MeshSdfSettingsDialog::ApplyCallback applyCallback)
     {
         m_meshSdfSettingsDialog.setSettings(settings);
+        m_meshSdfApplyCallback = applyCallback;
         m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
     }
 

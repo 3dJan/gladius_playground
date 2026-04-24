@@ -379,8 +379,12 @@ namespace gladius::tests
         EXPECT_GT(params->voxelCount, 0);
     }
 
-    TEST_F(SpatialMeshResource_Test, EvaluationConfig_PureBVH_SkipsVoxelGrid)
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_PureBVH_DoesNotRebuild)
     {
+        // PureBVH needs no extra payload beyond the always-present BVH, so a
+        // method change to PureBVH from any other method should be a free
+        // runtime switch (no payload rebuild). The pre-existing voxel grid
+        // stays in the payload — kernel dispatch ignores it under PureBVH.
         std::vector<float4> vertices;
         std::vector<TriangleIndices> indices;
         createCubeMesh(vertices, indices);
@@ -390,11 +394,10 @@ namespace gladius::tests
 
         MeshSdfEvaluationConfig cfg;
         cfg.method = MeshSdfMethod::PureBVH;
-        bool const invalidated = resource.setEvaluationConfig(cfg);
-        EXPECT_TRUE(invalidated);
-
-        auto const params = resource.getVoxelGridBuildParams();
-        EXPECT_FALSE(params.has_value());
+        // Returns true: the *config* did change (method differs from default).
+        bool const configChanged = resource.setEvaluationConfig(cfg);
+        EXPECT_TRUE(configChanged);
+        EXPECT_EQ(resource.evaluationConfig().method, MeshSdfMethod::PureBVH);
     }
 
     TEST_F(SpatialMeshResource_Test, EvaluationConfig_RuntimeOnlyChange_DoesNotInvalidate)
@@ -428,8 +431,13 @@ namespace gladius::tests
         EXPECT_TRUE(resource.setEvaluationConfig(cfg));
     }
 
-    TEST_F(SpatialMeshResource_Test, EvaluationConfig_MethodRoundTrip_RestoresVoxelGrid)
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_MethodRoundTrip_VoxelGridStaysAvailable)
     {
+        // With the lazy-payload optimization, switching between PureBVH and
+        // VoxelAccelerated does not drop the voxel grid (the grid is harmless
+        // for PureBVH, which simply ignores it). This avoids costly
+        // re-serialise on common round-trips like "settings auto-apply on
+        // load → user toggles method in dialog".
         std::vector<float4> vertices;
         std::vector<TriangleIndices> indices;
         createCubeMesh(vertices, indices);
@@ -440,13 +448,13 @@ namespace gladius::tests
         // Default (VoxelAccelerated) → grid present.
         ASSERT_TRUE(resource.getVoxelGridBuildParams().has_value());
 
-        // Switch to PureBVH → grid removed.
+        // Switch to PureBVH → grid stays (free runtime switch).
         MeshSdfEvaluationConfig pureBvh;
         pureBvh.method = MeshSdfMethod::PureBVH;
         EXPECT_TRUE(resource.setEvaluationConfig(pureBvh));
-        EXPECT_FALSE(resource.getVoxelGridBuildParams().has_value());
+        EXPECT_TRUE(resource.getVoxelGridBuildParams().has_value());
 
-        // Switch back to VoxelAccelerated → grid restored.
+        // Switch back to VoxelAccelerated → grid still present.
         MeshSdfEvaluationConfig voxel;
         voxel.method = MeshSdfMethod::VoxelAccelerated;
         EXPECT_TRUE(resource.setEvaluationConfig(voxel));

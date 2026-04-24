@@ -1330,10 +1330,18 @@ inline float fwnHierarchical(float3 pos,
 /// Signed distance via Fast Winding Number sign + closest-point magnitude.
 /// Robust to open/non-manifold/self-intersecting meshes.
 ///
-/// Reverted to the simple two-pass form (full BVH walk for magnitude + FWN
-/// for sign). The voxel-magnitude reuse and far-field skip variants were
-/// reverted after they crashed a display driver in untested hot-load. Re-add
-/// them only with proper isolated GPU testing first.
+/// When a populated voxel acceleration grid is available
+/// (@p voxelHeaderOffset > 0 and @p voxelDataOffset > 0), the magnitude is
+/// taken from the voxel-accelerated path which only falls back to a full BVH
+/// walk near the surface. This avoids the duplicate full BVH traversal that
+/// would otherwise dominate FWN cost on large meshes.
+///
+/// **Far-field skip** (@p farFieldDistance > 0): when the unsigned distance
+/// returned by the magnitude pass exceeds this threshold, the query point is
+/// far from any feature and we trust the cheap pseudo-normal / voxel sign
+/// instead of running the hierarchical winding traversal. For a typical
+/// render (most pixels far from the surface) this drops FWN cost to nearly
+/// the cost of the magnitude path on the bulk of the image.
 inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int nodesOffset,
                                               int trianglesOffset,
@@ -1350,17 +1358,42 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               float beta,
                                               float farFieldDistance)
 {
-    // Suppress unused-parameter warnings; kept in the signature so callers
-    // don't need to be touched while we work out a safe far-field path.
-    (void) voxelHeaderOffset;
-    (void) voxelDataOffset;
-    (void) farFieldDistance;
+    // Magnitude (signed): prefer the voxel-accelerated path when available.
+    float signedMagnitude;
+    if (voxelHeaderOffset > 0 && voxelDataOffset > 0)
+    {
+        signedMagnitude = spatialMeshSDF_VoxelAccelerated(pos,
+                                                          voxelHeaderOffset,
+                                                          voxelDataOffset,
+                                                          nodesOffset,
+                                                          trianglesOffset,
+                                                          normalsOffset,
+                                                          indicesOffset,
+                                                          edgeNeighborsOffset,
+                                                          nodeCount,
+                                                          triCount,
+                                                          vertexNormalCount,
+                                                          data);
+    }
+    else
+    {
+        float2 const closest =
+            spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
+                                indicesOffset, edgeNeighborsOffset,
+                                nodeCount, triCount, vertexNormalCount, data, 0.0f);
+        signedMagnitude = closest.x;
+    }
 
-    float2 const closest =
-        spatialMeshSDF_Core(pos, nodesOffset, trianglesOffset, normalsOffset,
-                            indicesOffset, edgeNeighborsOffset,
-                            nodeCount, triCount, vertexNormalCount, data, 0.0f);
-    float const unsignedDist = fabs(closest.x);
+    float const unsignedDist = fabs(signedMagnitude);
+
+    // Far-field skip: when the closest triangle is far away the magnitude
+    // path's sign is reliable (no nearby features to confuse the
+    // pseudo-normal / voxel sign). Skip the expensive winding traversal
+    // entirely. Covers the majority of pixels on a typical render.
+    if (farFieldDistance > 0.0f && unsignedDist > farFieldDistance)
+    {
+        return signedMagnitude;
+    }
 
     // Sign: hierarchical winding number.
     float const winding = fwnHierarchical(pos, nodesOffset, trianglesOffset,
