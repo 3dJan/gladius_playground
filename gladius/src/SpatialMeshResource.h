@@ -11,6 +11,7 @@
 
 #include "MeshBVH.h"
 #include "MeshResourceBase.h"
+#include "MeshSdfMethod.h"
 #include "MeshVoxelGridManager.h"
 
 #include <span>
@@ -78,6 +79,20 @@ namespace gladius
         /// Mark resource as needing rebuild (for mesh modification support)
         void invalidate();
 
+        /// Apply a new SDF-evaluation configuration. If @p cfg requires a
+        /// different acceleration structure (different method or voxel grid
+        /// resolution) this call invalidates the resource so the next load
+        /// rebuilds the payload. Pure runtime knobs (inflation, early-exit
+        /// toggle) are stored elsewhere and do not trigger a rebuild here.
+        /// @return true if the resource was invalidated.
+        bool setEvaluationConfig(MeshSdfEvaluationConfig const & cfg);
+
+        /// Currently-applied evaluation configuration.
+        [[nodiscard]] MeshSdfEvaluationConfig const & evaluationConfig() const noexcept
+        {
+            return m_evaluationConfig;
+        }
+
         /// Rebuild BVH from updated mesh data
         /// @param vertices Updated vertex positions
         /// @param indices Updated triangle indices
@@ -122,5 +137,9 @@ namespace gladius
         size_t m_edgeNeighborsOffset = 0;
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
+
+        /// Active evaluation configuration. Determines whether a voxel grid is
+        /// allocated during loadImpl() and at what resolution.
+        MeshSdfEvaluationConfig m_evaluationConfig{};
     };
 }

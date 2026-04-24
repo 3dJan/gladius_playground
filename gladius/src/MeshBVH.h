@@ -150,6 +150,17 @@ namespace gladius
         int maxDepth = 0;
         float avgPrimitivesPerLeaf = 0.0f;
         double buildTimeMs = 0.0;
+
+        /// @name Mesh quality diagnostics
+        /// @{
+        /// Number of triangles skipped during normal computation due to a degenerate
+        /// edge length or zero face-normal magnitude.
+        int degenerateTriangleCount = 0;
+        /// Number of undirected edges incident to exactly one face (open boundary).
+        int boundaryEdgeCount = 0;
+        /// Number of undirected edges incident to three or more faces (non-manifold).
+        int nonManifoldEdgeCount = 0;
+        /// @}
     };
 
     /// Builds a BVH for triangle mesh closest-point queries

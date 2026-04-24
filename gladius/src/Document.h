@@ -426,6 +426,18 @@ namespace gladius
          */
         bool isUiMode() const;
 
+        /// Set the mesh-repair configuration that any subsequent 3MF import will
+        /// apply to triangle meshes before BVH construction. Defaults to all-disabled.
+        void setMeshRepairConfig(mesh_repair::MeshRepairConfig const & cfg)
+        {
+            m_meshRepairConfig = cfg;
+        }
+
+        [[nodiscard]] mesh_repair::MeshRepairConfig const & getMeshRepairConfig() const noexcept
+        {
+            return m_meshRepairConfig;
+        }
+
         void updateFlatAssembly();
 
       private:
@@ -458,6 +470,9 @@ namespace gladius
         bool m_fileChanged{false};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
+
+        /// Mesh repair configuration applied at 3MF import time.
+        mesh_repair::MeshRepairConfig m_meshRepairConfig{};
 
         bool m_primitiveDateNeedsUpdate{true};
 

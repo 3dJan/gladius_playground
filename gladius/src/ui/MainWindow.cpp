@@ -878,6 +878,11 @@ namespace gladius::ui
                 {
                     m_shortcutSettingsDialog.render();
                 }
+
+                if (m_meshSdfSettingsDialog.isVisible())
+                {
+                    m_meshSdfSettingsDialog.render();
+                }
             }
 
             m_welcomeScreen.render();
@@ -1481,6 +1486,12 @@ namespace gladius::ui
             {
                 closeMenu();
                 showShortcutSettings();
+            }
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CUBE "\tMesh SDF Settings")))
+            {
+                closeMenu();
+                showMeshSdfSettings();
             }
 
             if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_LIST "\tShow Log")))
@@ -3257,6 +3268,18 @@ namespace gladius::ui
     void MainWindow::showShortcutSettings()
     {
         m_shortcutSettingsDialog.show();
+    }
+
+    void MainWindow::showMeshSdfSettings()
+    {
+        m_meshSdfSettingsDialog.show();
+    }
+
+    void MainWindow::setMeshSdfSettings(MeshSdfSettings * settings,
+                                        MeshSdfSettingsDialog::ApplyCallback applyCallback)
+    {
+        m_meshSdfSettingsDialog.setSettings(settings);
+        m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
     }
 
     void MainWindow::showWelcomeScreen()

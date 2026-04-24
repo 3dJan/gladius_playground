@@ -146,6 +146,7 @@ namespace gladius
     void Document::loadAllMeshResources()
     {
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
 
         if (!m_3mfmodel)
         {
@@ -422,6 +423,7 @@ namespace gladius
         m_3mfmodel.reset();
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -440,6 +442,7 @@ namespace gladius
         m_3mfmodel.reset();
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -1839,6 +1842,7 @@ namespace gladius
         }
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
 
         // Load build items from the 3MF model
         clearBuildItems();

@@ -360,4 +360,99 @@ namespace gladius::tests
             << "Expected all cube triangles to have axis-aligned face normals";
     }
 
+    // ========================================================================
+    // setEvaluationConfig tests
+    // ========================================================================
+
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_DefaultMethod_AllocatesVoxelGrid)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{200}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        // Default config is VoxelAccelerated → grid should be available.
+        auto const params = resource.getVoxelGridBuildParams();
+        ASSERT_TRUE(params.has_value());
+        EXPECT_GT(params->voxelCount, 0);
+    }
+
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_PureBVH_SkipsVoxelGrid)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{201}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        MeshSdfEvaluationConfig cfg;
+        cfg.method = MeshSdfMethod::PureBVH;
+        bool const invalidated = resource.setEvaluationConfig(cfg);
+        EXPECT_TRUE(invalidated);
+
+        auto const params = resource.getVoxelGridBuildParams();
+        EXPECT_FALSE(params.has_value());
+    }
+
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_RuntimeOnlyChange_DoesNotInvalidate)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{202}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        auto cfg = resource.evaluationConfig();
+        cfg.inflationDistance = 0.05f;
+        cfg.useEarlyExit = !cfg.useEarlyExit;
+        bool const invalidated = resource.setEvaluationConfig(cfg);
+        EXPECT_FALSE(invalidated);
+        EXPECT_FLOAT_EQ(resource.evaluationConfig().inflationDistance, 0.05f);
+    }
+
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_ResolutionChange_Invalidates)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{203}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        auto cfg = resource.evaluationConfig();
+        cfg.voxelGridResolution = cfg.voxelGridResolution * 2;
+        EXPECT_TRUE(resource.setEvaluationConfig(cfg));
+    }
+
+    TEST_F(SpatialMeshResource_Test, EvaluationConfig_MethodRoundTrip_RestoresVoxelGrid)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{204}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        // Default (VoxelAccelerated) → grid present.
+        ASSERT_TRUE(resource.getVoxelGridBuildParams().has_value());
+
+        // Switch to PureBVH → grid removed.
+        MeshSdfEvaluationConfig pureBvh;
+        pureBvh.method = MeshSdfMethod::PureBVH;
+        EXPECT_TRUE(resource.setEvaluationConfig(pureBvh));
+        EXPECT_FALSE(resource.getVoxelGridBuildParams().has_value());
+
+        // Switch back to VoxelAccelerated → grid restored.
+        MeshSdfEvaluationConfig voxel;
+        voxel.method = MeshSdfMethod::VoxelAccelerated;
+        EXPECT_TRUE(resource.setEvaluationConfig(voxel));
+        auto const params = resource.getVoxelGridBuildParams();
+        ASSERT_TRUE(params.has_value());
+        EXPECT_GT(params->voxelCount, 0);
+    }
+
 }  // namespace gladius::tests

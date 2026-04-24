@@ -1578,7 +1578,12 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                 // Pass the raymarcher's early-exit hint: when > 0, BVH traversal can stop
                 // as soon as it finds a triangle within sqrt(earlyExitDistanceSq). The
                 // returned distance is a safe lower bound on the true distance, so the
-                // raymarcher will not overshoot.
+                // raymarcher will not overshoot. The hint is suppressed when the
+                // RF_DISABLE_MESH_EARLY_EXIT flag is set (exact-distance mode).
+                float const earlyExitHint =
+                    ((renderingSettings.flags & RF_DISABLE_MESH_EARLY_EXIT) != 0)
+                        ? 0.0f
+                        : renderingSettings.earlyExitDistanceSq;
                 meshDist = spatialMeshSDFWithEarlyExit((float3)(pos),
                                                        nodesOffset,
                                                        trianglesOffset,
@@ -1589,9 +1594,14 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                                        triCount,
                                                        vertexNormalCount,
                                                        data,
-                                                       renderingSettings.earlyExitDistanceSq);
+                                                       earlyExitHint);
             }
-            
+
+            // Optional morphological inflation: subtract a constant distance from
+            // the mesh SDF, which closes small holes / pinholes at the cost of
+            // rounding sharp convex features.
+            meshDist -= renderingSettings.meshInflationDistance;
+
             sdf = uniteSmooth(sdf, meshDist, 0.0f);
         }
     }

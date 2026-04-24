@@ -2,6 +2,7 @@
 
 #include "BeamLatticeResource.h"
 #include "Mesh.h"
+#include "MeshRepair.h"
 #include "nodes/Assembly.h"
 #include "nodes/Model.h"
 
@@ -52,6 +53,13 @@ namespace gladius::io
     {
       public:
         explicit Importer3mf(events::SharedLogger logger);
+
+        /// Configure mesh-repair operations to apply to every imported triangle
+        /// mesh before BVH construction. Defaults to all-disabled (no repair).
+        void setMeshRepairConfig(mesh_repair::MeshRepairConfig const & cfg)
+        {
+            m_meshRepairConfig = cfg;
+        }
 
         void load(std::filesystem::path const & filename, Document & doc);
 
@@ -247,6 +255,8 @@ namespace gladius::io
         events::SharedLogger m_eventLogger;
 
         NodeMaps m_nodeMaps;
+
+        mesh_repair::MeshRepairConfig m_meshRepairConfig{};
     };
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);

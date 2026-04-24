@@ -3,6 +3,9 @@
 #include "mcp/ApplicationMCPAdapter.h"
 #include "mcp/MCPServer.h"
 #endif
+#include "Document.h"
+#include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "ui/MainWindow.h"
 
 #include <filesystem>
@@ -20,6 +23,9 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
         if (!m_headlessMode)
         {
             // Let MainWindow perform compute initialization and gracefully fall back on failure
@@ -38,6 +44,9 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
         if (!m_headlessMode)
         {
             m_mainWindow.setup();
@@ -60,6 +69,9 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
         m_mainWindow.setOpenCLDebugEnabled(openclDebugEnabled);
         if (!m_headlessMode)
         {
@@ -81,6 +93,9 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
         m_mainWindow.setup();
 
         // the first argument is the executable name
@@ -115,6 +130,9 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
         m_mainWindow.setup();
 
         if (std::filesystem::exists(filename))
@@ -270,6 +288,40 @@ namespace gladius
     std::shared_ptr<Document> Application::getCurrentDocument() const
     {
         return m_mainWindow.getCurrentDocument();
+    }
+
+    std::size_t Application::applyMeshSdfSettingsToCurrentDocument()
+    {
+        auto document = getCurrentDocument();
+        if (!document)
+        {
+            return 0;
+        }
+
+        // 1) Mesh repair config: applies on the next 3MF import.
+        document->setMeshRepairConfig(m_meshSdfSettings.repairConfig());
+
+        // 2) Evaluation config: push to existing SpatialMeshResource instances.
+        auto const evalCfg = m_meshSdfSettings.evaluationConfig();
+        std::size_t rebuilt = 0;
+        auto & resources = document->getResourceManager();
+        for (auto const & [key, resource] : resources.getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh == nullptr)
+            {
+                continue;
+            }
+            if (spatialMesh->setEvaluationConfig(evalCfg))
+            {
+                ++rebuilt;
+            }
+        }
+        return rebuilt;
     }
 
     bool Application::showUI()

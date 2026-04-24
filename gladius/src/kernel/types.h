@@ -62,7 +62,8 @@ enum RenderingFlags
     RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
     RF_DEBUG_METRICS = (1u << 15),  // Enable debug metrics collection (dev builds)
     RF_DISABLE_SHADOWS = (1u << 16),  // Skip soft-shadow computation (low-res preview)
-    RF_DISABLE_AO = (1u << 17)  // Skip ambient occlusion computation (low-res preview)
+    RF_DISABLE_AO = (1u << 17),  // Skip ambient occlusion computation (low-res preview)
+    RF_DISABLE_MESH_EARLY_EXIT = (1u << 18)  // Force exact mesh SDF (ignore raymarcher hint)
 };
 
 enum SamplingFilter
@@ -169,6 +170,11 @@ struct RenderingSettings // Note that the alignment has to be considered
     /// to find the exact minimum distance. The raymarcher updates this each step from
     /// the previous SDF reading, allowing far queries to skip most of the BVH.
     float earlyExitDistanceSq;
+
+    /// Morphological inflation (in mm) subtracted from every mesh SDF reading before it
+    /// participates in CSG. Closes pinholes/cracks up to ~2× this value at the cost of
+    /// rounding sharp features. 0 disables inflation. Configured via MeshSdfSettings.
+    float meshInflationDistance;
 };
 
 struct DistanceColor

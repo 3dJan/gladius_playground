@@ -56,6 +56,25 @@ namespace gladius
         m_needsVoxelGridBuild = true;
     }
 
+    bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
+    {
+        bool const rebuildRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
+        m_evaluationConfig = cfg;
+        if (rebuildRequired)
+        {
+            // Drop the cached payload and re-serialise with the new method
+            // (e.g. allocating or skipping the voxel grid). load() is a no-op
+            // after the first call, so call loadImpl() directly here, mirroring
+            // what rebuild() does.
+            m_payloadData.data.clear();
+            m_payloadData.meta.clear();
+            m_needsRebuild = true;
+            m_needsVoxelGridBuild = (cfg.method == MeshSdfMethod::VoxelAccelerated);
+            loadImpl();
+        }
+        return rebuildRequired;
+    }
+
     void SpatialMeshResource::rebuild(std::span<float4 const> vertices,
                                       std::span<TriangleIndices const> indices)
     {
@@ -192,11 +211,17 @@ namespace gladius
         m_payloadData.data.push_back(0.0f);  // normalsOffset
         m_payloadData.data.push_back(0.0f);  // indicesOffset
 
-        // Compute voxel grid header from bounding box
+        // Compute voxel grid header from bounding box. Resolution and whether the
+        // grid is actually populated are governed by the active evaluation config.
+        bool const useVoxelGrid =
+            (m_evaluationConfig.method == MeshSdfMethod::VoxelAccelerated);
+        int const voxelResolution = (m_evaluationConfig.voxelGridResolution > 0)
+                                        ? m_evaluationConfig.voxelGridResolution
+                                        : kDefaultVoxelGridResolution;
         MeshVoxelGridHeader const voxelHeader = createVoxelGridHeader(
             m_data.boundingBox.min.x, m_data.boundingBox.min.y, m_data.boundingBox.min.z,
             m_data.boundingBox.max.x, m_data.boundingBox.max.y, m_data.boundingBox.max.z,
-            kDefaultVoxelGridResolution);
+            voxelResolution);
         
         // Serialize voxel grid header (10 floats)
         m_payloadData.data.push_back(voxelHeader.originX);
@@ -213,7 +238,9 @@ namespace gladius
         // Placeholder for voxel grid info (2 floats) - will be patched later
         size_t const voxelInfoIndex = m_payloadData.data.size();
         m_payloadData.data.push_back(0.0f);  // voxelDataOffset
-        m_voxelCount = computeVoxelCount(voxelHeader);
+        // When the chosen method does not need a voxel grid, report zero voxels
+        // so the kernel dispatch in sdf.cl falls through to pure-BVH evaluation.
+        m_voxelCount = useVoxelGrid ? computeVoxelCount(voxelHeader) : 0u;
         m_payloadData.data.push_back(static_cast<float>(m_voxelCount));
 
         // Reserved (4 floats)

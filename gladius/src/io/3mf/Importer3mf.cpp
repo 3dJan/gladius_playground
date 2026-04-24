@@ -1259,6 +1259,28 @@ namespace gladius::io
             });
         }
 
+        // Optional mesh repair pre-pass (welding, degenerate removal, orientation,
+        // small-hole filling). All steps default to disabled — when nothing is
+        // enabled this call is a no-op.
+        auto const repairResult =
+            mesh_repair::repairMesh(vertices, indices, m_meshRepairConfig);
+        if (m_eventLogger &&
+            (repairResult.weldedVertices != 0u || repairResult.removedTriangles != 0u ||
+             repairResult.flippedTriangles != 0u || repairResult.filledHoles != 0u))
+        {
+            m_eventLogger->addEvent({fmt::format(
+                                       "Mesh repair on resource {}: welded {} vertices, removed {} "
+                                       "degenerate triangles, flipped {}, filled {} holes "
+                                       "({} triangles added)",
+                                       meshObject->GetModelResourceID(),
+                                       repairResult.weldedVertices,
+                                       repairResult.removedTriangles,
+                                       repairResult.flippedTriangles,
+                                       repairResult.filledHoles,
+                                       repairResult.addedTriangles),
+                                     gladius::events::Severity::Info});
+        }
+
         MeshBVHBuilder builder;
         auto spatialData = builder.build(vertices, indices);
         doc.getGeneratorContext().resourceManager.addResource(key, std::move(spatialData));

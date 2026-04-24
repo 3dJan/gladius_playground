@@ -27,6 +27,7 @@
 // includes for the shortcut system
 #include "ShortcutManager.h"
 #include "ShortcutSettingsDialog.h"
+#include "MeshSdfSettingsDialog.h"
 
 #include <chrono>
 
@@ -126,6 +127,18 @@ namespace gladius::ui
          * @brief Show the shortcut settings dialog
          */
         void showShortcutSettings();
+
+        /**
+         * @brief Show the mesh SDF settings dialog
+         */
+        void showMeshSdfSettings();
+
+        /**
+         * @brief Bind the persistent mesh SDF settings + apply hook used by the
+         *        "Mesh SDF Settings" menu entry.
+         */
+        void setMeshSdfSettings(MeshSdfSettings * settings,
+                                MeshSdfSettingsDialog::ApplyCallback applyCallback);
 
         /**
          * @brief Show the welcome screen and reset overlay opacity
@@ -323,6 +336,7 @@ namespace gladius::ui
         // Shortcut system
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         ShortcutSettingsDialog m_shortcutSettingsDialog;
+        MeshSdfSettingsDialog m_meshSdfSettingsDialog;
 
         // Compute availability flag. If false, UI runs in a limited mode without rendering.
         bool m_computeAvailable{true};

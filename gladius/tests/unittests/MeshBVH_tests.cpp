@@ -255,4 +255,126 @@ namespace gladius::tests
         }
     }
 
+    // ========================================================================
+    // Phase A: Mesh quality diagnostics
+    // ========================================================================
+
+    /// Watertight cube has only manifold edges and no degenerate triangles.
+    TEST_F(MeshBVHBuilder_Test, Build_WatertightCube_ReportsCleanStats)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        auto result = builder.build(vertices, indices);
+        ASSERT_FALSE(result.empty());
+
+        auto const & stats = builder.getLastBuildStats();
+        EXPECT_EQ(stats.degenerateTriangleCount, 0);
+        EXPECT_EQ(stats.boundaryEdgeCount, 0);
+        EXPECT_EQ(stats.nonManifoldEdgeCount, 0);
+    }
+
+    /// A degenerate (zero-area) triangle should be counted but must not abort the build.
+    TEST_F(MeshBVHBuilder_Test, Build_WithDegenerateTriangle_CountsIt)
+    {
+        std::vector<float4> vertices = {
+            {0.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+            {0.f, 1.f, 0.f, 0.f},
+            {0.f, 0.f, 1.f, 0.f}, // 3
+            {0.f, 0.f, 1.f, 0.f}, // 4 (duplicate)
+            {0.f, 0.f, 1.f, 0.f}, // 5 (duplicate)
+        };
+        std::vector<TriangleIndices> indices = {
+            {0, 1, 2},  // valid
+            {3, 4, 5},  // degenerate: all three vertices coincide
+        };
+
+        auto result = builder.build(vertices, indices);
+        ASSERT_FALSE(result.empty());
+
+        auto const & stats = builder.getLastBuildStats();
+        EXPECT_EQ(stats.degenerateTriangleCount, 1);
+    }
+
+    /// Two triangles sharing a single edge: 5 boundary edges, 1 manifold edge.
+    TEST_F(MeshBVHBuilder_Test, Build_OpenQuad_CountsBoundaryEdges)
+    {
+        std::vector<float4> vertices = {
+            {0.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+            {1.f, 1.f, 0.f, 0.f},
+            {0.f, 1.f, 0.f, 0.f},
+        };
+        // Shared edge: (0,2). 4 outer edges + (0,2) appears twice (once per triangle).
+        std::vector<TriangleIndices> indices = {
+            {0, 1, 2},
+            {0, 2, 3},
+        };
+
+        auto result = builder.build(vertices, indices);
+        ASSERT_FALSE(result.empty());
+
+        auto const & stats = builder.getLastBuildStats();
+        EXPECT_EQ(stats.boundaryEdgeCount, 4);   // four outer edges
+        EXPECT_EQ(stats.nonManifoldEdgeCount, 0);
+    }
+
+    /// Three coplanar triangles sharing one edge → non-manifold edge.
+    /// The edge resolution must pick the two triangles with the smallest dihedral
+    /// angle (largest |dot|), which here are the two coplanar ones.
+    TEST_F(MeshBVHBuilder_Test, Build_NonManifoldEdge_PicksSmallestDihedral)
+    {
+        // Edge along x-axis from (0,0,0) to (1,0,0). Three triangles share it:
+        //   tri 0: in xy-plane (normal +z)
+        //   tri 1: in xy-plane on the other side (normal -z) — coplanar with tri 0
+        //   tri 2: in xz-plane (normal +y) — perpendicular to the others
+        // Smallest dihedral pair: (tri 0, tri 1) with |dot| = 1; the perpendicular
+        // tri 2 has |dot| = 0 with each, so it must NOT be selected.
+        std::vector<float4> vertices = {
+            {0.f, 0.f, 0.f, 0.f},  // 0
+            {1.f, 0.f, 0.f, 0.f},  // 1
+            {0.f, 1.f, 0.f, 0.f},  // 2: tri 0 third vertex (+y)
+            {0.f, -1.f, 0.f, 0.f}, // 3: tri 1 third vertex (-y), opposite winding
+            {0.f, 0.f, 1.f, 0.f},  // 4: tri 2 third vertex (+z), perpendicular fin
+        };
+        std::vector<TriangleIndices> indices = {
+            {0, 1, 2},  // tri 0: normal +z
+            {1, 0, 3},  // tri 1: normal +z (CCW from below would be -z; from above +z)
+            {0, 1, 4},  // tri 2: normal -y
+        };
+
+        auto result = builder.build(vertices, indices);
+        ASSERT_FALSE(result.empty());
+
+        auto const & stats = builder.getLastBuildStats();
+        EXPECT_EQ(stats.nonManifoldEdgeCount, 1)
+            << "Edge (0,1) is shared by three faces and must be flagged non-manifold";
+
+        // Verify that the edge entry on the perpendicular fin (tri 2) was NOT
+        // assigned a neighbour — only the two coplanar triangles should be
+        // cross-linked. Locate tri 2 in the BVH-ordered triangle array by its
+        // characteristic geometry (vertex with z > 0).
+        int finBvhIdx = -1;
+        for (size_t i = 0; i < result.triangles.size(); ++i)
+        {
+            auto const & t = result.triangles[i];
+            if (t.v0.z > 0.5f || t.v1.z > 0.5f || t.v2.z > 0.5f)
+            {
+                finBvhIdx = static_cast<int>(i);
+                break;
+            }
+        }
+        ASSERT_GE(finBvhIdx, 0);
+
+        // Edge 0 of tri 2 is (v0,v1) = (0,1) — the shared non-manifold edge.
+        // It must NOT have been assigned a neighbour normal, because the
+        // resolver picked the two coplanar triangles, not this one.
+        auto const & finEdge0 =
+            result.edgeNeighborNormals[static_cast<size_t>(finBvhIdx) * 3u + 0u];
+        EXPECT_LT(finEdge0.normal.w, 0.5f)
+            << "Perpendicular fin must not be selected as the non-manifold partner";
+    }
+
 }  // namespace gladius::tests

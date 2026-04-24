@@ -43,12 +43,15 @@ namespace gladius
     {
         auto startTime = std::chrono::high_resolution_clock::now();
 
+        // Reset all diagnostic counters before each build so callers see only the
+        // statistics for the current invocation.
+        m_lastStats = MeshBVHBuildStats{};
+
         SpatialMeshData result;
 
         // Handle empty input
         if (vertices.empty() || indices.empty())
         {
-            m_lastStats = MeshBVHBuildStats{};
             return result;
         }
 
@@ -237,6 +240,7 @@ namespace gladius
             // Avoid division by zero for degenerate triangles
             if (len_e0 < 1e-10f || len_e1 < 1e-10f || len_e2 < 1e-10f)
             {
+                ++m_lastStats.degenerateTriangleCount;
                 continue;
             }
 
@@ -247,6 +251,7 @@ namespace gladius
             float const faceNormalLenSq = fnx * fnx + fny * fny + fnz * fnz;
             if (faceNormalLenSq < 1e-20f)
             {
+                ++m_lastStats.degenerateTriangleCount;
                 continue;
             }
             float const invFaceNormalLen = 1.0f / std::sqrt(faceNormalLenSq);
@@ -369,7 +374,9 @@ namespace gladius
             int edgeIdx;
         };
 
-        std::unordered_map<EdgeKey, EdgeRef, EdgeKeyHash> edgeMap;
+        // Collect ALL incident (triangle, edge) refs per undirected edge so that we can
+        // resolve boundary, manifold and non-manifold edges in a deterministic post-pass.
+        std::unordered_map<EdgeKey, std::vector<EdgeRef>, EdgeKeyHash> edgeMap;
         edgeMap.reserve(triCount * 3u);
 
         // Result in original-triangle order; reorder at the end.
@@ -382,20 +389,72 @@ namespace gladius
             {
                 auto [va, vb] = edgeVertices(idx, e);
                 EdgeKey const key = makeKey(va, vb);
-                auto it = edgeMap.find(key);
-                if (it == edgeMap.end())
+                edgeMap[key].push_back(EdgeRef{static_cast<int>(t), e});
+            }
+        }
+
+        auto const writeNeighbor = [&](EdgeRef const & lhs, float4 const & neighborNormal)
+        {
+            origOrder[static_cast<size_t>(lhs.triIdx) * 3u + static_cast<size_t>(lhs.edgeIdx)].normal =
+                neighborNormal;
+        };
+
+        for (auto const & [key, refs] : edgeMap)
+        {
+            (void) key;
+            if (refs.size() == 1u)
+            {
+                // Boundary edge: leave neighbour normal at zero (already initialised).
+                ++m_lastStats.boundaryEdgeCount;
+            }
+            else if (refs.size() == 2u)
+            {
+                writeNeighbor(refs[0], faceNormals[refs[1].triIdx]);
+                writeNeighbor(refs[1], faceNormals[refs[0].triIdx]);
+            }
+            else
+            {
+                // Non-manifold edge (>= 3 incident faces): pick the pair with the
+                // smallest dihedral angle (largest dot product between unit face normals,
+                // i.e. closest to coplanar) as the most plausible surface continuation.
+                // The remaining incident faces stay at zero — they are typically
+                // intersecting geometry where no consistent neighbour exists.
+                ++m_lastStats.nonManifoldEdgeCount;
+
+                size_t bestI = 0u;
+                size_t bestJ = 1u;
+                float bestDot = -2.f;
+                for (size_t i = 0u; i < refs.size(); ++i)
                 {
-                    edgeMap.emplace(key, EdgeRef{static_cast<int>(t), e});
+                    float4 const & ni = faceNormals[refs[i].triIdx];
+                    if (ni.w == 0.f)
+                    {
+                        continue; // skip degenerate face
+                    }
+                    for (size_t j = i + 1u; j < refs.size(); ++j)
+                    {
+                        float4 const & nj = faceNormals[refs[j].triIdx];
+                        if (nj.w == 0.f)
+                        {
+                            continue;
+                        }
+                        // For an undirected edge shared by two outward-facing triangles,
+                        // the normals on the two sides can be either nearly parallel
+                        // (smooth surface) or anti-parallel (sharp fold). Use |dot| so
+                        // both count as "small dihedral".
+                        float const d = std::abs(ni.x * nj.x + ni.y * nj.y + ni.z * nj.z);
+                        if (d > bestDot)
+                        {
+                            bestDot = d;
+                            bestI = i;
+                            bestJ = j;
+                        }
+                    }
                 }
-                else
+                if (bestDot > -2.f)
                 {
-                    int const otherTri = it->second.triIdx;
-                    int const otherEdge = it->second.edgeIdx;
-                    // Cross-link the two adjacent triangles.
-                    origOrder[t * 3u + static_cast<size_t>(e)].normal = faceNormals[otherTri];
-                    origOrder[static_cast<size_t>(otherTri) * 3u + static_cast<size_t>(otherEdge)].normal = faceNormals[t];
-                    // Erase to mark consumed; further hits on this key are non-manifold and ignored.
-                    edgeMap.erase(it);
+                    writeNeighbor(refs[bestI], faceNormals[refs[bestJ].triIdx]);
+                    writeNeighbor(refs[bestJ], faceNormals[refs[bestI].triIdx]);
                 }
             }
         }
