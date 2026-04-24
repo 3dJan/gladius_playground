@@ -23,9 +23,7 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
-        m_meshSdfSettings.attachConfigManager(&m_configManager);
-        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
-                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+        wireMeshSdfSettings();
         if (!m_headlessMode)
         {
             // Let MainWindow perform compute initialization and gracefully fall back on failure
@@ -44,9 +42,7 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
-        m_meshSdfSettings.attachConfigManager(&m_configManager);
-        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
-                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+        wireMeshSdfSettings();
         if (!m_headlessMode)
         {
             m_mainWindow.setup();
@@ -69,9 +65,7 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
-        m_meshSdfSettings.attachConfigManager(&m_configManager);
-        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
-                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+        wireMeshSdfSettings();
         m_mainWindow.setOpenCLDebugEnabled(openclDebugEnabled);
         if (!m_headlessMode)
         {
@@ -93,9 +87,7 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
-        m_meshSdfSettings.attachConfigManager(&m_configManager);
-        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
-                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+        wireMeshSdfSettings();
         m_mainWindow.setup();
 
         // the first argument is the executable name
@@ -130,9 +122,7 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
-        m_meshSdfSettings.attachConfigManager(&m_configManager);
-        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
-                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+        wireMeshSdfSettings();
         m_mainWindow.setup();
 
         if (std::filesystem::exists(filename))
@@ -288,6 +278,13 @@ namespace gladius
     std::shared_ptr<Document> Application::getCurrentDocument() const
     {
         return m_mainWindow.getCurrentDocument();
+    }
+
+    void Application::wireMeshSdfSettings()
+    {
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
     }
 
     std::size_t Application::applyMeshSdfSettingsToCurrentDocument()

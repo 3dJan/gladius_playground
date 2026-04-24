@@ -11,6 +11,7 @@
 #include "MeshRepair.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <string_view>
 
@@ -44,12 +45,18 @@ namespace gladius
     }
 
     /// Parse a method name written by @ref toString. Unknown values fall back to
-    /// @ref MeshSdfMethod::VoxelAccelerated for backwards compatibility.
+    /// @ref MeshSdfMethod::VoxelAccelerated for backwards compatibility and emit
+    /// a one-line warning to stderr so misspelled config entries are noticed.
     inline MeshSdfMethod parseMeshSdfMethod(std::string_view s) noexcept
     {
         if (s == "PureBVH")          return MeshSdfMethod::PureBVH;
         if (s == "VoxelAccelerated") return MeshSdfMethod::VoxelAccelerated;
         if (s == "NanoVDB")          return MeshSdfMethod::NanoVDB;
+        std::fprintf(stderr,
+                     "[MeshSdfMethod] Unknown method '%.*s' in config; falling back to "
+                     "VoxelAccelerated.\n",
+                     static_cast<int>(s.size()),
+                     s.data());
         return MeshSdfMethod::VoxelAccelerated;
     }
 

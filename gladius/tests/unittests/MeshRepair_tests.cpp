@@ -160,13 +160,11 @@ namespace gladius::tests
         // Remove the +z face (first 2 triangles).
         indices.erase(indices.begin(), indices.begin() + 2);
 
-        std::size_t filled = 0u;
-        std::size_t added = 0u;
         // Hole loop is the +z square: perimeter ~ 4.0. Use a generous threshold.
-        mesh_repair::fillSmallHoles(vertices, indices, 10.f, filled, added);
+        auto const r = mesh_repair::fillSmallHoles(vertices, indices, 10.f);
 
-        EXPECT_EQ(filled, 1u);
-        EXPECT_GE(added, 4u); // at least 4 fan triangles around the centroid
+        EXPECT_EQ(r.filled, 1u);
+        EXPECT_GE(r.added, 4u); // at least 4 fan triangles around the centroid
     }
 
     TEST(MeshRepair_FillSmallHoles, LargeHole_Skipped)
@@ -175,13 +173,11 @@ namespace gladius::tests
         std::vector<TriangleIndices> indices = cubeIndices();
         indices.erase(indices.begin(), indices.begin() + 2);
 
-        std::size_t filled = 0u;
-        std::size_t added = 0u;
         // Very tight perimeter limit: the +z face has perimeter 4, well above 0.5.
-        mesh_repair::fillSmallHoles(vertices, indices, 0.5f, filled, added);
+        auto const r = mesh_repair::fillSmallHoles(vertices, indices, 0.5f);
 
-        EXPECT_EQ(filled, 0u);
-        EXPECT_EQ(added, 0u);
+        EXPECT_EQ(r.filled, 0u);
+        EXPECT_EQ(r.added, 0u);
     }
 
     // ========================================================================

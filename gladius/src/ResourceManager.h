@@ -99,6 +99,15 @@ namespace gladius
             return true;
         }
 
+        /// Force a re-load: clears the "already loaded" flag and re-runs
+        /// loadImpl(). Use after configuration changes that require the
+        /// payload to be regenerated.
+        bool reload()
+        {
+            m_alreadyLoaded = false;
+            return load();
+        }
+
         void write(Primitives & primitives) override
         {
             m_startIndex = static_cast<int>(primitives.primitives.getSize());

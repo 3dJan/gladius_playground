@@ -99,12 +99,17 @@ namespace gladius::mesh_repair
         }
 
         // Map each input vertex index to a representative output vertex.
+        // Each spatial-hash bucket may contain multiple representatives; we
+        // probe the 27 neighbouring buckets (3³) so vertices straddling a
+        // bucket boundary are still recognised as duplicates.
         std::vector<int> remap(vertices.size(), -1);
-        std::unordered_map<GridKey, int, GridKeyHash> bucket;
+        std::unordered_map<GridKey, std::vector<int>, GridKeyHash> bucket;
         bucket.reserve(vertices.size());
 
         std::vector<float4> outVertices;
         outVertices.reserve(vertices.size());
+
+        float const epsSq = epsilon * epsilon;
 
         for (std::size_t i = 0; i < vertices.size(); ++i)
         {
@@ -112,17 +117,46 @@ namespace gladius::mesh_repair
             GridKey const key{quantise(v.x, epsilon),
                               quantise(v.y, epsilon),
                               quantise(v.z, epsilon)};
-            auto const it = bucket.find(key);
-            if (it == bucket.end())
+
+            int matched = -1;
+            for (std::int64_t dz = -1; dz <= 1 && matched < 0; ++dz)
             {
-                int const newIdx = static_cast<int>(outVertices.size());
-                bucket.emplace(key, newIdx);
-                remap[i] = newIdx;
-                outVertices.push_back(v);
+                for (std::int64_t dy = -1; dy <= 1 && matched < 0; ++dy)
+                {
+                    for (std::int64_t dx = -1; dx <= 1 && matched < 0; ++dx)
+                    {
+                        GridKey const probe{key.x + dx, key.y + dy, key.z + dz};
+                        auto const it = bucket.find(probe);
+                        if (it == bucket.end())
+                        {
+                            continue;
+                        }
+                        for (int const candidate : it->second)
+                        {
+                            float4 const & w = outVertices[static_cast<std::size_t>(candidate)];
+                            float const ddx = w.x - v.x;
+                            float const ddy = w.y - v.y;
+                            float const ddz = w.z - v.z;
+                            if ((ddx * ddx + ddy * ddy + ddz * ddz) <= epsSq)
+                            {
+                                matched = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (matched >= 0)
+            {
+                remap[i] = matched;
             }
             else
             {
-                remap[i] = it->second;
+                int const newIdx = static_cast<int>(outVertices.size());
+                bucket[key].push_back(newIdx);
+                remap[i] = newIdx;
+                outVertices.push_back(v);
             }
         }
 
@@ -281,7 +315,7 @@ namespace gladius::mesh_repair
                     }
                     componentOf[static_cast<std::size_t>(nb)] = compId;
                     flipRelative[static_cast<std::size_t>(nb)] =
-                        flipRelative[static_cast<std::size_t>(cur)] ^ sameDir;
+                        (flipRelative[static_cast<std::size_t>(cur)] != sameDir);
                     q.push(nb);
                 }
             }
@@ -316,7 +350,7 @@ namespace gladius::mesh_repair
             for (int triIdx : comp)
             {
                 bool const finalFlip =
-                    flipRelative[static_cast<std::size_t>(triIdx)] ^ invertComponent;
+                    (flipRelative[static_cast<std::size_t>(triIdx)] != invertComponent);
                 if (finalFlip)
                 {
                     auto & t = indices[static_cast<std::size_t>(triIdx)];
@@ -332,17 +366,14 @@ namespace gladius::mesh_repair
     // fillSmallHoles
     // ========================================================================
 
-    void fillSmallHoles(std::vector<float4> & vertices,
-                        std::vector<TriangleIndices> & indices,
-                        float maxPerimeter,
-                        std::size_t & outFilled,
-                        std::size_t & outAdded)
+    HoleFillResult fillSmallHoles(std::vector<float4> & vertices,
+                                  std::vector<TriangleIndices> & indices,
+                                  float maxPerimeter)
     {
-        outFilled = 0u;
-        outAdded = 0u;
+        HoleFillResult result;
         if (indices.empty())
         {
-            return;
+            return result;
         }
 
         // Collect boundary directed edges: any directed edge (a,b) for which
@@ -382,9 +413,9 @@ namespace gladius::mesh_repair
         std::unordered_set<int> visited;
         visited.reserve(boundaryNext.size());
 
-        for (auto const & [start, _] : boundaryNext)
+        for (auto const & entry : boundaryNext)
         {
-            (void) _;
+            int const start = entry.first;
             if (visited.count(start) != 0u)
             {
                 continue;
@@ -459,9 +490,10 @@ namespace gladius::mesh_repair
                 int const b = loop[(i + 1u) % loop.size()];
                 indices.push_back(TriangleIndices{a, centroidIdx, b});
             }
-            outAdded += loop.size();
-            ++outFilled;
+            result.added += loop.size();
+            ++result.filled;
         }
+        return result;
     }
 
     // ========================================================================
@@ -489,11 +521,10 @@ namespace gladius::mesh_repair
         }
         if (config.fillHoles)
         {
-            fillSmallHoles(vertices,
-                           indices,
-                           config.maxHolePerimeter,
-                           result.filledHoles,
-                           result.addedTriangles);
+            HoleFillResult const holes =
+                fillSmallHoles(vertices, indices, config.maxHolePerimeter);
+            result.filledHoles = holes.filled;
+            result.addedTriangles = holes.added;
         }
         return result;
     }

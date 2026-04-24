@@ -179,6 +179,13 @@ namespace gladius
         std::size_t applyMeshSdfSettingsToCurrentDocument();
 
       private:
+        /**
+         * @brief Common construction-time wiring shared by every constructor:
+         *        attach the ConfigManager-backed MeshSdfSettings and bind the
+         *        MainWindow's "Mesh SDF Settings" dialog to the apply hook.
+         */
+        void wireMeshSdfSettings();
+
         ConfigManager m_configManager;
         MeshSdfSettings m_meshSdfSettings;
         ui::MainWindow m_mainWindow;

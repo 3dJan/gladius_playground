@@ -44,10 +44,8 @@ namespace gladius
 
     void MeshSdfSettings::attachConfigManager(ConfigManager * config)
     {
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_config = config;
-        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_config = config;
         load();
     }
 
@@ -121,8 +119,10 @@ namespace gladius
                 return;
             }
             m_repair = cfg;
+            // Persist while still holding the lock so a concurrent mutator
+            // cannot interleave its own snapshot into the file.
+            save();
         }
-        save();
         notify(MeshSdfSettingsChange::Repair);
     }
 
@@ -145,8 +145,8 @@ namespace gladius
                 change |= MeshSdfSettingsChange::RuntimeOnly;
             }
             m_evaluation = cfg;
+            save();
         }
-        save();
         if (any(change))
         {
             notify(change);

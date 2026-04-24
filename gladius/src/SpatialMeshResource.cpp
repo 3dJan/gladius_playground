@@ -63,14 +63,13 @@ namespace gladius
         if (rebuildRequired)
         {
             // Drop the cached payload and re-serialise with the new method
-            // (e.g. allocating or skipping the voxel grid). load() is a no-op
-            // after the first call, so call loadImpl() directly here, mirroring
-            // what rebuild() does.
+            // (e.g. allocating or skipping the voxel grid). reload() resets the
+            // base class' "already loaded" flag and then re-runs loadImpl().
             m_payloadData.data.clear();
             m_payloadData.meta.clear();
             m_needsRebuild = true;
             m_needsVoxelGridBuild = (cfg.method == MeshSdfMethod::VoxelAccelerated);
-            loadImpl();
+            reload();
         }
         return rebuildRequired;
     }
@@ -103,8 +102,9 @@ namespace gladius
     static constexpr size_t kBvhOffsetsFloats = 4;     // nodesOffset, trianglesOffset, normalsOffset, indicesOffset
     static constexpr size_t kVoxelHeaderFloats = 10;   // origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding
     static constexpr size_t kVoxelInfoFloats = 2;      // voxelDataOffset, voxelCount
-    static constexpr size_t kReservedFloats = 4;       // [edgeNeighborsOffset, reserved, reserved, reserved]
-    
+    static constexpr size_t kEdgeNeighborsSlot = 1;    // edgeNeighborsOffset
+    static constexpr size_t kReservedFloats = 3;       // free slots for future use; total trailing block stays 4 floats
+
     static constexpr size_t kBvhOffsetsOffset = kBboxFloats + kCountsFloats;  // 12
     static constexpr size_t kVoxelInfoOffset = kBvhOffsetsOffset + kBvhOffsetsFloats + kVoxelHeaderFloats;  // 26
     static constexpr size_t kEdgeNeighborsOffsetIndex = kVoxelInfoOffset + kVoxelInfoFloats;                // 28

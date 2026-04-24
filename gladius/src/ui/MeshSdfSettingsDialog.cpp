@@ -156,13 +156,15 @@ namespace gladius::ui
             }
             if (m_repair.weld)
             {
-                ImGui::DragFloat("  Weld epsilon",
-                                 &m_repair.weldEpsilon,
-                                 1e-6f,
-                                 1e-7f,
-                                 1e-2f,
-                                 "%.6f");
-                m_dirty = true;
+                if (ImGui::DragFloat("  Weld epsilon",
+                                     &m_repair.weldEpsilon,
+                                     1e-6f,
+                                     1e-7f,
+                                     1e-2f,
+                                     "%.6f"))
+                {
+                    m_dirty = true;
+                }
             }
 
             if (ImGui::Checkbox("Remove degenerate triangles", &m_repair.removeDegenerate))
@@ -171,13 +173,15 @@ namespace gladius::ui
             }
             if (m_repair.removeDegenerate)
             {
-                ImGui::DragFloat("  Area epsilon",
-                                 &m_repair.areaEpsilon,
-                                 1e-11f,
-                                 1e-14f,
-                                 1e-4f,
-                                 "%.4e");
-                m_dirty = true;
+                if (ImGui::DragFloat("  Area epsilon",
+                                     &m_repair.areaEpsilon,
+                                     1e-11f,
+                                     1e-14f,
+                                     1e-4f,
+                                     "%.4e"))
+                {
+                    m_dirty = true;
+                }
             }
 
             if (ImGui::Checkbox("Orient consistently", &m_repair.orientConsistently))
@@ -191,13 +195,15 @@ namespace gladius::ui
             }
             if (m_repair.fillHoles)
             {
-                ImGui::DragFloat("  Max hole perimeter (mm)",
-                                 &m_repair.maxHolePerimeter,
-                                 0.01f,
-                                 0.f,
-                                 100.f,
-                                 "%.3f");
-                m_dirty = true;
+                if (ImGui::DragFloat("  Max hole perimeter (mm)",
+                                     &m_repair.maxHolePerimeter,
+                                     0.01f,
+                                     0.f,
+                                     100.f,
+                                     "%.3f"))
+                {
+                    m_dirty = true;
+                }
             }
         }
 
@@ -231,10 +237,21 @@ namespace gladius::ui
         ImGui::SameLine();
         if (ImGui::Button("Close"))
         {
+            // Discard pending edits so a subsequent show() starts from a
+            // clean state regardless of how the user dismisses the window.
+            syncFromSettings();
             m_visible = false;
         }
 
         ImGui::End();
+
+        // The window's [X] button toggles m_visible directly via the Begin
+        // pointer parameter. Treat that path the same as Close so we never
+        // hold stale working copies across show/hide cycles.
+        if (!m_visible && m_dirty)
+        {
+            syncFromSettings();
+        }
     }
 
 } // namespace gladius::ui

@@ -177,6 +177,14 @@ struct RenderingSettings // Note that the alignment has to be considered
     float meshInflationDistance;
 };
 
+#ifdef COMPILING_FOR_HOST
+// Lock down the host/device layout: every member is 4 bytes and tightly packed,
+// so any future field additions in this struct must be mirrored in every OpenCL
+// translation unit that declares the same struct (see kernel/sdf.cl and friends).
+static_assert(sizeof(RenderingSettings) == 10 * sizeof(float),
+              "RenderingSettings layout drift: update kernel-side declarations and bump this assert.");
+#endif
+
 struct DistanceColor
 {
     float signedDistance;

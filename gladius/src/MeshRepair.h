@@ -76,17 +76,22 @@ namespace gladius::mesh_repair
     std::size_t orientConsistently(std::vector<float4> const & vertices,
                                    std::vector<TriangleIndices> & indices);
 
+    /// Result of a hole-fill pass.
+    struct HoleFillResult
+    {
+        std::size_t filled = 0;  ///< Number of boundary loops successfully closed.
+        std::size_t added = 0;   ///< Number of triangles added to the mesh.
+    };
+
     /// Triangulate small boundary loops with a fan over the loop centroid.
     /// @param vertices In/out vertex array. Centroid vertices may be appended.
     /// @param indices In/out triangle indices. New triangles are appended.
     /// @param maxPerimeter Loops with perimeter > this value are left open.
-    /// @param[out] outFilled Number of boundary loops successfully filled.
-    /// @param[out] outAdded Number of triangles added.
-    void fillSmallHoles(std::vector<float4> & vertices,
-                        std::vector<TriangleIndices> & indices,
-                        float maxPerimeter,
-                        std::size_t & outFilled,
-                        std::size_t & outAdded);
+    /// @return Counters describing how many loops were filled and how many
+    ///         triangles were added.
+    HoleFillResult fillSmallHoles(std::vector<float4> & vertices,
+                                  std::vector<TriangleIndices> & indices,
+                                  float maxPerimeter);
 
     /// Run all enabled repair steps in a sensible order:
     /// weld → removeDegenerate → orientConsistently → fillSmallHoles.
