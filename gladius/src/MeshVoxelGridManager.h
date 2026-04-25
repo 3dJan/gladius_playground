@@ -29,6 +29,23 @@ namespace gladius
         int vertexNormalCount;  ///< Number of vertex normals
         int voxelCount;         ///< Total number of voxels (dims.x * dims.y * dims.z)
     };
+
+    /// Parameters needed to build the FWN coarse sign cache for a spatial mesh
+    /// resource. The cache is a resolution^3 grid of 1-bit sign values used by
+    /// `spatialMeshSDF_FastWindingNumber` to bypass the winding traversal when
+    /// the query is far enough from the surface that a coarse sign suffices.
+    struct MeshSignCacheBuildParams
+    {
+        int headerStart;          ///< Mesh header offset in primitive buffer
+        int signCacheDataOffset;  ///< Absolute offset where sign-cache words live
+        int signCacheReadyOffset; ///< Header slot to flip to signCacheDataOffset on completion
+        int nodesOffset;          ///< BVH nodes offset
+        int trianglesOffset;      ///< Triangles offset
+        int fwnAggregatesOffset;  ///< FWN aggregates offset
+        int nodeCount;            ///< Number of BVH nodes
+        int resolution;           ///< Cells per axis (currently 64)
+        int wordCount;            ///< Number of 32-bit words in the bitmap
+    };
     
     /// Builds voxel acceleration grids on the GPU
     /// @details Runs the buildMeshVoxelGrid kernel to populate voxel grids

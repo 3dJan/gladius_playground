@@ -416,4 +416,72 @@ namespace gladius
         
         return true;
     }
+
+    bool SlicerProgram::buildMeshSignCache(Primitives & primitives,
+                                           MeshSignCacheBuildParams const & params)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        ProfileFunction;
+
+        swapProgramsIfNeeded();
+
+        if (params.wordCount <= 0 || params.resolution <= 0)
+        {
+            return false;
+        }
+
+        if (!m_programFront || !m_programFront->isValid())
+        {
+            return false;
+        }
+
+        // Build in small word batches to avoid a single long-running kernel
+        // that could trip the display-driver watchdog. One word = 32 cells;
+        // 64 words = 2048 FWN samples per kernel launch.
+        int constexpr wordsPerBatch = 64;
+        cl::CommandQueue const & queue = m_ComputeContext->GetQueue();
+        cl::NDRange const origin = {0, 0, 0};
+
+        for (int baseWord = 0; baseWord < params.wordCount; baseWord += wordsPerBatch)
+        {
+            int const batchWordCount = std::min(wordsPerBatch, params.wordCount - baseWord);
+            cl::NDRange const globalRange = {static_cast<size_t>(batchWordCount), 1, 1};
+
+            cl::Event const event = m_programFront->runNonBlocking(queue,
+                                                                    "buildMeshSignCache",
+                                                                    origin,
+                                                                    globalRange,
+                                                                    primitives.data.getBuffer(),
+                                                                    static_cast<cl_int>(params.headerStart),
+                                                                    static_cast<cl_int>(params.signCacheDataOffset),
+                                                                    static_cast<cl_int>(params.nodesOffset),
+                                                                    static_cast<cl_int>(params.trianglesOffset),
+                                                                    static_cast<cl_int>(params.fwnAggregatesOffset),
+                                                                    static_cast<cl_int>(params.nodeCount),
+                                                                    static_cast<cl_int>(params.resolution),
+                                                                    static_cast<cl_int>(baseWord),
+                                                                    static_cast<cl_int>(params.wordCount));
+            if (!event())
+            {
+                return false;
+            }
+        }
+
+        // Flip the ready offset only after all chunk kernels above complete.
+        // The command queue is in-order, so any later render kernel sees either
+        // offset 0 (not ready) or a fully built bitmap.
+        cl::Event const readyEvent = m_programFront->runNonBlocking(queue,
+                                                                    "markMeshSignCacheReady",
+                                                                    origin,
+                                                                    cl::NDRange{1, 1, 1},
+                                                                    primitives.data.getBuffer(),
+                                                                    static_cast<cl_int>(params.signCacheReadyOffset),
+                                                                    static_cast<cl_int>(params.signCacheDataOffset));
+        if (!readyEvent())
+        {
+            return false;
+        }
+
+        return true;
+    }
 }

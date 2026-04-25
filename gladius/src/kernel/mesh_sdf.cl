@@ -1218,13 +1218,12 @@ inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 /// hierarchical traversal of the BVH augmented with per-node multipole
 /// aggregates.
 ///
-/// **Distance-aware pruning** (when @p unsignedDist > 0): subtrees whose
-/// nearest-AABB distance exceeds @c FWN_PRUNE_FACTOR * unsignedDist cannot
-/// flip the integer winding decision at the 0.5 threshold (their dipole
-/// contribution is bounded by `O(area / dist²)` and is dwarfed by the
-/// closer subtrees). Skipping them saves the bulk of the traversal cost
-/// near the surface, where the magnitude path's `unsignedDist` is small.
-/// Pass @p unsignedDist <= 0 to disable (keeps the legacy behaviour).
+/// **Experimental distance-aware pruning** (when @p unsignedDist > 0): skips
+/// subtrees whose nearest-AABB distance exceeds @c FWN_PRUNE_FACTOR *
+/// unsignedDist. This is fast but approximate; near a surface, winding is a
+/// global quantity and aggressive pruning can expose local triangle/BVH
+/// partitioning as visible sign artifacts. Pass @p unsignedDist <= 0 to
+/// disable (safe/full Barnes-Hut behaviour).
 ///
 /// **Front-to-back traversal**: when both children are pushed, the closer
 /// one (by AABB distance) is pushed last so it is popped first. Closer
@@ -1253,11 +1252,9 @@ inline float fwnHierarchical(float3 pos,
     __global float const * triangles = data + trianglesOffset;
     __global float const * aggregates = data + fwnAggregatesOffset;
 
-    // Distance-aware pruning radius (squared). A subtree whose nearest-AABB
-    // squared-distance exceeds this cannot meaningfully contribute to the
-    // sign decision and is dropped without loading aggregates. Conservative
-    // factor 8 keeps the dipole mass bounded by ~1/64 relative to the
-    // near-surface contributors. Disabled when unsignedDist <= 0.
+    // Experimental distance-aware pruning radius (squared). Disabled when
+    // unsignedDist <= 0. Runtime FWN keeps this disabled because near-surface
+    // global winding can be visibly affected by dropping far subtrees.
     float const FWN_PRUNE_FACTOR = 8.0f;
     float const pruneDistSq = (unsignedDist > 0.0f)
         ? (FWN_PRUNE_FACTOR * unsignedDist) * (FWN_PRUNE_FACTOR * unsignedDist)
@@ -1389,6 +1386,57 @@ inline float fwnHierarchical(float3 pos,
     return windingSum;
 }
 
+/// Lookup the coarse FWN sign cache.
+/// @return 1 for inside, -1 for outside, 0 when the cache cannot be used.
+inline int lookupFwnSignCache(float3 pos,
+                              int nodesOffset,
+                              int signCacheDataOffset,
+                              int signCacheResolution,
+                              float unsignedDist,
+                              __global float const * data)
+{
+    if (signCacheDataOffset <= 0 || signCacheResolution <= 0 || unsignedDist <= 0.0f)
+    {
+        return 0;
+    }
+
+    __global float const * nodes = data + nodesOffset;
+    float4 const bboxMin4 = vload4(0, nodes);
+    float4 const bboxMax4 = vload4(0, nodes + 4);
+    float3 const bboxMin = bboxMin4.xyz;
+    float3 const bboxMax = bboxMax4.xyz;
+    float3 const extent = bboxMax - bboxMin;
+
+    if (extent.x <= 0.0f || extent.y <= 0.0f || extent.z <= 0.0f)
+    {
+        return 0;
+    }
+
+    if (pos.x < bboxMin.x || pos.y < bboxMin.y || pos.z < bboxMin.z ||
+        pos.x > bboxMax.x || pos.y > bboxMax.y || pos.z > bboxMax.z)
+    {
+        return 0;
+    }
+
+    float3 const cellSize = extent / (float)signCacheResolution;
+    float const cellDiag = length(cellSize);
+    if (unsignedDist <= 2.0f * cellDiag)
+    {
+        return 0;
+    }
+
+    int3 cell = convert_int3(floor(((pos - bboxMin) / extent) * (float)signCacheResolution));
+    cell = clamp(cell, (int3)(0), (int3)(signCacheResolution - 1));
+
+    int const cellIndex = cell.x + signCacheResolution * (cell.y + signCacheResolution * cell.z);
+    int const wordIndex = cellIndex >> 5;
+    int const bitIndex = cellIndex & 31;
+    __global uint const * signCacheWords = (__global uint const *)(data + signCacheDataOffset);
+    uint const word = signCacheWords[wordIndex];
+    bool const inside = ((word >> bitIndex) & 1u) != 0u;
+    return inside ? 1 : -1;
+}
+
 /// Signed distance via Fast Winding Number sign + closest-point magnitude.
 /// Robust to open/non-manifold/self-intersecting meshes.
 ///
@@ -1413,6 +1461,8 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int fwnAggregatesOffset,
                                               int voxelHeaderOffset,
                                               int voxelDataOffset,
+                                              int signCacheDataOffset,
+                                              int signCacheResolution,
                                               int nodeCount,
                                               int triCount,
                                               int vertexNormalCount,
@@ -1457,12 +1507,29 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
         return signedMagnitude;
     }
 
-    // Sign: hierarchical winding number. Pass the magnitude as a hint so
-    // the traversal can prune subtrees that are too far to influence the
-    // sign decision.
+    // Coarse sign cache: once populated, this skips the winding traversal for
+    // points that are far enough from the surface not to share a cache cell
+    // with it. The lookup itself applies the 2*cellDiag safety gate.
+    int const cachedSign = lookupFwnSignCache(pos,
+                                              nodesOffset,
+                                              signCacheDataOffset,
+                                              signCacheResolution,
+                                              unsignedDist,
+                                              data);
+    if (cachedSign != 0)
+    {
+        return (cachedSign > 0) ? -unsignedDist : unsignedDist;
+    }
+
+    // Sign: hierarchical winding number. Do not pass unsignedDist for the
+    // distance-aware prune here: near the surface, winding is a global
+    // quantity and pruning far subtrees makes the result depend on the local
+    // triangle fan / BVH partitioning, which shows up as triangle-edge
+    // artifacts on otherwise smooth faces. Keep the safer front-to-back
+    // traversal order, but evaluate the full Barnes-Hut tree for sign.
     float const winding = fwnHierarchical(pos, nodesOffset, trianglesOffset,
                                           fwnAggregatesOffset, nodeCount, data, beta,
-                                          unsignedDist);
+                                          0.0f);
     return (winding > 0.5f) ? -unsignedDist : unsignedDist;
 }
 
@@ -1548,6 +1615,91 @@ __kernel void buildMeshVoxelGrid(
     int const outputIdx = voxelDataOffset + voxelIdx * 2;
     primitiveData[outputIdx + 0] = nearestTriIdx;
     primitiveData[outputIdx + 1] = signedDist;
+}
+
+/// Build a coarse one-bit FWN sign cache.
+/// Each work item writes one 32-bit word (32 cache cells) to avoid atomics.
+/// The host queues this kernel in small word batches to avoid long-running
+/// kernels on display GPUs.
+__kernel void buildMeshSignCache(__global float * primitiveData,
+                                 int headerStart,
+                                 int signCacheDataOffset,
+                                 int nodesOffset,
+                                 int trianglesOffset,
+                                 int fwnAggregatesOffset,
+                                 int nodeCount,
+                                 int resolution,
+                                 int baseWord,
+                                 int wordCount)
+{
+    int const wordIndex = baseWord + (int)get_global_id(0);
+    if (wordIndex >= wordCount || resolution <= 0 || nodeCount <= 0)
+    {
+        return;
+    }
+
+    float3 const bboxMin = (float3)(primitiveData[headerStart + 0],
+                                    primitiveData[headerStart + 1],
+                                    primitiveData[headerStart + 2]);
+    float3 const bboxMax = (float3)(primitiveData[headerStart + 4],
+                                    primitiveData[headerStart + 5],
+                                    primitiveData[headerStart + 6]);
+    float3 const extent = bboxMax - bboxMin;
+    __global uint * signCacheWords = (__global uint *)(primitiveData + signCacheDataOffset);
+
+    if (extent.x <= 0.0f || extent.y <= 0.0f || extent.z <= 0.0f)
+    {
+        signCacheWords[wordIndex] = 0u;
+        return;
+    }
+
+    int const cellsPerSlice = resolution * resolution;
+    int const cellCount = cellsPerSlice * resolution;
+    int const firstCell = wordIndex * 32;
+    float3 const cellSize = extent / (float)resolution;
+    uint bits = 0u;
+
+    for (int bit = 0; bit < 32; ++bit)
+    {
+        int const cellIndex = firstCell + bit;
+        if (cellIndex >= cellCount)
+        {
+            break;
+        }
+
+        int const z = cellIndex / cellsPerSlice;
+        int const rem = cellIndex - z * cellsPerSlice;
+        int const y = rem / resolution;
+        int const x = rem - y * resolution;
+
+        float3 const pos = bboxMin + ((float3)((float)x + 0.5f,
+                                               (float)y + 0.5f,
+                                               (float)z + 0.5f) * cellSize);
+        float const winding = fwnHierarchical(pos,
+                                              nodesOffset,
+                                              trianglesOffset,
+                                              fwnAggregatesOffset,
+                                              nodeCount,
+                                              primitiveData,
+                                              2.0f,
+                                              0.0f);
+        if (winding > 0.5f)
+        {
+            bits |= (1u << bit);
+        }
+    }
+
+    signCacheWords[wordIndex] = bits;
+}
+
+/// Mark a queued sign-cache build as ready. This kernel is queued after all
+/// buildMeshSignCache chunks, so render kernels see a non-zero offset only
+/// after the bitmap has been fully populated.
+__kernel void markMeshSignCacheReady(__global float * primitiveData,
+                                     int signCacheReadyOffset,
+                                     int signCacheDataOffset)
+{
+    primitiveData[signCacheReadyOffset] = (float)signCacheDataOffset;
 }
 
 #endif // MESH_SDF_CL

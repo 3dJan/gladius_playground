@@ -177,9 +177,16 @@ namespace gladius
         /// Collect voxel grid build parameters from all SpatialMeshResource instances
         /// @return Vector of build parameters for resources that need voxel grid builds
         [[nodiscard]] std::vector<MeshVoxelGridBuildParams> collectVoxelGridBuildParams() const;
+
+        /// Collect FWN sign-cache build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need sign-cache builds
+        [[nodiscard]] std::vector<MeshSignCacheBuildParams> collectSignCacheBuildParams() const;
         
         /// Mark all SpatialMeshResource instances as having their voxel grids built
         void markVoxelGridsBuilt();
+
+        /// Mark all SpatialMeshResource instances as having their sign-cache builds queued/built
+        void markSignCachesBuilt();
 
       private:
         void increaseImageNumber();

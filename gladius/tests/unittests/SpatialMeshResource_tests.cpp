@@ -379,6 +379,27 @@ namespace gladius::tests
         EXPECT_GT(params->voxelCount, 0);
     }
 
+    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_DefaultMesh_Available)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{205}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        auto const params = resource.getSignCacheBuildParams();
+        ASSERT_TRUE(params.has_value());
+        EXPECT_GT(params->signCacheDataOffset, 0);
+        EXPECT_GE(params->signCacheReadyOffset, 0);
+        EXPECT_GT(params->nodesOffset, 0);
+        EXPECT_GT(params->trianglesOffset, 0);
+        EXPECT_GT(params->fwnAggregatesOffset, 0);
+        EXPECT_GT(params->nodeCount, 0);
+        EXPECT_EQ(params->resolution, 64);
+        EXPECT_EQ(params->wordCount, 8192);
+    }
+
     TEST_F(SpatialMeshResource_Test, EvaluationConfig_PureBVH_DoesNotRebuild)
     {
         // PureBVH needs no extra payload beyond the always-present BVH, so a

@@ -512,6 +512,38 @@ namespace gladius
         return successCount;
     }
 
+    size_t ComputeCore::buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams)
+    {
+        ProfileFunction
+
+        if (buildParams.empty())
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        auto slicerProgram = m_programs.getSlicerProgram();
+        if (!slicerProgram || !slicerProgram->isValid())
+        {
+            logMsg("Cannot build mesh sign caches: slicer program not ready");
+            return 0;
+        }
+
+        size_t successCount = 0;
+        for (auto const & params : buildParams)
+        {
+            if (slicerProgram->buildMeshSignCache(*m_primitives, params))
+            {
+                ++successCount;
+            }
+        }
+
+        logMsg(fmt::format("Queued {} mesh sign-cache builds", successCount));
+
+        return successCount;
+    }
+
     void ComputeCore::adoptVertexOfMeshToSurface(VertexBuffer & vertices)
     {
         ProfileFunction

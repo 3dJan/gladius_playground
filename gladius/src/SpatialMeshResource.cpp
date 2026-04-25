@@ -141,12 +141,25 @@ namespace gladius
     static constexpr size_t kVoxelInfoFloats = 2;      // voxelDataOffset, voxelCount
     static constexpr size_t kEdgeNeighborsSlot = 1;    // edgeNeighborsOffset
     static constexpr size_t kFwnAggregatesSlot = 1;    // fwnAggregatesOffset
-    static constexpr size_t kReservedFloats = 2;       // free slots for future use; total trailing block stays 4 floats
+    static constexpr size_t kSignCacheOffsetSlot = 1;      // signCacheDataOffset (FWN coarse sign cache; 0 = not ready)
+    static constexpr size_t kSignCacheResolutionSlot = 1;  // sign cache resolution per axis
+    static constexpr size_t kReservedFloats = 0;           // total trailing block stays 4 floats
+
+    /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells
+    /// = 8192 ints = 32 KB per mesh. Hard-coded; no UI knob.
+    static constexpr int kSignCacheResolution = 64;
+    static constexpr size_t kSignCacheBitsPerWord = 32;
+    static constexpr size_t kSignCacheWordCount =
+        (static_cast<size_t>(kSignCacheResolution) * kSignCacheResolution * kSignCacheResolution +
+         kSignCacheBitsPerWord - 1) /
+        kSignCacheBitsPerWord;
 
     static constexpr size_t kBvhOffsetsOffset = kBboxFloats + kCountsFloats;  // 12
     static constexpr size_t kVoxelInfoOffset = kBvhOffsetsOffset + kBvhOffsetsFloats + kVoxelHeaderFloats;  // 26
     static constexpr size_t kEdgeNeighborsOffsetIndex = kVoxelInfoOffset + kVoxelInfoFloats;                // 28
     static constexpr size_t kFwnAggregatesOffsetIndex = kEdgeNeighborsOffsetIndex + kEdgeNeighborsSlot;     // 29
+    static constexpr size_t kSignCacheOffsetIndex = kFwnAggregatesOffsetIndex + kFwnAggregatesSlot;         // 30
+    static constexpr size_t kSignCacheResolutionIndex = kSignCacheOffsetIndex + kSignCacheOffsetSlot;       // 31
     
     void SpatialMeshResource::write(Primitives & primitives)
     {
@@ -167,12 +180,20 @@ namespace gladius
             static_cast<float>(m_dataBaseOffset + m_edgeNeighborsOffset);
         m_payloadData.data[m_headerStart + kFwnAggregatesOffsetIndex] =
             static_cast<float>(m_dataBaseOffset + m_fwnAggregatesOffset);
+        // The sign cache is GPU-built after upload. Keep the ready offset at 0
+        // until the queued build kernel patches it on the device.
+        m_payloadData.data[m_headerStart + kSignCacheOffsetIndex] = 0.0f;
+        m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] =
+            static_cast<float>(kSignCacheResolution);
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
         
-        // Flag that we need a voxel grid build after upload
+        // Flag that we need GPU-side post-upload builds. Local payload data only
+        // stores zero-filled cache buffers; every primitive upload invalidates the
+        // previously built GPU caches and they must be rebuilt/re-enabled.
         m_needsVoxelGridBuild = true;
+        m_needsSignCacheBuild = true;
     }
     
     std::optional<MeshVoxelGridBuildParams> SpatialMeshResource::getVoxelGridBuildParams() const
@@ -196,6 +217,32 @@ namespace gladius
         params.voxelCount = static_cast<int>(m_voxelCount);
         
         return params;
+    }
+
+    std::optional<MeshSignCacheBuildParams> SpatialMeshResource::getSignCacheBuildParams() const
+    {
+        if (m_data.empty() || m_data.nodes.empty() || m_data.fwnAggregates.empty() || m_signCacheDataOffset == 0)
+        {
+            return std::nullopt;
+        }
+
+        MeshSignCacheBuildParams params{};
+        params.headerStart = m_dataBaseOffset + static_cast<int>(m_headerStart);
+        params.signCacheDataOffset = m_dataBaseOffset + static_cast<int>(m_signCacheDataOffset);
+        params.signCacheReadyOffset = signCacheReadyHostOffset();
+        params.nodesOffset = m_dataBaseOffset + static_cast<int>(m_nodesOffset);
+        params.trianglesOffset = m_dataBaseOffset + static_cast<int>(m_trianglesOffset);
+        params.fwnAggregatesOffset = m_dataBaseOffset + static_cast<int>(m_fwnAggregatesOffset);
+        params.nodeCount = static_cast<int>(m_data.nodes.size());
+        params.resolution = kSignCacheResolution;
+        params.wordCount = static_cast<int>(kSignCacheWordCount);
+
+        return params;
+    }
+
+    int SpatialMeshResource::signCacheReadyHostOffset() const
+    {
+        return m_dataBaseOffset + static_cast<int>(m_headerStart + kSignCacheOffsetIndex);
     }
 
     // ========================================================================
@@ -233,7 +280,10 @@ namespace gladius
         // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
         // [16-25]: Voxel grid header (10 floats: origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding)
         // [26-27]: Voxel grid info (2 floats: voxelDataOffset, voxelCount)
-        // [28-31]: Reserved (4 floats)
+        // [28]:    Edge-neighbour face normals offset (per-edge adjacent face normals)
+        // [29]:    Fast-winding-number aggregate offset
+        // [30]:    FWN coarse sign-cache data offset (0 = not ready)
+        // [31]:    FWN coarse sign-cache resolution per axis
         // ====================================================================
         
         m_headerStart = m_payloadData.data.size();
@@ -293,11 +343,11 @@ namespace gladius
         m_voxelCount = useVoxelGrid ? computeVoxelCount(voxelHeader) : 0u;
         m_payloadData.data.push_back(static_cast<float>(m_voxelCount));
 
-        // Reserved (4 floats)
-        m_payloadData.data.push_back(0.0f);
-        m_payloadData.data.push_back(0.0f);
-        m_payloadData.data.push_back(0.0f);
-        m_payloadData.data.push_back(0.0f);
+        // FWN auxiliary offsets/resolution (patched below)
+        m_payloadData.data.push_back(0.0f);  // Edge-neighbour face normals offset
+        m_payloadData.data.push_back(0.0f);  // FWN aggregate offset
+        m_payloadData.data.push_back(0.0f);  // FWN sign-cache data offset (0 = not ready)
+        m_payloadData.data.push_back(static_cast<float>(kSignCacheResolution));
 
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
@@ -399,6 +449,17 @@ namespace gladius
             m_payloadData.data.push_back(0.0f);  // Will be filled by GPU kernel
         }
 
+        // Reserve space for the FWN coarse sign cache. One bit per cell of a
+        // kSignCacheResolution^3 grid spanning the mesh AABB; reinterpreted as
+        // a uint array on the device. Header [kSignCacheOffsetIndex] is left
+        // at 0 here; the queued markMeshSignCacheReady kernel writes the real
+        // offset only after buildMeshSignCache has populated the bitmap.
+        m_signCacheDataOffset = m_payloadData.data.size();
+        for (size_t i = 0; i < kSignCacheWordCount; ++i)
+        {
+            m_payloadData.data.push_back(0.0f);
+        }
+
         // Patch offsets in header (local offsets, will be adjusted with base offset when read)
         m_payloadData.data[bvhOffsetsIndex + 0] = static_cast<float>(m_nodesOffset);
         m_payloadData.data[bvhOffsetsIndex + 1] = static_cast<float>(m_trianglesOffset);
@@ -407,6 +468,13 @@ namespace gladius
         m_payloadData.data[voxelInfoIndex] = static_cast<float>(m_voxelDataOffset);
         m_payloadData.data[m_headerStart + kEdgeNeighborsOffsetIndex] = static_cast<float>(m_edgeNeighborsOffset);
         m_payloadData.data[m_headerStart + kFwnAggregatesOffsetIndex] = static_cast<float>(m_fwnAggregatesOffset);
+        // Sign cache offset stays 0 ("not ready") until the queued
+        // markMeshSignCacheReady kernel patches it on the GPU buffer.
+        m_payloadData.data[m_headerStart + kSignCacheOffsetIndex] = 0.0f;
+        m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] = static_cast<float>(kSignCacheResolution);
+
+        // Sign cache build is needed (fresh allocation, unpopulated bitmap).
+        m_needsSignCacheBuild = true;
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);

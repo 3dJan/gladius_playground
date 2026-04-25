@@ -621,6 +621,19 @@ namespace gladius
                 {
                     m_core->buildMeshVoxelGrids(buildParams);
                 }
+
+                // Queue coarse FWN sign-cache builds. The cache becomes visible
+                // to kernels only after a queued ready-offset patch executes, so
+                // FWN falls back to full winding traversal until the cache is ready.
+                auto signCacheBuildParams = m_generatorContext->resourceManager.collectSignCacheBuildParams();
+                if (!signCacheBuildParams.empty())
+                {
+                    size_t const queuedCount = m_core->buildMeshSignCaches(signCacheBuildParams);
+                    if (queuedCount == signCacheBuildParams.size())
+                    {
+                        m_generatorContext->resourceManager.markSignCachesBuilt();
+                    }
+                }
             }
 
             // update start and end indices

@@ -1527,7 +1527,9 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // [16-25]: Voxel grid header (10 floats: origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding)
             // [26-27]: Voxel grid info (2 floats: voxelDataOffset, voxelCount)
             // [28]:    Edge-neighbour face normals offset (per-edge adjacent face normals)
-            // [29-31]: Reserved (3 floats)
+            // [29]:    Fast-winding-number aggregate offset
+            // [30]:    FWN coarse sign-cache data offset (0 = not ready)
+            // [31]:    FWN coarse sign-cache resolution per axis
             // ====================================================================
 
             int const headerStart = primitive.start;
@@ -1551,6 +1553,9 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             int const edgeNeighborsOffset = (int)data[headerStart + 28];
             // Read FWN aggregates offset (offset 29)
             int const fwnAggregatesOffset = (int)data[headerStart + 29];
+            // Read FWN coarse sign-cache info (offsets 30-31)
+            int const fwnSignCacheDataOffset = (int)data[headerStart + 30];
+            int const fwnSignCacheResolution = (int)data[headerStart + 31];
             
             // Use voxel-accelerated path if voxel grid is available and populated
             // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
@@ -1596,6 +1601,8 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                                             fwnAggregatesOffset,
                                                             fwnVoxelHeaderOffset,
                                                             fwnVoxelDataOffset,
+                                                            fwnSignCacheDataOffset,
+                                                            fwnSignCacheResolution,
                                                             nodeCount,
                                                             triCount,
                                                             vertexNormalCount,

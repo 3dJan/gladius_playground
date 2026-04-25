@@ -176,6 +176,32 @@ namespace gladius
         
         return params;
     }
+
+    std::vector<MeshSignCacheBuildParams> ResourceManager::collectSignCacheBuildParams() const
+    {
+        std::vector<MeshSignCacheBuildParams> params;
+        params.reserve(m_resources.size());  // Upper bound estimate
+
+        for (auto const & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsSignCacheBuild())
+            {
+                auto buildParams = spatialMesh->getSignCacheBuildParams();
+                if (buildParams.has_value())
+                {
+                    params.push_back(buildParams.value());
+                }
+            }
+        }
+
+        return params;
+    }
     
     void ResourceManager::markVoxelGridsBuilt()
     {
@@ -190,6 +216,23 @@ namespace gladius
             if (spatialMesh != nullptr && spatialMesh->needsVoxelGridBuild())
             {
                 spatialMesh->markVoxelGridBuilt();
+            }
+        }
+    }
+
+    void ResourceManager::markSignCachesBuilt()
+    {
+        for (auto & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsSignCacheBuild())
+            {
+                spatialMesh->markSignCacheBuilt();
             }
         }
     }

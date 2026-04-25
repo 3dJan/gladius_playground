@@ -112,6 +112,24 @@ namespace gladius
         /// Mark voxel grid as built
         void markVoxelGridBuilt() { m_needsVoxelGridBuild = false; }
 
+        /// Get FWN sign-cache build parameters (valid after write)
+        /// @return Build parameters with adjusted offsets, or nullopt if not ready
+        [[nodiscard]] std::optional<MeshSignCacheBuildParams> getSignCacheBuildParams() const;
+
+        /// Check if FWN sign-cache build is needed
+        [[nodiscard]] bool needsSignCacheBuild() const { return m_needsSignCacheBuild; }
+
+        /// Mark FWN sign-cache build as queued. The queued
+        /// markMeshSignCacheReady kernel patches @ref signCacheReadyHostOffset()
+        /// on the GPU buffer once the bitmap is fully populated.
+        void markSignCacheBuilt() { m_needsSignCacheBuild = false; }
+
+        /// Absolute primitive-data index of the header slot that holds the
+        /// sign-cache data offset. Writing the absolute sign-cache data offset
+        /// to this slot in the GPU primitive buffer flips the cache from
+        /// "not ready" (0) to "ready" for the kernel.
+        [[nodiscard]] int signCacheReadyHostOffset() const;
+
       protected:
         /// Serialize to PrimitiveBuffer for GPU access
         void loadImpl() override;
@@ -138,6 +156,8 @@ namespace gladius
         size_t m_fwnAggregatesOffset = 0;
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
+        size_t m_signCacheDataOffset = 0;
+        bool m_needsSignCacheBuild = true;
 
         /// Active evaluation configuration. Determines whether a voxel grid is
         /// allocated during loadImpl() and at what resolution.
