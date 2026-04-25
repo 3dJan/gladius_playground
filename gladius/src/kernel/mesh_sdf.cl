@@ -1218,20 +1218,30 @@ inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 /// hierarchical traversal of the BVH augmented with per-node multipole
 /// aggregates.
 ///
-/// **Experimental distance-aware pruning** (when @p unsignedDist > 0): skips
-/// subtrees whose nearest-AABB distance exceeds @c FWN_PRUNE_FACTOR *
-/// unsignedDist. This is fast but approximate; near a surface, winding is a
-/// global quantity and aggressive pruning can expose local triangle/BVH
-/// partitioning as visible sign artifacts. Pass @p unsignedDist <= 0 to
-/// disable (safe/full Barnes-Hut behaviour).
+/// **Near-field exact integration** (when @p nearFieldExactDistance > 0):
+/// any node whose AABB lies within @p nearFieldExactDistance of @p pos is
+/// forced to recurse instead of using the dipole approximation, regardless
+/// of the Barnes-Hut acceptance test. Far-field nodes still use the dipole
+/// (cheap). This is the algorithmic fix for sign speckles near surfaces:
+/// the dipole's `O((radius/dist)^3)` error can flip the sign when winding
+/// is close to 0.5 (which is exactly the case near the surface). For
+/// near-surface query points we therefore evaluate the per-triangle
+/// solid-angle sum exactly. Pass 0 to disable (full Barnes-Hut everywhere).
 ///
 /// **Front-to-back traversal**: when both children are pushed, the closer
 /// one (by AABB distance) is pushed last so it is popped first. Closer
 /// subtrees contribute more winding mass earlier for inside points.
 ///
-/// @param beta Barnes-Hut acceptance threshold (typical 1.5 – 4.0).
-/// @param unsignedDist Unsigned distance from @p pos to the surface (for
-///                     distance-aware pruning); pass 0 to disable.
+/// @param beta Barnes-Hut acceptance threshold. The dipole approximation
+///             error scales as (radius / dist)^3, so an accepted node
+///             contributes at most ~(1/beta)^3 relative dipole error.
+///             Default beta = 2 keeps the traversal fast; near-surface
+///             robustness is provided by the bounded exact-integration band
+///             passed via @p nearFieldExactDistance.
+/// @param nearFieldExactDistance If > 0, subtrees whose AABB is closer than
+///             this distance to @p pos are forced to recurse (no dipole).
+///             This is used only in a small near-surface band and is capped
+///             by scene scale to avoid long-running kernels.
 /// @return winding number (~1 inside, ~0 outside; signed for non-closed input).
 inline float fwnHierarchical(float3 pos,
                              int nodesOffset,
@@ -1240,7 +1250,7 @@ inline float fwnHierarchical(float3 pos,
                              int nodeCount,
                              __global float const * data,
                              float beta,
-                             float unsignedDist)
+                             float nearFieldExactDistance)
 {
     if (nodeCount == 0)
     {
@@ -1251,12 +1261,8 @@ inline float fwnHierarchical(float3 pos,
     __global float const * triangles = data + trianglesOffset;
     __global float const * aggregates = data + fwnAggregatesOffset;
 
-    // Experimental distance-aware pruning radius (squared). Disabled when
-    // unsignedDist <= 0. Runtime FWN keeps this disabled because near-surface
-    // global winding can be visibly affected by dropping far subtrees.
-    float const FWN_PRUNE_FACTOR = 8.0f;
-    float const pruneDistSq = (unsignedDist > 0.0f)
-        ? (FWN_PRUNE_FACTOR * unsignedDist) * (FWN_PRUNE_FACTOR * unsignedDist)
+    float const nearFieldDistSq = (nearFieldExactDistance > 0.0f)
+        ? nearFieldExactDistance * nearFieldExactDistance
         : -1.0f;
 
     // Iterative DFS with explicit stack. Depth 128 leaves headroom for very
@@ -1274,19 +1280,10 @@ inline float fwnHierarchical(float3 pos,
     while (stackTop > 0)
     {
         int const nodeIdx = stack[--stackTop];
-
-        // Load BVH node AABB first (cheap, used for distance-aware prune
-        // before we touch the aggregate buffer).
         int const baseOffset = nodeIdx * 12;
-        float4 const bboxMin = vload4(0, nodes + baseOffset);      // floats 0-3
-        float4 const bboxMax = vload4(0, nodes + baseOffset + 4);  // floats 4-7
+        float4 const bboxMin = vload4(0, nodes + baseOffset);
+        float4 const bboxMax = vload4(0, nodes + baseOffset + 4);
         float const aabbDistSq = sqDistanceToAABB(pos, bboxMin.xyz, bboxMax.xyz);
-
-        // Distance-aware prune: subtree is too far to influence the sign.
-        if (pruneDistSq > 0.0f && aabbDistSq > pruneDistSq)
-        {
-            continue;
-        }
 
         // Load aggregate (8 floats = 2 × float4).
         int const agBase = nodeIdx * 8;
@@ -1303,9 +1300,15 @@ inline float fwnHierarchical(float3 pos,
         float const distSq = dot(diff, diff);
         float const radius = wnRadius.w;
 
-        // Barnes-Hut acceptance: dist > beta * radius
-        // (compare squared to avoid a sqrt)
-        if (distSq > betaSq * radius * radius && distSq > 0.0f)
+        bool const inNearField =
+            (nearFieldDistSq > 0.0f) && (aabbDistSq < nearFieldDistSq);
+
+        // Barnes-Hut acceptance: dist > beta * radius (compare squared to
+        // avoid a sqrt). Larger beta means we recurse closer to the source
+        // before approximating, which trades work for accuracy. The dipole
+        // relative error per accepted node is bounded by (radius/dist)^3,
+        // so the per-node sign error is at most ~(1/beta)^3.
+        if (!inNearField && distSq > betaSq * radius * radius && distSq > 0.0f)
         {
             // Dipole approximation: contribution is (diff · N) / (4π · |diff|^3)
             // where N here is wnRadius.xyz (already includes the 2·area factor).
@@ -1522,15 +1525,26 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
         return (cachedSign > 0) ? -unsignedDist : unsignedDist;
     }
 
-    // Sign: hierarchical winding number. Do not pass unsignedDist for the
-    // distance-aware prune here: near the surface, winding is a global
-    // quantity and pruning far subtrees makes the result depend on the local
-    // triangle fan / BVH partitioning, which shows up as triangle-edge
-    // artifacts on otherwise smooth faces. Keep the safer front-to-back
-    // traversal order, but evaluate the full Barnes-Hut tree for sign.
+    // Bounded near-field exact integration:
+    // - force exact traversal only in a thin band around the surface,
+    // - cap the band by scene scale to avoid long-running kernels.
+    float4 const rootMin4 = vload4(0, data + nodesOffset);
+    float4 const rootMax4 = vload4(0, data + nodesOffset + 4);
+    float3 const sceneExtent = rootMax4.xyz - rootMin4.xyz;
+    float const sceneDiag = length(sceneExtent);
+    float const approxCellDiag = (signCacheResolution > 0)
+        ? length(sceneExtent / (float)signCacheResolution)
+        : (sceneDiag * (1.0f / 64.0f));
+    float const nearFieldCap = fmax(2.0f * approxCellDiag, 0.01f * sceneDiag);
+    float const nearFieldDistance = (unsignedDist < nearFieldCap)
+        ? fmin(4.0f * unsignedDist, nearFieldCap)
+        : 0.0f;
+
+    // Sign: hierarchical winding number. Accuracy is controlled by `beta`,
+    // and near-surface robustness is improved via the bounded exact band.
     float const winding = fwnHierarchical(pos, nodesOffset, trianglesOffset,
                                           fwnAggregatesOffset, nodeCount, data, beta,
-                                          0.0f);
+                                          nearFieldDistance);
     return (winding > 0.5f) ? -unsignedDist : unsignedDist;
 }
 
@@ -1785,14 +1799,16 @@ __kernel void buildMeshSignCache(__global float * primitiveData,
             continue; // Unknown: cell may contain or touch the surface.
         }
 
+        float const nearFieldCap = 2.0f * cellDiag;
+        float const nearFieldDistance = fmin(4.0f * fabs(closest.x), nearFieldCap);
         float const winding = fwnHierarchical(pos,
                                               nodesOffset,
                                               trianglesOffset,
                                               fwnAggregatesOffset,
                                               nodeCount,
                                               primitiveData,
-                                              beta,
-                                              0.0f);
+                              beta,
+                              nearFieldDistance);
         uint const state = (winding > 0.5f) ? 2u : 1u;
         bits |= state << (cellInWord * 2);
     }
