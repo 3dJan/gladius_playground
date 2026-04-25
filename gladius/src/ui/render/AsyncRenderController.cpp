@@ -122,14 +122,12 @@ namespace gladius::ui::async_rendering
 
           if (!m_state)
         {
-            DebugText("NoState", 7);
             return;
         }
 
         bool expected = false;
         if (!m_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
-            DebugText("AlreadyRunning", 14);
             return;
         }
 
@@ -141,17 +139,11 @@ namespace gladius::ui::async_rendering
             m_state->data.hasPendingResult.store(false, std::memory_order_release);
         }
 
-        DebugText("SpawningWorker", 14);
         auto const spawned = m_state->data.workerPool->spawn(workerLoop(m_state));
         if (!spawned)
         {
-            DebugText("SpawnFailed", 11);
             m_running.store(false, std::memory_order_release);
             m_state->data.shutdownRequested.store(true, std::memory_order_release);
-        }
-        else
-        {
-            DebugText("SpawnSuccess", 12);
         }
     }
 
