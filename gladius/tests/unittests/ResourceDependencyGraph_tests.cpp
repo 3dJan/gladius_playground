@@ -296,6 +296,65 @@ namespace gladius_tests
         EXPECT_TRUE(requiredResources.empty()) << "Mesh object with no dependencies should return empty vector";
     }
 
+    TEST_F(ResourceDependencyGraphTest, GetAllRequiredResourceIdsForBuildItems_WithDirectMesh_IncludesMesh)
+    {
+        // Arrange
+        Lib3MF::PMeshObject usedMeshObject = m_model->AddMeshObject();
+        Lib3MF::PMeshObject unusedMeshObject = m_model->AddMeshObject();
+        Lib3MF_uint32 const usedMeshId = usedMeshObject->GetResourceID();
+        Lib3MF_uint32 const unusedMeshId = unusedMeshObject->GetResourceID();
+        m_model->AddBuildItem(usedMeshObject.get(), Lib3MF::sTransform());
+
+        io::ResourceDependencyGraph dependencyGraph(m_model, m_logger);
+        dependencyGraph.buildGraph();
+
+        // Act
+        auto const requiredResourceIds = dependencyGraph.getAllRequiredResourceIdsForBuildItems();
+
+        // Assert
+        EXPECT_TRUE(requiredResourceIds.contains(usedMeshId));
+        EXPECT_FALSE(requiredResourceIds.contains(unusedMeshId));
+    }
+
+    TEST_F(ResourceDependencyGraphTest, GetAllRequiredResourceIdsForBuildItems_WithComponents_IncludesTransitiveMesh)
+    {
+        // Arrange
+        Lib3MF::PMeshObject usedMeshObject = m_model->AddMeshObject();
+        Lib3MF::PMeshObject unusedMeshObject = m_model->AddMeshObject();
+        Lib3MF::PComponentsObject componentsObject = m_model->AddComponentsObject();
+        componentsObject->AddComponent(usedMeshObject.get(), Lib3MF::sTransform());
+
+        Lib3MF_uint32 const usedMeshId = usedMeshObject->GetResourceID();
+        Lib3MF_uint32 const unusedMeshId = unusedMeshObject->GetResourceID();
+        Lib3MF_uint32 const componentsId = componentsObject->GetResourceID();
+        m_model->AddBuildItem(componentsObject.get(), Lib3MF::sTransform());
+
+        io::ResourceDependencyGraph dependencyGraph(m_model, m_logger);
+        dependencyGraph.buildGraph();
+
+        // Act
+        auto const requiredResourceIds = dependencyGraph.getAllRequiredResourceIdsForBuildItems();
+
+        // Assert
+        EXPECT_TRUE(requiredResourceIds.contains(componentsId));
+        EXPECT_TRUE(requiredResourceIds.contains(usedMeshId));
+        EXPECT_FALSE(requiredResourceIds.contains(unusedMeshId));
+    }
+
+    TEST_F(ResourceDependencyGraphTest, GetAllRequiredResourceIdsForBuildItems_WithNoBuildItems_ReturnsEmpty)
+    {
+        // Arrange
+        m_model->AddMeshObject();
+        io::ResourceDependencyGraph dependencyGraph(m_model, m_logger);
+        dependencyGraph.buildGraph();
+
+        // Act
+        auto const requiredResourceIds = dependencyGraph.getAllRequiredResourceIdsForBuildItems();
+
+        // Assert
+        EXPECT_TRUE(requiredResourceIds.empty());
+    }
+
     TEST_F(ResourceDependencyGraphTest, FindBuildItemsReferencingResource_WithBuildItem_ReturnsMatchingItem)
     {
         // Arrange: create a mesh object and add a build item referencing it

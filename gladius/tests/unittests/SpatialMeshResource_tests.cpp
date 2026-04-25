@@ -379,7 +379,7 @@ namespace gladius::tests
         EXPECT_GT(params->voxelCount, 0);
     }
 
-    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_DefaultMesh_Available)
+    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_DefaultMesh_UnavailableUntilFwnSelected)
     {
         std::vector<float4> vertices;
         std::vector<TriangleIndices> indices;
@@ -387,6 +387,30 @@ namespace gladius::tests
 
         ResourceKey key(ResourceId{205}, ResourceType::Unknown);
         SpatialMeshResource resource(key, vertices, indices);
+
+        EXPECT_TRUE(resource.getData().fwnAggregates.empty());
+        EXPECT_FALSE(resource.needsSignCacheBuild());
+
+        auto const params = resource.getSignCacheBuildParams();
+        EXPECT_FALSE(params.has_value());
+    }
+
+    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_FwnMethod_BuildsAggregatesLazily)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{208}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        ASSERT_TRUE(resource.getData().fwnAggregates.empty());
+
+        MeshSdfEvaluationConfig cfg = resource.evaluationConfig();
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        EXPECT_TRUE(resource.setEvaluationConfig(cfg));
+
+        EXPECT_FALSE(resource.getData().fwnAggregates.empty());
 
         auto const params = resource.getSignCacheBuildParams();
         ASSERT_TRUE(params.has_value());
@@ -482,6 +506,8 @@ namespace gladius::tests
         bool const configChanged = resource.setEvaluationConfig(cfg);
         EXPECT_TRUE(configChanged);
         EXPECT_EQ(resource.evaluationConfig().method, MeshSdfMethod::PureBVH);
+        EXPECT_FALSE(resource.needsVoxelGridBuild());
+        EXPECT_FALSE(resource.needsSignCacheBuild());
     }
 
     TEST_F(SpatialMeshResource_Test, EvaluationConfig_RuntimeOnlyChange_DoesNotInvalidate)

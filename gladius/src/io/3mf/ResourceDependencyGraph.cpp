@@ -157,6 +157,53 @@ namespace gladius::io
         return requiredResources;
     }
 
+    std::set<Lib3MF_uint32> ResourceDependencyGraph::getAllRequiredResourceIdsForBuildItems() const
+    {
+        std::set<Lib3MF_uint32> requiredResourceIds;
+        if (!m_model || !m_graph)
+        {
+            return requiredResourceIds;
+        }
+
+        Lib3MF::PBuildItemIterator buildItemIterator = m_model->GetBuildItems();
+        while (buildItemIterator->MoveNext())
+        {
+            Lib3MF::PBuildItem buildItem = buildItemIterator->GetCurrent();
+            if (!buildItem)
+            {
+                continue;
+            }
+
+            Lib3MF_uint32 const rootResourceId = buildItem->GetObjectResourceID();
+            if (rootResourceId == 0u)
+            {
+                continue;
+            }
+
+            requiredResourceIds.insert(rootResourceId);
+
+            try
+            {
+                Lib3MF::PResource rootResource = m_model->GetResourceByID(rootResourceId);
+                for (auto const & requiredResource : getAllRequiredResources(rootResource))
+                {
+                    if (requiredResource)
+                    {
+                        requiredResourceIds.insert(requiredResource->GetResourceID());
+                    }
+                }
+            }
+            catch (const std::exception &)
+            {
+                // Keep the build item root ID, but skip dependency expansion if
+                // lib3mf cannot resolve the resource. Later import stages will
+                // report the concrete load error if the object is actually needed.
+            }
+        }
+
+        return requiredResourceIds;
+    }
+
     std::vector<Lib3MF::PBuildItem>
     ResourceDependencyGraph::findBuildItemsReferencingResource(Lib3MF::PResource resource) const
     {

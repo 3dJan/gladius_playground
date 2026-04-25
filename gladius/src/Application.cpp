@@ -348,6 +348,15 @@ namespace gladius
                 ++rebuilt;
             }
         }
+        if (rebuilt > 0u)
+        {
+            // A method/resolution change may have regenerated SpatialMeshResource
+            // payloads (for example, lazily adding FWN aggregates/sign-cache storage).
+            // Mark primitive data dirty and push it once so the renderer never sees
+            // runtime FWN flags with an old non-FWN GPU payload.
+            document->invalidatePrimitiveData();
+            (void) document->updateParameter();
+        }
         return rebuilt;
     }
 

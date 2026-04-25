@@ -7,6 +7,7 @@
 #include "nodes/Model.h"
 
 #include <filesystem>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -80,6 +81,16 @@ namespace gladius::io
          * @param doc The document to add the loaded mesh objects to.
          */
         void loadMeshes(Lib3MF::PModel model, Document & doc);
+
+        /**
+         * @brief Loads only mesh objects whose 3MF resource IDs are in @p resourceIds.
+         *
+         * The filter is intended for first-frame reachability loading; pass the
+         * closure returned by ResourceDependencyGraph::getAllRequiredResourceIdsForBuildItems().
+         */
+        void loadMeshes(Lib3MF::PModel model,
+                Document & doc,
+                std::set<Lib3MF_uint32> const & resourceIds);
 
         /**
          * @brief Loads all build items from a 3MF model and adds them to the document.

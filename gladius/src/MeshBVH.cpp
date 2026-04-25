@@ -3,6 +3,7 @@
 /// @see MeshBVH.h
 
 #include "MeshBVH.h"
+#include "Profiling.h"
 
 #include <algorithm>
 #include <chrono>
@@ -41,6 +42,8 @@ namespace gladius
                                           std::span<TriangleIndices const> indices,
                                           MeshBVHBuildParams const & params)
     {
+        ProfileFunction;
+
         auto startTime = std::chrono::high_resolution_clock::now();
 
         // Reset all diagnostic counters before each build so callers see only the
@@ -205,6 +208,8 @@ namespace gladius
                                                      std::span<TriangleIndices const> indices,
                                                      SpatialMeshData & data)
     {
+        ProfileFunction;
+
         size_t const vertexCount = vertices.size();
         data.vertexNormals.resize(vertexCount);
 
@@ -307,6 +312,8 @@ namespace gladius
                                                     std::vector<int> const & bvhToOriginalTriangle,
                                                     SpatialMeshData & data)
     {
+        ProfileFunction;
+
         size_t const triCount = originalIndices.size();
         data.edgeNeighborNormals.assign(triCount * 3u, MeshEdgeNeighborNormal{});
 
@@ -789,6 +796,8 @@ namespace gladius
 
     void computeFwnAggregates(SpatialMeshData & data)
     {
+        ProfileFunction;
+
         data.fwnAggregates.clear();
         if (data.nodes.empty())
         {

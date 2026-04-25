@@ -1188,6 +1188,30 @@ namespace gladius::io
         }
     }
 
+    void Importer3mf::loadMeshes(Lib3MF::PModel model,
+                                 Document & doc,
+                                 std::set<Lib3MF_uint32> const & resourceIds)
+    {
+        ProfileFunction auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+            auto const object = objectIterator->GetCurrentObject();
+
+            if (!object->IsMeshObject())
+            {
+                continue;
+            }
+
+            if (resourceIds.find(object->GetResourceID()) == resourceIds.end())
+            {
+                continue;
+            }
+
+            auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
+            loadMeshIfNecessary(model, meshObj, doc);
+        }
+    }
+
     void Importer3mf::loadComponentObjects(Lib3MF::PModel model, Document & doc)
     {
         ProfileFunction auto objectIterator = model->GetObjects();
@@ -1243,27 +1267,33 @@ namespace gladius::io
         vertices.reserve(numVertices);
         indices.reserve(numFaces);
 
-        for (auto vertexIndex = 0u; vertexIndex < numVertices; ++vertexIndex)
         {
-            auto const v = meshObject->GetVertex(vertexIndex);
-            vertices.push_back(float4{v.m_Coordinates[0], v.m_Coordinates[1], v.m_Coordinates[2], 0.0f});
-        }
+            ZoneScopedN("Importer3mf::extractMeshBuffers");
+            for (auto vertexIndex = 0u; vertexIndex < numVertices; ++vertexIndex)
+            {
+                auto const v = meshObject->GetVertex(vertexIndex);
+                vertices.push_back(float4{v.m_Coordinates[0], v.m_Coordinates[1], v.m_Coordinates[2], 0.0f});
+            }
 
-        for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
-        {
-            auto const & triangle = meshObject->GetTriangle(faceIndex);
-            indices.push_back(TriangleIndices{
-                static_cast<int>(triangle.m_Indices[0]),
-                static_cast<int>(triangle.m_Indices[1]),
-                static_cast<int>(triangle.m_Indices[2])
-            });
+            for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
+            {
+                auto const & triangle = meshObject->GetTriangle(faceIndex);
+                indices.push_back(TriangleIndices{
+                    static_cast<int>(triangle.m_Indices[0]),
+                    static_cast<int>(triangle.m_Indices[1]),
+                    static_cast<int>(triangle.m_Indices[2])
+                });
+            }
         }
 
         // Optional mesh repair pre-pass (welding, degenerate removal, orientation,
         // small-hole filling). All steps default to disabled — when nothing is
         // enabled this call is a no-op.
-        auto const repairResult =
-            mesh_repair::repairMesh(vertices, indices, m_meshRepairConfig);
+        mesh_repair::MeshRepairResult repairResult{};
+        {
+            ZoneScopedN("Importer3mf::repairMesh");
+            repairResult = mesh_repair::repairMesh(vertices, indices, m_meshRepairConfig);
+        }
         if (m_eventLogger &&
             (repairResult.weldedVertices != 0u || repairResult.removedTriangles != 0u ||
              repairResult.flippedTriangles != 0u || repairResult.filledHoles != 0u))
@@ -1281,8 +1311,12 @@ namespace gladius::io
                                      gladius::events::Severity::Info});
         }
 
-        MeshBVHBuilder builder;
-        auto spatialData = builder.build(vertices, indices);
+        SpatialMeshData spatialData;
+        {
+            ZoneScopedN("Importer3mf::buildSpatialMeshData");
+            MeshBVHBuilder builder;
+            spatialData = builder.build(vertices, indices);
+        }
         doc.getGeneratorContext().resourceManager.addResource(key, std::move(spatialData));
 
         // Also load beam lattice if present

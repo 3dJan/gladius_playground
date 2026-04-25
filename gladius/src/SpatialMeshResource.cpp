@@ -4,6 +4,7 @@
 
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGrid.h"
+#include "Profiling.h"
 
 #include <algorithm>
 #include <cstring>
@@ -60,6 +61,8 @@ namespace gladius
 
     bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
     {
+        ProfileFunction;
+
         bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
         bool const fwnBetaChanged = m_evaluationConfig.fwnBeta != cfg.fwnBeta;
 
@@ -77,13 +80,14 @@ namespace gladius
         // method).
         bool const resolutionChanged =
             m_evaluationConfig.voxelGridResolution != cfg.voxelGridResolution;
+        bool const payloadHasFwnSupport = !m_data.fwnAggregates.empty() && m_signCacheDataOffset != 0u;
         bool const newMethodSatisfied = [&]() {
             switch (cfg.method)
             {
             case MeshSdfMethod::PureBVH:
                 return true;
             case MeshSdfMethod::FastWindingNumber:
-                return !m_data.fwnAggregates.empty();
+                return payloadHasFwnSupport;
             case MeshSdfMethod::VoxelAccelerated:
                 return m_voxelCount > 0;
             case MeshSdfMethod::NanoVDB:
@@ -94,12 +98,26 @@ namespace gladius
         bool const rebuildRequired = resolutionChanged || !newMethodSatisfied;
 
         m_evaluationConfig = cfg;
+        if (cfg.method == MeshSdfMethod::VoxelAccelerated)
+        {
+            m_needsVoxelGridBuild = m_voxelCount > 0u;
+        }
+        else
+        {
+            m_needsVoxelGridBuild = false;
+        }
+
         if (cfg.method == MeshSdfMethod::FastWindingNumber && fwnBetaChanged)
         {
             // Existing GPU sign caches were generated for the previous beta. Keep
             // them disabled by the kernel-side beta check and queue a rebuild the
             // next time post-upload cache work is collected.
             resetSignCacheBuildProgress();
+        }
+        else if (cfg.method != MeshSdfMethod::FastWindingNumber)
+        {
+            m_needsSignCacheBuild = false;
+            m_signCacheNextWord = 0;
         }
         if (rebuildRequired)
         {
@@ -121,6 +139,8 @@ namespace gladius
     void SpatialMeshResource::rebuild(std::span<float4 const> vertices,
                                       std::span<TriangleIndices const> indices)
     {
+        ProfileFunction;
+
         MeshBVHBuilder builder;
         MeshBVHBuildParams params;
         params.maxPrimitivesPerLeaf = 4;
@@ -129,16 +149,14 @@ namespace gladius
         params.intersectionCost = 1.0f;
 
         m_data = builder.build(vertices, indices, params);
-        // Pre-compute Fast-Winding-Number multipole aggregates so the GPU side
-        // can switch between methods without rebuilding the BVH.
-        computeFwnAggregates(m_data);
         m_needsRebuild = false;
-        m_needsVoxelGridBuild = true;
 
         // Clear and reload payload data
         m_payloadData.data.clear();
         m_payloadData.meta.clear();
         loadImpl();
+        m_needsVoxelGridBuild = m_voxelCount > 0u &&
+                                m_evaluationConfig.method == MeshSdfMethod::VoxelAccelerated;
     }
     
     // ========================================================================
@@ -200,6 +218,8 @@ namespace gladius
     
     void SpatialMeshResource::write(Primitives & primitives)
     {
+        ProfileFunction;
+
         // Track the base offset before adding our data
         m_dataBaseOffset = static_cast<int>(primitives.data.getSize());
         
@@ -230,8 +250,17 @@ namespace gladius
         // Flag that we need GPU-side post-upload builds. Local payload data only
         // stores zero-filled cache buffers; every primitive upload invalidates the
         // previously built GPU caches and they must be rebuilt/re-enabled.
-        m_needsVoxelGridBuild = true;
-        resetSignCacheBuildProgress();
+        m_needsVoxelGridBuild = m_voxelCount > 0u &&
+                                m_evaluationConfig.method == MeshSdfMethod::VoxelAccelerated;
+        if (m_signCacheDataOffset != 0u && usesFwnSignCache())
+        {
+            resetSignCacheBuildProgress();
+        }
+        else
+        {
+            m_needsSignCacheBuild = false;
+            m_signCacheNextWord = 0;
+        }
     }
     
     std::optional<MeshVoxelGridBuildParams> SpatialMeshResource::getVoxelGridBuildParams() const
@@ -304,17 +333,22 @@ namespace gladius
 
     void SpatialMeshResource::loadImpl()
     {
+        ProfileFunction;
+
         if (m_data.empty())
         {
             return;
         }
 
-        // Ensure Fast-Winding-Number aggregates exist. The (key, SpatialMeshData&&)
-        // constructor (used by 3MF import via Document::addMeshResource) does not
-        // run computeFwnAggregates, so without this lazy build the FWN dispatch
-        // would read uninitialised payload memory and produce wrong-sign artifacts.
-        if (m_data.fwnAggregates.empty() && !m_data.nodes.empty())
+        bool const useFwn = m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+
+        // Build Fast-Winding-Number aggregates only when the active method needs
+        // them. This keeps default VoxelAccelerated/PureBVH file-open latency and
+        // primitive payload size down for large meshes; switching to FWN later
+        // triggers a reload that computes and serialises this auxiliary data.
+        if (useFwn && m_data.fwnAggregates.empty() && !m_data.nodes.empty())
         {
+            ZoneScopedN("SpatialMeshResource::computeFwnAggregates");
             computeFwnAggregates(m_data);
         }
 
@@ -483,16 +517,19 @@ namespace gladius
         // Layout: [weightedNormal.xyz, radius] [areaCentroid.xyz, totalArea].
         // Used by spatialMeshSDF_FastWindingNumber in mesh_sdf.cl.
         m_fwnAggregatesOffset = m_payloadData.data.size();
-        for (auto const & ag : m_data.fwnAggregates)
+        if (useFwn)
         {
-            m_payloadData.data.push_back(ag.weightedNormalSum.x);
-            m_payloadData.data.push_back(ag.weightedNormalSum.y);
-            m_payloadData.data.push_back(ag.weightedNormalSum.z);
-            m_payloadData.data.push_back(ag.weightedNormalSum.w);
-            m_payloadData.data.push_back(ag.areaCentroid.x);
-            m_payloadData.data.push_back(ag.areaCentroid.y);
-            m_payloadData.data.push_back(ag.areaCentroid.z);
-            m_payloadData.data.push_back(ag.areaCentroid.w);
+            for (auto const & ag : m_data.fwnAggregates)
+            {
+                m_payloadData.data.push_back(ag.weightedNormalSum.x);
+                m_payloadData.data.push_back(ag.weightedNormalSum.y);
+                m_payloadData.data.push_back(ag.weightedNormalSum.z);
+                m_payloadData.data.push_back(ag.weightedNormalSum.w);
+                m_payloadData.data.push_back(ag.areaCentroid.x);
+                m_payloadData.data.push_back(ag.areaCentroid.y);
+                m_payloadData.data.push_back(ag.areaCentroid.z);
+                m_payloadData.data.push_back(ag.areaCentroid.w);
+            }
         }
 
         // Reserve space for voxel grid data (2 floats per voxel: nearestTriIdx, signedDist)
@@ -504,15 +541,18 @@ namespace gladius
             m_payloadData.data.push_back(0.0f);  // Will be filled by GPU kernel
         }
 
-        // Reserve space for the FWN coarse sign cache. One bit per cell of a
-        // kSignCacheResolution^3 grid spanning the mesh AABB; reinterpreted as
-        // a uint array on the device. Header [kSignCacheOffsetIndex] is left
-        // at 0 here; the queued markMeshSignCacheReady kernel writes the real
-        // offset only after buildMeshSignCache has populated the bitmap.
-        m_signCacheDataOffset = m_payloadData.data.size();
-        for (size_t i = 0; i < kSignCacheWordCount; ++i)
+        // Reserve space for the FWN coarse sign cache only when FWN is active.
+        // Non-FWN loads never read this cache, so skipping it avoids a 64 KB
+        // primitive-payload allocation/upload per mesh and prevents unnecessary
+        // post-upload build bookkeeping on the first frame.
+        m_signCacheDataOffset = 0u;
+        if (useFwn)
         {
-            m_payloadData.data.push_back(0.0f);
+            m_signCacheDataOffset = m_payloadData.data.size();
+            for (size_t i = 0; i < kSignCacheWordCount; ++i)
+            {
+                m_payloadData.data.push_back(0.0f);
+            }
         }
 
         // Patch offsets in header (local offsets, will be adjusted with base offset when read)
@@ -529,8 +569,16 @@ namespace gladius
         m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] = static_cast<float>(kSignCacheResolution);
         m_payloadData.data[m_headerStart + kSignCacheBetaIndex] = m_evaluationConfig.fwnBeta;
 
-        // Sign cache build is needed (fresh allocation, unpopulated bitmap).
-        resetSignCacheBuildProgress();
+        // Sign cache build is needed only when a fresh FWN cache allocation is present.
+        if (useFwn)
+        {
+            resetSignCacheBuildProgress();
+        }
+        else
+        {
+            m_needsSignCacheBuild = false;
+            m_signCacheNextWord = 0;
+        }
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);

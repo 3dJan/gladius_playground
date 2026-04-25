@@ -153,6 +153,16 @@ namespace gladius
             return;
         }
 
+        if (m_resourceDependencyGraph)
+        {
+            ZoneScopedN("Document::loadReachableMeshResources");
+            importer.loadMeshes(
+              m_3mfmodel,
+              *this,
+              m_resourceDependencyGraph->getAllRequiredResourceIdsForBuildItems());
+            return;
+        }
+
         importer.loadMeshes(m_3mfmodel, *this);
     }
 
@@ -190,6 +200,11 @@ namespace gladius
 
         m_assembly->updateInputsAndOutputs();
 
+        // Build the lightweight 3MF resource dependency graph before extracting
+        // mesh geometry, so loadAllMeshResources() can skip meshes that are not
+        // reachable from any build item. Large unused meshes then no longer
+        // contribute BVH/repair/payload work on first frame.
+        rebuildResourceDependencyGraph();
         loadAllMeshResources();
 
         updateParameterRegistration();
@@ -203,8 +218,6 @@ namespace gladius
             return;
         }
 
-        // Rebuild resource dependency graph
-        rebuildResourceDependencyGraph();
         updateFlatAssembly();
 
         m_core->refreshProgram(m_flatAssembly);
