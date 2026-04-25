@@ -275,7 +275,7 @@ namespace gladius::ui
 
     void MainWindow::setup()
     {
-        ProfileFunction;
+        //ProfileFunction;
         LOG_SCOPE_DURATION_NAMED("MainWindow::setup()");
         m_initialized = true;
 

@@ -1085,6 +1085,177 @@ namespace gladius::tests
         }
     }
 
+    /// Diagnostic: compare GPU-built FWN aggregates against the host's recursive
+    /// `computeFwnAggregates` implementation on a higher-subdivision icosphere
+    /// (deep BVH with many internal nodes). Reports the largest disagreements
+    /// per component so we can see whether GPU/host differ structurally — not
+    /// just on a leaf-only tiny mesh. Also samples the resulting hierarchical
+    /// winding number on a probe grid using the host aggregates as a reference
+    /// to localise where sign differences could plausibly originate.
+    TEST_F(MeshSdfPerformance_Test, FwnAggregates_GpuVsHost_DeepBvh_Diagnostic)
+    {
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        // Subdivision 4 → ~5120 triangles, BVH depth ~9-10.
+        createIcosphere(vertices, indices, 10.0f, 4);
+
+        ResourceKey key(ResourceId{4242}, ResourceType::Mesh);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        MeshSdfEvaluationConfig cfg{};
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        cfg.fwnBeta = 2.0f;
+        ASSERT_TRUE(resource.setEvaluationConfig(cfg));
+
+        // Make a working copy of the BVH and run the host bottom-up reference.
+        SpatialMeshData hostData = resource.getData();
+        ASSERT_FALSE(hostData.nodes.empty());
+        ASSERT_FALSE(hostData.triangles.empty());
+        computeFwnAggregates(hostData);
+        ASSERT_EQ(hostData.fwnAggregates.size(), hostData.nodes.size());
+
+        auto core = std::make_shared<ComputeCore>(
+            m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto slicerProgram = core->getSlicerProgram();
+        ASSERT_TRUE(slicerProgram != nullptr);
+        slicerProgram->setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        return (float4)(0.0f, 0.0f, 0.0f, length(pos) - 1.0f);
+    }
+    )CLC");
+        slicerProgram->recompileBlocking();
+        ASSERT_TRUE(slicerProgram->isValid());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_TRUE(primitives != nullptr);
+        primitives->clear();
+        resource.write(*primitives);
+
+        auto paramsOpt = resource.getFwnAggregateBuildParams();
+        ASSERT_TRUE(paramsOpt.has_value());
+        auto const params = paramsOpt.value();
+
+        size_t const builtCount = core->buildMeshFwnAggregates({params});
+        ASSERT_EQ(builtCount, 1u);
+
+        primitives->data.read();
+        auto const & primitiveData = primitives->data.getData();
+        size_t const aggregateStart = static_cast<size_t>(params.fwnAggregatesOffset);
+        size_t const aggregateEnd = aggregateStart + hostData.nodes.size() * 8u;
+        ASSERT_LE(aggregateEnd, primitiveData.size());
+
+        // Per-component error tracking. Track absolute and relative differences
+        // for the dipole-relevant fields. Internal nodes have non-empty subtree
+        // ranges, leaves contain a few triangles each.
+        struct WorstDiff
+        {
+            float absDiff{0.0f};
+            float relDiff{0.0f};
+            size_t nodeIdx{0};
+            float gpuVal{0.0f};
+            float hostVal{0.0f};
+        };
+        WorstDiff worstNormal;
+        WorstDiff worstCentroid;
+        WorstDiff worstArea;
+        WorstDiff worstRadius;
+        size_t internalNodes = 0;
+        size_t leafNodes = 0;
+
+        auto consider = [](WorstDiff & w, float gpu, float host, size_t idx) {
+            float const diff = std::fabs(gpu - host);
+            float const denom = std::max(1.0e-6f, std::fabs(host));
+            float const rel = diff / denom;
+            if (diff > w.absDiff)
+            {
+                w.absDiff = diff;
+                w.relDiff = rel;
+                w.nodeIdx = idx;
+                w.gpuVal = gpu;
+                w.hostVal = host;
+            }
+        };
+
+        for (size_t nodeIdx = 0; nodeIdx < hostData.nodes.size(); ++nodeIdx)
+        {
+            auto const & node = hostData.nodes[nodeIdx];
+            if (node.isLeaf()) { ++leafNodes; }
+            else { ++internalNodes; }
+
+            auto const & host = hostData.fwnAggregates[nodeIdx];
+            size_t const offset = aggregateStart + nodeIdx * 8u;
+            float const gpuNx = primitiveData[offset + 0];
+            float const gpuNy = primitiveData[offset + 1];
+            float const gpuNz = primitiveData[offset + 2];
+            float const gpuRadius = primitiveData[offset + 3];
+            float const gpuCx = primitiveData[offset + 4];
+            float const gpuCy = primitiveData[offset + 5];
+            float const gpuCz = primitiveData[offset + 6];
+            float const gpuArea = primitiveData[offset + 7];
+
+            float const nMag = std::sqrt(gpuNx*gpuNx + gpuNy*gpuNy + gpuNz*gpuNz);
+            float const hostNMag = std::sqrt(host.weightedNormalSum.x*host.weightedNormalSum.x
+                                           + host.weightedNormalSum.y*host.weightedNormalSum.y
+                                           + host.weightedNormalSum.z*host.weightedNormalSum.z);
+            consider(worstNormal, nMag, hostNMag, nodeIdx);
+
+            float const cMag = std::sqrt(gpuCx*gpuCx + gpuCy*gpuCy + gpuCz*gpuCz);
+            float const hostCMag = std::sqrt(host.areaCentroid.x*host.areaCentroid.x
+                                           + host.areaCentroid.y*host.areaCentroid.y
+                                           + host.areaCentroid.z*host.areaCentroid.z);
+            consider(worstCentroid, cMag, hostCMag, nodeIdx);
+
+            consider(worstArea, gpuArea, host.areaCentroid.w, nodeIdx);
+            consider(worstRadius, gpuRadius, host.weightedNormalSum.w, nodeIdx);
+        }
+
+        std::cout << "\n=== FWN Aggregate GPU vs Host (sub=4 icosphere) ===\n";
+        std::cout << "Total nodes: " << hostData.nodes.size()
+                  << " (internal=" << internalNodes << ", leaf=" << leafNodes << ")\n";
+        std::cout << "Triangles: " << hostData.triangles.size() << "\n";
+        std::cout << std::fixed << std::setprecision(6);
+        auto report = [](char const * name, WorstDiff const & w) {
+            std::cout << name << " worst |Δ|=" << w.absDiff
+                      << " rel=" << w.relDiff
+                      << " at node=" << w.nodeIdx
+                      << " gpu=" << w.gpuVal
+                      << " host=" << w.hostVal << "\n";
+        };
+        report("|weightedNormalSum|", worstNormal);
+        report("|areaCentroid|     ", worstCentroid);
+        report("totalArea          ", worstArea);
+        report("radius             ", worstRadius);
+        std::cout << "===\n";
+
+        // Sums (weightedNormal, areaCentroid, totalArea) are associative and
+        // should agree to within a tight FP tolerance scaled by triangle count.
+        // Radius diverges by design: GPU computes the tight true radius from
+        // vertices in the subtree; host computes a recursive conservative
+        // bound. Host radius >= GPU radius in general.
+        float const numTriBound = std::max(1.0f, static_cast<float>(hostData.triangles.size()));
+        EXPECT_LT(worstNormal.absDiff, 1.0e-3f * numTriBound)
+            << "Weighted-normal sum disagreement is unexpectedly large";
+        EXPECT_LT(worstCentroid.absDiff, 1.0e-3f * numTriBound)
+            << "Area-centroid disagreement is unexpectedly large";
+        EXPECT_LT(worstArea.absDiff, 1.0e-3f * numTriBound)
+            << "Total-area disagreement is unexpectedly large";
+        // Radius can differ; assert host radius is always >= GPU radius (host is conservative).
+        for (size_t nodeIdx = 0; nodeIdx < hostData.nodes.size(); ++nodeIdx)
+        {
+            float const gpuRadius = primitiveData[aggregateStart + nodeIdx * 8u + 3u];
+            float const hostRadius = hostData.fwnAggregates[nodeIdx].weightedNormalSum.w;
+            EXPECT_GE(hostRadius + 1.0e-3f, gpuRadius)
+                << "Node " << nodeIdx << ": host radius (" << hostRadius
+                << ") should bound GPU radius (" << gpuRadius << ")";
+        }
+    }
+
     /// Validate that voxel grid stores actual triangle indices (not placeholders)
     /// This test verifies the voxel acceleration fast path can be used
     TEST_F(MeshSdfPerformance_Test, VoxelGrid_StoresValidTriangleIndices)

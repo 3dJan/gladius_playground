@@ -95,6 +95,8 @@ namespace gladius
 
         /// Barnes-Hut acceptance threshold for the Fast-Winding-Number method.
         /// Higher values are more accurate, lower values are faster.
+        /// Near-surface robustness is additionally handled by a bounded
+        /// exact-integration band in the kernel.
         /// Typical range: 1.5 – 4.0. **Runtime only**: forwarded into
         /// `RenderingSettings.meshFwnBeta`.
         float fwnBeta = 2.0f;

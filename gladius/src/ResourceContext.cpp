@@ -29,6 +29,9 @@ namespace gladius
         m_renderingSettings.normalOffset = 0.0001f;
         m_renderingSettings.earlyExitDistanceSq = 0.0f;
         m_renderingSettings.meshInflationDistance = 0.0f;
+        // Keep the global Barnes-Hut threshold fast by default; near-surface
+        // robustness is handled by a bounded exact-integration band in
+        // mesh_sdf.cl (capped by scene scale to avoid TDR).
         m_renderingSettings.meshFwnBeta = 2.0f;
         m_renderingSettings.meshFwnFarFieldFactor = 0.5f;
 

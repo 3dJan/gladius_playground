@@ -61,6 +61,7 @@ namespace gladius::tests
                 {
                     continue;
                 }
+                auto const & node = data.nodes[static_cast<std::size_t>(nodeIdx)];
                 float const cx = ag.areaCentroid.x / ag.areaCentroid.w;
                 float const cy = ag.areaCentroid.y / ag.areaCentroid.w;
                 float const cz = ag.areaCentroid.z / ag.areaCentroid.w;
@@ -83,7 +84,6 @@ namespace gladius::tests
                     }
                     continue;
                 }
-                auto const & node = data.nodes[static_cast<std::size_t>(nodeIdx)];
                 if (node.isLeaf())
                 {
                     int const end = node.primStart + node.primCount;
