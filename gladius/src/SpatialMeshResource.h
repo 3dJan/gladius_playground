@@ -105,6 +105,16 @@ namespace gladius
         /// Get voxel grid build parameters (valid after write)
         /// @return Build parameters with adjusted offsets, or nullopt if not ready
         [[nodiscard]] std::optional<MeshVoxelGridBuildParams> getVoxelGridBuildParams() const;
+
+        /// Get FWN aggregate build parameters (valid after write)
+        /// @return Build parameters with adjusted offsets, or nullopt if not ready
+        [[nodiscard]] std::optional<MeshFwnAggregateBuildParams> getFwnAggregateBuildParams() const;
+
+        /// Check if FWN aggregate build is needed
+        [[nodiscard]] bool needsFwnAggregateBuild() const { return m_needsFwnAggregateBuild; }
+
+        /// Mark FWN aggregates as built in the GPU primitive buffer
+        void markFwnAggregatesBuilt() { m_needsFwnAggregateBuild = false; }
         
         /// Check if voxel grid build is needed
         [[nodiscard]] bool needsVoxelGridBuild() const { return m_needsVoxelGridBuild; }
@@ -168,6 +178,7 @@ namespace gladius
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
         size_t m_signCacheDataOffset = 0;
+        bool m_needsFwnAggregateBuild = false;
         bool m_needsSignCacheBuild = true;
         int m_signCacheNextWord = 0;
 

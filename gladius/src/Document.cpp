@@ -638,6 +638,20 @@ namespace gladius
                 m_primitiveDateNeedsUpdate = false;
             }
 
+            // Build FWN aggregate buffers on the GPU before any FWN render or
+            // sign-cache kernel can consume them. This replaces the previous
+            // CPU aggregate pre-pass while preserving in-order queue safety.
+            auto fwnAggregateBuildParams = m_generatorContext->resourceManager.collectFwnAggregateBuildParams();
+            if (!fwnAggregateBuildParams.empty())
+            {
+                size_t const builtCount = m_core->buildMeshFwnAggregates(fwnAggregateBuildParams);
+                if (builtCount > 0u)
+                {
+                    m_generatorContext->resourceManager.markFwnAggregatesBuilt(fwnAggregateBuildParams,
+                                                                               builtCount);
+                }
+            }
+
             // Queue bounded coarse FWN sign-cache work. The cache becomes visible
             // to kernels only after the final queued ready-offset patch executes,
             // so FWN falls back to full winding traversal until the cache is ready.

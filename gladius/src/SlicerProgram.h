@@ -75,6 +75,14 @@ namespace gladius
         bool buildMeshVoxelGrid(Primitives & primitives, MeshVoxelGridBuildParams const & params);
 
         /**
+         * @brief Build Fast-Winding-Number aggregate records for mesh SDF queries
+         * @param primitives The primitives buffer containing mesh BVH data
+         * @param params Build parameters specifying offsets and counts
+         * @return true if the kernel was queued successfully
+         */
+        bool buildMeshFwnAggregates(Primitives & primitives, MeshFwnAggregateBuildParams const & params);
+
+        /**
          * @brief Queue a coarse FWN sign-cache build for mesh SDF queries
          * @param primitives The primitives buffer containing mesh BVH data
          * @param params Build parameters specifying offsets and counts

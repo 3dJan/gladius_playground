@@ -21,8 +21,8 @@ struct MeshBVHNodeGPU
     float4 bboxMax;     // xyz = max bounds, w unused
     int leftChild;      // -1 if leaf
     int rightChild;     // -1 if leaf
-    int primStart;      // First triangle index (leaf only)
-    int primCount;      // Number of triangles (leaf only)
+    int primStart;      // First triangle index in this node's subtree
+    int primCount;      // Number of triangles in this node's subtree
 };
 
 /// Triangle data (64 bytes - extended for precomputed face normal)
@@ -1616,6 +1616,92 @@ __kernel void buildMeshVoxelGrid(
     int const outputIdx = voxelDataOffset + voxelIdx * 2;
     primitiveData[outputIdx + 0] = nearestTriIdx;
     primitiveData[outputIdx + 1] = signedDist;
+}
+
+/// Build Fast-Winding-Number per-node aggregate records in-place.
+/// Each work item handles one BVH node. Internal nodes use the host-provided
+/// contiguous subtree triangle range, so this avoids CPU-side bottom-up FWN
+/// prep while keeping the query-time aggregate layout unchanged.
+__kernel void buildMeshFwnAggregates(__global float * primitiveData,
+                                     int nodesOffset,
+                                     int trianglesOffset,
+                                     int fwnAggregatesOffset,
+                                     int nodeCount,
+                                     int triCount)
+{
+    int const nodeIdx = (int)get_global_id(0);
+    if (nodeIdx >= nodeCount || nodeCount <= 0 || triCount <= 0 || fwnAggregatesOffset <= 0)
+    {
+        return;
+    }
+
+    __global float const * nodes = primitiveData + nodesOffset;
+    __global float const * triangles = primitiveData + trianglesOffset;
+    __global float * aggregates = primitiveData + fwnAggregatesOffset;
+
+    int const nodeBase = nodeIdx * 12;
+    float4 const intData = vload4(0, nodes + nodeBase + 8);
+    int const primStart = as_int(intData.z);
+    int const primCount = as_int(intData.w);
+    int const primEnd = primStart + primCount;
+
+    int const agBase = nodeIdx * 8;
+    if (primStart < 0 || primCount <= 0 || primStart >= triCount || primEnd > triCount)
+    {
+        vstore4((float4)(0.0f, 0.0f, 0.0f, 0.0f), 0, aggregates + agBase);
+        vstore4((float4)(0.0f, 0.0f, 0.0f, 0.0f), 0, aggregates + agBase + 4);
+        return;
+    }
+
+    float3 weightedNormalSum = (float3)(0.0f, 0.0f, 0.0f);
+    float3 areaCentroid = (float3)(0.0f, 0.0f, 0.0f);
+    float totalArea = 0.0f;
+
+    for (int i = primStart; i < primEnd; ++i)
+    {
+        int const triBase = i * 16;
+        float3 const v0 = vload4(0, triangles + triBase).xyz;
+        float3 const v1 = vload4(0, triangles + triBase + 4).xyz;
+        float3 const v2 = vload4(0, triangles + triBase + 8).xyz;
+        float3 const faceNormal = vload4(0, triangles + triBase + 12).xyz;
+
+        float3 const e = v1 - v0;
+        float3 const f = v2 - v0;
+        float const area = 0.5f * length(cross(e, f));
+        float3 const centroid = (v0 + v1 + v2) * (1.0f / 3.0f);
+
+        weightedNormalSum += (2.0f * area) * faceNormal;
+        areaCentroid += area * centroid;
+        totalArea += area;
+    }
+
+    float radius = 0.0f;
+    if (totalArea > 0.0f)
+    {
+        float3 const centroid = areaCentroid / totalArea;
+        float radiusSq = 0.0f;
+        for (int i = primStart; i < primEnd; ++i)
+        {
+            int const triBase = i * 16;
+            float3 const v0 = vload4(0, triangles + triBase).xyz;
+            float3 const v1 = vload4(0, triangles + triBase + 4).xyz;
+            float3 const v2 = vload4(0, triangles + triBase + 8).xyz;
+            float3 const d0 = v0 - centroid;
+            float3 const d1 = v1 - centroid;
+            float3 const d2 = v2 - centroid;
+            radiusSq = fmax(radiusSq, dot(d0, d0));
+            radiusSq = fmax(radiusSq, dot(d1, d1));
+            radiusSq = fmax(radiusSq, dot(d2, d2));
+        }
+        radius = sqrt(radiusSq);
+    }
+
+    vstore4((float4)(weightedNormalSum.x, weightedNormalSum.y, weightedNormalSum.z, radius),
+            0,
+            aggregates + agBase);
+    vstore4((float4)(areaCentroid.x, areaCentroid.y, areaCentroid.z, totalArea),
+            0,
+            aggregates + agBase + 4);
 }
 
 /// Build a coarse conservative FWN sign cache.

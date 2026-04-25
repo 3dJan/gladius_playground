@@ -38,15 +38,15 @@ namespace gladius
     /// GPU-compatible BVH node structure for triangle mesh traversal
     /// @note Size: 48 bytes (aligned to 16-byte boundary)
     /// @invariant If isLeaf(): leftChild == -1 && rightChild == -1 && primCount > 0
-    /// @invariant If internal: leftChild >= 0 && rightChild >= 0 && primCount == 0
+    /// @invariant If internal: leftChild >= 0 && rightChild >= 0 and the primitive range covers the whole subtree.
     struct MeshBVHNode
     {
         float4 bboxMin;     ///< Bounding box minimum (xyz, w unused)
         float4 bboxMax;     ///< Bounding box maximum (xyz, w unused)
         int leftChild;      ///< Index of left child (-1 if leaf)
         int rightChild;     ///< Index of right child (-1 if leaf)
-        int primStart;      ///< First triangle index (leaf nodes only)
-        int primCount;      ///< Number of triangles (leaf nodes only)
+        int primStart;      ///< First triangle index in this node's subtree
+        int primCount;      ///< Number of triangles in this node's subtree
 
         MeshBVHNode()
             : bboxMin{0.f, 0.f, 0.f, 0.f}

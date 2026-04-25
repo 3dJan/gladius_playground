@@ -178,6 +178,10 @@ namespace gladius
         /// @return Vector of build parameters for resources that need voxel grid builds
         [[nodiscard]] std::vector<MeshVoxelGridBuildParams> collectVoxelGridBuildParams() const;
 
+        /// Collect FWN aggregate build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need FWN aggregate builds
+        [[nodiscard]] std::vector<MeshFwnAggregateBuildParams> collectFwnAggregateBuildParams() const;
+
         /// Collect FWN sign-cache build parameters from all SpatialMeshResource instances
         /// @return Vector of build parameters for resources that need sign-cache builds
         [[nodiscard]] std::vector<MeshSignCacheBuildParams> collectSignCacheBuildParams() const;
@@ -185,9 +189,13 @@ namespace gladius
         /// Mark all SpatialMeshResource instances as having their voxel grids built
         void markVoxelGridsBuilt();
 
+        /// Mark SpatialMeshResource FWN aggregates as built for successfully queued builds
+        void markFwnAggregatesBuilt(std::vector<MeshFwnAggregateBuildParams> const & buildParams,
+                                    size_t builtCount);
+
         /// Advance SpatialMeshResource sign-cache progress for successfully queued build steps
         void markSignCacheBuildProgress(std::vector<MeshSignCacheBuildParams> const & buildParams,
-                        size_t queuedCount);
+                                        size_t queuedCount);
 
       private:
         void increaseImageNumber();

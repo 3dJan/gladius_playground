@@ -512,6 +512,42 @@ namespace gladius
         return successCount;
     }
 
+    size_t ComputeCore::buildMeshFwnAggregates(std::vector<MeshFwnAggregateBuildParams> const & buildParams)
+    {
+        ProfileFunction
+
+        if (buildParams.empty())
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        m_primitives->write();
+
+        auto slicerProgram = m_programs.getSlicerProgram();
+        if (!slicerProgram || !slicerProgram->isValid())
+        {
+            logMsg("Cannot build mesh FWN aggregates: slicer program not ready");
+            return 0;
+        }
+
+        size_t successCount = 0;
+        for (auto const & params : buildParams)
+        {
+            if (slicerProgram->buildMeshFwnAggregates(*m_primitives, params))
+            {
+                ++successCount;
+            }
+        }
+
+        CL_ERROR(m_ComputeContext->GetQueue().finish());
+
+        logMsg(fmt::format("Built {} mesh FWN aggregate buffers", successCount));
+
+        return successCount;
+    }
+
     size_t ComputeCore::buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams)
     {
         ProfileFunction

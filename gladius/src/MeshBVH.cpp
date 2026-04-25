@@ -764,8 +764,12 @@ namespace gladius
             rightCentroidBounds.max.z = std::max(rightCentroidBounds.max.z, c.z);
         }
 
-        ctx.nodes[nodeIndex].primStart = 0;
-        ctx.nodes[nodeIndex].primCount = 0;
+        // Store the full subtree range on internal nodes as well. Mesh query
+        // kernels still use child indices to distinguish internal nodes from
+        // leaves, while the GPU FWN-prep kernel can use this contiguous range
+        // to build one aggregate per node without a CPU bottom-up pass.
+        ctx.nodes[nodeIndex].primStart = start;
+        ctx.nodes[nodeIndex].primCount = primCount;
         int const leftIdx = buildRecursive(ctx, start, mid, depth + 1, params,
                                            bestLeftBounds, leftCentroidBounds);
         int const rightIdx = buildRecursive(ctx, mid, end, depth + 1, params,

@@ -395,7 +395,7 @@ namespace gladius::tests
         EXPECT_FALSE(params.has_value());
     }
 
-    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_FwnMethod_BuildsAggregatesLazily)
+    TEST_F(SpatialMeshResource_Test, FwnMethod_ReservesGpuAggregateBuildBeforeSignCache)
     {
         std::vector<float4> vertices;
         std::vector<TriangleIndices> indices;
@@ -410,7 +410,19 @@ namespace gladius::tests
         cfg.method = MeshSdfMethod::FastWindingNumber;
         EXPECT_TRUE(resource.setEvaluationConfig(cfg));
 
-        EXPECT_FALSE(resource.getData().fwnAggregates.empty());
+        EXPECT_TRUE(resource.getData().fwnAggregates.empty());
+        EXPECT_TRUE(resource.needsFwnAggregateBuild());
+
+        auto const aggregateParams = resource.getFwnAggregateBuildParams();
+        ASSERT_TRUE(aggregateParams.has_value());
+        EXPECT_GT(aggregateParams->fwnAggregatesOffset, 0);
+        EXPECT_GT(aggregateParams->nodesOffset, 0);
+        EXPECT_GT(aggregateParams->trianglesOffset, 0);
+        EXPECT_GT(aggregateParams->nodeCount, 0);
+        EXPECT_GT(aggregateParams->triCount, 0);
+
+        EXPECT_FALSE(resource.getSignCacheBuildParams().has_value());
+        resource.markFwnAggregatesBuilt();
 
         auto const params = resource.getSignCacheBuildParams();
         ASSERT_TRUE(params.has_value());
@@ -449,6 +461,8 @@ namespace gladius::tests
         cfg.fwnBeta = 3.5f;
         EXPECT_TRUE(resource.setEvaluationConfig(cfg));
         EXPECT_TRUE(resource.usesFwnSignCache());
+        ASSERT_TRUE(resource.needsFwnAggregateBuild());
+        resource.markFwnAggregatesBuilt();
 
         auto const params = resource.getSignCacheBuildParams();
         ASSERT_TRUE(params.has_value());
@@ -469,6 +483,7 @@ namespace gladius::tests
         MeshSdfEvaluationConfig cfg = resource.evaluationConfig();
         cfg.method = MeshSdfMethod::FastWindingNumber;
         ASSERT_TRUE(resource.setEvaluationConfig(cfg));
+        resource.markFwnAggregatesBuilt();
 
         auto firstParams = resource.getSignCacheBuildParams();
         ASSERT_TRUE(firstParams.has_value());

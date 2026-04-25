@@ -417,6 +417,41 @@ namespace gladius
         return true;
     }
 
+    bool SlicerProgram::buildMeshFwnAggregates(Primitives & primitives,
+                                               MeshFwnAggregateBuildParams const & params)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        ProfileFunction;
+
+        swapProgramsIfNeeded();
+
+        if (params.nodeCount <= 0 || params.triCount <= 0 || params.fwnAggregatesOffset <= 0)
+        {
+            return false;
+        }
+
+        if (!m_programFront || !m_programFront->isValid())
+        {
+            return false;
+        }
+
+        cl::CommandQueue const & queue = m_ComputeContext->GetQueue();
+        cl::NDRange const origin = {0, 0, 0};
+        cl::NDRange const globalRange = {static_cast<size_t>(params.nodeCount), 1, 1};
+
+        cl::Event const event = m_programFront->runNonBlocking(queue,
+                                                               "buildMeshFwnAggregates",
+                                                               origin,
+                                                               globalRange,
+                                                               primitives.data.getBuffer(),
+                                                               static_cast<cl_int>(params.nodesOffset),
+                                                               static_cast<cl_int>(params.trianglesOffset),
+                                                               static_cast<cl_int>(params.fwnAggregatesOffset),
+                                                               static_cast<cl_int>(params.nodeCount),
+                                                               static_cast<cl_int>(params.triCount));
+        return event() != nullptr;
+    }
+
     bool SlicerProgram::buildMeshSignCache(Primitives & primitives,
                                            MeshSignCacheBuildParams const & params)
     {

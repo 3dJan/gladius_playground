@@ -30,6 +30,19 @@ namespace gladius
         int voxelCount;         ///< Total number of voxels (dims.x * dims.y * dims.z)
     };
 
+    /// Parameters needed to build Fast-Winding-Number per-node aggregates on
+    /// the GPU after the spatial mesh payload has been uploaded. Aggregates are
+    /// written in-place into the primitive buffer and are a prerequisite for
+    /// FWN evaluation and sign-cache construction.
+    struct MeshFwnAggregateBuildParams
+    {
+        int nodesOffset;         ///< BVH nodes offset in primitive buffer
+        int trianglesOffset;     ///< Triangles offset in primitive buffer
+        int fwnAggregatesOffset; ///< FWN aggregate output offset in primitive buffer
+        int nodeCount;           ///< Number of BVH nodes / aggregate records
+        int triCount;            ///< Number of triangles in BVH order
+    };
+
     /// Parameters needed to build the FWN coarse sign cache for a spatial mesh
     /// resource. The cache is a resolution^3 grid of conservative two-bit cell
     /// states used by `spatialMeshSDF_FastWindingNumber` to bypass the winding

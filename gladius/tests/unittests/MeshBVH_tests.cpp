@@ -146,6 +146,28 @@ namespace gladius::tests
         EXPECT_GE(result.boundingBox.max.z, 0.5f);
     }
 
+    TEST_F(MeshBVHBuilder_Test, Build_Cube_NodeRangesCoverSubtrees)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        auto result = builder.build(vertices, indices);
+
+        ASSERT_FALSE(result.nodes.empty());
+        ASSERT_EQ(result.triangles.size(), 12u);
+
+        EXPECT_EQ(result.nodes.front().primStart, 0);
+        EXPECT_EQ(result.nodes.front().primCount, static_cast<int>(result.triangles.size()));
+
+        for (auto const & node : result.nodes)
+        {
+            EXPECT_GE(node.primStart, 0);
+            EXPECT_GT(node.primCount, 0);
+            EXPECT_LE(node.primStart + node.primCount, static_cast<int>(result.triangles.size()));
+        }
+    }
+
     // ========================================================================
     // T018: Angle-weighted normals test
     // ========================================================================

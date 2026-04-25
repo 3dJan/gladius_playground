@@ -950,6 +950,141 @@ namespace gladius::tests
         SUCCEED() << "GPU voxel grid build completed successfully";
     }
 
+    /// End-to-end GPU FWN aggregate build test.
+    /// Validates that the post-upload OpenCL kernel fills the reserved aggregate
+    /// slots with the same range-based values used by the runtime FWN traversal.
+    TEST_F(MeshSdfPerformance_Test, FwnAggregates_GpuBuild_MatchesHostRangeAggregates)
+    {
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createIcosphere(vertices, indices, 3.0f, 1);
+
+        ResourceKey key(ResourceId{42}, ResourceType::Mesh);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        MeshSdfEvaluationConfig cfg{};
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        cfg.fwnBeta = 2.0f;
+        ASSERT_TRUE(resource.setEvaluationConfig(cfg));
+
+        auto const expectedData = resource.getData();
+        ASSERT_FALSE(expectedData.nodes.empty());
+        ASSERT_FALSE(expectedData.triangles.empty());
+
+        auto core = std::make_shared<ComputeCore>(
+            m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto slicerProgram = core->getSlicerProgram();
+        ASSERT_TRUE(slicerProgram != nullptr);
+        slicerProgram->setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        return (float4)(0.0f, 0.0f, 0.0f, length(pos) - 1.0f);
+    }
+    )CLC");
+        slicerProgram->recompileBlocking();
+        ASSERT_TRUE(slicerProgram->isValid());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_TRUE(primitives != nullptr);
+
+        primitives->clear();
+        resource.write(*primitives);
+
+        auto paramsOpt = resource.getFwnAggregateBuildParams();
+        ASSERT_TRUE(paramsOpt.has_value());
+        auto const params = paramsOpt.value();
+        ASSERT_TRUE(resource.needsFwnAggregateBuild());
+        ASSERT_EQ(params.nodeCount, static_cast<int>(expectedData.nodes.size()));
+        ASSERT_EQ(params.triCount, static_cast<int>(expectedData.triangles.size()));
+
+        size_t const builtCount = core->buildMeshFwnAggregates({params});
+        ASSERT_EQ(builtCount, 1u);
+
+        primitives->data.read();
+        auto const & primitiveData = primitives->data.getData();
+        size_t const aggregateStart = static_cast<size_t>(params.fwnAggregatesOffset);
+        size_t const aggregateEnd = aggregateStart + expectedData.nodes.size() * 8u;
+        ASSERT_LE(aggregateEnd, primitiveData.size());
+
+        auto computeExpectedAggregate = [&expectedData](MeshBVHNode const & node) {
+            MeshBVHFwnAggregate aggregate{};
+
+            int const primEnd = node.primStart + node.primCount;
+            for (int triIdx = node.primStart; triIdx < primEnd; ++triIdx)
+            {
+                auto const & tri = expectedData.triangles[static_cast<size_t>(triIdx)];
+                float const ex = tri.v1.x - tri.v0.x;
+                float const ey = tri.v1.y - tri.v0.y;
+                float const ez = tri.v1.z - tri.v0.z;
+                float const fx = tri.v2.x - tri.v0.x;
+                float const fy = tri.v2.y - tri.v0.y;
+                float const fz = tri.v2.z - tri.v0.z;
+                float const cx = ey * fz - ez * fy;
+                float const cy = ez * fx - ex * fz;
+                float const cz = ex * fy - ey * fx;
+                float const area = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+
+                aggregate.weightedNormalSum.x += 2.0f * area * tri.faceNormal.x;
+                aggregate.weightedNormalSum.y += 2.0f * area * tri.faceNormal.y;
+                aggregate.weightedNormalSum.z += 2.0f * area * tri.faceNormal.z;
+                aggregate.areaCentroid.x += area * (tri.v0.x + tri.v1.x + tri.v2.x) * (1.0f / 3.0f);
+                aggregate.areaCentroid.y += area * (tri.v0.y + tri.v1.y + tri.v2.y) * (1.0f / 3.0f);
+                aggregate.areaCentroid.z += area * (tri.v0.z + tri.v1.z + tri.v2.z) * (1.0f / 3.0f);
+                aggregate.areaCentroid.w += area;
+            }
+
+            if (aggregate.areaCentroid.w > 0.0f)
+            {
+                float const centerX = aggregate.areaCentroid.x / aggregate.areaCentroid.w;
+                float const centerY = aggregate.areaCentroid.y / aggregate.areaCentroid.w;
+                float const centerZ = aggregate.areaCentroid.z / aggregate.areaCentroid.w;
+                float radiusSq = 0.0f;
+                auto includeVertex = [&](float4 const & vertex) {
+                    float const dx = vertex.x - centerX;
+                    float const dy = vertex.y - centerY;
+                    float const dz = vertex.z - centerZ;
+                    radiusSq = std::max(radiusSq, dx * dx + dy * dy + dz * dz);
+                };
+
+                for (int triIdx = node.primStart; triIdx < primEnd; ++triIdx)
+                {
+                    auto const & tri = expectedData.triangles[static_cast<size_t>(triIdx)];
+                    includeVertex(tri.v0);
+                    includeVertex(tri.v1);
+                    includeVertex(tri.v2);
+                }
+                aggregate.weightedNormalSum.w = std::sqrt(radiusSq);
+            }
+
+            return aggregate;
+        };
+
+        constexpr float kTolerance = 5.0e-4f;
+        for (size_t nodeIdx = 0; nodeIdx < expectedData.nodes.size(); ++nodeIdx)
+        {
+            auto const & node = expectedData.nodes[nodeIdx];
+            ASSERT_GE(node.primStart, 0) << "node " << nodeIdx;
+            ASSERT_GT(node.primCount, 0) << "node " << nodeIdx;
+            ASSERT_LE(node.primStart + node.primCount, params.triCount) << "node " << nodeIdx;
+
+            auto const expected = computeExpectedAggregate(node);
+            size_t const offset = aggregateStart + nodeIdx * 8u;
+            EXPECT_NEAR(primitiveData[offset + 0], expected.weightedNormalSum.x, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 1], expected.weightedNormalSum.y, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 2], expected.weightedNormalSum.z, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 3], expected.weightedNormalSum.w, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 4], expected.areaCentroid.x, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 5], expected.areaCentroid.y, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 6], expected.areaCentroid.z, kTolerance) << "node " << nodeIdx;
+            EXPECT_NEAR(primitiveData[offset + 7], expected.areaCentroid.w, kTolerance) << "node " << nodeIdx;
+        }
+    }
+
     /// Validate that voxel grid stores actual triangle indices (not placeholders)
     /// This test verifies the voxel acceleration fast path can be used
     TEST_F(MeshSdfPerformance_Test, VoxelGrid_StoresValidTriangleIndices)

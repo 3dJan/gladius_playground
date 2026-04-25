@@ -666,6 +666,12 @@ namespace gladius
         /// @return Number of grids successfully built
         size_t buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams);
 
+        /// Build Fast-Winding-Number aggregate buffers for spatial mesh resources.
+        /// This is a prerequisite for FWN rendering and sign-cache construction.
+        /// @param buildParams Vector of build parameters from ResourceManager::collectFwnAggregateBuildParams()
+        /// @return Number of aggregate buffers successfully built
+        size_t buildMeshFwnAggregates(std::vector<MeshFwnAggregateBuildParams> const & buildParams);
+
         /// Queue bounded coarse FWN sign-cache build steps for spatial mesh resources.
         /// The kernels and final ready-offset patch are queued without waiting;
         /// until the ready patch executes, the render kernel sees offset 0 and
