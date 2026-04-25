@@ -394,10 +394,73 @@ namespace gladius::tests
         EXPECT_GE(params->signCacheReadyOffset, 0);
         EXPECT_GT(params->nodesOffset, 0);
         EXPECT_GT(params->trianglesOffset, 0);
+        EXPECT_GT(params->normalsOffset, 0);
+        EXPECT_GT(params->indicesOffset, 0);
+        EXPECT_GT(params->edgeNeighborsOffset, 0);
         EXPECT_GT(params->fwnAggregatesOffset, 0);
         EXPECT_GT(params->nodeCount, 0);
+        EXPECT_GT(params->triCount, 0);
+        EXPECT_GT(params->vertexNormalCount, 0);
         EXPECT_EQ(params->resolution, 64);
-        EXPECT_EQ(params->wordCount, 8192);
+        EXPECT_EQ(params->wordCount, 16384);
+        EXPECT_EQ(params->baseWord, 0);
+        EXPECT_EQ(params->wordsToBuild, 512);
+        EXPECT_FALSE(params->completesBuild);
+        EXPECT_FLOAT_EQ(params->fwnBeta, resource.evaluationConfig().fwnBeta);
+    }
+
+    TEST_F(SpatialMeshResource_Test, SignCacheBuildParams_AfterFwnBetaChange_UsesCurrentBeta)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{206}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        EXPECT_FALSE(resource.usesFwnSignCache());
+
+        MeshSdfEvaluationConfig cfg = resource.evaluationConfig();
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        cfg.fwnBeta = 3.5f;
+        EXPECT_TRUE(resource.setEvaluationConfig(cfg));
+        EXPECT_TRUE(resource.usesFwnSignCache());
+
+        auto const params = resource.getSignCacheBuildParams();
+        ASSERT_TRUE(params.has_value());
+        EXPECT_FLOAT_EQ(params->fwnBeta, 3.5f);
+        EXPECT_GE(params->signCacheBetaOffset, 0);
+        EXPECT_TRUE(resource.needsSignCacheBuild());
+    }
+
+    TEST_F(SpatialMeshResource_Test, SignCacheBuildProgress_AfterQueuedStep_AdvancesIncrementally)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        ResourceKey key(ResourceId{207}, ResourceType::Unknown);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        MeshSdfEvaluationConfig cfg = resource.evaluationConfig();
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        ASSERT_TRUE(resource.setEvaluationConfig(cfg));
+
+        auto firstParams = resource.getSignCacheBuildParams();
+        ASSERT_TRUE(firstParams.has_value());
+        ASSERT_FALSE(firstParams->completesBuild);
+        resource.markSignCacheBuildQueued(*firstParams);
+
+        auto secondParams = resource.getSignCacheBuildParams();
+        ASSERT_TRUE(secondParams.has_value());
+        EXPECT_EQ(secondParams->baseWord, firstParams->baseWord + firstParams->wordsToBuild);
+        EXPECT_TRUE(resource.needsSignCacheBuild());
+
+        MeshSignCacheBuildParams finalParams = *secondParams;
+        finalParams.baseWord = finalParams.wordCount - finalParams.wordsToBuild;
+        finalParams.completesBuild = true;
+        resource.markSignCacheBuildQueued(finalParams);
+        EXPECT_FALSE(resource.needsSignCacheBuild());
     }
 
     TEST_F(SpatialMeshResource_Test, EvaluationConfig_PureBVH_DoesNotRebuild)

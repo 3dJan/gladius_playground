@@ -41,6 +41,25 @@ namespace gladius::tests
                 {0, 1, 5}, {0, 5, 4}, // -y
             };
         }
+
+        double signedVolume(std::vector<float4> const & vertices,
+                            std::vector<TriangleIndices> const & indices)
+        {
+            double volume6 = 0.0;
+            for (auto const & t : indices)
+            {
+                float4 const & a = vertices[static_cast<std::size_t>(t.i0)];
+                float4 const & b = vertices[static_cast<std::size_t>(t.i1)];
+                float4 const & c = vertices[static_cast<std::size_t>(t.i2)];
+                volume6 += static_cast<double>(a.x) *
+                                (static_cast<double>(b.y) * c.z - static_cast<double>(b.z) * c.y) +
+                            static_cast<double>(a.y) *
+                                (static_cast<double>(b.z) * c.x - static_cast<double>(b.x) * c.z) +
+                            static_cast<double>(a.z) *
+                                (static_cast<double>(b.x) * c.y - static_cast<double>(b.y) * c.x);
+            }
+            return volume6 / 6.0;
+        }
     } // namespace
 
     // ========================================================================
@@ -146,6 +165,23 @@ namespace gladius::tests
         std::vector<TriangleIndices> indices = cubeIndices();
         std::size_t const flipped = mesh_repair::orientConsistently(vertices, indices);
         EXPECT_EQ(flipped, 0u);
+        EXPECT_GT(signedVolume(vertices, indices), 0.0);
+    }
+
+    TEST(MeshRepair_OrientConsistently, InwardClosedCube_FlipsOutward)
+    {
+        std::vector<float4> vertices = cubeVertices();
+        std::vector<TriangleIndices> indices = cubeIndices();
+        for (auto & tri : indices)
+        {
+            std::swap(tri.i1, tri.i2);
+        }
+        ASSERT_LT(signedVolume(vertices, indices), 0.0);
+
+        std::size_t const flipped = mesh_repair::orientConsistently(vertices, indices);
+
+        EXPECT_EQ(flipped, 12u);
+        EXPECT_GT(signedVolume(vertices, indices), 0.0);
     }
 
     // ========================================================================
@@ -178,6 +214,28 @@ namespace gladius::tests
 
         EXPECT_EQ(r.filled, 0u);
         EXPECT_EQ(r.added, 0u);
+    }
+
+    TEST(MeshRepair_FillSmallHoles, TouchingBoundaryLoops_BothFilled)
+    {
+        std::vector<float4> vertices = {
+            {0.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+            {1.f, 1.f, 0.f, 0.f},
+            {0.f, 1.f, 0.f, 0.f},
+            {0.f, 0.f, 1.f, 0.f},
+            {1.f, 0.f, 1.f, 0.f},
+            {0.f, 1.f, 1.f, 0.f},
+        };
+        std::vector<TriangleIndices> indices = {
+            {0, 1, 2}, {0, 2, 3},
+            {0, 4, 5}, {0, 5, 6},
+        };
+
+        auto const r = mesh_repair::fillSmallHoles(vertices, indices, 10.f);
+
+        EXPECT_EQ(r.filled, 2u);
+        EXPECT_EQ(r.added, 8u);
     }
 
     // ========================================================================

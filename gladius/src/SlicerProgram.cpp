@@ -425,7 +425,7 @@ namespace gladius
 
         swapProgramsIfNeeded();
 
-        if (params.wordCount <= 0 || params.resolution <= 0)
+        if (params.wordCount <= 0 || params.wordsToBuild <= 0 || params.resolution <= 0)
         {
             return false;
         }
@@ -436,15 +436,17 @@ namespace gladius
         }
 
         // Build in small word batches to avoid a single long-running kernel
-        // that could trip the display-driver watchdog. One word = 32 cells;
-        // 64 words = 2048 FWN samples per kernel launch.
+        // that could trip the display-driver watchdog. One word = 16 two-bit
+        // cells; 64 words = 1024 conservative cache-cell samples per launch.
         int constexpr wordsPerBatch = 64;
         cl::CommandQueue const & queue = m_ComputeContext->GetQueue();
         cl::NDRange const origin = {0, 0, 0};
 
-        for (int baseWord = 0; baseWord < params.wordCount; baseWord += wordsPerBatch)
+        int const firstWord = std::clamp(params.baseWord, 0, params.wordCount);
+        int const lastWord = std::min(params.wordCount, firstWord + params.wordsToBuild);
+        for (int baseWord = firstWord; baseWord < lastWord; baseWord += wordsPerBatch)
         {
-            int const batchWordCount = std::min(wordsPerBatch, params.wordCount - baseWord);
+            int const batchWordCount = std::min(wordsPerBatch, lastWord - baseWord);
             cl::NDRange const globalRange = {static_cast<size_t>(batchWordCount), 1, 1};
 
             cl::Event const event = m_programFront->runNonBlocking(queue,
@@ -456,18 +458,29 @@ namespace gladius
                                                                     static_cast<cl_int>(params.signCacheDataOffset),
                                                                     static_cast<cl_int>(params.nodesOffset),
                                                                     static_cast<cl_int>(params.trianglesOffset),
+                                                                    static_cast<cl_int>(params.normalsOffset),
+                                                                    static_cast<cl_int>(params.indicesOffset),
+                                                                    static_cast<cl_int>(params.edgeNeighborsOffset),
                                                                     static_cast<cl_int>(params.fwnAggregatesOffset),
                                                                     static_cast<cl_int>(params.nodeCount),
+                                                                    static_cast<cl_int>(params.triCount),
+                                                                    static_cast<cl_int>(params.vertexNormalCount),
                                                                     static_cast<cl_int>(params.resolution),
                                                                     static_cast<cl_int>(baseWord),
-                                                                    static_cast<cl_int>(params.wordCount));
+                                                                    static_cast<cl_int>(params.wordCount),
+                                                                    static_cast<cl_float>(params.fwnBeta));
             if (!event())
             {
                 return false;
             }
         }
 
-        // Flip the ready offset only after all chunk kernels above complete.
+        if (!params.completesBuild)
+        {
+            return true;
+        }
+
+        // Flip the ready offset only after the final chunk kernels above complete.
         // The command queue is in-order, so any later render kernel sees either
         // offset 0 (not ready) or a fully built bitmap.
         cl::Event const readyEvent = m_programFront->runNonBlocking(queue,
@@ -476,7 +489,9 @@ namespace gladius
                                                                     cl::NDRange{1, 1, 1},
                                                                     primitives.data.getBuffer(),
                                                                     static_cast<cl_int>(params.signCacheReadyOffset),
-                                                                    static_cast<cl_int>(params.signCacheDataOffset));
+                                                                    static_cast<cl_int>(params.signCacheDataOffset),
+                                                                    static_cast<cl_int>(params.signCacheBetaOffset),
+                                                                    static_cast<cl_float>(params.fwnBeta));
         if (!readyEvent())
         {
             return false;

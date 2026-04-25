@@ -83,6 +83,31 @@ namespace gladius::mesh_repair
             return EdgeKey{(static_cast<std::uint64_t>(hi) << 32) |
                            static_cast<std::uint64_t>(lo)};
         }
+
+        inline bool triangleIndicesValid(std::vector<float4> const & vertices,
+                                         TriangleIndices const & t) noexcept
+        {
+            return t.i0 >= 0 && t.i1 >= 0 && t.i2 >= 0 &&
+                   static_cast<std::size_t>(t.i0) < vertices.size() &&
+                   static_cast<std::size_t>(t.i1) < vertices.size() &&
+                   static_cast<std::size_t>(t.i2) < vertices.size();
+        }
+
+        inline double signedVolume6(float4 const & a, float4 const & b, float4 const & c)
+        {
+            double const ax = a.x;
+            double const ay = a.y;
+            double const az = a.z;
+            double const bx = b.x;
+            double const by = b.y;
+            double const bz = b.z;
+            double const cx = c.x;
+            double const cy = c.y;
+            double const cz = c.z;
+            return ax * (by * cz - bz * cy) +
+                   ay * (bz * cx - bx * cz) +
+                   az * (bx * cy - by * cx);
+        }
     } // namespace
 
     // ========================================================================
@@ -224,28 +249,6 @@ namespace gladius::mesh_repair
         }
         std::size_t const triCount = indices.size();
 
-        // Build directed-edge → triangle map. A consistently oriented manifold
-        // produces opposing directed edges between any pair of neighbouring
-        // triangles; matching directions indicates a needed flip.
-        struct DirectedEdgeKey
-        {
-            std::uint64_t key;
-            bool operator==(DirectedEdgeKey const & o) const noexcept { return key == o.key; }
-        };
-        struct DirectedEdgeKeyHash
-        {
-            std::size_t operator()(DirectedEdgeKey const & k) const noexcept
-            {
-                return std::hash<std::uint64_t>{}(k.key);
-            }
-        };
-        auto const dirKey = [](int a, int b)
-        {
-            return DirectedEdgeKey{
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(a)) << 32) |
-                static_cast<std::uint64_t>(static_cast<std::uint32_t>(b))};
-        };
-
         // Adjacency: for each triangle, list of (neighbourTri, sameDirection?).
         std::vector<std::vector<std::pair<int, bool>>> adj(triCount);
 
@@ -321,17 +324,42 @@ namespace gladius::mesh_repair
             }
         }
 
+        std::vector<bool> componentClosed(components.size(), true);
+        for (auto const & [_, refs] : undirected)
+        {
+            (void) _;
+            if (refs.size() == 2u)
+            {
+                continue;
+            }
+            for (auto const & ref : refs)
+            {
+                int const compId = componentOf[static_cast<std::size_t>(ref.first)];
+                if (compId >= 0)
+                {
+                    componentClosed[static_cast<std::size_t>(compId)] = false;
+                }
+            }
+        }
+
         // Per-component majority area vote: sum the areas of triangles whose
         // current orientation matches the seed (flipRelative=false) versus those
-        // that would be flipped. Whichever group has more area wins.
-        std::size_t flipCount = 0u;
-        for (auto const & comp : components)
+        // that would be flipped. Whichever group has more area wins. For closed
+        // manifold components, add a global signed-volume pass so the final
+        // orientation is outward, not merely internally consistent.
+        std::vector<bool> finalFlip(triCount, false);
+        for (std::size_t compIndex = 0; compIndex < components.size(); ++compIndex)
         {
+            auto const & comp = components[compIndex];
             float keepArea = 0.f;
             float flipArea = 0.f;
             for (int triIdx : comp)
             {
                 auto const & t = indices[static_cast<std::size_t>(triIdx)];
+                if (!triangleIndicesValid(vertices, t))
+                {
+                    continue;
+                }
                 float const a = triangleArea(vertices[static_cast<std::size_t>(t.i0)],
                                              vertices[static_cast<std::size_t>(t.i1)],
                                              vertices[static_cast<std::size_t>(t.i2)]);
@@ -349,14 +377,49 @@ namespace gladius::mesh_repair
             bool const invertComponent = (flipArea > keepArea);
             for (int triIdx : comp)
             {
-                bool const finalFlip =
+                finalFlip[static_cast<std::size_t>(triIdx)] =
                     (flipRelative[static_cast<std::size_t>(triIdx)] != invertComponent);
-                if (finalFlip)
+            }
+
+            if (!componentClosed[compIndex])
+            {
+                continue;
+            }
+
+            double volume6 = 0.0;
+            for (int triIdx : comp)
+            {
+                auto const & t = indices[static_cast<std::size_t>(triIdx)];
+                if (!triangleIndicesValid(vertices, t))
                 {
-                    auto & t = indices[static_cast<std::size_t>(triIdx)];
-                    std::swap(t.i1, t.i2);
-                    ++flipCount;
+                    continue;
                 }
+                bool const flip = finalFlip[static_cast<std::size_t>(triIdx)];
+                int const i0 = t.i0;
+                int const i1 = flip ? t.i2 : t.i1;
+                int const i2 = flip ? t.i1 : t.i2;
+                volume6 += signedVolume6(vertices[static_cast<std::size_t>(i0)],
+                                         vertices[static_cast<std::size_t>(i1)],
+                                         vertices[static_cast<std::size_t>(i2)]);
+            }
+            if (volume6 < 0.0)
+            {
+                for (int triIdx : comp)
+                {
+                    auto const idx = static_cast<std::size_t>(triIdx);
+                    finalFlip[idx] = !finalFlip[idx];
+                }
+            }
+        }
+
+        std::size_t flipCount = 0u;
+        for (std::size_t triIdx = 0; triIdx < triCount; ++triIdx)
+        {
+            if (finalFlip[triIdx])
+            {
+                auto & t = indices[triIdx];
+                std::swap(t.i1, t.i2);
+                ++flipCount;
             }
         }
         return flipCount;
@@ -377,8 +440,8 @@ namespace gladius::mesh_repair
         }
 
         // Collect boundary directed edges: any directed edge (a,b) for which
-        // the opposing (b,a) does not exist. Build a successor map next[a] = b
-        // along the boundary so we can walk loops.
+        // the opposing (b,a) does not exist. Store all successors per start
+        // vertex so bow-tie/touching holes do not silently drop edges.
         std::unordered_set<std::uint64_t> directedEdges;
         directedEdges.reserve(indices.size() * 3u);
         auto const dirHash = [](int a, int b)
@@ -393,15 +456,17 @@ namespace gladius::mesh_repair
             directedEdges.insert(dirHash(t.i2, t.i0));
         }
 
-        std::unordered_map<int, int> boundaryNext;
-        boundaryNext.reserve(64u);
+        std::unordered_map<int, std::vector<int>> boundaryNext;
+        boundaryNext.reserve(indices.size() * 3u);
+        std::size_t boundaryEdgeCount = 0u;
         for (auto const & t : indices)
         {
             auto const tryAdd = [&](int a, int b)
             {
                 if (directedEdges.find(dirHash(b, a)) == directedEdges.end())
                 {
-                    boundaryNext.emplace(a, b);
+                    boundaryNext[a].push_back(b);
+                    ++boundaryEdgeCount;
                 }
             };
             tryAdd(t.i0, t.i1);
@@ -409,89 +474,122 @@ namespace gladius::mesh_repair
             tryAdd(t.i2, t.i0);
         }
 
-        // Walk closed loops along boundaryNext.
-        std::unordered_set<int> visited;
-        visited.reserve(boundaryNext.size());
+        // Walk closed loops along boundaryNext. Track consumed directed edges,
+        // not visited vertices, because multiple valid boundary loops can share
+        // a vertex in non-manifold input.
+        std::unordered_set<std::uint64_t> consumedEdges;
+        consumedEdges.reserve(boundaryEdgeCount);
 
         for (auto const & entry : boundaryNext)
         {
             int const start = entry.first;
-            if (visited.count(start) != 0u)
+            for (int const firstNext : entry.second)
             {
-                continue;
-            }
-            // Trace loop
-            std::vector<int> loop;
-            loop.reserve(8u);
-            int cur = start;
-            bool closed = false;
-            while (true)
-            {
-                if (visited.count(cur) != 0u)
+                if (consumedEdges.count(dirHash(start, firstNext)) != 0u)
                 {
-                    closed = (cur == start) && !loop.empty();
-                    break;
+                    continue;
                 }
-                visited.insert(cur);
-                loop.push_back(cur);
-                auto const it = boundaryNext.find(cur);
-                if (it == boundaryNext.end())
-                {
-                    break;
-                }
-                cur = it->second;
-                if (cur == start)
-                {
-                    closed = true;
-                    break;
-                }
-                if (loop.size() > boundaryNext.size())
-                {
-                    break; // safety
-                }
-            }
-            if (!closed || loop.size() < 3u)
-            {
-                continue;
-            }
 
-            // Compute perimeter and centroid.
-            float perimeter = 0.f;
-            float cx = 0.f, cy = 0.f, cz = 0.f;
-            for (std::size_t i = 0; i < loop.size(); ++i)
-            {
-                float4 const & a = vertices[static_cast<std::size_t>(loop[i])];
-                float4 const & b = vertices[static_cast<std::size_t>(loop[(i + 1u) % loop.size()])];
-                float const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
-                perimeter += std::sqrt(dx * dx + dy * dy + dz * dz);
-                cx += a.x;
-                cy += a.y;
-                cz += a.z;
-            }
-            if (perimeter > maxPerimeter)
-            {
-                continue; // intentional opening, leave alone
-            }
-            float const inv = 1.f / static_cast<float>(loop.size());
-            cx *= inv;
-            cy *= inv;
-            cz *= inv;
+                // Trace one boundary cycle starting from this directed edge.
+                std::vector<int> loop;
+                loop.reserve(8u);
+                std::vector<std::uint64_t> pathEdges;
+                pathEdges.reserve(8u);
+                std::unordered_set<int> loopVertices;
+                loopVertices.reserve(8u);
 
-            // Add centroid vertex and fan-triangulate. The boundary walk follows
-            // the directed edge (a→b) that the surrounding mesh has left
-            // unmatched. To close it, the new fan triangle must contribute the
-            // OPPOSITE directed edge (b→a), so we wind the fan as
-            // (a, centroid, b) — its edges are a→centroid, centroid→b, b→a.
-            int const centroidIdx = static_cast<int>(vertices.size());
-            vertices.push_back(float4{cx, cy, cz, 0.f});
-            for (std::size_t i = 0; i < loop.size(); ++i)
-            {
-                int const a = loop[i];
-                int const b = loop[(i + 1u) % loop.size()];
-                indices.push_back(TriangleIndices{a, centroidIdx, b});
+                int cur = start;
+                int next = firstNext;
+                bool closed = false;
+                while (pathEdges.size() <= boundaryEdgeCount)
+                {
+                    std::uint64_t const edge = dirHash(cur, next);
+                    if (consumedEdges.count(edge) != 0u)
+                    {
+                        break;
+                    }
+                    pathEdges.push_back(edge);
+                    if (loop.empty())
+                    {
+                        loop.push_back(cur);
+                        loopVertices.insert(cur);
+                    }
+                    if (next == start)
+                    {
+                        closed = true;
+                        break;
+                    }
+                    if (loopVertices.count(next) != 0u)
+                    {
+                        break;
+                    }
+                    loop.push_back(next);
+                    loopVertices.insert(next);
+
+                    auto const it = boundaryNext.find(next);
+                    if (it == boundaryNext.end())
+                    {
+                        break;
+                    }
+                    auto const & candidates = it->second;
+                    auto const nextIt = std::find_if(candidates.begin(),
+                                                     candidates.end(),
+                                                     [&](int candidate)
+                                                     {
+                                                         return consumedEdges.count(
+                                                                    dirHash(next, candidate)) == 0u;
+                                                     });
+                    if (nextIt == candidates.end())
+                    {
+                        break;
+                    }
+                    cur = next;
+                    next = *nextIt;
+                }
+                if (!closed || loop.size() < 3u)
+                {
+                    continue;
+                }
+                consumedEdges.insert(pathEdges.begin(), pathEdges.end());
+
+                // Compute perimeter and centroid.
+                float perimeter = 0.f;
+                float cx = 0.f, cy = 0.f, cz = 0.f;
+                for (std::size_t i = 0; i < loop.size(); ++i)
+                {
+                    float4 const & a = vertices[static_cast<std::size_t>(loop[i])];
+                    float4 const & b = vertices[static_cast<std::size_t>(loop[(i + 1u) % loop.size()])];
+                    float const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+                    perimeter += std::sqrt(dx * dx + dy * dy + dz * dz);
+                    cx += a.x;
+                    cy += a.y;
+                    cz += a.z;
+                }
+                if (perimeter > maxPerimeter)
+                {
+                    continue; // intentional opening, leave alone
+                }
+                float const inv = 1.f / static_cast<float>(loop.size());
+                cx *= inv;
+                cy *= inv;
+                cz *= inv;
+
+                // Add centroid vertex and fan-triangulate. The boundary walk follows
+                // the directed edge (a→b) that the surrounding mesh has left
+                // unmatched. To close it, the new fan triangle must contribute the
+                // OPPOSITE directed edge (b→a), so we wind the fan as
+                // (a, centroid, b) — its edges are a→centroid, centroid→b, b→a.
+                int const centroidIdx = static_cast<int>(vertices.size());
+                vertices.push_back(float4{cx, cy, cz, 0.f});
+                for (std::size_t i = 0; i < loop.size(); ++i)
+                {
+                    int const a = loop[i];
+                    int const b = loop[(i + 1u) % loop.size()];
+                    indices.push_back(TriangleIndices{a, centroidIdx, b});
+                }
+                result.added += loop.size();
+                ++result.filled;
             }
-            result.added += loop.size();
-            ++result.filled;
         }
         return result;
     }

@@ -1227,8 +1227,7 @@ inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 ///
 /// **Front-to-back traversal**: when both children are pushed, the closer
 /// one (by AABB distance) is pushed last so it is popped first. Closer
-/// subtrees contribute more winding mass earlier, letting the
-/// |windingSum| > 0.75 early-exit fire sooner for inside points.
+/// subtrees contribute more winding mass earlier for inside points.
 ///
 /// @param beta Barnes-Hut acceptance threshold (typical 1.5 – 4.0).
 /// @param unsignedDist Unsigned distance from @p pos to the surface (for
@@ -1316,14 +1315,6 @@ inline float fwnHierarchical(float3 pos,
             float3 const N = 0.5f * wnRadius.xyz;
             windingSum += invFourPi * dot(diff, N) * invDistCubed;
 
-            // Early-exit: once |windingSum| exceeds 0.75 the sign decision is
-            // locked-in (the remaining stack would have to contribute > 0.25 to
-            // flip the threshold check at 0.5). For closed meshes with nominal
-            // winding ≈ {0, 1} this saves the rest of the traversal entirely.
-            if (fabs(windingSum) > 0.75f)
-            {
-                return windingSum;
-            }
             continue;
         }
 
@@ -1392,10 +1383,13 @@ inline int lookupFwnSignCache(float3 pos,
                               int nodesOffset,
                               int signCacheDataOffset,
                               int signCacheResolution,
+                              float signCacheBeta,
                               float unsignedDist,
+                              float runtimeBeta,
                               __global float const * data)
 {
-    if (signCacheDataOffset <= 0 || signCacheResolution <= 0 || unsignedDist <= 0.0f)
+    if (signCacheDataOffset <= 0 || signCacheResolution <= 0 || unsignedDist <= 0.0f ||
+        fabs(signCacheBeta - runtimeBeta) > 1.0e-4f)
     {
         return 0;
     }
@@ -1420,7 +1414,7 @@ inline int lookupFwnSignCache(float3 pos,
 
     float3 const cellSize = extent / (float)signCacheResolution;
     float const cellDiag = length(cellSize);
-    if (unsignedDist <= 2.0f * cellDiag)
+    if (unsignedDist <= 0.5f * cellDiag)
     {
         return 0;
     }
@@ -1429,12 +1423,16 @@ inline int lookupFwnSignCache(float3 pos,
     cell = clamp(cell, (int3)(0), (int3)(signCacheResolution - 1));
 
     int const cellIndex = cell.x + signCacheResolution * (cell.y + signCacheResolution * cell.z);
-    int const wordIndex = cellIndex >> 5;
-    int const bitIndex = cellIndex & 31;
+    int const wordIndex = cellIndex >> 4;
+    int const bitShift = (cellIndex & 15) * 2;
     __global uint const * signCacheWords = (__global uint const *)(data + signCacheDataOffset);
     uint const word = signCacheWords[wordIndex];
-    bool const inside = ((word >> bitIndex) & 1u) != 0u;
-    return inside ? 1 : -1;
+    uint const state = (word >> bitShift) & 3u;
+    if (state == 0u)
+    {
+        return 0;
+    }
+    return (state == 2u) ? 1 : -1;
 }
 
 /// Signed distance via Fast Winding Number sign + closest-point magnitude.
@@ -1463,6 +1461,7 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int voxelDataOffset,
                                               int signCacheDataOffset,
                                               int signCacheResolution,
+                                              float signCacheBeta,
                                               int nodeCount,
                                               int triCount,
                                               int vertexNormalCount,
@@ -1509,12 +1508,14 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
 
     // Coarse sign cache: once populated, this skips the winding traversal for
     // points that are far enough from the surface not to share a cache cell
-    // with it. The lookup itself applies the 2*cellDiag safety gate.
+    // with it. The lookup itself applies a conservative half-cell-diagonal gate.
     int const cachedSign = lookupFwnSignCache(pos,
                                               nodesOffset,
                                               signCacheDataOffset,
                                               signCacheResolution,
+                                              signCacheBeta,
                                               unsignedDist,
+                                              beta,
                                               data);
     if (cachedSign != 0)
     {
@@ -1617,8 +1618,8 @@ __kernel void buildMeshVoxelGrid(
     primitiveData[outputIdx + 1] = signedDist;
 }
 
-/// Build a coarse one-bit FWN sign cache.
-/// Each work item writes one 32-bit word (32 cache cells) to avoid atomics.
+/// Build a coarse conservative FWN sign cache.
+/// Each work item writes one 32-bit word (16 two-bit cache cells) to avoid atomics.
 /// The host queues this kernel in small word batches to avoid long-running
 /// kernels on display GPUs.
 __kernel void buildMeshSignCache(__global float * primitiveData,
@@ -1626,11 +1627,17 @@ __kernel void buildMeshSignCache(__global float * primitiveData,
                                  int signCacheDataOffset,
                                  int nodesOffset,
                                  int trianglesOffset,
+                                 int normalsOffset,
+                                 int indicesOffset,
+                                 int edgeNeighborsOffset,
                                  int fwnAggregatesOffset,
                                  int nodeCount,
+                                 int triCount,
+                                 int vertexNormalCount,
                                  int resolution,
                                  int baseWord,
-                                 int wordCount)
+                                 int wordCount,
+                                 float beta)
 {
     int const wordIndex = baseWord + (int)get_global_id(0);
     if (wordIndex >= wordCount || resolution <= 0 || nodeCount <= 0)
@@ -1655,13 +1662,14 @@ __kernel void buildMeshSignCache(__global float * primitiveData,
 
     int const cellsPerSlice = resolution * resolution;
     int const cellCount = cellsPerSlice * resolution;
-    int const firstCell = wordIndex * 32;
+    int const firstCell = wordIndex * 16;
     float3 const cellSize = extent / (float)resolution;
+    float const cellDiag = length(cellSize);
     uint bits = 0u;
 
-    for (int bit = 0; bit < 32; ++bit)
+    for (int cellInWord = 0; cellInWord < 16; ++cellInWord)
     {
-        int const cellIndex = firstCell + bit;
+        int const cellIndex = firstCell + cellInWord;
         if (cellIndex >= cellCount)
         {
             break;
@@ -1675,18 +1683,32 @@ __kernel void buildMeshSignCache(__global float * primitiveData,
         float3 const pos = bboxMin + ((float3)((float)x + 0.5f,
                                                (float)y + 0.5f,
                                                (float)z + 0.5f) * cellSize);
+        float2 const closest = spatialMeshSDF_Core(pos,
+                                                   nodesOffset,
+                                                   trianglesOffset,
+                                                   normalsOffset,
+                                                   indicesOffset,
+                                                   edgeNeighborsOffset,
+                                                   nodeCount,
+                                                   triCount,
+                                                   vertexNormalCount,
+                                                   primitiveData,
+                                                   0.0f);
+        if (fabs(closest.x) <= 0.5f * cellDiag)
+        {
+            continue; // Unknown: cell may contain or touch the surface.
+        }
+
         float const winding = fwnHierarchical(pos,
                                               nodesOffset,
                                               trianglesOffset,
                                               fwnAggregatesOffset,
                                               nodeCount,
                                               primitiveData,
-                                              2.0f,
+                                              beta,
                                               0.0f);
-        if (winding > 0.5f)
-        {
-            bits |= (1u << bit);
-        }
+        uint const state = (winding > 0.5f) ? 2u : 1u;
+        bits |= state << (cellInWord * 2);
     }
 
     signCacheWords[wordIndex] = bits;
@@ -1697,8 +1719,11 @@ __kernel void buildMeshSignCache(__global float * primitiveData,
 /// after the bitmap has been fully populated.
 __kernel void markMeshSignCacheReady(__global float * primitiveData,
                                      int signCacheReadyOffset,
-                                     int signCacheDataOffset)
+                                     int signCacheDataOffset,
+                                     int signCacheBetaOffset,
+                                     float beta)
 {
+    primitiveData[signCacheBetaOffset] = beta;
     primitiveData[signCacheReadyOffset] = (float)signCacheDataOffset;
 }
 

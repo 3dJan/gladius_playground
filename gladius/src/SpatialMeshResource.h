@@ -119,16 +119,27 @@ namespace gladius
         /// Check if FWN sign-cache build is needed
         [[nodiscard]] bool needsSignCacheBuild() const { return m_needsSignCacheBuild; }
 
-        /// Mark FWN sign-cache build as queued. The queued
-        /// markMeshSignCacheReady kernel patches @ref signCacheReadyHostOffset()
-        /// on the GPU buffer once the bitmap is fully populated.
-        void markSignCacheBuilt() { m_needsSignCacheBuild = false; }
+        /// Check whether the current evaluation method can consume the FWN sign cache.
+        [[nodiscard]] bool usesFwnSignCache() const noexcept
+        {
+            return m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        }
+
+        /// Advance FWN sign-cache build progress after a build step was queued.
+        /// The final step queues markMeshSignCacheReady, which patches
+        /// @ref signCacheReadyHostOffset() on the GPU buffer once the bitmap is
+        /// fully populated.
+        void markSignCacheBuildQueued(MeshSignCacheBuildParams const & params);
 
         /// Absolute primitive-data index of the header slot that holds the
         /// sign-cache data offset. Writing the absolute sign-cache data offset
         /// to this slot in the GPU primitive buffer flips the cache from
         /// "not ready" (0) to "ready" for the kernel.
         [[nodiscard]] int signCacheReadyHostOffset() const;
+
+        /// Absolute primitive-data index of the header slot storing the FWN beta
+        /// used to produce the currently ready sign cache.
+        [[nodiscard]] int signCacheBetaHostOffset() const;
 
       protected:
         /// Serialize to PrimitiveBuffer for GPU access
@@ -158,6 +169,9 @@ namespace gladius
         size_t m_voxelCount = 0;
         size_t m_signCacheDataOffset = 0;
         bool m_needsSignCacheBuild = true;
+        int m_signCacheNextWord = 0;
+
+        void resetSignCacheBuildProgress() noexcept;
 
         /// Active evaluation configuration. Determines whether a voxel grid is
         /// allocated during loadImpl() and at what resolution.

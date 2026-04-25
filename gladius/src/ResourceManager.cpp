@@ -11,6 +11,8 @@
 #include <fmt/format.h>
 #include <lodepng.h>
 
+#include <algorithm>
+
 #include "MeshResourceVdb.h"
 
 namespace gladius
@@ -190,7 +192,9 @@ namespace gladius
             }
 
             auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
-            if (spatialMesh != nullptr && spatialMesh->needsSignCacheBuild())
+            if (spatialMesh != nullptr &&
+                spatialMesh->needsSignCacheBuild() &&
+                spatialMesh->usesFwnSignCache())
             {
                 auto buildParams = spatialMesh->getSignCacheBuildParams();
                 if (buildParams.has_value())
@@ -220,19 +224,29 @@ namespace gladius
         }
     }
 
-    void ResourceManager::markSignCachesBuilt()
+    void ResourceManager::markSignCacheBuildProgress(std::vector<MeshSignCacheBuildParams> const & buildParams,
+                                                     size_t queuedCount)
     {
-        for (auto & [key, resource] : m_resources)
+        size_t const count = std::min(queuedCount, buildParams.size());
+        for (size_t i = 0; i < count; ++i)
         {
-            if (key.getResourceType() != ResourceType::Mesh)
+            auto const & params = buildParams[i];
+            for (auto & [key, resource] : m_resources)
             {
-                continue;
-            }
+                if (key.getResourceType() != ResourceType::Mesh)
+                {
+                    continue;
+                }
 
-            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
-            if (spatialMesh != nullptr && spatialMesh->needsSignCacheBuild())
-            {
-                spatialMesh->markSignCacheBuilt();
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+                if (spatialMesh != nullptr &&
+                    spatialMesh->needsSignCacheBuild() &&
+                    spatialMesh->usesFwnSignCache() &&
+                    spatialMesh->signCacheReadyHostOffset() == params.signCacheReadyOffset)
+                {
+                    spatialMesh->markSignCacheBuildQueued(params);
+                    break;
+                }
             }
         }
     }

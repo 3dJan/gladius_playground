@@ -584,8 +584,8 @@ namespace gladius
 
             CL_ERROR(m_core->getComputeContext()->GetQueue().finish());
 
-            updateMemoryOffsets(); // determines which resources are needed            if
-                                   // (m_primitiveDateNeedsUpdate)
+            updateMemoryOffsets(); // determines which resources are needed
+            if (m_primitiveDateNeedsUpdate)
             {
                 if (m_generatorContext->primitives)
                 {
@@ -622,24 +622,24 @@ namespace gladius
                     m_core->buildMeshVoxelGrids(buildParams);
                 }
 
-                // Queue coarse FWN sign-cache builds. The cache becomes visible
-                // to kernels only after a queued ready-offset patch executes, so
-                // FWN falls back to full winding traversal until the cache is ready.
-                auto signCacheBuildParams = m_generatorContext->resourceManager.collectSignCacheBuildParams();
-                if (!signCacheBuildParams.empty())
+                m_primitiveDateNeedsUpdate = false;
+            }
+
+            // Queue bounded coarse FWN sign-cache work. The cache becomes visible
+            // to kernels only after the final queued ready-offset patch executes,
+            // so FWN falls back to full winding traversal until the cache is ready.
+            auto signCacheBuildParams = m_generatorContext->resourceManager.collectSignCacheBuildParams();
+            if (!signCacheBuildParams.empty())
+            {
+                size_t const queuedCount = m_core->buildMeshSignCaches(signCacheBuildParams);
+                if (queuedCount > 0u)
                 {
-                    size_t const queuedCount = m_core->buildMeshSignCaches(signCacheBuildParams);
-                    if (queuedCount == signCacheBuildParams.size())
-                    {
-                        m_generatorContext->resourceManager.markSignCachesBuilt();
-                    }
+                    m_generatorContext->resourceManager.markSignCacheBuildProgress(signCacheBuildParams, queuedCount);
                 }
             }
 
             // update start and end indices
             updateMemoryOffsets();
-
-            m_primitiveDateNeedsUpdate = false;
         }
         catch (std::exception const & e)
         {

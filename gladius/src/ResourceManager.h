@@ -185,8 +185,9 @@ namespace gladius
         /// Mark all SpatialMeshResource instances as having their voxel grids built
         void markVoxelGridsBuilt();
 
-        /// Mark all SpatialMeshResource instances as having their sign-cache builds queued/built
-        void markSignCachesBuilt();
+        /// Advance SpatialMeshResource sign-cache progress for successfully queued build steps
+        void markSignCacheBuildProgress(std::vector<MeshSignCacheBuildParams> const & buildParams,
+                        size_t queuedCount);
 
       private:
         void increaseImageNumber();

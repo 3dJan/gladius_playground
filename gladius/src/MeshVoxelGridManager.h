@@ -31,20 +31,31 @@ namespace gladius
     };
 
     /// Parameters needed to build the FWN coarse sign cache for a spatial mesh
-    /// resource. The cache is a resolution^3 grid of 1-bit sign values used by
-    /// `spatialMeshSDF_FastWindingNumber` to bypass the winding traversal when
-    /// the query is far enough from the surface that a coarse sign suffices.
+    /// resource. The cache is a resolution^3 grid of conservative two-bit cell
+    /// states used by `spatialMeshSDF_FastWindingNumber` to bypass the winding
+    /// traversal when the query is far enough from the surface that a coarse
+    /// sign suffices.
     struct MeshSignCacheBuildParams
     {
         int headerStart;          ///< Mesh header offset in primitive buffer
         int signCacheDataOffset;  ///< Absolute offset where sign-cache words live
         int signCacheReadyOffset; ///< Header slot to flip to signCacheDataOffset on completion
+        int signCacheBetaOffset;  ///< Header slot storing the beta used for this cache
         int nodesOffset;          ///< BVH nodes offset
         int trianglesOffset;      ///< Triangles offset
+        int normalsOffset;        ///< Vertex normals offset
+        int indicesOffset;        ///< Vertex indices offset
+        int edgeNeighborsOffset;  ///< Per-edge adjacent face normals offset
         int fwnAggregatesOffset;  ///< FWN aggregates offset
         int nodeCount;            ///< Number of BVH nodes
+        int triCount;             ///< Number of triangles
+        int vertexNormalCount;    ///< Number of vertex normals
         int resolution;           ///< Cells per axis (currently 64)
-        int wordCount;            ///< Number of 32-bit words in the bitmap
+        int wordCount;            ///< Total number of 32-bit words in the 2-bit cell-state map
+        int baseWord;             ///< First 32-bit word to build in this incremental step
+        int wordsToBuild;         ///< Number of words to build in this incremental step
+        bool completesBuild;      ///< True when this step queues the final cache chunk and ready marker
+        float fwnBeta;            ///< Barnes-Hut beta used while building this cache
     };
     
     /// Builds voxel acceleration grids on the GPU

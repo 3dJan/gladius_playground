@@ -5,6 +5,7 @@
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGrid.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace gladius
@@ -54,11 +55,13 @@ namespace gladius
     {
         m_needsRebuild = true;
         m_needsVoxelGridBuild = true;
+        resetSignCacheBuildProgress();
     }
 
     bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
     {
         bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
+        bool const fwnBetaChanged = m_evaluationConfig.fwnBeta != cfg.fwnBeta;
 
         // Even when the *method* changed, the existing payload may already
         // contain everything the new method needs:
@@ -91,6 +94,13 @@ namespace gladius
         bool const rebuildRequired = resolutionChanged || !newMethodSatisfied;
 
         m_evaluationConfig = cfg;
+        if (cfg.method == MeshSdfMethod::FastWindingNumber && fwnBetaChanged)
+        {
+            // Existing GPU sign caches were generated for the previous beta. Keep
+            // them disabled by the kernel-side beta check and queue a rebuild the
+            // next time post-upload cache work is collected.
+            resetSignCacheBuildProgress();
+        }
         if (rebuildRequired)
         {
             // Drop the cached payload and re-serialise with the new method
@@ -143,16 +153,20 @@ namespace gladius
     static constexpr size_t kFwnAggregatesSlot = 1;    // fwnAggregatesOffset
     static constexpr size_t kSignCacheOffsetSlot = 1;      // signCacheDataOffset (FWN coarse sign cache; 0 = not ready)
     static constexpr size_t kSignCacheResolutionSlot = 1;  // sign cache resolution per axis
-    static constexpr size_t kReservedFloats = 0;           // total trailing block stays 4 floats
+    static constexpr size_t kSignCacheBetaSlot = 1;        // beta used to build the ready sign cache
 
-    /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells
-    /// = 8192 ints = 32 KB per mesh. Hard-coded; no UI knob.
+    /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells.
+    /// Each cell stores a conservative 2-bit state (unknown/outside/inside), so
+    /// this uses 16384 ints = 64 KB per mesh. Hard-coded; no UI knob.
     static constexpr int kSignCacheResolution = 64;
+    static constexpr size_t kSignCacheBitsPerCell = 2;
     static constexpr size_t kSignCacheBitsPerWord = 32;
+    static constexpr size_t kSignCacheCellsPerWord = kSignCacheBitsPerWord / kSignCacheBitsPerCell;
     static constexpr size_t kSignCacheWordCount =
         (static_cast<size_t>(kSignCacheResolution) * kSignCacheResolution * kSignCacheResolution +
-         kSignCacheBitsPerWord - 1) /
-        kSignCacheBitsPerWord;
+         kSignCacheCellsPerWord - 1) /
+        kSignCacheCellsPerWord;
+    static constexpr int kSignCacheWordsPerBuildStep = 512;
 
     static constexpr size_t kBvhOffsetsOffset = kBboxFloats + kCountsFloats;  // 12
     static constexpr size_t kVoxelInfoOffset = kBvhOffsetsOffset + kBvhOffsetsFloats + kVoxelHeaderFloats;  // 26
@@ -160,6 +174,29 @@ namespace gladius
     static constexpr size_t kFwnAggregatesOffsetIndex = kEdgeNeighborsOffsetIndex + kEdgeNeighborsSlot;     // 29
     static constexpr size_t kSignCacheOffsetIndex = kFwnAggregatesOffsetIndex + kFwnAggregatesSlot;         // 30
     static constexpr size_t kSignCacheResolutionIndex = kSignCacheOffsetIndex + kSignCacheOffsetSlot;       // 31
+    static constexpr size_t kSignCacheBetaIndex = kSignCacheResolutionIndex + kSignCacheResolutionSlot;     // 32
+
+    void SpatialMeshResource::resetSignCacheBuildProgress() noexcept
+    {
+        m_needsSignCacheBuild = true;
+        m_signCacheNextWord = 0;
+    }
+
+    void SpatialMeshResource::markSignCacheBuildQueued(MeshSignCacheBuildParams const & params)
+    {
+        if (!m_needsSignCacheBuild || params.signCacheReadyOffset != signCacheReadyHostOffset())
+        {
+            return;
+        }
+
+        int const nextWord = std::max(m_signCacheNextWord, params.baseWord + params.wordsToBuild);
+        m_signCacheNextWord = std::min(nextWord, static_cast<int>(kSignCacheWordCount));
+        if (params.completesBuild || m_signCacheNextWord >= static_cast<int>(kSignCacheWordCount))
+        {
+            m_needsSignCacheBuild = false;
+            m_signCacheNextWord = 0;
+        }
+    }
     
     void SpatialMeshResource::write(Primitives & primitives)
     {
@@ -185,6 +222,7 @@ namespace gladius
         m_payloadData.data[m_headerStart + kSignCacheOffsetIndex] = 0.0f;
         m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] =
             static_cast<float>(kSignCacheResolution);
+        m_payloadData.data[m_headerStart + kSignCacheBetaIndex] = m_evaluationConfig.fwnBeta;
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
@@ -193,7 +231,7 @@ namespace gladius
         // stores zero-filled cache buffers; every primitive upload invalidates the
         // previously built GPU caches and they must be rebuilt/re-enabled.
         m_needsVoxelGridBuild = true;
-        m_needsSignCacheBuild = true;
+        resetSignCacheBuildProgress();
     }
     
     std::optional<MeshVoxelGridBuildParams> SpatialMeshResource::getVoxelGridBuildParams() const
@@ -230,12 +268,22 @@ namespace gladius
         params.headerStart = m_dataBaseOffset + static_cast<int>(m_headerStart);
         params.signCacheDataOffset = m_dataBaseOffset + static_cast<int>(m_signCacheDataOffset);
         params.signCacheReadyOffset = signCacheReadyHostOffset();
+        params.signCacheBetaOffset = signCacheBetaHostOffset();
         params.nodesOffset = m_dataBaseOffset + static_cast<int>(m_nodesOffset);
         params.trianglesOffset = m_dataBaseOffset + static_cast<int>(m_trianglesOffset);
+        params.normalsOffset = m_dataBaseOffset + static_cast<int>(m_normalsOffset);
+        params.indicesOffset = m_dataBaseOffset + static_cast<int>(m_indicesOffset);
+        params.edgeNeighborsOffset = m_dataBaseOffset + static_cast<int>(m_edgeNeighborsOffset);
         params.fwnAggregatesOffset = m_dataBaseOffset + static_cast<int>(m_fwnAggregatesOffset);
         params.nodeCount = static_cast<int>(m_data.nodes.size());
+        params.triCount = static_cast<int>(m_data.triangles.size());
+        params.vertexNormalCount = static_cast<int>(m_data.vertexNormals.size());
         params.resolution = kSignCacheResolution;
         params.wordCount = static_cast<int>(kSignCacheWordCount);
+        params.baseWord = std::clamp(m_signCacheNextWord, 0, params.wordCount);
+        params.wordsToBuild = std::min(kSignCacheWordsPerBuildStep, params.wordCount - params.baseWord);
+        params.completesBuild = (params.baseWord + params.wordsToBuild) >= params.wordCount;
+        params.fwnBeta = m_evaluationConfig.fwnBeta;
 
         return params;
     }
@@ -243,6 +291,11 @@ namespace gladius
     int SpatialMeshResource::signCacheReadyHostOffset() const
     {
         return m_dataBaseOffset + static_cast<int>(m_headerStart + kSignCacheOffsetIndex);
+    }
+
+    int SpatialMeshResource::signCacheBetaHostOffset() const
+    {
+        return m_dataBaseOffset + static_cast<int>(m_headerStart + kSignCacheBetaIndex);
     }
 
     // ========================================================================
@@ -274,7 +327,7 @@ namespace gladius
         metaData.start = static_cast<int>(m_payloadData.data.size());
 
         // ====================================================================
-        // Header Layout (32 floats total):
+        // Header Layout (33 floats total):
         // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
         // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
         // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -284,6 +337,7 @@ namespace gladius
         // [29]:    Fast-winding-number aggregate offset
         // [30]:    FWN coarse sign-cache data offset (0 = not ready)
         // [31]:    FWN coarse sign-cache resolution per axis
+        // [32]:    FWN beta used to build the ready sign cache
         // ====================================================================
         
         m_headerStart = m_payloadData.data.size();
@@ -348,6 +402,7 @@ namespace gladius
         m_payloadData.data.push_back(0.0f);  // FWN aggregate offset
         m_payloadData.data.push_back(0.0f);  // FWN sign-cache data offset (0 = not ready)
         m_payloadData.data.push_back(static_cast<float>(kSignCacheResolution));
+        m_payloadData.data.push_back(m_evaluationConfig.fwnBeta);
 
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
@@ -472,9 +527,10 @@ namespace gladius
         // markMeshSignCacheReady kernel patches it on the GPU buffer.
         m_payloadData.data[m_headerStart + kSignCacheOffsetIndex] = 0.0f;
         m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] = static_cast<float>(kSignCacheResolution);
+        m_payloadData.data[m_headerStart + kSignCacheBetaIndex] = m_evaluationConfig.fwnBeta;
 
         // Sign cache build is needed (fresh allocation, unpopulated bitmap).
-        m_needsSignCacheBuild = true;
+        resetSignCacheBuildProgress();
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);

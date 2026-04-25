@@ -666,12 +666,12 @@ namespace gladius
         /// @return Number of grids successfully built
         size_t buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams);
 
-        /// Queue coarse FWN sign-cache builds for spatial mesh resources.
-        /// The kernels and ready-offset patch are queued without waiting; until
-        /// the ready patch executes, the render kernel sees offset 0 and falls
-        /// back to full FWN.
+        /// Queue bounded coarse FWN sign-cache build steps for spatial mesh resources.
+        /// The kernels and final ready-offset patch are queued without waiting;
+        /// until the ready patch executes, the render kernel sees offset 0 and
+        /// falls back to full FWN.
         /// @param buildParams Vector of build parameters from ResourceManager::collectSignCacheBuildParams()
-        /// @return Number of sign-cache builds successfully queued
+        /// @return Number of sign-cache build steps successfully queued
         size_t buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams);
 
         void adoptVertexOfMeshToSurface(VertexBuffer & vertices);

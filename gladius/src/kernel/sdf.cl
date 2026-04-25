@@ -1520,7 +1520,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
         {
             // Spatial mesh SDF using BVH traversal with optional voxel acceleration
             // ====================================================================
-            // Header Layout (32 floats total):
+            // Header Layout (33 floats total):
             // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
             // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
             // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -1530,6 +1530,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // [29]:    Fast-winding-number aggregate offset
             // [30]:    FWN coarse sign-cache data offset (0 = not ready)
             // [31]:    FWN coarse sign-cache resolution per axis
+            // [32]:    FWN beta used to build the ready sign cache
             // ====================================================================
 
             int const headerStart = primitive.start;
@@ -1556,6 +1557,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // Read FWN coarse sign-cache info (offsets 30-31)
             int const fwnSignCacheDataOffset = (int)data[headerStart + 30];
             int const fwnSignCacheResolution = (int)data[headerStart + 31];
+            float const fwnSignCacheBeta = data[headerStart + 32];
             
             // Use voxel-accelerated path if voxel grid is available and populated
             // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
@@ -1603,6 +1605,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                                             fwnVoxelDataOffset,
                                                             fwnSignCacheDataOffset,
                                                             fwnSignCacheResolution,
+                                                            fwnSignCacheBeta,
                                                             nodeCount,
                                                             triCount,
                                                             vertexNormalCount,

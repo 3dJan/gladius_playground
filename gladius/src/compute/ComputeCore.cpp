@@ -533,13 +533,14 @@ namespace gladius
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
-            if (slicerProgram->buildMeshSignCache(*m_primitives, params))
+            if (!slicerProgram->buildMeshSignCache(*m_primitives, params))
             {
-                ++successCount;
+                break;
             }
+            ++successCount;
         }
 
-        logMsg(fmt::format("Queued {} mesh sign-cache builds", successCount));
+        logMsg(fmt::format("Queued {} mesh sign-cache build steps", successCount));
 
         return successCount;
     }
