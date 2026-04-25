@@ -62,6 +62,9 @@ namespace gladius
     bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
     {
         ProfileFunction;
+        bool const touchesFwn = cfg.method == MeshSdfMethod::FastWindingNumber ||
+                                m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::setEvaluationConfig", touchesFwn);
 
         bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
         bool const fwnBetaChanged = m_evaluationConfig.fwnBeta != cfg.fwnBeta;
@@ -81,6 +84,12 @@ namespace gladius
         bool const resolutionChanged =
             m_evaluationConfig.voxelGridResolution != cfg.voxelGridResolution;
         bool const payloadHasFwnSupport = m_fwnAggregatesOffset != 0u && m_signCacheDataOffset != 0u;
+        GLADIUS_FWN_PREP_LOG_IF(touchesFwn,
+                                "SpatialMeshResource::setEvaluationConfig method=" +
+                                    std::string(toString(cfg.method)) +
+                                    " payloadHasFwnSupport=" +
+                                    std::to_string(payloadHasFwnSupport) +
+                                    " fwnBetaChanged=" + std::to_string(fwnBetaChanged));
         bool const newMethodSatisfied = [&]() {
             switch (cfg.method)
             {
@@ -220,6 +229,7 @@ namespace gladius
     void SpatialMeshResource::write(Primitives & primitives)
     {
         ProfileFunction;
+        GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::write FWN payload", usesFwnSignCache());
 
         // Track the base offset before adding our data
         m_dataBaseOffset = static_cast<int>(primitives.data.getSize());
@@ -259,6 +269,14 @@ namespace gladius
         if (m_signCacheDataOffset != 0u && usesFwnSignCache())
         {
             resetSignCacheBuildProgress();
+            GLADIUS_FWN_PREP_LOG("SpatialMeshResource::write FWN offsets nodes=" +
+                                 std::to_string(m_dataBaseOffset + static_cast<int>(m_nodesOffset)) +
+                                 " triangles=" +
+                                 std::to_string(m_dataBaseOffset + static_cast<int>(m_trianglesOffset)) +
+                                 " aggregates=" +
+                                 std::to_string(m_dataBaseOffset + static_cast<int>(m_fwnAggregatesOffset)) +
+                                 " signCache=" +
+                                 std::to_string(m_dataBaseOffset + static_cast<int>(m_signCacheDataOffset)));
         }
         else
         {
@@ -363,6 +381,12 @@ namespace gladius
         }
 
         bool const useFwn = m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl FWN payload", useFwn);
+        GLADIUS_FWN_PREP_LOG_IF(useFwn,
+                                "SpatialMeshResource::loadImpl prepare nodes=" +
+                                    std::to_string(m_data.nodes.size()) +
+                                    " triangles=" + std::to_string(m_data.triangles.size()) +
+                                    " vertexNormals=" + std::to_string(m_data.vertexNormals.size()));
 
         // Clear previous payload
         m_payloadData.meta.clear();
@@ -453,76 +477,91 @@ namespace gladius
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
         m_nodesOffset = m_payloadData.data.size();
-        for (auto const & node : m_data.nodes)
         {
-            m_payloadData.data.push_back(node.bboxMin.x);
-            m_payloadData.data.push_back(node.bboxMin.y);
-            m_payloadData.data.push_back(node.bboxMin.z);
-            m_payloadData.data.push_back(node.bboxMin.w);
-            m_payloadData.data.push_back(node.bboxMax.x);
-            m_payloadData.data.push_back(node.bboxMax.y);
-            m_payloadData.data.push_back(node.bboxMax.z);
-            m_payloadData.data.push_back(node.bboxMax.w);
-            m_payloadData.data.push_back(intBitsToFloat(node.leftChild));
-            m_payloadData.data.push_back(intBitsToFloat(node.rightChild));
-            m_payloadData.data.push_back(intBitsToFloat(node.primStart));
-            m_payloadData.data.push_back(intBitsToFloat(node.primCount));
+            GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize BVH nodes", useFwn);
+            for (auto const & node : m_data.nodes)
+            {
+                m_payloadData.data.push_back(node.bboxMin.x);
+                m_payloadData.data.push_back(node.bboxMin.y);
+                m_payloadData.data.push_back(node.bboxMin.z);
+                m_payloadData.data.push_back(node.bboxMin.w);
+                m_payloadData.data.push_back(node.bboxMax.x);
+                m_payloadData.data.push_back(node.bboxMax.y);
+                m_payloadData.data.push_back(node.bboxMax.z);
+                m_payloadData.data.push_back(node.bboxMax.w);
+                m_payloadData.data.push_back(intBitsToFloat(node.leftChild));
+                m_payloadData.data.push_back(intBitsToFloat(node.rightChild));
+                m_payloadData.data.push_back(intBitsToFloat(node.primStart));
+                m_payloadData.data.push_back(intBitsToFloat(node.primCount));
+            }
         }
 
         // Serialize triangles
         // Each triangle: v0 (4), v1 (4), v2 (4), faceNormal (4) = 16 floats
         m_trianglesOffset = m_payloadData.data.size();
-        for (auto const & tri : m_data.triangles)
         {
-            m_payloadData.data.push_back(tri.v0.x);
-            m_payloadData.data.push_back(tri.v0.y);
-            m_payloadData.data.push_back(tri.v0.z);
-            m_payloadData.data.push_back(tri.v0.w);
-            m_payloadData.data.push_back(tri.v1.x);
-            m_payloadData.data.push_back(tri.v1.y);
-            m_payloadData.data.push_back(tri.v1.z);
-            m_payloadData.data.push_back(tri.v1.w);
-            m_payloadData.data.push_back(tri.v2.x);
-            m_payloadData.data.push_back(tri.v2.y);
-            m_payloadData.data.push_back(tri.v2.z);
-            m_payloadData.data.push_back(tri.v2.w);
-            m_payloadData.data.push_back(tri.faceNormal.x);
-            m_payloadData.data.push_back(tri.faceNormal.y);
-            m_payloadData.data.push_back(tri.faceNormal.z);
-            m_payloadData.data.push_back(tri.faceNormal.w);
+            GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize triangles", useFwn);
+            for (auto const & tri : m_data.triangles)
+            {
+                m_payloadData.data.push_back(tri.v0.x);
+                m_payloadData.data.push_back(tri.v0.y);
+                m_payloadData.data.push_back(tri.v0.z);
+                m_payloadData.data.push_back(tri.v0.w);
+                m_payloadData.data.push_back(tri.v1.x);
+                m_payloadData.data.push_back(tri.v1.y);
+                m_payloadData.data.push_back(tri.v1.z);
+                m_payloadData.data.push_back(tri.v1.w);
+                m_payloadData.data.push_back(tri.v2.x);
+                m_payloadData.data.push_back(tri.v2.y);
+                m_payloadData.data.push_back(tri.v2.z);
+                m_payloadData.data.push_back(tri.v2.w);
+                m_payloadData.data.push_back(tri.faceNormal.x);
+                m_payloadData.data.push_back(tri.faceNormal.y);
+                m_payloadData.data.push_back(tri.faceNormal.z);
+                m_payloadData.data.push_back(tri.faceNormal.w);
+            }
         }
 
         // Serialize vertex normals
         // Each normal: xyz + w (vertex index) = 4 floats
         m_normalsOffset = m_payloadData.data.size();
-        for (auto const & vn : m_data.vertexNormals)
         {
-            m_payloadData.data.push_back(vn.normal.x);
-            m_payloadData.data.push_back(vn.normal.y);
-            m_payloadData.data.push_back(vn.normal.z);
-            m_payloadData.data.push_back(vn.normal.w);
+            GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize vertex normals", useFwn);
+            for (auto const & vn : m_data.vertexNormals)
+            {
+                m_payloadData.data.push_back(vn.normal.x);
+                m_payloadData.data.push_back(vn.normal.y);
+                m_payloadData.data.push_back(vn.normal.z);
+                m_payloadData.data.push_back(vn.normal.w);
+            }
         }
 
         // Serialize triangle indices for normal lookup
         // Each triangle: 3 vertex indices = 4 ints (padded)
         m_indicesOffset = m_payloadData.data.size();
-        for (auto const & idx : m_data.triangleIndices)
         {
-            m_payloadData.data.push_back(intBitsToFloat(idx.i0));
-            m_payloadData.data.push_back(intBitsToFloat(idx.i1));
-            m_payloadData.data.push_back(intBitsToFloat(idx.i2));
-            m_payloadData.data.push_back(0.0f);  // Padding for alignment
+            GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize triangle indices", useFwn);
+            for (auto const & idx : m_data.triangleIndices)
+            {
+                m_payloadData.data.push_back(intBitsToFloat(idx.i0));
+                m_payloadData.data.push_back(intBitsToFloat(idx.i1));
+                m_payloadData.data.push_back(intBitsToFloat(idx.i2));
+                m_payloadData.data.push_back(0.0f);  // Padding for alignment
+            }
         }
 
         // Serialize per-edge adjacent face normals (3 entries per triangle, 4 floats each).
         // Used by computePseudoNormalFast in mesh_sdf.cl for robust sign on edge features.
         m_edgeNeighborsOffset = m_payloadData.data.size();
-        for (auto const & en : m_data.edgeNeighborNormals)
         {
-            m_payloadData.data.push_back(en.normal.x);
-            m_payloadData.data.push_back(en.normal.y);
-            m_payloadData.data.push_back(en.normal.z);
-            m_payloadData.data.push_back(en.normal.w);
+            GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize edge neighbours", useFwn);
+            for (auto const & en : m_data.edgeNeighborNormals)
+            {
+                m_payloadData.data.push_back(en.normal.x);
+                m_payloadData.data.push_back(en.normal.y);
+                m_payloadData.data.push_back(en.normal.z);
+                m_payloadData.data.push_back(en.normal.w);
+            }
         }
 
         // Reserve per-node Fast-Winding-Number aggregates (8 floats per node).
@@ -533,6 +572,7 @@ namespace gladius
         m_fwnAggregatesOffset = 0u;
         if (useFwn)
         {
+            GLADIUS_FWN_PREP_SCOPE("SpatialMeshResource::loadImpl reserve FWN aggregate slots");
             m_fwnAggregatesOffset = m_payloadData.data.size();
             size_t const aggregateFloatCount = m_data.nodes.size() * 8u;
             for (size_t i = 0; i < aggregateFloatCount; ++i)
@@ -557,6 +597,7 @@ namespace gladius
         m_signCacheDataOffset = 0u;
         if (useFwn)
         {
+            GLADIUS_FWN_PREP_SCOPE("SpatialMeshResource::loadImpl reserve FWN sign-cache slots");
             m_signCacheDataOffset = m_payloadData.data.size();
             for (size_t i = 0; i < kSignCacheWordCount; ++i)
             {

@@ -422,6 +422,7 @@ namespace gladius
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
+        GLADIUS_FWN_PREP_SCOPE("SlicerProgram::buildMeshFwnAggregates queue kernel");
 
         swapProgramsIfNeeded();
 
@@ -432,6 +433,7 @@ namespace gladius
 
         if (!m_programFront || !m_programFront->isValid())
         {
+            GLADIUS_FWN_PREP_LOG("SlicerProgram::buildMeshFwnAggregates skipped: program invalid");
             return false;
         }
 
@@ -457,6 +459,7 @@ namespace gladius
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
+        GLADIUS_FWN_PREP_SCOPE("SlicerProgram::buildMeshSignCache queue kernels");
 
         swapProgramsIfNeeded();
 

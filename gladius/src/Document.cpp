@@ -7,6 +7,7 @@
 #include "FileSystemUtils.h"
 #include "MeshBVH.h"
 #include "MeshExporter.h"
+#include "Profiling.h"
 #include "ResourceManager.h"
 #include "TimeMeasurement.h"
 #include "compute/ComputeCore.h"
@@ -644,6 +645,9 @@ namespace gladius
             auto fwnAggregateBuildParams = m_generatorContext->resourceManager.collectFwnAggregateBuildParams();
             if (!fwnAggregateBuildParams.empty())
             {
+                GLADIUS_FWN_PREP_SCOPE("Document::updatePrimitiveData FWN aggregate stage");
+                GLADIUS_FWN_PREP_LOG("Document::updatePrimitiveData FWN aggregate builds=" +
+                                     std::to_string(fwnAggregateBuildParams.size()));
                 size_t const builtCount = m_core->buildMeshFwnAggregates(fwnAggregateBuildParams);
                 if (builtCount > 0u)
                 {
@@ -658,6 +662,9 @@ namespace gladius
             auto signCacheBuildParams = m_generatorContext->resourceManager.collectSignCacheBuildParams();
             if (!signCacheBuildParams.empty())
             {
+                GLADIUS_FWN_PREP_SCOPE("Document::updatePrimitiveData FWN sign-cache stage");
+                GLADIUS_FWN_PREP_LOG("Document::updatePrimitiveData FWN sign-cache steps=" +
+                                     std::to_string(signCacheBuildParams.size()));
                 size_t const queuedCount = m_core->buildMeshSignCaches(signCacheBuildParams);
                 if (queuedCount > 0u)
                 {

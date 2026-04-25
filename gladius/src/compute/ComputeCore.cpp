@@ -515,15 +515,22 @@ namespace gladius
     size_t ComputeCore::buildMeshFwnAggregates(std::vector<MeshFwnAggregateBuildParams> const & buildParams)
     {
         ProfileFunction
+        GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshFwnAggregates total", !buildParams.empty());
 
         if (buildParams.empty())
         {
             return 0;
         }
 
+        GLADIUS_FWN_PREP_LOG("ComputeCore::buildMeshFwnAggregates resources=" +
+                             std::to_string(buildParams.size()));
+
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        m_primitives->write();
+        {
+            GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates primitive upload");
+            m_primitives->write();
+        }
 
         auto slicerProgram = m_programs.getSlicerProgram();
         if (!slicerProgram || !slicerProgram->isValid())
@@ -533,17 +540,25 @@ namespace gladius
         }
 
         size_t successCount = 0;
-        for (auto const & params : buildParams)
         {
-            if (slicerProgram->buildMeshFwnAggregates(*m_primitives, params))
+            GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates queue kernels");
+            for (auto const & params : buildParams)
             {
-                ++successCount;
+                if (slicerProgram->buildMeshFwnAggregates(*m_primitives, params))
+                {
+                    ++successCount;
+                }
             }
         }
 
-        CL_ERROR(m_ComputeContext->GetQueue().finish());
+        {
+            GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates wait for GPU");
+            CL_ERROR(m_ComputeContext->GetQueue().finish());
+        }
 
         logMsg(fmt::format("Built {} mesh FWN aggregate buffers", successCount));
+        GLADIUS_FWN_PREP_LOG("ComputeCore::buildMeshFwnAggregates built=" +
+                             std::to_string(successCount));
 
         return successCount;
     }
@@ -551,11 +566,15 @@ namespace gladius
     size_t ComputeCore::buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams)
     {
         ProfileFunction
+        GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshSignCaches queue steps", !buildParams.empty());
 
         if (buildParams.empty())
         {
             return 0;
         }
+
+        GLADIUS_FWN_PREP_LOG("ComputeCore::buildMeshSignCaches steps=" +
+                             std::to_string(buildParams.size()));
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
@@ -577,6 +596,8 @@ namespace gladius
         }
 
         logMsg(fmt::format("Queued {} mesh sign-cache build steps", successCount));
+        GLADIUS_FWN_PREP_LOG("ComputeCore::buildMeshSignCaches queued=" +
+                             std::to_string(successCount));
 
         return successCount;
     }

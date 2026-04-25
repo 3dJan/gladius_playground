@@ -2,6 +2,7 @@
 
 #include "BeamLatticeResource.h"
 #include "ImageStackResource.h"
+#include "Profiling.h"
 #include "ResourceContext.h"
 #include "SpatialMeshResource.h"
 #include "StlResource.h"
@@ -181,6 +182,7 @@ namespace gladius
 
     std::vector<MeshSignCacheBuildParams> ResourceManager::collectSignCacheBuildParams() const
     {
+        GLADIUS_FWN_PREP_SCOPE("ResourceManager::collectSignCacheBuildParams");
         std::vector<MeshSignCacheBuildParams> params;
         params.reserve(m_resources.size());  // Upper bound estimate
 
@@ -205,11 +207,15 @@ namespace gladius
             }
         }
 
+        GLADIUS_FWN_PREP_LOG_IF(!params.empty(),
+                                "ResourceManager::collectSignCacheBuildParams collected=" +
+                                    std::to_string(params.size()));
         return params;
     }
 
     std::vector<MeshFwnAggregateBuildParams> ResourceManager::collectFwnAggregateBuildParams() const
     {
+        GLADIUS_FWN_PREP_SCOPE("ResourceManager::collectFwnAggregateBuildParams");
         std::vector<MeshFwnAggregateBuildParams> params;
         params.reserve(m_resources.size());
 
@@ -233,6 +239,9 @@ namespace gladius
             }
         }
 
+        GLADIUS_FWN_PREP_LOG_IF(!params.empty(),
+                                "ResourceManager::collectFwnAggregateBuildParams collected=" +
+                                    std::to_string(params.size()));
         return params;
     }
     
@@ -256,6 +265,11 @@ namespace gladius
     void ResourceManager::markFwnAggregatesBuilt(std::vector<MeshFwnAggregateBuildParams> const & buildParams,
                                                  size_t builtCount)
     {
+        GLADIUS_FWN_PREP_SCOPE_IF("ResourceManager::markFwnAggregatesBuilt", !buildParams.empty());
+        GLADIUS_FWN_PREP_LOG_IF(!buildParams.empty(),
+                                "ResourceManager::markFwnAggregatesBuilt built=" +
+                                    std::to_string(builtCount) +
+                                    " requested=" + std::to_string(buildParams.size()));
         size_t const count = std::min(builtCount, buildParams.size());
         for (size_t i = 0; i < count; ++i)
         {
