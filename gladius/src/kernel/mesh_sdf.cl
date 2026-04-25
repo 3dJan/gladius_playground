@@ -1217,7 +1217,23 @@ inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 /// Compute the generalised winding number at `pos` using a Barnes-Hut
 /// hierarchical traversal of the BVH augmented with per-node multipole
 /// aggregates.
+///
+/// **Distance-aware pruning** (when @p unsignedDist > 0): subtrees whose
+/// nearest-AABB distance exceeds @c FWN_PRUNE_FACTOR * unsignedDist cannot
+/// flip the integer winding decision at the 0.5 threshold (their dipole
+/// contribution is bounded by `O(area / dist²)` and is dwarfed by the
+/// closer subtrees). Skipping them saves the bulk of the traversal cost
+/// near the surface, where the magnitude path's `unsignedDist` is small.
+/// Pass @p unsignedDist <= 0 to disable (keeps the legacy behaviour).
+///
+/// **Front-to-back traversal**: when both children are pushed, the closer
+/// one (by AABB distance) is pushed last so it is popped first. Closer
+/// subtrees contribute more winding mass earlier, letting the
+/// |windingSum| > 0.75 early-exit fire sooner for inside points.
+///
 /// @param beta Barnes-Hut acceptance threshold (typical 1.5 – 4.0).
+/// @param unsignedDist Unsigned distance from @p pos to the surface (for
+///                     distance-aware pruning); pass 0 to disable.
 /// @return winding number (~1 inside, ~0 outside; signed for non-closed input).
 inline float fwnHierarchical(float3 pos,
                              int nodesOffset,
@@ -1225,7 +1241,8 @@ inline float fwnHierarchical(float3 pos,
                              int fwnAggregatesOffset,
                              int nodeCount,
                              __global float const * data,
-                             float beta)
+                             float beta,
+                             float unsignedDist)
 {
     if (nodeCount == 0)
     {
@@ -1235,6 +1252,16 @@ inline float fwnHierarchical(float3 pos,
     __global float const * nodes = data + nodesOffset;
     __global float const * triangles = data + trianglesOffset;
     __global float const * aggregates = data + fwnAggregatesOffset;
+
+    // Distance-aware pruning radius (squared). A subtree whose nearest-AABB
+    // squared-distance exceeds this cannot meaningfully contribute to the
+    // sign decision and is dropped without loading aggregates. Conservative
+    // factor 8 keeps the dipole mass bounded by ~1/64 relative to the
+    // near-surface contributors. Disabled when unsignedDist <= 0.
+    float const FWN_PRUNE_FACTOR = 8.0f;
+    float const pruneDistSq = (unsignedDist > 0.0f)
+        ? (FWN_PRUNE_FACTOR * unsignedDist) * (FWN_PRUNE_FACTOR * unsignedDist)
+        : -1.0f;
 
     // Iterative DFS with explicit stack. Depth 128 leaves headroom for very
     // unbalanced BVHs (depth 64 covers 2^64 tris in the balanced case but
@@ -1251,6 +1278,19 @@ inline float fwnHierarchical(float3 pos,
     while (stackTop > 0)
     {
         int const nodeIdx = stack[--stackTop];
+
+        // Load BVH node AABB first (cheap, used for distance-aware prune
+        // before we touch the aggregate buffer).
+        int const baseOffset = nodeIdx * 12;
+        float4 const bboxMin = vload4(0, nodes + baseOffset);      // floats 0-3
+        float4 const bboxMax = vload4(0, nodes + baseOffset + 4);  // floats 4-7
+        float const aabbDistSq = sqDistanceToAABB(pos, bboxMin.xyz, bboxMax.xyz);
+
+        // Distance-aware prune: subtree is too far to influence the sign.
+        if (pruneDistSq > 0.0f && aabbDistSq > pruneDistSq)
+        {
+            continue;
+        }
 
         // Load aggregate (8 floats = 2 × float4).
         int const agBase = nodeIdx * 8;
@@ -1290,8 +1330,8 @@ inline float fwnHierarchical(float3 pos,
             continue;
         }
 
-        // Recurse / evaluate exactly. Re-read children from the BVH node.
-        int const baseOffset = nodeIdx * 12;
+        // Recurse / evaluate exactly. Children indices live in the int data
+        // block of the BVH node we already loaded.
         float4 const intData = vload4(0, nodes + baseOffset + 8);
         int const leftChild = as_int(intData.x);
         int const rightChild = as_int(intData.y);
@@ -1313,13 +1353,35 @@ inline float fwnHierarchical(float3 pos,
         }
         else
         {
-            if (rightChild >= 0 && stackTop < 128)
+            // Front-to-back: push the farther child first so the closer one
+            // is popped first. Use AABB squared-distance for the comparison.
+            float leftDistSq = FLT_MAX;
+            float rightDistSq = FLT_MAX;
+            if (leftChild >= 0)
             {
-                stack[stackTop++] = rightChild;
+                int const leftBase = leftChild * 12;
+                float4 const lMin = vload4(0, nodes + leftBase);
+                float4 const lMax = vload4(0, nodes + leftBase + 4);
+                leftDistSq = sqDistanceToAABB(pos, lMin.xyz, lMax.xyz);
             }
-            if (leftChild >= 0 && stackTop < 128)
+            if (rightChild >= 0)
             {
-                stack[stackTop++] = leftChild;
+                int const rightBase = rightChild * 12;
+                float4 const rMin = vload4(0, nodes + rightBase);
+                float4 const rMax = vload4(0, nodes + rightBase + 4);
+                rightDistSq = sqDistanceToAABB(pos, rMin.xyz, rMax.xyz);
+            }
+
+            int const nearChild = (leftDistSq <= rightDistSq) ? leftChild : rightChild;
+            int const farChild  = (leftDistSq <= rightDistSq) ? rightChild : leftChild;
+
+            if (farChild >= 0 && stackTop < 128)
+            {
+                stack[stackTop++] = farChild;
+            }
+            if (nearChild >= 0 && stackTop < 128)
+            {
+                stack[stackTop++] = nearChild;
             }
         }
     }
@@ -1395,9 +1457,12 @@ inline float spatialMeshSDF_FastWindingNumber(float3 pos,
         return signedMagnitude;
     }
 
-    // Sign: hierarchical winding number.
+    // Sign: hierarchical winding number. Pass the magnitude as a hint so
+    // the traversal can prune subtrees that are too far to influence the
+    // sign decision.
     float const winding = fwnHierarchical(pos, nodesOffset, trianglesOffset,
-                                          fwnAggregatesOffset, nodeCount, data, beta);
+                                          fwnAggregatesOffset, nodeCount, data, beta,
+                                          unsignedDist);
     return (winding > 0.5f) ? -unsignedDist : unsignedDist;
 }
 
