@@ -2100,14 +2100,14 @@ namespace gladius::compute
         auto index = [&](std::size_t x, std::size_t y, std::size_t z) -> std::size_t
         { return z * width * height + y * width + x; };
 
-        float const v000 = data[index(x0, y0, z0)];
-        float const v100 = data[index(x1, y0, z0)];
-        float const v010 = data[index(x0, y1, z0)];
-        float const v110 = data[index(x1, y1, z0)];
-        float const v001 = data[index(x0, y0, z1)];
-        float const v101 = data[index(x1, y0, z1)];
-        float const v011 = data[index(x0, y1, z1)];
-        float const v111 = data[index(x1, y1, z1)];
+        float const v000 = data[index(x0, y0, z0)].s[3];
+        float const v100 = data[index(x1, y0, z0)].s[3];
+        float const v010 = data[index(x0, y1, z0)].s[3];
+        float const v110 = data[index(x1, y1, z0)].s[3];
+        float const v001 = data[index(x0, y0, z1)].s[3];
+        float const v101 = data[index(x1, y0, z1)].s[3];
+        float const v011 = data[index(x0, y1, z1)].s[3];
+        float const v111 = data[index(x1, y1, z1)].s[3];
 
         float const c00 = v000 * (1.0F - fx) + v100 * fx;
         float const c10 = v010 * (1.0F - fx) + v110 * fx;

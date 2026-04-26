@@ -2275,7 +2275,12 @@ namespace gladius::compute::tests
                 m_depth = std::max<std::size_t>(sdfBuffer.getDepth(), 1U);
 
                 auto const & raw = sdfBuffer.getData();
-                m_values.assign(raw.begin(), raw.end());
+                m_values.clear();
+                m_values.reserve(raw.size());
+                for (auto const & sample : raw)
+                {
+                    m_values.push_back(sample.s[3]);
+                }
 
                 BoundingBox const actualBounds = resources->getPreCompSdfBBox();
                 m_min = Eigen::Vector3f{actualBounds.min.x, actualBounds.min.y, actualBounds.min.z};

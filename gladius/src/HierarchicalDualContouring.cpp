@@ -156,7 +156,6 @@ namespace gladius::hierarchical_dc
                 depth = std::max<std::size_t>(sdfBuffer.getDepth(), 1U);
 
                 auto const & raw = sdfBuffer.getData();
-                values.assign(raw.begin(), raw.end());
 
                 bounds = resources->getPreCompSdfBBox();
                 min = Eigen::Vector3f{bounds.min.x, bounds.min.y, bounds.min.z};
@@ -169,6 +168,13 @@ namespace gladius::hierarchical_dc
                 spacing.z() =
                   (depth > 1U) ? (max.z() - min.z()) / static_cast<float>(depth - 1U) : 1.0F;
                 spacing = spacing.cwiseMax(Eigen::Vector3f::Constant(1e-5F));
+
+                values.clear();
+                values.reserve(raw.size());
+                for (auto const & sample : raw)
+                {
+                    values.push_back(sample.s[3]);
+                }
 
                 initialized = true;
                 resolution = targetResolution;

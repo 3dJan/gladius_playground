@@ -382,10 +382,11 @@ namespace gladius::compute
             auto const& data = sdfBuffer.getData();
             if (!data.empty())
             {
-                float minVal = data[0];
-                float maxVal = data[0];
-                for (float v : data)
+                float minVal = data[0].s[3];
+                float maxVal = data[0].s[3];
+                for (auto const & sample : data)
                 {
+                    float const v = sample.s[3];
                     minVal = std::min(minVal, v);
                     maxVal = std::max(maxVal, v);
                 }
@@ -4470,7 +4471,7 @@ namespace gladius::compute
         auto const& data = sdfBuffer.getData();
         auto sampleAt = [&](std::size_t x, std::size_t y, std::size_t z) -> float {
             std::size_t const index = z * width * height + y * width + x;
-            return (index < data.size()) ? data[index] : 0.0F;
+            return (index < data.size()) ? data[index].s[3] : 0.0F;
         };
 
         float const v000 = sampleAt(x0, y0, z0);

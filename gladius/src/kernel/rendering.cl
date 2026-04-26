@@ -41,9 +41,10 @@ float4 cachedSdf(float3 pos, PAYLOAD_ARGS)
     float4 value = read_imagef(preCompSdf, samplerLinearPosClamp, normalizedPos);
     float const preComputedSdfSize = (float) get_image_width(preCompSdf);
     float const tolerance = max(max(voxelSize.x, voxelSize.y), voxelSize.z) * 2.f;
-    if ((renderingSettings.approximation & AM_ONLY_PRECOMPSDF) || ((fabs(value.x) > tolerance) && (renderingSettings.approximation & AM_HYBRID)))
+    float const signedDistance = value.w;
+    if ((renderingSettings.approximation & AM_ONLY_PRECOMPSDF) || ((fabs(signedDistance) > tolerance) && (renderingSettings.approximation & AM_HYBRID)))
     {
-        return (float4)(0.5f,0.5f,0.5f, value.x);
+        return (float4)(value.xyz, signedDistance);
     }
 
     return model(pos, PASS_PAYLOAD_ARGS);

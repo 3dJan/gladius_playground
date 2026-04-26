@@ -75,7 +75,13 @@ namespace gladius_tests
       EXPECT_EQ(bufSize, 16777216u);
 
       auto const & data = preComp.getData();
-      auto const hash = helper::computeHash(data.cbegin(), data.cend());
+      std::vector<float> distances;
+      distances.reserve(data.size());
+      for (auto const & sample : data)
+      {
+        distances.push_back(sample.s[3]);
+      }
+      auto const hash = helper::computeHash(distances.cbegin(), distances.cend());
       EXPECT_EQ(hash, 13095517456146691086u);
 
       auto bBox = core->getBoundingBox();

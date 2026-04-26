@@ -28,14 +28,30 @@ namespace gladius_tests
         auto testModel(float3 pos) -> float;
         auto testModel2(float3 pos) -> float;
 
+        inline auto hashValue(cl_float4 const & value) -> size_t
+        {
+            size_t hash = 0;
+            std::hash<float> hasher;
+            for (auto component : value.s)
+            {
+                hash ^= hasher(component) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+            }
+            return hash;
+        }
+
+        template <typename T>
+        auto hashValue(T const & value) -> size_t
+        {
+            return std::hash<T>{}(value);
+        }
+
         template <typename Iterator>
         auto computeHash(Iterator cbegin, Iterator cend)
         {
-            std::hash<typename std::iterator_traits<Iterator>::value_type> hasher;
             size_t hash = 0;
             for (auto it = cbegin; it != cend; ++it)
             {
-                hash ^= hasher(*it) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                hash ^= hashValue(*it) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
             }
             return hash;
         }

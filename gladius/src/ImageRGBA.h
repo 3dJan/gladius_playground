@@ -304,7 +304,8 @@ namespace gladius
 
     using Skeleton = ImageImpl<cl_int>;
 
-    using PreComputedSdf = ImageImpl<cl_float>;
+    // xyz stores preview color, w stores signed distance.
+    using PreComputedSdf = ImageImpl<cl_float4>;
 
     /// Buffer storing traveled distances from low-res preview for HQ initialization
     /// Format: Single-channel float (CL_R, CL_FLOAT)
