@@ -832,7 +832,9 @@ namespace gladius::hierarchical_dc
 
         if (m_config.enableGpuAcceleration)
         {
-            auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
+            auto & programManager = m_core->getProgramManager();
+            programManager.ensureHierarchicalDcProgramCompiled();
+            auto * program = programManager.getHierarchicalDCProgram();
             if (program != nullptr)
             {
                 try
@@ -1931,7 +1933,9 @@ namespace gladius::hierarchical_dc
 
         try
         {
-            auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
+            auto & programManager = m_core->getProgramManager();
+            programManager.ensureHierarchicalDcProgramCompiled();
+            auto * program = programManager.getHierarchicalDCProgram();
             if (!program)
             {
                 logError("HierarchicalDCProgram not available");
@@ -2121,7 +2125,9 @@ namespace gladius::hierarchical_dc
 
         try
         {
-            auto * program = m_core->getProgramManager().getHierarchicalDCProgram();
+            auto & programManager = m_core->getProgramManager();
+            programManager.ensureHierarchicalDcProgramCompiled();
+            auto * program = programManager.getHierarchicalDCProgram();
             if (!program)
             {
                 logError("HierarchicalDCProgram not available");
@@ -2490,7 +2496,9 @@ namespace gladius::hierarchical_dc
                           positions, values, *primitives, m_config.isoValue);
                     }
 
-                    auto * dcProgram = m_core->getProgramManager().getHierarchicalDCProgram();
+                    auto & programManager = m_core->getProgramManager();
+                    programManager.ensureHierarchicalDcProgramCompiled();
+                    auto * dcProgram = programManager.getHierarchicalDCProgram();
                     if (dcProgram != nullptr)
                     {
                         dcProgram->batchGradients(

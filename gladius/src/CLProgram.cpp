@@ -36,6 +36,21 @@ namespace gladius
             return false;
         }
 
+        std::string toLowerCopy(std::string_view text)
+        {
+            std::string result{text};
+            std::transform(result.begin(),
+                           result.end(),
+                           result.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return result;
+        }
+
+        bool containsCaseInsensitive(std::string_view haystack, std::string_view needle)
+        {
+            return toLowerCopy(haystack).find(toLowerCopy(needle)) != std::string::npos;
+        }
+
         inline std::filesystem::path ensureDumpDir(std::filesystem::path const & cacheDir)
         {
             std::filesystem::path dir = cacheDir.empty()
@@ -1007,6 +1022,18 @@ namespace gladius
         auto dynamicHash = computeDynamicHash();
         auto currentHash = computeHash(); // Keep for fallback
 
+        if (m_logger)
+        {
+            m_logger->logInfo(fmt::format(
+              "{}: OpenCL cache probe static={} dynamic={} single={} twoLevel={} cacheDir='{}'",
+              m_debugLabel,
+              staticHash,
+              dynamicHash,
+              currentHash,
+              m_enableTwoLevelPipeline ? "enabled" : "disabled",
+              m_cacheDirectory.string()));
+        }
+
         // Dump prepared static/dynamic inputs (post-replacements) and options if requested
         if (isOclDumpEnabled())
         {
@@ -1034,7 +1061,7 @@ namespace gladius
         {
             if (m_logger)
             {
-                m_logger->logInfo("CLProgram: Loaded linked program from cache (static: " +
+                m_logger->logInfo(m_debugLabel + ": Loaded linked program from cache (static: " +
                                   std::to_string(staticHash) +
                                   ", dynamic: " + std::to_string(dynamicHash) + ")");
             }
@@ -1059,7 +1086,7 @@ namespace gladius
             if (m_logger)
             {
                 m_logger->logInfo(
-                  "CLProgram: Loaded program from single-level binary cache (hash: " +
+                  m_debugLabel + ": Loaded program from single-level binary cache (hash: " +
                   std::to_string(currentHash) + ")");
             }
             m_hashLastSuccessfulCompilation = currentHash;
@@ -1092,7 +1119,7 @@ namespace gladius
         // Two-level compilation: try to load/compile static library, then link with dynamic
         if (m_logger)
         {
-            m_logger->logInfo("CLProgram: Two-level compilation check - cacheEnabled: " +
+            m_logger->logInfo(m_debugLabel + ": Two-level compilation check - cacheEnabled: " +
                               std::to_string(m_cacheEnabled) + ", cacheDirectory: '" +
                               m_cacheDirectory.string() + "'" +
                               ", staticSources: " + std::to_string(m_staticSources.size()) +
@@ -1110,7 +1137,7 @@ namespace gladius
                 // implementations)
                 if (m_logger)
                 {
-                    m_logger->logInfo("CLProgram: Compiling static library from source");
+                    m_logger->logInfo(m_debugLabel + ": Compiling static library from source");
                 }
                 try
                 {
@@ -1424,7 +1451,7 @@ namespace gladius
 
         if (m_logger)
         {
-            m_logger->logInfo("OpenCL: Compiling program (" +
+            m_logger->logInfo(m_debugLabel + ": Compiling single-level program (" +
                               std::to_string(numberOfLines(m_sources)) + " lines)");
         }
 
@@ -1772,9 +1799,73 @@ namespace gladius
         return m_cacheEnabled;
     }
 
+    void CLProgram::logBinaryCacheDisabledOnce(std::string_view reason) const
+    {
+        if (!m_logger || m_binaryCacheDisabledLogged)
+        {
+            return;
+        }
+
+        m_binaryCacheDisabledLogged = true;
+        m_logger->logWarning(m_debugLabel + ": OpenCL binary cache disabled: " +
+                             std::string(reason));
+    }
+
+    bool CLProgram::canUseBinaryCache() const
+    {
+        try
+        {
+            auto const device = m_ComputeContext->GetDevice();
+            auto const deviceName = device.getInfo<CL_DEVICE_NAME>();
+            auto const deviceVendor = device.getInfo<CL_DEVICE_VENDOR>();
+            auto const deviceVersion = device.getInfo<CL_DEVICE_VERSION>();
+            auto const driverVersion = device.getInfo<CL_DRIVER_VERSION>();
+
+            std::string platformName;
+            std::string platformVendor;
+            std::string platformVersion;
+            try
+            {
+                cl::Platform platform(device.getInfo<CL_DEVICE_PLATFORM>());
+                platformName = platform.getInfo<CL_PLATFORM_NAME>();
+                platformVendor = platform.getInfo<CL_PLATFORM_VENDOR>();
+                platformVersion = platform.getInfo<CL_PLATFORM_VERSION>();
+            }
+            catch (...)
+            {
+                // Device-level strings are enough for most implementations.
+            }
+
+            auto const implementation =
+              deviceName + "|" + deviceVendor + "|" + deviceVersion + "|" + driverVersion + "|" +
+              platformName + "|" + platformVendor + "|" + platformVersion;
+
+            if (containsCaseInsensitive(implementation, "rusticl"))
+            {
+                logBinaryCacheDisabledOnce(
+                  "Rusticl currently crashes inside clCreateProgramWithBinary for cached "
+                  "programs; using source compilation instead.");
+                return false;
+            }
+        }
+        catch (const std::exception & e)
+        {
+            logBinaryCacheDisabledOnce(std::string("could not query OpenCL driver identity: ") +
+                                       e.what());
+            return false;
+        }
+        catch (...)
+        {
+            logBinaryCacheDisabledOnce("could not query OpenCL driver identity");
+            return false;
+        }
+
+        return true;
+    }
+
     bool CLProgram::loadProgramFromCache(size_t hash)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty())
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !canUseBinaryCache())
         {
             return false;
         }
@@ -1840,7 +1931,7 @@ namespace gladius
 
     void CLProgram::saveProgramToCache(size_t hash)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty() || !m_program)
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !m_program || !canUseBinaryCache())
         {
             return;
         }
@@ -1915,7 +2006,7 @@ namespace gladius
 
     bool CLProgram::loadStaticLibraryFromCache(size_t staticHash, cl::Program & staticLibrary)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty())
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !canUseBinaryCache())
         {
             return false;
         }
@@ -1972,7 +2063,7 @@ namespace gladius
 
     void CLProgram::saveStaticLibraryToCache(size_t staticHash, const cl::Program & staticLibrary)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty())
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !canUseBinaryCache())
         {
             return;
         }
@@ -2015,7 +2106,7 @@ namespace gladius
 
     bool CLProgram::loadLinkedProgramFromCache(size_t staticHash, size_t dynamicHash)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty())
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !canUseBinaryCache())
         {
             return false;
         }
@@ -2119,7 +2210,7 @@ namespace gladius
 
     void CLProgram::saveLinkedProgramToCache(size_t staticHash, size_t dynamicHash)
     {
-        if (!m_cacheEnabled || m_cacheDirectory.empty() || !m_program)
+        if (!m_cacheEnabled || m_cacheDirectory.empty() || !m_program || !canUseBinaryCache())
         {
             return;
         }

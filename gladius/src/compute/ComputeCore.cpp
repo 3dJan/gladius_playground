@@ -527,11 +527,6 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        {
-            GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates primitive upload");
-            m_primitives->write();
-        }
-
         auto slicerProgram = m_programs.getSlicerProgram();
         if (!slicerProgram || !slicerProgram->isValid())
         {
@@ -1263,7 +1258,7 @@ namespace gladius
         {
             return false;
         }
-        return (!renderProgram->isCompilationInProgress());
+        return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
     }
 
     void ComputeCore::compileSlicerProgramBlocking()
@@ -1942,12 +1937,11 @@ namespace gladius
 
         // Low-res preview must stay cheap and independent of mesh complexity.
         // If the precomputed SDF is not ready yet, keep the previous image
-        // instead of falling back to full model evaluation (which can be tens
-        // of seconds for large mesh/FWN scenes).
+        // instead of falling back to full model evaluation.
         if (!m_precompSdfIsValid)
         {
-            m_lastUsedApproximation = AM_FULL_MODEL;
-            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
             return;
         }
 
@@ -1989,8 +1983,8 @@ namespace gladius
 
         if (!m_precompSdfIsValid)
         {
-            m_lastUsedApproximation = AM_FULL_MODEL;
-            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
             return cl::Event{};
         }
 
@@ -2039,8 +2033,8 @@ namespace gladius
 
         if (!m_precompSdfIsValid)
         {
-            m_lastUsedApproximation = AM_FULL_MODEL;
-            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
             return cl::Event{};
         }
 

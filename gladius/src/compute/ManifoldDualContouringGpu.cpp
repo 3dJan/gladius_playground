@@ -683,6 +683,7 @@ namespace gladius::compute
         // Get the shared program instance from ProgramManager
         // This ensures the program has the correct model source set
         auto & programManager = m_core.getProgramManager();
+        programManager.ensureManifoldDcProgramCompiled();
 
         auto * program = programManager.getManifoldDualContouringProgram();
         if (!program)
@@ -710,9 +711,9 @@ namespace gladius::compute
             return;
         }
 
-        // Ensure the program is compiled with the current model's SDF
-        // This is important when switching between different models
-        m_core.getProgramManager().recompileBlockingForManifoldDC();
+        // Ensure the program is compiled with the current model's SDF. This is
+        // intentionally lazy so first preview rendering does not compile MDC.
+        m_core.getProgramManager().ensureManifoldDcProgramCompiled();
 
         // Pre-fetch bounding box for chunking decision
         auto bbox = m_core.getBoundingBox();

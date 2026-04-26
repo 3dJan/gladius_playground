@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -35,6 +37,45 @@
 
 namespace gladius
 {
+    namespace
+    {
+        std::filesystem::path openClCacheDirectory()
+        {
+            std::error_code ec;
+            std::filesystem::path base;
+
+#ifdef _WIN32
+            if (auto const * localAppData = std::getenv("LOCALAPPDATA"))
+            {
+                base = std::filesystem::path(localAppData) / "gladius";
+            }
+#else
+            if (auto const * xdgCacheHome = std::getenv("XDG_CACHE_HOME"))
+            {
+                base = std::filesystem::path(xdgCacheHome) / "gladius";
+            }
+            else if (auto const * home = std::getenv("HOME"))
+            {
+                base = std::filesystem::path(home) / ".cache" / "gladius";
+            }
+#endif
+            if (base.empty())
+            {
+                base = std::filesystem::temp_directory_path(ec) / "gladius";
+            }
+
+            auto cacheDir = base / "opencl_cache";
+            std::filesystem::create_directories(cacheDir, ec);
+            if (ec)
+            {
+                ec.clear();
+                cacheDir = std::filesystem::temp_directory_path(ec) / "gladius" / "opencl_cache";
+                std::filesystem::create_directories(cacheDir, ec);
+            }
+            return cacheDir;
+        }
+    } // namespace
+
     ProgramManager::ProgramManager(SharedComputeContext context,
                                    RequiredCapabilities requiredCapabilities,
                                    events::SharedLogger logger,
@@ -85,12 +126,19 @@ namespace gladius
         }
 
         // Set up binary caching
-        auto cacheDir = std::filesystem::temp_directory_path() / "gladius" / "opencl_cache";
+        auto cacheDir = openClCacheDirectory();
+        m_slicerProgram->setDebugLabel("SlicerProgram");
+        m_optimizedRenderProgram->setDebugLabel("RenderProgram");
+        m_dualContouringSamplingProgram->setDebugLabel("DualContouringSamplingProgram");
+        m_hierarchicalDCProgram->setDebugLabel("HierarchicalDCProgram");
+        m_manifoldDualContouringProgram->setDebugLabel("ManifoldDualContouringProgram");
         m_slicerProgram->setCacheDirectory(cacheDir);
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
         m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
         m_hierarchicalDCProgram->setCacheDirectory(cacheDir);
         m_manifoldDualContouringProgram->setCacheDirectory(cacheDir);
+        m_slicerProgram->setEnableTwoLevelPipeline(true);
+        m_optimizedRenderProgram->setEnableTwoLevelPipeline(true);
 
         m_optimizedRenderProgram->buildKernelLib();
         recompileIfRequired();
@@ -134,16 +182,6 @@ namespace gladius
             {
                 m_dualContouringSamplingProgram->setModelKernel(m_modelSource);
             }
-            if (m_hierarchicalDCProgram)
-            {
-                m_hierarchicalDCProgram->setModelKernel(m_modelSource);
-                m_hierarchicalDCProgram->recompileNonBlocking();
-            }
-            if (m_manifoldDualContouringProgram)
-            {
-                m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
-                m_manifoldDualContouringProgram->recompileNonBlocking();
-            }
             m_slicerProgram->recompileNonBlocking();
             m_slicerState.signalCompilationStarted();
         }
@@ -162,16 +200,6 @@ namespace gladius
             if (m_dualContouringSamplingProgram)
             {
                 m_dualContouringSamplingProgram->setModelKernel(m_modelSource);
-            }
-            if (m_hierarchicalDCProgram)
-            {
-                m_hierarchicalDCProgram->setModelKernel(m_modelSource);
-                m_hierarchicalDCProgram->recompileNonBlocking();
-            }
-            if (m_manifoldDualContouringProgram)
-            {
-                m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
-                m_manifoldDualContouringProgram->recompileNonBlocking();
             }
             m_optimizedRenderProgram->recompileNonBlocking();
             m_renderState.signalCompilationStarted();
@@ -201,34 +229,56 @@ namespace gladius
         compileRenderProgram();
 
         compileSlicerProgram();
-        
-        // Also recompile hierarchical DC program when model changes
-        if (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isValid())
-        {
-            m_hierarchicalDCProgram->setModelKernel(m_modelSource);
-            m_hierarchicalDCProgram->recompileNonBlocking();
-        }
-        if (m_manifoldDualContouringProgram)
-        {
-            m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
-            m_manifoldDualContouringProgram->recompileNonBlocking();
-        }
     }
 
     void ProgramManager::recompileBlockingForManifoldDC()
     {
+        ProfileFunction;
+        ensureManifoldDcProgramCompiled();
+    }
+
+    void ProgramManager::ensureHierarchicalDcProgramCompiled()
+    {
+        ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+
+        if (m_modelSource.empty() || !m_hierarchicalDCProgram)
+        {
+            return;
+        }
+
+        m_hierarchicalDCProgram->setEnableVdb(m_isVdbActive);
+        if (!m_hierarchicalDCProgram->isValid() || m_hierarchicalDCProgram->isCompilationInProgress())
+        {
+            m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+            m_hierarchicalDCProgram->waitForCompilation();
+            m_hierarchicalDCProgram->recompileBlocking();
+        }
+        else
+        {
+            m_hierarchicalDCProgram->setModelKernel(m_modelSource);
+            if (!m_hierarchicalDCProgram->isValid())
+            {
+                m_hierarchicalDCProgram->recompileBlocking();
+            }
+        }
+    }
+
+    void ProgramManager::ensureManifoldDcProgramCompiled()
+    {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
         
-        if (m_modelSource.empty())
+        if (m_modelSource.empty() || !m_manifoldDualContouringProgram)
         {
-            // No model source set - nothing to compile
             return;
         }
-        
-        if (m_manifoldDualContouringProgram)
+
+        m_manifoldDualContouringProgram->setEnableVdb(m_isVdbActive);
+        m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
+        m_manifoldDualContouringProgram->waitForCompilation();
+        if (!m_manifoldDualContouringProgram->isValid())
         {
-            m_manifoldDualContouringProgram->setModelKernel(m_modelSource);
             m_manifoldDualContouringProgram->recompileBlocking();
         }
     }

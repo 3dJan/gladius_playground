@@ -3,6 +3,7 @@
 #include "Profiling.h"
 #include <fmt/format.h>
 #include <string>
+#include <utility>
 
 #include "exceptions.h"
 
@@ -372,6 +373,22 @@ namespace gladius
         {
             m_logger->logWarning(
               "ProgramBase: m_programFront is null, cannot set cache enabled state!");
+        }
+    }
+
+    void ProgramBase::setEnableTwoLevelPipeline(bool enabled)
+    {
+        if (m_programFront)
+        {
+            m_programFront->setEnableTwoLevelPipeline(enabled);
+        }
+    }
+
+    void ProgramBase::setDebugLabel(std::string label)
+    {
+        if (m_programFront)
+        {
+            m_programFront->setDebugLabel(std::move(label));
         }
     }
 

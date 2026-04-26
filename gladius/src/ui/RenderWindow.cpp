@@ -1763,12 +1763,16 @@ namespace gladius::ui
                 else
                 {
                     // Async scheduling failed - fall back to synchronous preview
+                    bool const wasSdfValid = m_core->isSdfValid();
                     m_core->renderLowResPreview();
-                    m_lowResFeedbackPending.store(false, std::memory_order_release);
-                    m_lastLowResRenderTime = std::chrono::system_clock::now();
-                    m_lastLowResPreviewEpoch.store(
-                      m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                      std::memory_order_release);
+                    if (m_core->isSdfValid() || wasSdfValid)
+                    {
+                        m_lowResFeedbackPending.store(false, std::memory_order_release);
+                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                        m_lastLowResPreviewEpoch.store(
+                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                          std::memory_order_release);
+                    }
                 }
             }
             else if (!previewJobInFlight)
@@ -1777,12 +1781,16 @@ namespace gladius::ui
                 auto token = m_core->requestComputeToken();
                 if (token.has_value())
                 {
+                    bool const wasSdfValid = m_core->isSdfValid();
                     m_core->renderLowResPreview();
-                    m_lowResFeedbackPending.store(false, std::memory_order_release);
-                    m_lastLowResRenderTime = std::chrono::system_clock::now();
-                    m_lastLowResPreviewEpoch.store(
-                      m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                      std::memory_order_release);
+                    if (m_core->isSdfValid() || wasSdfValid)
+                    {
+                        m_lowResFeedbackPending.store(false, std::memory_order_release);
+                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                        m_lastLowResPreviewEpoch.store(
+                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                          std::memory_order_release);
+                    }
                 }
                 else
                 {
@@ -3243,6 +3251,7 @@ namespace gladius::ui
         auto lowResImage = m_core->getLowResPreviewImage();
         auto resultImage = m_core->getResultImage();
         auto renderProgram = m_core->getBestRenderProgram();
+        bool scheduleAdaptivePreview = false;
 
         if (lowResImage && resultImage && renderProgram)
         {
@@ -3261,6 +3270,60 @@ namespace gladius::ui
 
             // Update the last displayed frame ID for ordering
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
+
+            if (!m_streamingPreviewActive.load(std::memory_order_acquire) &&
+                !m_streamingJobInFlight.load(std::memory_order_acquire) && meta.latencyNs > 0)
+            {
+                float const executionDurationMs =
+                  static_cast<float>(static_cast<double>(meta.latencyNs) / 1'000'000.0);
+                auto constexpr targetFrameTimeMs = 25.0f;
+                float const error = targetFrameTimeMs - executionDurationMs;
+
+                if (executionDurationMs > 0.0f && std::abs(error) > 0.5f)
+                {
+                    auto & state = m_renderWindowState;
+                    state.fpsIntegral *= 0.8f;
+                    state.fpsIntegral += error;
+
+                    float constexpr kp = 0.001f;
+                    float constexpr ki = 0.00001f;
+                    float constexpr kd = 0.000001f;
+                    float const derivative = error - state.fpsPreviousError;
+                    float const adjustment = kp * error + ki * state.fpsIntegral +
+                                             kd * derivative;
+
+                    float const previousQuality = state.renderQualityWhileMoving;
+                    state.renderQualityWhileMoving =
+                      std::clamp(previousQuality + adjustment, 0.05f, state.renderQuality);
+                    state.fpsPreviousError = error;
+
+                    int const newWidth = static_cast<int>(std::clamp(
+                      m_renderWindowSize_px.x * state.renderQualityWhileMoving, 1.f, 16000.f));
+                    int const newHeight = static_cast<int>(std::clamp(
+                      m_renderWindowSize_px.y * state.renderQualityWhileMoving, 1.f, 16000.f));
+
+                    auto const [currentWidth, currentHeight] =
+                      m_core->getLowResPreviewResolution();
+                    if (currentWidth > 0 && currentHeight > 0)
+                    {
+                        float const widthChangePercent =
+                          std::abs(newWidth - static_cast<int>(currentWidth)) /
+                          static_cast<float>(currentWidth) * 100.0f;
+                        float const heightChangePercent =
+                          std::abs(newHeight - static_cast<int>(currentHeight)) /
+                          static_cast<float>(currentHeight) * 100.0f;
+
+                        if (widthChangePercent > 5.0f || heightChangePercent > 5.0f)
+                        {
+                            if (m_core->setLowResPreviewResolution(
+                                  static_cast<size_t>(newWidth), static_cast<size_t>(newHeight)))
+                            {
+                                scheduleAdaptivePreview = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Signal the streaming worker that it is safe to render the next frame
@@ -3271,6 +3334,12 @@ namespace gladius::ui
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
+
+        if (scheduleAdaptivePreview)
+        {
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lowResFeedbackPending.store(true, std::memory_order_release);
+        }
     }
 
     void RenderWindow::startStreamingPreview()

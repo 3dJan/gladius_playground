@@ -151,6 +151,7 @@ namespace gladius::compute
 
         // Get the program from ProgramManager
         auto& programManager = m_core.getProgramManager();
+        programManager.ensureManifoldDcProgramCompiled();
         m_program = programManager.getManifoldDualContouringProgram();
         if (!m_program)
         {

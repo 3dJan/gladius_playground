@@ -73,6 +73,8 @@ namespace gladius
         
         /// Recompile the ManifoldDualContouring program with current model source
         void recompileBlockingForManifoldDC();
+        void ensureHierarchicalDcProgramCompiled();
+        void ensureManifoldDcProgramCompiled();
 
         void setComputeContext(std::shared_ptr<ComputeContext> context);
 

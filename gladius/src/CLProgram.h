@@ -12,7 +12,9 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "ImageStackOCL.h"
@@ -65,6 +67,11 @@ namespace gladius
         void setLogger(events::SharedLogger logger)
         {
             m_logger = std::move(logger);
+        }
+
+        void setDebugLabel(std::string label)
+        {
+            m_debugLabel = std::move(label);
         }
 
         /// Get the shared event logger
@@ -469,10 +476,12 @@ namespace gladius
         SharedKernelReplacements m_kernelReplacements;
 
         bool m_enableTwoLevelPipeline = false;
+        std::string m_debugLabel = "CLProgram";
 
         // Binary caching support
         std::filesystem::path m_cacheDirectory;
         bool m_cacheEnabled = true; // Cache enabled by default
+        mutable bool m_binaryCacheDisabledLogged = false;
 
         // Static vs Dynamic source tracking
         cl::Program::Sources m_staticSources;  // Static kernel files (.cl files from resources)
@@ -484,6 +493,8 @@ namespace gladius
         // Cache management helpers
         bool loadProgramFromCache(size_t hash);
         void saveProgramToCache(size_t hash);
+        [[nodiscard]] bool canUseBinaryCache() const;
+        void logBinaryCacheDisabledOnce(std::string_view reason) const;
         std::string getDeviceSignature() const;
         [[nodiscard]] std::string makeSingleLevelBuildSignature(size_t programHash) const;
         [[nodiscard]] std::string makeStaticLibrarySignature(size_t staticHash) const;

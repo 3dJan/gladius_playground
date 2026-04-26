@@ -37,6 +37,8 @@ namespace gladius
         void setCacheDirectory(const std::filesystem::path & path);
         void clearCache();
         void setCacheEnabled(bool enabled);
+        void setEnableTwoLevelPipeline(bool enabled);
+        void setDebugLabel(std::string label);
         [[nodiscard]] bool isCacheEnabled() const;
 
         /**
