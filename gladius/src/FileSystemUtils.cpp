@@ -9,6 +9,13 @@
 #ifndef _MSVC_LANG
 #include <unistd.h>
 #endif
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
 #include <sago/platform_folders.h>
 
 namespace gladius
