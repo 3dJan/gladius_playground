@@ -299,10 +299,19 @@ namespace gladius::ui
                                         !m_renderWindowState.isRendering &&
                                         !m_renderWindowState.isMoving &&
                                         !m_suppressHQDisplay.load(std::memory_order_acquire);
+            bool const useProgressiveBuffer =
+              m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image &&
+              m_asyncProgressiveEpoch.load(std::memory_order_acquire) == currentEpoch &&
+              !m_renderWindowState.isMoving &&
+              !m_suppressHQDisplay.load(std::memory_order_acquire);
 
             if (useFrontBuffer)
             {
                 displayImage = frontBuf->image;
+            }
+            else if (useProgressiveBuffer)
+            {
+                displayImage = m_asyncProgressiveBuffer->image;
             }
             else
             {
@@ -316,6 +325,7 @@ namespace gladius::ui
             displayImage = m_core->getResultImage();
         }
 
+        displayImage->bind();
         auto const textureId = displayImage->GetTextureId();
         auto & io = ImGui::GetIO();
         ImGuiWindowFlags const window_flags =
@@ -1663,15 +1673,44 @@ namespace gladius::ui
             m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
         }
 
-        // Defer buffer reallocation during resize to preserve visible content
+        // Defer buffer reallocation during resize to preserve visible content. Also wait until
+        // async HQ rendering has fully drained before reallocating the displayed CL/GL image:
+        // worker jobs copy their staging image back into m_resultImage after the render kernel
+        // completes, and resizing that image concurrently can crash inside clEnqueueCopyImage.
         bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
+        int const desiredScreenWidth = static_cast<int>(
+          std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f));
+        int const desiredScreenHeight = static_cast<int>(
+          std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f));
+        auto const resultImage = m_core->getResultImage();
+        bool const screenResizeRequired =
+          resultImage && (static_cast<int>(resultImage->getWidth()) != desiredScreenWidth ||
+                          static_cast<int>(resultImage->getHeight()) != desiredScreenHeight);
+        bool const hqRenderInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
+
+        if (!shouldDeferResize && screenResizeRequired && !hqRenderInFlight &&
+            m_asyncProgressiveBuffer != nullptr)
+        {
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+            m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            state.currentLine = 0;
+            state.isRendering = false;
+        }
+
+        if (!shouldDeferResize && screenResizeRequired && hqRenderInFlight)
+        {
+            m_dirty = true;
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            state.isRendering = false;
+            return;
+        }
 
         if (!shouldDeferResize &&
-            m_core->setScreenResolution(
-              static_cast<int>(
-                std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f)),
-              static_cast<int>(
-                std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f))))
+            m_core->setScreenResolution(desiredScreenWidth, desiredScreenHeight))
         {
             // Resolution changed - mark dirty but DON'T bump epoch if already rendering
             // (bumping epoch would cancel in-flight jobs)
@@ -1963,6 +2002,7 @@ namespace gladius::ui
                 if (newFront && newFront->image)
                 {
                     // Bind the new frame to ensure GL texture is updated
+                    newFront->image->invalidateContent();
                     newFront->image->bind();
                     newFront->image->unbind();
 
@@ -1984,13 +2024,10 @@ namespace gladius::ui
             }
             else
             {
-                // Progressive chunk completed - keep rendering flag set to schedule next chunk
-                // Update GL texture with the new chunk (UI thread safe)
-                auto resultImage = m_core->getResultImage();
-                if (resultImage)
+                if (!isOutdated && m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
                 {
-                    resultImage->bind(); // Updates GL texture from CL buffer
-                    resultImage->unbind();
+                    m_asyncProgressiveBuffer->image->invalidateContent();
+                    m_view->startAnimationMode();
                 }
 
                 // Don't reset state.isRendering - we want to continue rendering
@@ -2055,10 +2092,38 @@ namespace gladius::ui
         job.width = static_cast<uint32_t>(width);
         job.height = static_cast<uint32_t>(height);
         job.startLine = std::min(state.currentLine, height);
+        if (job.startLine == 0)
+        {
+            state.renderingStepSize =
+              std::min(state.renderingStepSize, kInitialProgressiveStepSize);
+        }
         job.stepSize =
           std::max<size_t>(1, std::min(state.renderingStepSize, height - job.startLine));
         job.precomputeSdf = false;
         job.enableHighQuality = m_enableHQRendering;
+
+        if (job.startLine == 0 &&
+            (!m_asyncProgressiveBuffer ||
+             m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch))
+        {
+            auto * seedBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
+            auto renderProgram = m_core->getBestRenderProgram();
+            if (seedBuffer && seedBuffer->image && renderProgram &&
+                seedBuffer->image->getWidth() >= width && seedBuffer->image->getHeight() >= height)
+            {
+                renderProgram->resample(*image, *seedBuffer->image, 0, height);
+                seedBuffer->image->invalidateContent();
+                m_asyncProgressiveBuffer = seedBuffer;
+                m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
+            }
+            else if (seedBuffer)
+            {
+                [[maybe_unused]] bool const released =
+                  m_asyncController->tryTransitionBuffer(seedBuffer,
+                                                         async_rendering::FrameState::Writing,
+                                                         async_rendering::FrameState::Idle);
+            }
+        }
 
         ZoneValue(job.startLine);
         ZoneValue(job.stepSize);
@@ -2098,6 +2163,7 @@ namespace gladius::ui
         result.jobType = job.type;
         result.width = job.width;
         result.height = job.height;
+        result.startLine = job.startLine;
 
         if (cancellationRequested())
         {
@@ -2114,7 +2180,6 @@ namespace gladius::ui
         auto const startTime = std::chrono::steady_clock::now();
 
         async_rendering::FrameBuffer * writeBuffer = nullptr;
-        bool const isFirstChunk = (job.startLine == 0);
 
         auto releaseProgressiveBuffer = [&]()
         {
@@ -2135,7 +2200,7 @@ namespace gladius::ui
             writeBuffer = nullptr;
         };
 
-        if (isFirstChunk || !m_asyncProgressiveBuffer ||
+        if (!m_asyncProgressiveBuffer ||
             m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch)
         {
             writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
@@ -2147,39 +2212,12 @@ namespace gladius::ui
 
             if (writeBuffer->image)
             {
-                if (auto const resultImage = m_core->getResultImage())
+                if (writeBuffer->image->getWidth() < job.width ||
+                    writeBuffer->image->getHeight() < job.height)
                 {
-                    // Validate dimensions — the result image may have been
-                    // resized on the UI thread since the job was created.
-                    if (resultImage->getWidth() < job.width ||
-                        resultImage->getHeight() < job.height ||
-                        writeBuffer->image->getWidth() < job.width ||
-                        writeBuffer->image->getHeight() < job.height)
-                    {
-                        releaseProgressiveBuffer();
-                        result.cancelled = true;
-                        co_return result;
-                    }
-
-                    cl::Event previewCopyEvent{};
-                    commandQueue.enqueueCopyImage(resultImage->getBuffer(),
-                                                  writeBuffer->image->getBuffer(),
-                                                  {0, 0, 0},
-                                                  {0, 0, 0},
-                                                  {job.width, job.height, 1},
-                                                  nullptr,
-                                                  &previewCopyEvent);
-                    commandQueue.flush();
-                    co_await waitForEvent(previewCopyEvent, cancelCheck);
-
-                    if (cancellationRequested())
-                    {
-                        releaseProgressiveBuffer();
-                        result.cancelled = true;
-                        co_return result;
-                    }
-
-                    writeBuffer->image->invalidateContent();
+                    releaseProgressiveBuffer();
+                    result.cancelled = true;
+                    co_return result;
                 }
             }
 
@@ -2231,45 +2269,6 @@ namespace gladius::ui
 
                     result.completedLine = advanced ? endLine : job.startLine;
                     result.completedFrame = result.completedLine >= job.height;
-
-                    if (advanced && !result.cancelled)
-                    {
-                        if (auto const resultImage = m_core->getResultImage())
-                        {
-                            // Validate dimensions — result image may have been
-                            // resized on the UI thread since the job was created.
-                            if (resultImage->getWidth() < result.width ||
-                                resultImage->getHeight() < result.height ||
-                                writeBuffer->image->getWidth() < result.width ||
-                                writeBuffer->image->getHeight() < result.height)
-                            {
-                                result.cancelled = true;
-                            }
-                            else
-                            {
-                                cl::Event copyBackEvent{};
-                                commandQueue.enqueueCopyImage(writeBuffer->image->getBuffer(),
-                                                              resultImage->getBuffer(),
-                                                              {0, 0, 0},
-                                                              {0, 0, 0},
-                                                              {result.width, result.height, 1},
-                                                              nullptr,
-                                                              &copyBackEvent);
-                                commandQueue.flush();
-                                co_await waitForEvent(copyBackEvent, cancelCheck);
-
-                                if (!cancellationRequested())
-                                {
-                                    writeBuffer->image->invalidateContent();
-                                    resultImage->invalidateContent();
-                                }
-                                else
-                                {
-                                    result.cancelled = true;
-                                }
-                            }
-                        }
-                    }
                 }
                 else
                 {

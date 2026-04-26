@@ -82,6 +82,7 @@ namespace gladius::ui::async_rendering
         bool cancelled{false};
         bool completedFrame{false};
         bool precomputedSdfUpdated{false};
+        size_t startLine{0};
         size_t completedLine{0};
         uint64_t computeDurationNs{0};
         float compilationProgress{0.0f};  // 0.0 - 1.0 for compilation jobs
