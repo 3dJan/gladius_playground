@@ -100,12 +100,14 @@ namespace gladius
         if (m_capabilities == RequiredCapabilities::OpenGLInterop)
         {
             LOG_LOCATION
-            m_resultImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
-            m_resultImage->allocateOnDevice();
+            auto resultImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
+            resultImage->allocateOnDevice();
+            m_resultImage.store(resultImage, std::memory_order_release);
 
-            m_lowResPreviewImage =
+            auto lowResPreviewImage =
               std::make_shared<GLImageBuffer>(*m_ComputeContext, width / 2, height / 2);
-            m_lowResPreviewImage->allocateOnDevice();
+            lowResPreviewImage->allocateOnDevice();
+            m_lowResPreviewImage.store(lowResPreviewImage, std::memory_order_release);
         }
 
         const auto thumbnailSize = size_t{256};
@@ -772,7 +774,8 @@ namespace gladius
 
     bool ComputeCore::isBusy() const
     {
-        return !(m_precompSdfIsValid && isAnyCompilationInProgress() && isRendererReady());
+        return !(m_precompSdfIsValid.load(std::memory_order_acquire) &&
+                 isAnyCompilationInProgress() && isRendererReady());
     }
 
     bool ComputeCore::updateBoundingBoxFast()
@@ -1357,7 +1360,7 @@ namespace gladius
             return false;
         }
 
-        if (m_precompSdfIsValid)
+        if (m_precompSdfIsValid.load(std::memory_order_acquire))
         {
                         logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: SDF already valid");
             return true;
@@ -1386,7 +1389,7 @@ namespace gladius
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(prevCompSdfBBox);
         m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, prevCompSdfBBox);
-        m_precompSdfIsValid = true;
+        m_precompSdfIsValid.store(true, std::memory_order_release);
         logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: completed successfully");
         return true;
     }
@@ -1445,7 +1448,7 @@ namespace gladius
             }
         }
 
-        if (m_precompSdfIsValid)
+        if (m_precompSdfIsValid.load(std::memory_order_acquire))
         {
             logMsg("ComputeCore::precomputeSdfAsync: SDF already valid, skipping");
             m_sdfComputationInProgress.store(false);
@@ -1543,7 +1546,9 @@ namespace gladius
                 std::stringstream ss;
                 ss << "ComputeCore.prepareThumbnailGeneration: begin"
                    << " glInterop=" << (m_capabilities == RequiredCapabilities::OpenGLInterop)
-                   << " precompValid=" << (m_precompSdfIsValid ? 1 : 0) << " renderProgValid="
+                   << " precompValid="
+                   << (m_precompSdfIsValid.load(std::memory_order_acquire) ? 1 : 0)
+                   << " renderProgValid="
                    << (m_programs.getRenderProgram() &&
                        !m_programs.getRenderProgram()->isCompilationInProgress())
                    << " slicerValid="
@@ -1647,12 +1652,12 @@ namespace gladius
 
     SharedGLImageBuffer ComputeCore::getResultImage() const
     {
-        return m_resultImage;
+        return m_resultImage.load(std::memory_order_acquire);
     }
 
     SharedGLImageBuffer ComputeCore::getLowResPreviewImage() const
     {
-        return m_lowResPreviewImage;
+        return m_lowResPreviewImage.load(std::memory_order_acquire);
     }
 
     SharedContourExtractor ComputeCore::getContour() const
@@ -1714,8 +1719,10 @@ namespace gladius
 
     bool ComputeCore::setScreenResolution(size_t width, size_t height)
     {
-        ProfileFunction if (m_resultImage && (width == m_resultImage->getWidth()) &&
-                            (height == m_resultImage->getHeight()))
+        ProfileFunction auto const currentImage =
+          m_resultImage.load(std::memory_order_acquire);
+        if (currentImage && (width == currentImage->getWidth()) &&
+            (height == currentImage->getHeight()))
         {
             return false;
         }
@@ -1725,15 +1732,25 @@ namespace gladius
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
-        m_resultImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
-        m_resultImage->allocateOnDevice();
+        auto const latestImage = m_resultImage.load(std::memory_order_acquire);
+        if (latestImage && (width == latestImage->getWidth()) &&
+            (height == latestImage->getHeight()))
+        {
+            return false;
+        }
+
+        auto resultImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
+        resultImage->allocateOnDevice();
+        m_resultImage.store(resultImage, std::memory_order_release);
         return true;
     }
 
     bool ComputeCore::setLowResPreviewResolution(size_t width, size_t height)
     {
-        if (m_lowResPreviewImage && (width == m_lowResPreviewImage->getWidth()) &&
-            (height == m_lowResPreviewImage->getHeight()))
+        auto const currentImage =
+          m_lowResPreviewImage.load(std::memory_order_acquire);
+        if (currentImage && (width == currentImage->getWidth()) &&
+            (height == currentImage->getHeight()))
         {
             return false;
         }
@@ -1743,18 +1760,29 @@ namespace gladius
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
-        m_lowResPreviewImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
-        m_lowResPreviewImage->allocateOnDevice();
+        auto const latestImage =
+          m_lowResPreviewImage.load(std::memory_order_acquire);
+        if (latestImage && (width == latestImage->getWidth()) &&
+            (height == latestImage->getHeight()))
+        {
+            return false;
+        }
+
+        auto lowResPreviewImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
+        lowResPreviewImage->allocateOnDevice();
+        m_lowResPreviewImage.store(lowResPreviewImage, std::memory_order_release);
         return true;
     }
 
     std::pair<size_t, size_t> ComputeCore::getLowResPreviewResolution() const
     {
-        if (!m_lowResPreviewImage)
+        auto const image =
+          m_lowResPreviewImage.load(std::memory_order_acquire);
+        if (!image)
         {
             return {0u, 0u};
         }
-        return {m_lowResPreviewImage->getWidth(), m_lowResPreviewImage->getHeight()};
+        return {image->getWidth(), image->getHeight()};
     }
 
     SharedPrimitives ComputeCore::getPrimitives() const
@@ -1816,22 +1844,28 @@ namespace gladius
         throwIfNoOpenGL();
         glFinish();
 
-        if (m_resultImage->getWidth() != sourceImage.getWidth() ||
-            m_resultImage->getHeight() != sourceImage.getHeight())
+        auto resultImage = m_resultImage.load(std::memory_order_acquire);
+        if (!resultImage)
         {
-            m_resultImage->setWidth(sourceImage.getWidth());
-            m_resultImage->setHeight(sourceImage.getHeight());
+            return;
+        }
 
-            m_resultImage->allocateOnDevice();
+        if (resultImage->getWidth() != sourceImage.getWidth() ||
+            resultImage->getHeight() != sourceImage.getHeight())
+        {
+            resultImage = std::make_shared<GLImageBuffer>(
+              *m_ComputeContext, sourceImage.getWidth(), sourceImage.getHeight());
+            resultImage->allocateOnDevice();
+            m_resultImage.store(resultImage, std::memory_order_release);
         }
 
         if (m_ComputeContext->outputMethod() == OutputMethod::interop)
         {
-            this->renderResultImageInterOp(sourceImage, *m_resultImage);
+            this->renderResultImageInterOp(sourceImage, *resultImage);
         }
         if (m_ComputeContext->outputMethod() == OutputMethod::readpixel)
         {
-            this->renderResultImageReadPixel(sourceImage, *m_resultImage);
+            this->renderResultImageReadPixel(sourceImage, *resultImage);
         }
         LOG_LOCATION
     }
@@ -1855,19 +1889,24 @@ namespace gladius
         }
 
         glFinish();
+        auto resultImage = m_resultImage.load(std::memory_order_acquire);
+        if (!resultImage)
+        {
+            return false;
+        }
 
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
         getBestRenderProgram()->renderScene(
-          *m_primitives, *m_resultImage, m_sliceHeight_mm, startLine, endLine);
+          *m_primitives, *resultImage, m_sliceHeight_mm, startLine, endLine);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
-        m_resultImage->invalidateContent();
+        resultImage->invalidateContent();
 
         // Bind to update GL texture with new rendering
-        m_resultImage->bind();
-        m_resultImage->unbind();
+        resultImage->bind();
+        resultImage->unbind();
 
         LOG_LOCATION
         return true;
@@ -1938,7 +1977,7 @@ namespace gladius
         // Low-res preview must stay cheap and independent of mesh complexity.
         // If the precomputed SDF is not ready yet, keep the previous image
         // instead of falling back to full model evaluation.
-        if (!m_precompSdfIsValid)
+        if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
             m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
@@ -1948,6 +1987,13 @@ namespace gladius
         throwIfNoOpenGL();
 
         glFinish();
+        auto lowResPreviewImage =
+          m_lowResPreviewImage.load(std::memory_order_acquire);
+        auto resultImage = m_resultImage.load(std::memory_order_acquire);
+        if (!lowResPreviewImage || !resultImage)
+        {
+            return;
+        }
 
         m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
         m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
@@ -1958,19 +2004,19 @@ namespace gladius
         m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
         getBestRenderProgram()->renderScene(*m_primitives,
-                                            *m_lowResPreviewImage,
+                                            *lowResPreviewImage,
                                             m_sliceHeight_mm,
                                             0,
-                                            m_lowResPreviewImage->getHeight());
+                                            lowResPreviewImage->getHeight());
         m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         getBestRenderProgram()->resample(
-          *m_lowResPreviewImage, *m_resultImage, 0, m_resultImage->getHeight());
-        m_resultImage->invalidateContent();
+          *lowResPreviewImage, *resultImage, 0, resultImage->getHeight());
+        resultImage->invalidateContent();
 
         // Ensure GL texture is updated (especially important for readpixel mode)
-        m_resultImage->bind();
-        m_resultImage->unbind();
+        resultImage->bind();
+        resultImage->unbind();
     }
 
     cl::Event ComputeCore::renderLowResPreviewAsync(cl::CommandQueue const & queue,
@@ -1981,7 +2027,7 @@ namespace gladius
         // Note: No mutex lock - caller is responsible for thread safety
         // Note: No glFinish() - this is async, caller handles sync via returned event
 
-        if (!m_precompSdfIsValid)
+        if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
             m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
@@ -2031,7 +2077,7 @@ namespace gladius
         // Work with a local copy of settings to avoid mutating shared state
         auto settings = m_resources->getRenderingSettings();
 
-        if (!m_precompSdfIsValid)
+        if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
             m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
             m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
@@ -2084,7 +2130,7 @@ namespace gladius
         }
 
         auto * distanceBuffer = m_resources->getDistanceInitBuffer();
-        if (!distanceBuffer || !m_distanceInitBufferValid)
+        if (!distanceBuffer || !m_distanceInitBufferValid.load(std::memory_order_acquire))
         {
             // Fall back to standard rendering if distance buffer not available
             return renderSceneComputeOnly(commandQueue, startLine, endLine, targetImage, completionEvent);
@@ -2121,17 +2167,18 @@ namespace gladius
 
     bool ComputeCore::isDistanceInitBufferValid() const
     {
-        return m_distanceInitBufferValid && m_resources->getDistanceInitBuffer() != nullptr;
+        return m_distanceInitBufferValid.load(std::memory_order_acquire) &&
+               m_resources->getDistanceInitBuffer() != nullptr;
     }
 
     void ComputeCore::invalidateDistanceInitBuffer()
     {
-        m_distanceInitBufferValid = false;
+        m_distanceInitBufferValid.store(false, std::memory_order_release);
     }
 
     void ComputeCore::setDistanceInitBufferValid()
     {
-        m_distanceInitBufferValid = true;
+        m_distanceInitBufferValid.store(true, std::memory_order_release);
     }
 
     bool ComputeCore::renderSceneWithMetrics(
@@ -2226,20 +2273,20 @@ namespace gladius
     {
         std::string const reasonStr = reason.empty() ? std::string{} : std::string(reason);
 
-        m_precompSdfIsValid = false;
+        m_precompSdfIsValid.store(false, std::memory_order_release);
         // Distance buffer depends on SDF being valid, so invalidate it too
-        m_distanceInitBufferValid = false;
+        m_distanceInitBufferValid.store(false, std::memory_order_release);
     }
 
     void ComputeCore::setSdfValid(bool valid)
     {
-        m_precompSdfIsValid = valid;
+        m_precompSdfIsValid.store(valid, std::memory_order_release);
         m_sdfComputationInProgress.store(false);
     }
 
     bool ComputeCore::isSdfValid() const
     {
-        return m_precompSdfIsValid;
+        return m_precompSdfIsValid.load(std::memory_order_acquire);
     }
 
     ApproximationMode ComputeCore::getLastUsedApproximation() const
@@ -2294,7 +2341,7 @@ namespace gladius
             throw std::runtime_error("Model is not up to date");
         }
 
-        if (!m_precompSdfIsValid)
+        if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
             logMsg("ComputeCore.createThumbnail: precomputed SDF is not valid");
             throw std::runtime_error("Precomputed SDF is not valid");

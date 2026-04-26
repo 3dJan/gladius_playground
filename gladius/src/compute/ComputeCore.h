@@ -721,8 +721,8 @@ namespace gladius
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
         SharedContourExtractor m_contour;
-        SharedGLImageBuffer m_resultImage;
-        SharedGLImageBuffer m_lowResPreviewImage;
+        mutable std::atomic<SharedGLImageBuffer> m_resultImage;
+        mutable std::atomic<SharedGLImageBuffer> m_lowResPreviewImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImageHighRes;
 
@@ -747,7 +747,7 @@ namespace gladius
         std::future<void> m_sliceFuture;
         std::mutex m_contourExtractorMutex;
 
-        bool m_precompSdfIsValid = false;
+        std::atomic_bool m_precompSdfIsValid{false};
         size_t m_preCompSdfSize = 256u;
 
         bool m_autoUpdateBoundingBox = true;
@@ -760,7 +760,7 @@ namespace gladius
 
         /// @brief Tracks whether the distance init buffer contains valid data
         /// @note Invalidated on parameter changes, camera changes, or resolution changes
-        bool m_distanceInitBufferValid = false;
+        std::atomic_bool m_distanceInitBufferValid{false};
 
         /// @brief Tracks last used approximation modes for UI status display only
         /// @note Mutable because these are purely diagnostic and set during const render methods

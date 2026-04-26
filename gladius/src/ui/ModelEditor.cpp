@@ -1604,7 +1604,8 @@ namespace gladius::ui
                     m_validationOverlay.render(m_doc->getIssueList());
                 }
 
-                m_popupMenuFunction();
+                auto popupMenuFunction = m_popupMenuFunction;
+                popupMenuFunction();
 
                 // Tab bar: always show Graph + Code; show Properties only for Image3D
                 auto previousTabMode = m_currentTabMode;

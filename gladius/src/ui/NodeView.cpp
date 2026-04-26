@@ -2391,12 +2391,13 @@ namespace gladius::ui
     {
         m_showLinkAssignmentMenu = true;
         // Copy the required data so the callback does not hold dangling references across frames
-        nodes::VariantParameter const targetParameterCopy = parameter.second; // by-value copy
         nodes::ParameterId const targetParamId = parameter.second.getId();
+        nodes::NodeId const targetParentId = parameter.second.getParentId();
+        std::type_index const targetType = parameter.second.getTypeIndex();
         std::string const targetNameCopy = parameter.first; // by-value copy
 
         m_modelEditor->showPopupMenu(
-          [this, targetParameterCopy, targetParamId, targetNameCopy]()
+          [this, targetParamId, targetParentId, targetType, targetNameCopy]()
           {
               if (m_showLinkAssignmentMenu)
               {
@@ -2409,12 +2410,13 @@ namespace gladius::ui
                   return;
               }
 
-              // Use the safe copies captured above
-              const auto newSource = inputMenu(*model, targetParameterCopy, targetNameCopy);
+              const auto newSource = inputMenu(
+                *model, targetParamId, targetParentId, targetType, targetNameCopy);
               if (newSource.has_value())
               {
                   model->addLink(newSource.value(), targetParamId, false);
                   m_modelEditor->markModelAsModified();
+                  m_modelEditor->closePopupMenu();
               }
           });
     }

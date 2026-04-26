@@ -9,11 +9,12 @@ namespace ed = ax::NodeEditor;
 namespace gladius::ui
 {
     OptionalPortId inputMenu(nodes::Model & nodes,
-                             gladius::nodes::VariantParameter targetParameter,
-                             std::string targetName)
+                             nodes::ParameterId targetId,
+                             nodes::NodeId targetParentId,
+                             std::type_index targetType,
+                             std::string const & targetName)
     {
         const auto & ports = nodes.getPortRegistry();
-        nodes::ParameterId targetId = targetParameter.getId();
 
         const auto targetIter = nodes.getParameterRegistry().find(targetId);
         if (targetIter == std::end(nodes.getParameterRegistry()))
@@ -29,7 +30,7 @@ namespace gladius::ui
         posOnCanvas.x -= 400;
 
         // get the positition of the parent node of the target parameter
-        auto const parentNode = nodes.getNode(targetParameter.getParentId());
+        auto const parentNode = nodes.getNode(targetParentId);
         if (parentNode.has_value())
         {
             auto const screenPos = ed::GetNodePosition(parentNode.value()->getId());
@@ -40,7 +41,7 @@ namespace gladius::ui
         {
             // Button for creating a new node of (Constant, Vector, Matrix, Resource) depending on
             // the type of the target parameter and use the new node as input
-            if (targetParameter.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+            if (targetType == nodes::ParameterTypeIndex::Float)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button,
                                       LinkColors::DarkColorFloat); // Set button color to blue
@@ -59,7 +60,7 @@ namespace gladius::ui
                 ImGui::PopStyleColor();
             }
 
-            if (targetParameter.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+            if (targetType == nodes::ParameterTypeIndex::Float3)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button,
                                       LinkColors::DarkColorFloat3); // Set button color to green
@@ -76,7 +77,7 @@ namespace gladius::ui
                 ImGui::PopStyleColor();
             }
 
-            if (targetParameter.getTypeIndex() == nodes::ParameterTypeIndex::Matrix4)
+            if (targetType == nodes::ParameterTypeIndex::Matrix4)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button,
                                       LinkColors::DarkColorMatrix); // Set button color to red

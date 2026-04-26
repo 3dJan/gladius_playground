@@ -3091,6 +3091,7 @@ namespace gladius::ui
         // When SDF is not valid, it uses direct function evaluation (slower but correct)
         {
             ZoneScopedN("RenderLowResPreviewAsync");
+            auto computeToken = m_core->waitForComputeToken();
 
             // Use the non-blocking async preview render
             // This renders at low resolution and returns a cl::Event for completion tracking
