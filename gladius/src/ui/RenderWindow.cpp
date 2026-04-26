@@ -3472,8 +3472,8 @@ namespace gladius::ui
                 continue;
             }
 
-            // Poll GPU completion.  Use a generous timeout — the first frame
-            // after SDF invalidation uses AM_FULL_MODEL which can be slow.
+            // Poll GPU completion. Use a generous timeout for driver hiccups,
+            // but preview rendering itself never falls back to full-model SDF.
             auto constexpr timeout = std::chrono::milliseconds(5000);
             auto const pollStart = std::chrono::steady_clock::now();
             bool eventCompleted = false;

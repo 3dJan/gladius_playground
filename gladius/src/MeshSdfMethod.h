@@ -110,6 +110,14 @@ namespace gladius
         /// sign artifacts on thin features. **Runtime only**: forwarded into
         /// `RenderingSettings.meshFwnFarFieldFactor`.
         float fwnFarFieldFactor = 0.5f;
+
+        /// Enable the coarse 64³ FWN sign cache. When true, cells far enough
+        /// from the surface are pre-classified inside/outside on the GPU after
+        /// the aggregate build, and the kernel skips the winding traversal for
+        /// those cells. Disable for debugging sign speckles. Changing this
+        /// refreshes the primitive-buffer header but does not rebuild the mesh
+        /// BVH payload.
+        bool fwnUseSignCache = true;
     };
 
     /// Determine whether changing @p oldCfg → @p newCfg requires acceleration

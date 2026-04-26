@@ -228,8 +228,7 @@ namespace gladius
 
             auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
             if (spatialMesh != nullptr &&
-                spatialMesh->needsFwnAggregateBuild() &&
-                spatialMesh->usesFwnSignCache())
+                spatialMesh->needsFwnAggregateBuild())
             {
                 auto buildParams = spatialMesh->getFwnAggregateBuildParams();
                 if (buildParams.has_value())

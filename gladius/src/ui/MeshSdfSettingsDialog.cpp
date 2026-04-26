@@ -149,6 +149,14 @@ namespace gladius::ui
                     "Skip winding traversal beyond factor \xC3\x97 half-bbox-diagonal. "
                     "0 = exact (slow). 0.5 = recommended. >1 = aggressive (may show "
                     "sign artifacts on thin features).");
+
+                if (ImGui::Checkbox("Use sign cache", &m_eval.fwnUseSignCache))
+                {
+                    m_dirty = true;
+                }
+                ImGui::TextDisabled(
+                    "Pre-classifies cells far from the surface on the GPU to skip "
+                    "winding traversal. Disable to diagnose sign speckles.");
             }
 
             if (ImGui::Checkbox("Use early-exit hint", &m_eval.useEarlyExit))

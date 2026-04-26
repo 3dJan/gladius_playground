@@ -68,6 +68,8 @@ namespace gladius
 
         bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
         bool const fwnBetaChanged = m_evaluationConfig.fwnBeta != cfg.fwnBeta;
+        bool const fwnSignCacheUsageChanged =
+            m_evaluationConfig.fwnUseSignCache != cfg.fwnUseSignCache;
 
         // Even when the *method* changed, the existing payload may already
         // contain everything the new method needs:
@@ -116,12 +118,18 @@ namespace gladius
             m_needsVoxelGridBuild = false;
         }
 
-        if (cfg.method == MeshSdfMethod::FastWindingNumber && fwnBetaChanged)
+        if (cfg.method == MeshSdfMethod::FastWindingNumber && cfg.fwnUseSignCache &&
+            (fwnBetaChanged || fwnSignCacheUsageChanged))
         {
             // Existing GPU sign caches were generated for the previous beta. Keep
             // them disabled by the kernel-side beta check and queue a rebuild the
             // next time post-upload cache work is collected.
             resetSignCacheBuildProgress();
+        }
+        else if (cfg.method == MeshSdfMethod::FastWindingNumber && !cfg.fwnUseSignCache)
+        {
+            m_needsSignCacheBuild = false;
+            m_signCacheNextWord = 0;
         }
         else if (cfg.method != MeshSdfMethod::FastWindingNumber)
         {
@@ -143,7 +151,7 @@ namespace gladius
         // Report rebuildPotentiallyRequired so callers see "the config changed"
         // even when we skipped the heavy reload — they may still need to
         // refresh other state (e.g. RenderingSettings flags).
-        return rebuildPotentiallyRequired;
+        return rebuildPotentiallyRequired || fwnSignCacheUsageChanged;
     }
 
     void SpatialMeshResource::rebuild(std::span<float4 const> vertices,
@@ -229,7 +237,7 @@ namespace gladius
     void SpatialMeshResource::write(Primitives & primitives)
     {
         ProfileFunction;
-        GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::write FWN payload", usesFwnSignCache());
+        GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::write FWN payload", usesFastWindingNumber());
 
         // Track the base offset before adding our data
         m_dataBaseOffset = static_cast<int>(primitives.data.getSize());
@@ -265,7 +273,7 @@ namespace gladius
         // previously built GPU caches and they must be rebuilt/re-enabled.
         m_needsVoxelGridBuild = m_voxelCount > 0u &&
                                 m_evaluationConfig.method == MeshSdfMethod::VoxelAccelerated;
-        m_needsFwnAggregateBuild = m_fwnAggregatesOffset != 0u && usesFwnSignCache();
+        m_needsFwnAggregateBuild = m_fwnAggregatesOffset != 0u && usesFastWindingNumber();
         if (m_signCacheDataOffset != 0u && usesFwnSignCache())
         {
             resetSignCacheBuildProgress();
@@ -328,7 +336,7 @@ namespace gladius
     std::optional<MeshSignCacheBuildParams> SpatialMeshResource::getSignCacheBuildParams() const
     {
         if (m_data.empty() || m_data.nodes.empty() || m_fwnAggregatesOffset == 0u ||
-            m_signCacheDataOffset == 0u || m_needsFwnAggregateBuild)
+            m_signCacheDataOffset == 0u || !usesFwnSignCache() || m_needsFwnAggregateBuild)
         {
             return std::nullopt;
         }
@@ -623,7 +631,15 @@ namespace gladius
         if (useFwn)
         {
             m_needsFwnAggregateBuild = m_fwnAggregatesOffset != 0u;
-            resetSignCacheBuildProgress();
+            if (m_evaluationConfig.fwnUseSignCache)
+            {
+                resetSignCacheBuildProgress();
+            }
+            else
+            {
+                m_needsSignCacheBuild = false;
+                m_signCacheNextWord = 0;
+            }
         }
         else
         {

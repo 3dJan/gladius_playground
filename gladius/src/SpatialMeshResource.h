@@ -129,10 +129,16 @@ namespace gladius
         /// Check if FWN sign-cache build is needed
         [[nodiscard]] bool needsSignCacheBuild() const { return m_needsSignCacheBuild; }
 
+        /// Check whether the current evaluation method uses Fast Winding Number.
+        [[nodiscard]] bool usesFastWindingNumber() const noexcept
+        {
+            return m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        }
+
         /// Check whether the current evaluation method can consume the FWN sign cache.
         [[nodiscard]] bool usesFwnSignCache() const noexcept
         {
-            return m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+            return usesFastWindingNumber() && m_evaluationConfig.fwnUseSignCache;
         }
 
         /// Advance FWN sign-cache build progress after a build step was queued.

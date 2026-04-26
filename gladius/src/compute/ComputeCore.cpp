@@ -1939,24 +1939,25 @@ namespace gladius
             return;
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        // Low-res preview must stay cheap and independent of mesh complexity.
+        // If the precomputed SDF is not ready yet, keep the previous image
+        // instead of falling back to full model evaluation (which can be tens
+        // of seconds for large mesh/FWN scenes).
+        if (!m_precompSdfIsValid)
+        {
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            return;
+        }
+
         throwIfNoOpenGL();
 
         glFinish();
 
-        // Use precomputed SDF when available for fast rendering, fall back to full model
-        // evaluation otherwise (slower but ensures the preview always updates)
-        if (m_precompSdfIsValid)
-        {
-            m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
-        }
-        else
-        {
-            m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
-            m_lastUsedApproximation = AM_FULL_MODEL;
-            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
-        }
+        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
 
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         // and avoids expensive shadow rays and AO samples during interactive editing
@@ -1986,23 +1987,20 @@ namespace gladius
         // Note: No mutex lock - caller is responsible for thread safety
         // Note: No glFinish() - this is async, caller handles sync via returned event
 
+        if (!m_precompSdfIsValid)
+        {
+            m_lastUsedApproximation = AM_FULL_MODEL;
+            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            return cl::Event{};
+        }
+
         // Work with a local copy of settings to avoid mutating shared state
         // across threads (the worker thread calls this during streaming preview)
         auto settings = m_resources->getRenderingSettings();
 
-        // Use precomputed SDF if available, otherwise use full model evaluation (slower but works)
-        if (m_precompSdfIsValid)
-        {
-            settings.approximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
-        }
-        else
-        {
-            settings.approximation = AM_FULL_MODEL;
-            m_lastUsedApproximation = AM_FULL_MODEL;
-            m_lastUsedPreviewApproximation = AM_FULL_MODEL;
-        }
+        settings.approximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
 
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
@@ -2039,19 +2037,16 @@ namespace gladius
         // Work with a local copy of settings to avoid mutating shared state
         auto settings = m_resources->getRenderingSettings();
 
-        // Use precomputed SDF if available, otherwise use full model evaluation
-        if (m_precompSdfIsValid)
+        if (!m_precompSdfIsValid)
         {
-            settings.approximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
-        }
-        else
-        {
-            settings.approximation = AM_FULL_MODEL;
             m_lastUsedApproximation = AM_FULL_MODEL;
             m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+            return cl::Event{};
         }
+
+        settings.approximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
+        m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
 
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;

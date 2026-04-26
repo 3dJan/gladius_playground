@@ -621,7 +621,10 @@ float4 determineColor(struct RayCastResult raycastingResult,
     }
 
     float3 normalAtHitPos = surfaceNormal(pos, PASS_PAYLOAD_ARGS);
-    float3 const color = (raycastingResult.type == 1) ? model(pos, PASS_PAYLOAD_ARGS).xyz : raycastingResult.color.xyz;
+    bool const previewOnly = (renderingSettings.approximation & AM_ONLY_PRECOMPSDF) != 0;
+    float3 const color = (raycastingResult.type == 1 && !previewOnly)
+        ? model(pos, PASS_PAYLOAD_ARGS).xyz
+        : raycastingResult.color.xyz;
 
     float4 const shadedColor = shadingMetal(
           pos,  color, normalAtHitPos, rayDirection, PASS_PAYLOAD_ARGS);

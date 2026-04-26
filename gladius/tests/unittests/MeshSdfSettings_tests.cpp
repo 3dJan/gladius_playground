@@ -69,6 +69,24 @@ namespace gladius::tests
         EXPECT_TRUE(has(seen, MeshSdfSettingsChange::RuntimeOnly));
     }
 
+    TEST(MeshSdfSettings_EvalChange, FwnSignCacheToggle_RaisesRuntimeOnlyFlag)
+    {
+        MeshSdfSettings settings;
+        MeshSdfSettingsChange seen = MeshSdfSettingsChange::None;
+        settings.subscribe([&](MeshSdfSettingsChange c) { seen = c; });
+
+        auto cfg = settings.evaluationConfig();
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        settings.setEvaluationConfig(cfg);
+        seen = MeshSdfSettingsChange::None;
+
+        cfg.fwnUseSignCache = !cfg.fwnUseSignCache;
+        settings.setEvaluationConfig(cfg);
+
+        EXPECT_FALSE(has(seen, MeshSdfSettingsChange::Method));
+        EXPECT_TRUE(has(seen, MeshSdfSettingsChange::RuntimeOnly));
+    }
+
     TEST(MeshSdfSettings_EvalChange, MethodAndInflation_RaisesBothFlags)
     {
         MeshSdfSettings settings;

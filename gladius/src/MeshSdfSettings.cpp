@@ -32,7 +32,8 @@ namespace gladius
                    a.inflationDistance == b.inflationDistance &&
                    a.voxelGridResolution == b.voxelGridResolution &&
                    a.fwnBeta == b.fwnBeta &&
-                   a.fwnFarFieldFactor == b.fwnFarFieldFactor;
+                   a.fwnFarFieldFactor == b.fwnFarFieldFactor &&
+                   a.fwnUseSignCache == b.fwnUseSignCache;
         }
     } // namespace
 
@@ -87,6 +88,8 @@ namespace gladius
             SECTION_EVALUATION, "fwnBeta", m_evaluation.fwnBeta);
         m_evaluation.fwnFarFieldFactor = m_config->getValue<float>(
             SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
+        m_evaluation.fwnUseSignCache = m_config->getValue<bool>(
+            SECTION_EVALUATION, "fwnUseSignCache", m_evaluation.fwnUseSignCache);
     }
 
     void MeshSdfSettings::save()
@@ -117,6 +120,8 @@ namespace gladius
             SECTION_EVALUATION, "fwnBeta", m_evaluation.fwnBeta);
         m_config->setValue<float>(
             SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
+        m_config->setValue<bool>(
+            SECTION_EVALUATION, "fwnUseSignCache", m_evaluation.fwnUseSignCache);
         m_config->save();
     }
 
@@ -150,7 +155,10 @@ namespace gladius
                 change |= MeshSdfSettingsChange::Method;
             }
             if (m_evaluation.useEarlyExit != cfg.useEarlyExit ||
-                m_evaluation.inflationDistance != cfg.inflationDistance)
+                m_evaluation.inflationDistance != cfg.inflationDistance ||
+                m_evaluation.fwnBeta != cfg.fwnBeta ||
+                m_evaluation.fwnFarFieldFactor != cfg.fwnFarFieldFactor ||
+                m_evaluation.fwnUseSignCache != cfg.fwnUseSignCache)
             {
                 change |= MeshSdfSettingsChange::RuntimeOnly;
             }

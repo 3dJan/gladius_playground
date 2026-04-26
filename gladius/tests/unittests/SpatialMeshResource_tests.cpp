@@ -5,6 +5,7 @@
 #include "SpatialMeshResource.h"
 #include "MeshBVH.h"
 #include "Primitives.h"
+#include "ResourceManager.h"
 
 #include <gtest/gtest.h>
 
@@ -469,6 +470,47 @@ namespace gladius::tests
         EXPECT_FLOAT_EQ(params->fwnBeta, 3.5f);
         EXPECT_GE(params->signCacheBetaOffset, 0);
         EXPECT_TRUE(resource.needsSignCacheBuild());
+    }
+
+    TEST_F(SpatialMeshResource_Test, FwnMethod_WithSignCacheDisabled_StillCollectsAggregateBuild)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices);
+
+        MeshBVHBuilder builder;
+        MeshBVHBuildParams params;
+        params.maxPrimitivesPerLeaf = 4;
+        params.maxDepth = 32;
+        params.traversalCost = 1.0f;
+        params.intersectionCost = 1.0f;
+
+        ResourceManager manager(nullptr, {});
+        ResourceKey key(ResourceId{209}, ResourceType::Mesh);
+        manager.addResource(key, builder.build(vertices, indices, params));
+
+        auto * resource = dynamic_cast<SpatialMeshResource *>(manager.getResourcePtr(key));
+        ASSERT_NE(resource, nullptr);
+
+        MeshSdfEvaluationConfig cfg = resource->evaluationConfig();
+        cfg.method = MeshSdfMethod::FastWindingNumber;
+        cfg.fwnUseSignCache = false;
+        EXPECT_TRUE(resource->setEvaluationConfig(cfg));
+
+        EXPECT_TRUE(resource->usesFastWindingNumber());
+        EXPECT_FALSE(resource->usesFwnSignCache());
+        EXPECT_TRUE(resource->needsFwnAggregateBuild());
+        EXPECT_FALSE(resource->needsSignCacheBuild());
+        EXPECT_FALSE(resource->getSignCacheBuildParams().has_value());
+
+        auto const aggregateParams = manager.collectFwnAggregateBuildParams();
+        ASSERT_EQ(aggregateParams.size(), 1u);
+        EXPECT_GT(aggregateParams.front().fwnAggregatesOffset, 0);
+
+        manager.markFwnAggregatesBuilt(aggregateParams, aggregateParams.size());
+        EXPECT_FALSE(resource->needsFwnAggregateBuild());
+        EXPECT_FALSE(resource->getSignCacheBuildParams().has_value());
+        EXPECT_TRUE(manager.collectSignCacheBuildParams().empty());
     }
 
     TEST_F(SpatialMeshResource_Test, SignCacheBuildProgress_AfterQueuedStep_AdvancesIncrementally)
