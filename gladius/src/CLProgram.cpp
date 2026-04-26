@@ -1022,7 +1022,7 @@ namespace gladius
         auto dynamicHash = computeDynamicHash();
         auto currentHash = computeHash(); // Keep for fallback
 
-        if (m_logger)
+        if (m_logger && isOclDumpEnabled())
         {
             m_logger->logInfo(fmt::format(
               "{}: OpenCL cache probe static={} dynamic={} single={} twoLevel={} cacheDir='{}'",
@@ -1813,6 +1813,18 @@ namespace gladius
 
     bool CLProgram::canUseBinaryCache() const
     {
+        std::lock_guard<std::mutex> lock(m_binaryCacheCapabilityMutex);
+        if (m_canUseBinaryCache.has_value())
+        {
+            return m_canUseBinaryCache.value();
+        }
+
+        auto disableBinaryCache = [this](std::string reason) {
+            logBinaryCacheDisabledOnce(reason);
+            m_canUseBinaryCache = false;
+            return false;
+        };
+
         try
         {
             auto const device = m_ComputeContext->GetDevice();
@@ -1842,24 +1854,22 @@ namespace gladius
 
             if (containsCaseInsensitive(implementation, "rusticl"))
             {
-                logBinaryCacheDisabledOnce(
+                return disableBinaryCache(
                   "Rusticl currently crashes inside clCreateProgramWithBinary for cached "
                   "programs; using source compilation instead.");
-                return false;
             }
         }
         catch (const std::exception & e)
         {
-            logBinaryCacheDisabledOnce(std::string("could not query OpenCL driver identity: ") +
-                                       e.what());
-            return false;
+            return disableBinaryCache(std::string("could not query OpenCL driver identity: ") +
+                                      e.what());
         }
         catch (...)
         {
-            logBinaryCacheDisabledOnce("could not query OpenCL driver identity");
-            return false;
+            return disableBinaryCache("could not query OpenCL driver identity");
         }
 
+        m_canUseBinaryCache = true;
         return true;
     }
 

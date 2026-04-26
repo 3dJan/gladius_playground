@@ -30,6 +30,7 @@ file(GLOB TEST_MCP_SOURCES CONFIGURE_DEPENDS
 )
 target_sources(${BINARY} PRIVATE ${TEST_MCP_SOURCES})
 target_compile_definitions(${BINARY} PRIVATE GLADIUS_ENABLE_MCP)
+target_compile_definitions(${BINARY} PRIVATE GLADIUS_KERNEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/kernel")
 
 if(MSVC)
  target_compile_options(${BINARY} PRIVATE  /W3 /WX /D_USE_MATH_DEFINES)

@@ -1853,6 +1853,8 @@ namespace gladius
         if (resultImage->getWidth() != sourceImage.getWidth() ||
             resultImage->getHeight() != sourceImage.getHeight())
         {
+            // Allocate a fresh CL/GL image and publish it atomically so async
+            // render jobs holding the previous shared_ptr can finish safely.
             resultImage = std::make_shared<GLImageBuffer>(
               *m_ComputeContext, sourceImage.getWidth(), sourceImage.getHeight());
             resultImage->allocateOnDevice();
@@ -1964,13 +1966,13 @@ namespace gladius
         return false;
     }
 
-    void ComputeCore::renderLowResPreview() const
+    LowResPreviewRenderStatus ComputeCore::renderLowResPreview() const
     {
         ProfileFunction
 
-          if (!m_computeMutex.try_lock())
+        if (!m_computeMutex.try_lock())
         {
-            return;
+            return LowResPreviewRenderStatus::Skipped;
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
@@ -1979,9 +1981,7 @@ namespace gladius
         // instead of falling back to full model evaluation.
         if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
-            return;
+            return LowResPreviewRenderStatus::Skipped;
         }
 
         throwIfNoOpenGL();
@@ -1992,7 +1992,7 @@ namespace gladius
         auto resultImage = m_resultImage.load(std::memory_order_acquire);
         if (!lowResPreviewImage || !resultImage)
         {
-            return;
+            return LowResPreviewRenderStatus::Failed;
         }
 
         m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
@@ -2017,6 +2017,7 @@ namespace gladius
         // Ensure GL texture is updated (especially important for readpixel mode)
         resultImage->bind();
         resultImage->unbind();
+        return LowResPreviewRenderStatus::Rendered;
     }
 
     cl::Event ComputeCore::renderLowResPreviewAsync(cl::CommandQueue const & queue,
@@ -2029,8 +2030,6 @@ namespace gladius
 
         if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
             return cl::Event{};
         }
 
@@ -2079,8 +2078,6 @@ namespace gladius
 
         if (!m_precompSdfIsValid.load(std::memory_order_acquire))
         {
-            m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
-            m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
             return cl::Event{};
         }
 

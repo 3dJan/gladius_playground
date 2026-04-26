@@ -233,6 +233,7 @@ namespace gladius
                 auto buildParams = spatialMesh->getFwnAggregateBuildParams();
                 if (buildParams.has_value())
                 {
+                    buildParams->resourceKey = key;
                     params.push_back(buildParams.value());
                 }
             }
@@ -273,6 +274,19 @@ namespace gladius
         for (size_t i = 0; i < count; ++i)
         {
             auto const & params = buildParams[i];
+            if (params.resourceKey.has_value())
+            {
+                auto * resource = getResourcePtr(params.resourceKey.value());
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+                if (spatialMesh != nullptr)
+                {
+                    spatialMesh->markFwnAggregatesBuilt();
+                }
+                continue;
+            }
+
+            // Compatibility fallback for tests or direct callers that construct
+            // MeshFwnAggregateBuildParams without ResourceManager metadata.
             for (auto & [key, resource] : m_resources)
             {
                 if (key.getResourceType() != ResourceType::Mesh)

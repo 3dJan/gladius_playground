@@ -14,32 +14,17 @@ namespace gladius::tests
     {
         std::string loadRenderingKernelSource()
         {
-            std::filesystem::path path = std::filesystem::current_path();
-            for (int depth = 0; depth < 8; ++depth)
+            std::filesystem::path const path =
+              std::filesystem::path{GLADIUS_KERNEL_SOURCE_DIR} / "rendering.cl";
+            std::ifstream file(path);
+            if (!file)
             {
-                auto const candidate = path / "src" / "kernel" / "rendering.cl";
-                if (std::filesystem::exists(candidate))
-                {
-                    std::ifstream file(candidate);
-                    std::stringstream buffer;
-                    buffer << file.rdbuf();
-                    return buffer.str();
-                }
-                auto const nestedCandidate = path / "gladius" / "src" / "kernel" / "rendering.cl";
-                if (std::filesystem::exists(nestedCandidate))
-                {
-                    std::ifstream file(nestedCandidate);
-                    std::stringstream buffer;
-                    buffer << file.rdbuf();
-                    return buffer.str();
-                }
-                if (!path.has_parent_path())
-                {
-                    break;
-                }
-                path = path.parent_path();
+                return {};
             }
-            return {};
+
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            return buffer.str();
         }
     }
 

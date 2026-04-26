@@ -53,6 +53,9 @@ namespace gladius::ui
 
         void triggerNodePositionUpdate();
 
+        /// Replace the current popup callback. Popup callbacks may close or
+        /// replace themselves while being invoked, so callers must not keep
+        /// references into the stored function object across frames.
         void showPopupMenu(PopupMenuFunction popupMenuFunction);
         void closePopupMenu();
 

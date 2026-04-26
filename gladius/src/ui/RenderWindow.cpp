@@ -110,6 +110,16 @@ namespace gladius::ui
         }
 
         constexpr size_t kInitialProgressiveStepSize = 8;
+        constexpr float kAdaptivePreviewTargetFrameTimeMs = 25.0f;
+        constexpr float kAdaptivePreviewMinErrorMs = 0.5f;
+        constexpr float kAdaptivePreviewIntegralDecay = 0.8f;
+        constexpr float kAdaptivePreviewProportionalGain = 0.001f;
+        constexpr float kAdaptivePreviewIntegralGain = 0.00001f;
+        constexpr float kAdaptivePreviewDerivativeGain = 0.000001f;
+        constexpr float kAdaptivePreviewMinQuality = 0.05f;
+        constexpr float kAdaptivePreviewMinDimension = 1.0f;
+        constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
+        constexpr float kAdaptivePreviewResizeThresholdPercent = 5.0f;
     }
 
     void RenderWindow::initialize(ComputeCore * core,
@@ -323,6 +333,13 @@ namespace gladius::ui
         {
             // Synchronous rendering - use result image
             displayImage = m_core->getResultImage();
+        }
+
+        if (!displayImage)
+        {
+            // No image yet (early init / between resize and re-allocation).
+            // Skip drawing this frame instead of dereferencing a null shared_ptr.
+            return;
         }
 
         displayImage->bind();
@@ -743,16 +760,15 @@ namespace gladius::ui
         {
             // TODO: [003-async-preview-rendering] Consider migrating this sync path to async
             // For now, keep synchronous preview for the legacy renderSync() path
-            bool const wasSdfValid = m_core->isSdfValid();
-            m_core->renderLowResPreview();
-            if (m_core->isSdfValid() || wasSdfValid)
+            auto const previewStatus = m_core->renderLowResPreview();
+            if (previewStatus == LowResPreviewRenderStatus::Rendered)
             {
                 m_lowResFeedbackPending.store(false, std::memory_order_release);
                 // Track that low-res preview is now up-to-date with the current epoch
                 m_lastLowResPreviewEpoch.store(m_asyncCurrentEpoch.load(std::memory_order_acquire),
                                                std::memory_order_release);
+                m_lastLowResRenderTime = std::chrono::system_clock::now();
             }
-            m_lastLowResRenderTime = std::chrono::system_clock::now();
             return;
         }
 
@@ -1780,7 +1796,7 @@ namespace gladius::ui
             bool const sdfValid = m_core->isSdfValid();
             bool const sdfJobRunning = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
             bool const streamingActive = m_streamingPreviewActive.load(std::memory_order_acquire);
-            bool const useAsyncPreview = !previewJobInFlight && (sdfValid || !sdfJobRunning);
+            bool const useAsyncPreview = !previewJobInFlight && sdfValid;
 
             if (streamingActive)
             {
@@ -1802,9 +1818,8 @@ namespace gladius::ui
                 else
                 {
                     // Async scheduling failed - fall back to synchronous preview
-                    bool const wasSdfValid = m_core->isSdfValid();
-                    m_core->renderLowResPreview();
-                    if (m_core->isSdfValid() || wasSdfValid)
+                    auto const previewStatus = m_core->renderLowResPreview();
+                    if (previewStatus == LowResPreviewRenderStatus::Rendered)
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
@@ -1820,9 +1835,8 @@ namespace gladius::ui
                 auto token = m_core->requestComputeToken();
                 if (token.has_value())
                 {
-                    bool const wasSdfValid = m_core->isSdfValid();
-                    m_core->renderLowResPreview();
-                    if (m_core->isSdfValid() || wasSdfValid)
+                    auto const previewStatus = m_core->renderLowResPreview();
+                    if (previewStatus == LowResPreviewRenderStatus::Rendered)
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
@@ -2108,8 +2122,12 @@ namespace gladius::ui
         {
             auto * seedBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             auto renderProgram = m_core->getBestRenderProgram();
+            bool const seedSourceFits = image->getWidth() >= width && image->getHeight() >= height;
+            bool const seedTargetFits = seedBuffer && seedBuffer->image &&
+                                        seedBuffer->image->getWidth() >= width &&
+                                        seedBuffer->image->getHeight() >= height;
             if (seedBuffer && seedBuffer->image && renderProgram &&
-                seedBuffer->image->getWidth() >= width && seedBuffer->image->getHeight() >= height)
+                seedSourceFits && seedTargetFits)
             {
                 renderProgram->resample(*image, *seedBuffer->image, 0, height);
                 seedBuffer->image->invalidateContent();
@@ -3086,9 +3104,9 @@ namespace gladius::ui
 
         auto const startTime = std::chrono::steady_clock::now();
 
-        // Perform the async preview render using the low-res preview infrastructure
-        // Note: Preview renders work both with and without precomputed SDF
-        // When SDF is not valid, it uses direct function evaluation (slower but correct)
+        // Perform the async preview render using the low-res preview infrastructure.
+        // Preview rendering intentionally waits for the precomputed SDF so the
+        // feedback pass stays cheap and independent of mesh complexity.
         {
             ZoneScopedN("RenderLowResPreviewAsync");
             auto computeToken = m_core->waitForComputeToken();
@@ -3276,31 +3294,34 @@ namespace gladius::ui
             {
                 float const executionDurationMs =
                   static_cast<float>(static_cast<double>(meta.latencyNs) / 1'000'000.0);
-                auto constexpr targetFrameTimeMs = 25.0f;
-                float const error = targetFrameTimeMs - executionDurationMs;
+                float const error = kAdaptivePreviewTargetFrameTimeMs - executionDurationMs;
 
-                if (executionDurationMs > 0.0f && std::abs(error) > 0.5f)
+                if (executionDurationMs > 0.0f && std::abs(error) > kAdaptivePreviewMinErrorMs)
                 {
                     auto & state = m_renderWindowState;
-                    state.fpsIntegral *= 0.8f;
+                    state.fpsIntegral *= kAdaptivePreviewIntegralDecay;
                     state.fpsIntegral += error;
 
-                    float constexpr kp = 0.001f;
-                    float constexpr ki = 0.00001f;
-                    float constexpr kd = 0.000001f;
                     float const derivative = error - state.fpsPreviousError;
-                    float const adjustment = kp * error + ki * state.fpsIntegral +
-                                             kd * derivative;
+                    float const adjustment = kAdaptivePreviewProportionalGain * error +
+                                             kAdaptivePreviewIntegralGain * state.fpsIntegral +
+                                             kAdaptivePreviewDerivativeGain * derivative;
 
                     float const previousQuality = state.renderQualityWhileMoving;
                     state.renderQualityWhileMoving =
-                      std::clamp(previousQuality + adjustment, 0.05f, state.renderQuality);
+                      std::clamp(previousQuality + adjustment,
+                                 kAdaptivePreviewMinQuality,
+                                 state.renderQuality);
                     state.fpsPreviousError = error;
 
                     int const newWidth = static_cast<int>(std::clamp(
-                      m_renderWindowSize_px.x * state.renderQualityWhileMoving, 1.f, 16000.f));
+                      m_renderWindowSize_px.x * state.renderQualityWhileMoving,
+                      kAdaptivePreviewMinDimension,
+                      kAdaptivePreviewMaxDimension));
                     int const newHeight = static_cast<int>(std::clamp(
-                      m_renderWindowSize_px.y * state.renderQualityWhileMoving, 1.f, 16000.f));
+                      m_renderWindowSize_px.y * state.renderQualityWhileMoving,
+                      kAdaptivePreviewMinDimension,
+                      kAdaptivePreviewMaxDimension));
 
                     auto const [currentWidth, currentHeight] =
                       m_core->getLowResPreviewResolution();
@@ -3313,7 +3334,8 @@ namespace gladius::ui
                           std::abs(newHeight - static_cast<int>(currentHeight)) /
                           static_cast<float>(currentHeight) * 100.0f;
 
-                        if (widthChangePercent > 5.0f || heightChangePercent > 5.0f)
+                        if (widthChangePercent > kAdaptivePreviewResizeThresholdPercent ||
+                            heightChangePercent > kAdaptivePreviewResizeThresholdPercent)
                         {
                             if (m_core->setLowResPreviewResolution(
                                   static_cast<size_t>(newWidth), static_cast<size_t>(newHeight)))

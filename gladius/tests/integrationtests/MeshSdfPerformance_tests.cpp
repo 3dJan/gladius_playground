@@ -994,6 +994,7 @@ namespace gladius::tests
 
         primitives->clear();
         resource.write(*primitives);
+        primitives->write();
 
         auto paramsOpt = resource.getFwnAggregateBuildParams();
         ASSERT_TRUE(paramsOpt.has_value());
@@ -1085,14 +1086,9 @@ namespace gladius::tests
         }
     }
 
-    /// Diagnostic: compare GPU-built FWN aggregates against the host's recursive
-    /// `computeFwnAggregates` implementation on a higher-subdivision icosphere
-    /// (deep BVH with many internal nodes). Reports the largest disagreements
-    /// per component so we can see whether GPU/host differ structurally — not
-    /// just on a leaf-only tiny mesh. Also samples the resulting hierarchical
-    /// winding number on a probe grid using the host aggregates as a reference
-    /// to localise where sign differences could plausibly originate.
-    TEST_F(MeshSdfPerformance_Test, FwnAggregates_GpuVsHost_DeepBvh_Diagnostic)
+    /// Compare GPU-built FWN aggregates against the host's recursive
+    /// `computeFwnAggregates` implementation on a higher-subdivision icosphere.
+    TEST_F(MeshSdfPerformance_Test, FwnAggregates_GpuVsHost_DeepBvh_MatchesHostSums)
     {
         if (!m_context->isValid())
         {
@@ -1136,6 +1132,7 @@ namespace gladius::tests
         ASSERT_TRUE(primitives != nullptr);
         primitives->clear();
         resource.write(*primitives);
+        primitives->write();
 
         auto paramsOpt = resource.getFwnAggregateBuildParams();
         ASSERT_TRUE(paramsOpt.has_value());
@@ -1215,36 +1212,33 @@ namespace gladius::tests
             consider(worstRadius, gpuRadius, host.weightedNormalSum.w, nodeIdx);
         }
 
-        std::cout << "\n=== FWN Aggregate GPU vs Host (sub=4 icosphere) ===\n";
-        std::cout << "Total nodes: " << hostData.nodes.size()
-                  << " (internal=" << internalNodes << ", leaf=" << leafNodes << ")\n";
-        std::cout << "Triangles: " << hostData.triangles.size() << "\n";
-        std::cout << std::fixed << std::setprecision(6);
-        auto report = [](char const * name, WorstDiff const & w) {
-            std::cout << name << " worst |Δ|=" << w.absDiff
-                      << " rel=" << w.relDiff
-                      << " at node=" << w.nodeIdx
-                      << " gpu=" << w.gpuVal
-                      << " host=" << w.hostVal << "\n";
-        };
-        report("|weightedNormalSum|", worstNormal);
-        report("|areaCentroid|     ", worstCentroid);
-        report("totalArea          ", worstArea);
-        report("radius             ", worstRadius);
-        std::cout << "===\n";
-
         // Sums (weightedNormal, areaCentroid, totalArea) are associative and
-        // should agree to within a tight FP tolerance scaled by triangle count.
+        // should agree to within a tight FP tolerance scaled by sqrt(triangle count).
         // Radius diverges by design: GPU computes the tight true radius from
         // vertices in the subtree; host computes a recursive conservative
         // bound. Host radius >= GPU radius in general.
         float const numTriBound = std::max(1.0f, static_cast<float>(hostData.triangles.size()));
-        EXPECT_LT(worstNormal.absDiff, 1.0e-3f * numTriBound)
-            << "Weighted-normal sum disagreement is unexpectedly large";
-        EXPECT_LT(worstCentroid.absDiff, 1.0e-3f * numTriBound)
-            << "Area-centroid disagreement is unexpectedly large";
-        EXPECT_LT(worstArea.absDiff, 1.0e-3f * numTriBound)
-            << "Total-area disagreement is unexpectedly large";
+        float const aggregateTolerance = 5.0e-3f * std::sqrt(numTriBound);
+        auto const meshSummary = fmt::format("nodes={} internal={} leaf={} triangles={}",
+                                             hostData.nodes.size(),
+                                             internalNodes,
+                                             leafNodes,
+                                             hostData.triangles.size());
+        auto describeWorst = [](char const * name, WorstDiff const & w) {
+            return fmt::format("{} worst |Δ|={} rel={} node={} gpu={} host={}",
+                               name,
+                               w.absDiff,
+                               w.relDiff,
+                               w.nodeIdx,
+                               w.gpuVal,
+                               w.hostVal);
+        };
+        EXPECT_LT(worstNormal.absDiff, aggregateTolerance)
+            << meshSummary << "; " << describeWorst("weightedNormalSum", worstNormal);
+        EXPECT_LT(worstCentroid.absDiff, aggregateTolerance)
+            << meshSummary << "; " << describeWorst("areaCentroid", worstCentroid);
+        EXPECT_LT(worstArea.absDiff, aggregateTolerance)
+            << meshSummary << "; " << describeWorst("totalArea", worstArea);
         // Radius can differ; assert host radius is always >= GPU radius (host is conservative).
         for (size_t nodeIdx = 0; nodeIdx < hostData.nodes.size(); ++nodeIdx)
         {

@@ -33,6 +33,7 @@
 #include "nodes/ToOCLVisitor.h"
 #include "nodes/Validator.h"
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -164,6 +165,11 @@ namespace gladius
             return;
         }
 
+        // The normal load path builds this graph before mesh extraction so
+        // unused mesh resources can be skipped. If this fallback path is used,
+        // keep loading all meshes rather than risking missing geometry.
+        assert(m_resourceDependencyGraph &&
+               "Resource dependency graph should be built before loading meshes");
         importer.loadMeshes(m_3mfmodel, *this);
     }
 

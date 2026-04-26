@@ -355,7 +355,11 @@ namespace gladius
             // Mark primitive data dirty and push it once so the renderer never sees
             // runtime FWN flags with an old non-FWN GPU payload.
             document->invalidatePrimitiveData();
-            (void) document->updateParameter();
+            if (!document->updateParameter() && m_globalLogger)
+            {
+                m_globalLogger->logWarning(
+                  "Mesh SDF setting change rebuilt resource payloads, but parameter upload did not complete");
+            }
         }
         return rebuilt;
     }

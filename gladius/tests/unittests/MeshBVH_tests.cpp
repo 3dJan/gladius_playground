@@ -146,7 +146,7 @@ namespace gladius::tests
         EXPECT_GE(result.boundingBox.max.z, 0.5f);
     }
 
-    TEST_F(MeshBVHBuilder_Test, Build_Cube_NodeRangesCoverSubtrees)
+    TEST_F(MeshBVHBuilder_Test, Build_CubeMesh_NodesCoverFullSubtreeRange)
     {
         std::vector<float4> vertices;
         std::vector<TriangleIndices> indices;

@@ -40,6 +40,13 @@ namespace gladius
     using SharedRenderProgram = std::shared_ptr<RenderProgram>;
     using SharedPrimitives = std::shared_ptr<Primitives>;
 
+    enum class LowResPreviewRenderStatus
+    {
+        Rendered,
+        Skipped,
+        Failed
+    };
+
     /**
      * @brief Wrapper class for ContourExtractor to maintain backward compatibility
      * with code that expects a reference to ContourExtractor.
@@ -426,7 +433,9 @@ namespace gladius
                                                   ImageRGBA & targetImage,
                                                   cl::Event * completionEvent = nullptr);
 
-        void renderLowResPreview() const;
+        /// @brief Render the current low-resolution preview when the precomputed SDF is ready.
+        /// @return Rendered when a preview frame was produced, Skipped when the SDF is not ready, or Failed on an execution/precondition error.
+        [[nodiscard]] LowResPreviewRenderStatus renderLowResPreview() const;
 
         /**
          * @brief Starts asynchronous low-resolution preview render (non-blocking).

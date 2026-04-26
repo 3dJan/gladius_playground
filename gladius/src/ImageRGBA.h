@@ -304,7 +304,9 @@ namespace gladius
 
     using Skeleton = ImageImpl<cl_int>;
 
-    // xyz stores preview color, w stores signed distance.
+    // `sdf_generator.cl` writes preview color to xyz and signed distance to w.
+    // Keep full-float color here because the low-res preview resamples this 3D
+    // field directly; any host-side distance consumer must read `.s[3]` only.
     using PreComputedSdf = ImageImpl<cl_float4>;
 
     /// Buffer storing traveled distances from low-res preview for HQ initialization

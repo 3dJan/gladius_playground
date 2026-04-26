@@ -9,6 +9,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -482,6 +483,8 @@ namespace gladius
         std::filesystem::path m_cacheDirectory;
         bool m_cacheEnabled = true; // Cache enabled by default
         mutable bool m_binaryCacheDisabledLogged = false;
+        mutable std::mutex m_binaryCacheCapabilityMutex;
+        mutable std::optional<bool> m_canUseBinaryCache;
 
         // Static vs Dynamic source tracking
         cl::Program::Sources m_staticSources;  // Static kernel files (.cl files from resources)

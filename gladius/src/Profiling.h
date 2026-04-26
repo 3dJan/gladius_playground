@@ -3,15 +3,17 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <syncstream>
 #include <thread>
 #include <tracy/Tracy.hpp>
 #include <utility>
 
-// Temporarily enable detailed FWN preparation timings. These logs intentionally
+// Optional detailed FWN preparation timings. These logs intentionally
 // use std::clog (stderr) instead of std::cout so MCP stdio framing on stdout
-// remains untouched. Set to 0 before production/release use.
+// remains untouched. Disabled by default; opt in locally with
+// -DGLADIUS_ENABLE_FWN_PREP_TIMING_LOGS=1 while diagnosing.
 #ifndef GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS
-#define GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS 1
+#define GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS 0
 #endif
 
 // Enable debug output for async rendering diagnostics
@@ -96,7 +98,8 @@ namespace gladius
 
             auto const end = std::chrono::high_resolution_clock::now();
             auto const duration = std::chrono::duration<double, std::milli>(end - m_start);
-            std::clog << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
+            std::osyncstream(std::clog)
+              << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
         }
 
       private:
@@ -107,7 +110,7 @@ namespace gladius
 
     inline void logFwnPrepTiming(std::string const & message)
     {
-        std::clog << "[FWN prep] " << message << std::endl;
+        std::osyncstream(std::clog) << "[FWN prep] " << message << std::endl;
     }
 
 #define GLADIUS_FWN_PREP_JOIN_INNER(left, right) left##right
@@ -136,7 +139,7 @@ namespace gladius
 
 #define LOG_SCOPE_DURATION ScopedTimeLogger scopedTimeLogger(__FUNCTION__);
 #define LOG_SCOPE_DURATION_NAMED(name) ScopedTimeLogger scopedTimeLogger(name);
-#define ProfileFunction LOG_SCOPE_DURATION
-// #define ProfileFunction ZoneScoped;
+// #define ProfileFunction LOG_SCOPE_DURATION
+#define ProfileFunction ZoneScoped;
 // #define ProfileFunction
 }

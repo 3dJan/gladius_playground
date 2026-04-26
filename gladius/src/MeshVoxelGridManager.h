@@ -7,7 +7,9 @@
 
 #include "ComputeContext.h"
 #include "MeshVoxelGrid.h"
+#include "ResourceKey.h"
 
+#include <optional>
 #include <vector>
 
 namespace gladius
@@ -36,6 +38,7 @@ namespace gladius
     /// FWN evaluation and sign-cache construction.
     struct MeshFwnAggregateBuildParams
     {
+        std::optional<ResourceKey> resourceKey; ///< Resource that owns this build request, when collected by ResourceManager
         int nodesOffset;         ///< BVH nodes offset in primitive buffer
         int trianglesOffset;     ///< Triangles offset in primitive buffer
         int fwnAggregatesOffset; ///< FWN aggregate output offset in primitive buffer
