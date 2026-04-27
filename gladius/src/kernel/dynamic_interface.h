@@ -7,6 +7,8 @@
 // Essential function prototypes that the generated model code needs
 float3 matrixVectorMul3f(float16 matrix, float3 vector);
 float glsl_mod1f(float a, float b);
+float3 glsl_mod3f(float3 a, float3 b);
+float16 glsl_mod16f(float16 a, float16 b);
 float bbBox(float3 pos, float3 bbmin, float3 bbmax);
 
 // Forward declarations for types used in function signatures

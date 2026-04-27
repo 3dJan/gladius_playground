@@ -76,6 +76,7 @@ namespace gladius
         
         /// Recompile the ManifoldDualContouring program with current model source
         void recompileBlockingForManifoldDC();
+        [[nodiscard]] bool ensureSlicerProgramCompiled();
         void ensureHierarchicalDcProgramCompiled();
         void ensureManifoldDcProgramCompiled();
 

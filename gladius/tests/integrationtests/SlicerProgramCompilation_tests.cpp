@@ -1,0 +1,72 @@
+/// @file SlicerProgramCompilation_tests.cpp
+/// @brief Regression tests for dynamically compiled slicer model helpers.
+
+#include "ComputeContext.h"
+#include "EventLogger.h"
+#include "compute/ComputeCore.h"
+
+#include <gtest/gtest.h>
+
+#include <sstream>
+#include <string>
+
+namespace gladius_tests::slicer_program_compilation
+{
+    using namespace gladius;
+
+    class SlicerProgramCompilation_Test : public ::testing::Test
+    {
+      protected:
+        void SetUp() override
+        {
+            m_logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+            m_context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+
+            if (!m_context->isValid())
+            {
+                GTEST_SKIP() << "OpenCL context not available";
+            }
+        }
+
+        [[nodiscard]] std::string collectLogMessages() const
+        {
+            std::ostringstream messages;
+            for (auto const & event : *m_logger)
+            {
+                messages << event.getMessage() << '\n';
+            }
+            return messages.str();
+        }
+
+        std::shared_ptr<ComputeContext> m_context;
+        events::SharedLogger m_logger;
+    };
+
+    /// @test RecompileBlocking_WithVectorModHelper_DoesNotReportMissingGlslMod3f
+    TEST_F(SlicerProgramCompilation_Test,
+           RecompileBlocking_WithVectorModHelper_DoesNotReportMissingGlslMod3f)
+    {
+        auto core = std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto slicerProgram = core->getSlicerProgram();
+        ASSERT_NE(slicerProgram, nullptr);
+
+        m_logger->clear();
+        slicerProgram->setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        float3 const repeated = glsl_mod3f(pos + (float3)(4.0f, 5.0f, 6.0f),
+                                           (float3)(2.0f, 3.0f, 4.0f));
+        float const distance = length(repeated - (float3)(1.0f, 1.5f, 2.0f)) - 0.5f;
+        return (float4)(0.0f, 0.0f, 0.0f, distance);
+    }
+    )CLC");
+
+        ASSERT_NO_THROW(slicerProgram->recompileBlocking());
+        EXPECT_TRUE(slicerProgram->isValid());
+
+        auto const logMessages = collectLogMessages();
+        EXPECT_EQ(logMessages.find("glsl_mod3f"), std::string::npos) << logMessages;
+        EXPECT_EQ(logMessages.find("use of undeclared identifier"), std::string::npos)
+          << logMessages;
+    }
+} // namespace gladius_tests::slicer_program_compilation

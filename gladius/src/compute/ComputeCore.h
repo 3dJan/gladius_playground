@@ -710,6 +710,7 @@ namespace gladius
         bool updateBoundingBoxFast();
                 [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
                 [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
+        [[nodiscard]] bool ensureSlicerProgramReady();
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 

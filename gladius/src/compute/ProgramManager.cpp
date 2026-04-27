@@ -243,6 +243,48 @@ namespace gladius
         ensureManifoldDcProgramCompiled();
     }
 
+    bool ProgramManager::ensureSlicerProgramCompiled()
+    {
+        ProfileFunction;
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+
+        if (!m_slicerProgram || m_modelSource.empty())
+        {
+            return false;
+        }
+
+        try
+        {
+            m_slicerProgram->setEnableVdb(m_isVdbActive);
+            m_slicerProgram->setModelKernel(m_modelSource);
+            m_slicerProgram->waitForCompilation();
+
+            if (m_slicerProgram->isValid())
+            {
+                m_slicerState.signalCompilationFinished();
+            }
+
+            if (!m_slicerState.isModelUpToDate() || !m_slicerProgram->isValid())
+            {
+                m_slicerState.signalCompilationStarted();
+                m_slicerProgram->recompileBlocking();
+                if (m_slicerProgram->isValid())
+                {
+                    m_slicerState.signalCompilationFinished();
+                }
+            }
+        }
+        catch (std::exception const & e)
+        {
+            logMsg(std::string("Slicer program compilation failed: ") + e.what());
+            return false;
+        }
+
+        return m_slicerProgram->isValid() && !m_slicerProgram->isCompilationInProgress() &&
+               m_slicerState.isModelUpToDate();
+    }
+
     void ProgramManager::ensureHierarchicalDcProgramCompiled()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

@@ -645,6 +645,12 @@ namespace gladius
     {
         ProfileFunction;
 
+        if (!ensureSlicerProgramReady())
+        {
+            logMsg("Slicer program is not ready for contour generation");
+            return;
+        }
+
         if (!updateBBox())
         {
             logMsg("Bounding box computation failed");
@@ -1162,6 +1168,23 @@ namespace gladius
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgressNonBlocking() const noexcept
     {
         return m_programs.isAnyCompilationInProgressNonBlocking();
+    }
+
+    bool ComputeCore::ensureSlicerProgramReady()
+    {
+        ProfileFunction;
+
+        try
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+            m_programs.setVdbRequired(requiresNanoVdbLocked());
+            return m_programs.ensureSlicerProgramCompiled();
+        }
+        catch (std::exception const & e)
+        {
+            logMsg(std::string("Could not prepare slicer program: ") + e.what());
+            return false;
+        }
     }
 
     bool ComputeCore::updateBBox()
