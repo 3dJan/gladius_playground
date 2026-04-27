@@ -12,6 +12,7 @@
 #include <SlicerProgram.h>
 #include <compute/HierarchicalDCProgram.h>
 #include <compute/ManifoldDualContouringProgram.h>
+#include <compute/MeshPreparationProgram.h>
 #include <compute/ParameterSignature.h>
 #include <compute/types.h>
 #include <nodes/BuildParameter.h>
@@ -47,6 +48,8 @@ namespace gladius
         [[nodiscard]] HierarchicalDCProgram * getHierarchicalDCProgram() const;
 
         [[nodiscard]] compute::ManifoldDualContouringProgram * getManifoldDualContouringProgram() const;
+
+        [[nodiscard]] MeshPreparationProgram * getMeshPreparationProgram() const;
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
@@ -133,6 +136,8 @@ namespace gladius
         std::unique_ptr<HierarchicalDCProgram> m_hierarchicalDCProgram;
 
         std::unique_ptr<compute::ManifoldDualContouringProgram> m_manifoldDualContouringProgram;
+
+        std::unique_ptr<MeshPreparationProgram> m_meshPreparationProgram;
 
         bool m_isComputationTimeLoggingEnabled = false;
 

@@ -489,18 +489,17 @@ namespace gladius
         // Ensure primitives are uploaded to GPU
         m_primitives->write();
         
-        // Get the slicer program which includes mesh_sdf.cl with the build kernel
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build voxel grids: slicer program not ready");
+            logMsg("Cannot build voxel grids: mesh preparation program not available");
             return 0;
         }
         
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
-            if (slicerProgram->buildMeshVoxelGrid(*m_primitives, params))
+            if (meshPreparationProgram->buildMeshVoxelGrid(*m_primitives, params))
             {
                 ++successCount;
             }
@@ -529,10 +528,10 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build mesh FWN aggregates: slicer program not ready");
+            logMsg("Cannot build mesh FWN aggregates: mesh preparation program not available");
             return 0;
         }
 
@@ -541,7 +540,7 @@ namespace gladius
             GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates queue kernels");
             for (auto const & params : buildParams)
             {
-                if (slicerProgram->buildMeshFwnAggregates(*m_primitives, params))
+                if (meshPreparationProgram->buildMeshFwnAggregates(*m_primitives, params))
                 {
                     ++successCount;
                 }
@@ -575,17 +574,17 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build mesh sign caches: slicer program not ready");
+            logMsg("Cannot build mesh sign caches: mesh preparation program not available");
             return 0;
         }
 
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
-            if (!slicerProgram->buildMeshSignCache(*m_primitives, params))
+            if (!meshPreparationProgram->buildMeshSignCache(*m_primitives, params))
             {
                 break;
             }

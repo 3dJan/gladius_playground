@@ -28,6 +28,7 @@
 #include "ResourceContext.h"
 #include "SlicerProgram.h"
 #include "compute/HierarchicalDCProgram.h"
+#include "compute/MeshPreparationProgram.h"
 #include "compute/ProgramManager.h"
 #include "gpgpu.h"
 #include "nodes/GraphFlattener.h"
@@ -102,6 +103,8 @@ namespace gladius
           std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
         m_manifoldDualContouringProgram =
           std::make_unique<compute::ManifoldDualContouringProgram>(m_ComputeContext, m_resources);
+        m_meshPreparationProgram =
+          std::make_unique<MeshPreparationProgram>(m_ComputeContext, m_resources);
 
         // NanoVDB is now enabled for all OpenCL runtimes, including rusticl
         // fp64 hardware support is not strictly required (OpenCL can emulate doubles)
@@ -123,6 +126,7 @@ namespace gladius
             m_dualContouringSamplingProgram->setLogger(m_eventLogger);
             m_hierarchicalDCProgram->setLogger(m_eventLogger);
             m_manifoldDualContouringProgram->setLogger(m_eventLogger);
+            m_meshPreparationProgram->setLogger(m_eventLogger);
         }
 
         // Set up binary caching
@@ -132,11 +136,13 @@ namespace gladius
         m_dualContouringSamplingProgram->setDebugLabel("DualContouringSamplingProgram");
         m_hierarchicalDCProgram->setDebugLabel("HierarchicalDCProgram");
         m_manifoldDualContouringProgram->setDebugLabel("ManifoldDualContouringProgram");
+        m_meshPreparationProgram->setDebugLabel("MeshPreparationProgram");
         m_slicerProgram->setCacheDirectory(cacheDir);
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
         m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
         m_hierarchicalDCProgram->setCacheDirectory(cacheDir);
         m_manifoldDualContouringProgram->setCacheDirectory(cacheDir);
+        m_meshPreparationProgram->setCacheDirectory(cacheDir);
         m_slicerProgram->setEnableTwoLevelPipeline(true);
         m_optimizedRenderProgram->setEnableTwoLevelPipeline(true);
 
@@ -344,7 +350,8 @@ namespace gladius
              (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
              (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
              (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
-             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
+             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress()) ||
+             (m_meshPreparationProgram && m_meshPreparationProgram->isCompilationInProgress());
     }
 
     [[nodiscard]] bool ProgramManager::isAnyCompilationInProgressNonBlocking() const noexcept
@@ -356,7 +363,8 @@ namespace gladius
             (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
             (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
             (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
-            (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
+            (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress()) ||
+            (m_meshPreparationProgram && m_meshPreparationProgram->isCompilationInProgress());
     }
 
     void ProgramManager::requestShutdownAll()
@@ -381,6 +389,10 @@ namespace gladius
         if (m_manifoldDualContouringProgram)
         {
             m_manifoldDualContouringProgram->requestShutdown();
+        }
+        if (m_meshPreparationProgram)
+        {
+            m_meshPreparationProgram->requestShutdown();
         }
     }
 
@@ -409,6 +421,10 @@ namespace gladius
         if (m_manifoldDualContouringProgram)
         {
             m_manifoldDualContouringProgram->waitForCompilation();
+        }
+        if (m_meshPreparationProgram)
+        {
+            m_meshPreparationProgram->waitForCompilation();
         }
     }
 
@@ -564,6 +580,11 @@ namespace gladius
     compute::ManifoldDualContouringProgram * ProgramManager::getManifoldDualContouringProgram() const
     {
         return m_manifoldDualContouringProgram.get();
+    }
+
+    MeshPreparationProgram * ProgramManager::getMeshPreparationProgram() const
+    {
+        return m_meshPreparationProgram.get();
     }
 
     events::SharedLogger ProgramManager::getSharedLogger() const

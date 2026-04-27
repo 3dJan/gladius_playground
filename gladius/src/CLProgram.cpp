@@ -1651,6 +1651,72 @@ namespace gladius
         buildFromSourceAndLinkWithLibImpl(filenames, dynamicSource, callBack, false);
     }
 
+    void CLProgram::buildCompleteProgram(const FileNames & filenames, BuildCallBack & callBack)
+    {
+        ProfileFunction;
+        m_valid = false;
+
+        m_staticSources.clear();
+        m_dynamicSources.clear();
+        m_sources.clear();
+        m_sourceFilenames = filenames;
+
+        loadSourceFromFile(filenames);
+        applyAllKernelReplacements();
+
+        auto const currentHash = computeHash();
+
+        if (m_logger)
+        {
+            m_logger->logInfo(fmt::format(
+              "{}: OpenCL complete-program cache probe hash={} cacheDir='{}'",
+              m_debugLabel,
+              currentHash,
+              m_cacheDirectory.string()));
+        }
+
+        if (m_cacheEnabled && !m_cacheDirectory.empty() && loadProgramFromCache(currentHash))
+        {
+            if (m_logger)
+            {
+                m_logger->logInfo(
+                  m_debugLabel + ": Loaded complete program from binary cache (hash: " +
+                  std::to_string(currentHash) + ")");
+            }
+            m_hashLastSuccessfulCompilation = currentHash;
+            m_valid = true;
+            m_isCompilationInProgress = false;
+            m_kernels.clear();
+
+            m_callBackUserData.computeContext = m_ComputeContext.get();
+            m_callBackUserData.callBack = &callBack;
+            m_callBackUserData.sender = this;
+            m_callBackUserData.program = m_program.get();
+
+            callBackDispatcher(nullptr, &m_callBackUserData);
+            return;
+        }
+
+        if (m_hashLastSuccessfulCompilation != 0 && m_hashLastSuccessfulCompilation == currentHash)
+        {
+            m_valid = true;
+            m_isCompilationInProgress = false;
+            m_kernels.clear();
+
+            m_callBackUserData.computeContext = m_ComputeContext.get();
+            m_callBackUserData.callBack = &callBack;
+            m_callBackUserData.sender = this;
+            m_callBackUserData.program = m_program.get();
+
+            callBackDispatcher(nullptr, &m_callBackUserData);
+            return;
+        }
+
+        m_valid = false;
+        m_isCompilationInProgress = true;
+        compileSingleLevel(callBack, currentHash);
+    }
+
     void CLProgram::buildFromSourceAndLinkWithLibImpl(const FileNames & filenames,
                                                       const std::string & dynamicSource,
                                                       BuildCallBack & callBack,
