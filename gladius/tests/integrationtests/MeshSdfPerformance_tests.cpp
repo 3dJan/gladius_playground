@@ -388,6 +388,9 @@ namespace gladius::tests
     /// `GLADIUS_RUN_GPU_BENCH=1` to enable. Use a small mesh.
     TEST_F(MeshSdfPerformance_Test, GpuSdfRender_AllMethods_PrintsThroughput)
     {
+#ifdef _MSC_VER
+#pragma warning(suppress : 4996)
+#endif
         if (std::getenv("GLADIUS_RUN_GPU_BENCH") == nullptr)
         {
             GTEST_SKIP() << "GPU benchmark default-skipped. Set "
