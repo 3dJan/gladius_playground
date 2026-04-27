@@ -7,8 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <future>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace gladius_tests::slicer_program_compilation
 {
@@ -68,5 +71,85 @@ namespace gladius_tests::slicer_program_compilation
         EXPECT_EQ(logMessages.find("glsl_mod3f"), std::string::npos) << logMessages;
         EXPECT_EQ(logMessages.find("use of undeclared identifier"), std::string::npos)
           << logMessages;
+    }
+
+    /// @test IsSlicingInProgress_WithComputeMutexHeld_DoesNotBlockUiThread
+    TEST_F(SlicerProgramCompilation_Test,
+           IsSlicingInProgress_WithComputeMutexHeld_DoesNotBlockUiThread)
+    {
+        using namespace std::chrono_literals;
+
+        auto core = std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
+
+        std::promise<void> lockAcquiredPromise;
+        auto lockAcquiredFuture = lockAcquiredPromise.get_future();
+        std::promise<void> releasePromise;
+        auto releaseFuture = releasePromise.get_future();
+
+        std::thread lockHolder(
+          [&]()
+          {
+              auto computeToken = core->waitForComputeToken();
+              lockAcquiredPromise.set_value();
+              releaseFuture.wait();
+          });
+
+        auto const lockWaitResult = lockAcquiredFuture.wait_for(1s);
+        if (lockWaitResult != std::future_status::ready)
+        {
+            releasePromise.set_value();
+            lockHolder.join();
+            FAIL() << "Timed out waiting for helper thread to acquire the compute mutex";
+        }
+
+        auto statusFuture = std::async(std::launch::async,
+                                       [&]() { return core->isSlicingInProgress(); });
+        auto const statusWaitResult = statusFuture.wait_for(100ms);
+
+        releasePromise.set_value();
+        lockHolder.join();
+
+        ASSERT_EQ(statusWaitResult, std::future_status::ready)
+          << "isSlicingInProgress() must not wait for ComputeCore::m_computeMutex";
+        EXPECT_FALSE(statusFuture.get());
+    }
+
+    /// @test GetContour_WithComputeMutexHeld_DoesNotBlockUiThread
+    TEST_F(SlicerProgramCompilation_Test, GetContour_WithComputeMutexHeld_DoesNotBlockUiThread)
+    {
+        using namespace std::chrono_literals;
+
+        auto core = std::make_shared<ComputeCore>(m_context, RequiredCapabilities::ComputeOnly, m_logger);
+
+        std::promise<void> lockAcquiredPromise;
+        auto lockAcquiredFuture = lockAcquiredPromise.get_future();
+        std::promise<void> releasePromise;
+        auto releaseFuture = releasePromise.get_future();
+
+        std::thread lockHolder(
+          [&]()
+          {
+              auto computeToken = core->waitForComputeToken();
+              lockAcquiredPromise.set_value();
+              releaseFuture.wait();
+          });
+
+        auto const lockWaitResult = lockAcquiredFuture.wait_for(1s);
+        if (lockWaitResult != std::future_status::ready)
+        {
+            releasePromise.set_value();
+            lockHolder.join();
+            FAIL() << "Timed out waiting for helper thread to acquire the compute mutex";
+        }
+
+        auto contourFuture = std::async(std::launch::async, [&]() { return core->getContour(); });
+        auto const contourWaitResult = contourFuture.wait_for(100ms);
+
+        releasePromise.set_value();
+        lockHolder.join();
+
+        ASSERT_EQ(contourWaitResult, std::future_status::ready)
+          << "getContour() must not wait for ComputeCore::m_computeMutex";
+        EXPECT_NE(contourFuture.get(), nullptr);
     }
 } // namespace gladius_tests::slicer_program_compilation

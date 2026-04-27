@@ -179,7 +179,7 @@ namespace gladius
             }
         }
         m_contour->runPostProcessing();
-        m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
+        m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
     }
 
     void ComputeCore::generateContourQuadtree(nodes::SliceParameter const & sliceParameter)
@@ -354,7 +354,7 @@ namespace gladius
         }
 
         m_contour->runPostProcessing();
-        m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
+        m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
     }
 
     bool ComputeCore::tryToupdateParameter(nodes::Assembly & assembly)
@@ -1075,27 +1075,63 @@ namespace gladius
     {
         ProfileFunction
 
-          if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+        std::lock_guard<std::mutex> lockSliceFuture(m_sliceFutureMutex);
 
-        if (fabs(m_lastContourSliceHeight_mm - sliceParameter.zHeight_mm) < FLT_EPSILON)
+        if (m_slicingInProgress.load(std::memory_order_acquire))
         {
             return false;
         }
 
         if (m_sliceFuture.valid())
         {
+            if (m_sliceFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            {
+                m_slicingInProgress.store(true, std::memory_order_release);
+                return false;
+            }
             m_sliceFuture.get();
         }
+
+        if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        if (fabs(m_lastContourSliceHeight_mm.load(std::memory_order_acquire) -
+                 sliceParameter.zHeight_mm) < FLT_EPSILON)
+        {
+            return false;
+        }
+
+        m_slicingInProgress.store(true, std::memory_order_release);
         m_sliceFuture = std::async(
+          std::launch::async,
           [&, sliceParameter]()
           {
+              struct SlicingGuard
+              {
+                  ComputeCore & core;
+                  ~SlicingGuard()
+                  {
+                      core.m_slicingInProgress.store(false, std::memory_order_release);
+                  }
+              } slicingGuard{*this};
+
               FrameMarkEnd("Slicing");
-              std::lock_guard<std::mutex> lockContourExtractor(m_contourExtractorMutex);
-              generateContours(sliceParameter);
+              try
+              {
+                  std::lock_guard<std::mutex> lockContourExtractor(m_contourExtractorMutex);
+                  generateContours(sliceParameter);
+              }
+              catch (std::exception const & e)
+              {
+                  logMsg(std::string("Contour generation failed: ") + e.what());
+              }
+              catch (...)
+              {
+                  logMsg("Contour generation failed with an unknown error");
+              }
               FrameMarkEnd("Slicing");
           });
         return true;
@@ -1103,25 +1139,14 @@ namespace gladius
 
     void ComputeCore::invalidateContourCache()
     {
-        m_lastContourSliceHeight_mm = std::numeric_limits<cl_float>::quiet_NaN();
+        m_lastContourSliceHeight_mm.store(std::numeric_limits<cl_float>::quiet_NaN(),
+                                          std::memory_order_release);
     }
 
     bool ComputeCore::isSlicingInProgress() const
     {
         ProfileFunction
-
-          std::lock_guard<std::recursive_mutex>
-            lock(m_computeMutex);
-        if (!m_sliceFuture.valid())
-        {
-            return false;
-        }
-
-        if (fabs(m_lastContourSliceHeight_mm - m_sliceHeight_mm) < FLT_EPSILON)
-        {
-            return false;
-        }
-        return m_sliceFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+        return m_slicingInProgress.load(std::memory_order_acquire);
     }
 
     std::mutex & ComputeCore::getContourExtractorMutex()
@@ -1684,26 +1709,17 @@ namespace gladius
 
     SharedContourExtractor ComputeCore::getContour() const
     {
-        // Create a local copy of the future to avoid race conditions
-        // We must NOT hold the mutex while waiting to avoid deadlock
-        std::future<void> localFuture;
+        // Preserve the existing synchronous getter behavior for CLI/API callers, but never take
+        // m_computeMutex here. The slice worker may need that mutex while loading or compiling a
+        // model, and the UI polls getContour() from the render loop.
         {
-            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+            std::lock_guard<std::mutex> lockSliceFuture(m_sliceFutureMutex);
             if (m_sliceFuture.valid())
             {
-                // Move the future to avoid race conditions
-                localFuture = std::move(const_cast<std::future<void> &>(m_sliceFuture));
+                m_sliceFuture.get();
             }
         }
 
-        // Wait for the future outside the mutex to avoid deadlock
-        if (localFuture.valid())
-        {
-            localFuture.get();
-        }
-
-        // Now acquire the mutex to safely return the contour
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         return m_contour;
     }
 

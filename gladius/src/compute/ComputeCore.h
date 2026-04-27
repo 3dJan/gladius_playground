@@ -22,6 +22,7 @@
 
 #include <array>
 #include <atomic>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -743,7 +744,7 @@ namespace gladius
         double layerThickness_mm = 0.05;
         cl_float m_sliceHeight_mm{0.0f};
 
-        cl_float m_lastContourSliceHeight_mm{0.0f};
+        std::atomic<cl_float> m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
         std::atomic<bool> m_boundingBoxStale{false};
@@ -754,8 +755,10 @@ namespace gladius
 
         std::shared_ptr<ModelState> m_meshResourceState;
 
-        std::future<void> m_sliceFuture;
+        mutable std::future<void> m_sliceFuture;
+        mutable std::mutex m_sliceFutureMutex;
         std::mutex m_contourExtractorMutex;
+        std::atomic_bool m_slicingInProgress{false};
 
         std::atomic_bool m_precompSdfIsValid{false};
         size_t m_preCompSdfSize = 256u;
