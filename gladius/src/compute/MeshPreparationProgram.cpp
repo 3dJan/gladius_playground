@@ -70,6 +70,7 @@ namespace gladius
 
     void MeshPreparationProgram::waitForCompilation()
     {
+        std::lock_guard<std::mutex> lock(m_compileMutex);
         m_program.finishCompilation();
     }
 
