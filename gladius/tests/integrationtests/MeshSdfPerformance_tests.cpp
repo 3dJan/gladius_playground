@@ -388,10 +388,20 @@ namespace gladius::tests
     /// `GLADIUS_RUN_GPU_BENCH=1` to enable. Use a small mesh.
     TEST_F(MeshSdfPerformance_Test, GpuSdfRender_AllMethods_PrintsThroughput)
     {
+        auto const getEnvSafe = [](char const * name) -> bool
+        {
 #ifdef _MSC_VER
-#pragma warning(suppress : 4996)
+            char * val = nullptr;
+            size_t len = 0;
+            _dupenv_s(&val, &len, name);
+            std::unique_ptr<char, decltype(&free)> guard(val, &free);
+            return val != nullptr;
+#else
+            return std::getenv(name) != nullptr;
 #endif
-        if (std::getenv("GLADIUS_RUN_GPU_BENCH") == nullptr)
+        };
+
+        if (!getEnvSafe("GLADIUS_RUN_GPU_BENCH"))
         {
             GTEST_SKIP() << "GPU benchmark default-skipped. Set "
                             "GLADIUS_RUN_GPU_BENCH=1 to enable. WARNING: "
