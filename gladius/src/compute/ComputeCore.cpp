@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -951,8 +952,7 @@ namespace gladius
 
     bool ComputeCore::isCompilationInProgress() const
     {
-        return m_programs.getRenderProgram()->isCompilationInProgress() ||
-               m_programs.getSlicerProgram()->isCompilationInProgress();
+        return m_programs.isBlockingCompilationInProgress();
     }
 
     void ComputeCore::recompileBlockingNoLock()
@@ -1246,7 +1246,11 @@ namespace gladius
 
         m_boundingBox.reset();
         invalidatePreCompSdf("refreshProgram");
-        if (m_codeGenerator == CodeGenerator::CommandStream)
+        auto commandStreamKernel = std::optional<std::string>{};
+        auto optimizedKernel = std::optional<std::string>{};
+
+        if (m_codeGenerator == CodeGenerator::CommandStream ||
+            m_codeGenerator == CodeGenerator::Automatic)
         {
             std::stringstream modelKernel;
             getResourceContext()->getCommandBuffer().clear();
@@ -1266,17 +1270,45 @@ namespace gladius
 
             getResourceContext()->getCommandBuffer().write();
 
-            m_programs.setModelSource(modelKernel.str());
+            commandStreamKernel = modelKernel.str();
         }
 
-        if (m_codeGenerator == CodeGenerator::Code)
+        if (m_codeGenerator == CodeGenerator::Code || m_codeGenerator == CodeGenerator::Automatic)
         {
-            std::stringstream optimizedKernel;
+            std::stringstream optimizedKernelStream;
             nodes::ToOclVisitor visitor;
             assembly->visitNodes(visitor);
-            visitor.write(optimizedKernel);
+            visitor.write(optimizedKernelStream);
 
-            m_programs.setModelSource(optimizedKernel.str());
+            optimizedKernel = optimizedKernelStream.str();
+        }
+
+        if (m_codeGenerator == CodeGenerator::Automatic)
+        {
+            if (!commandStreamKernel.has_value() || !optimizedKernel.has_value())
+            {
+                logMsg("Automatic code generation failed to create both render sources");
+                return;
+            }
+            m_programs.setModelSources(*optimizedKernel, *commandStreamKernel, true);
+        }
+        else if (m_codeGenerator == CodeGenerator::CommandStream)
+        {
+            if (!commandStreamKernel.has_value())
+            {
+                logMsg("Command-stream code generation failed to create a render source");
+                return;
+            }
+            m_programs.setModelSources(*commandStreamKernel, *commandStreamKernel, false);
+        }
+        else if (m_codeGenerator == CodeGenerator::Code)
+        {
+            if (!optimizedKernel.has_value())
+            {
+                logMsg("Optimized code generation failed to create a render source");
+                return;
+            }
+            m_programs.setModelSource(*optimizedKernel);
         }
 
         // Capture parameter signature after code generation for fast-path validation
@@ -1596,8 +1628,8 @@ namespace gladius
                    << " precompValid="
                    << (m_precompSdfIsValid.load(std::memory_order_acquire) ? 1 : 0)
                    << " renderProgValid="
-                   << (m_programs.getRenderProgram() &&
-                       !m_programs.getRenderProgram()->isCompilationInProgress())
+                   << (m_programs.getBestRenderProgram() &&
+                       !m_programs.getBestRenderProgram()->isCompilationInProgress())
                    << " slicerValid="
                    << (m_programs.getSlicerProgram() && m_programs.getSlicerProgram()->isValid());
                 logMsg(ss.str());
@@ -1741,17 +1773,17 @@ namespace gladius
     }
     SharedRenderProgram ComputeCore::getBestRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getBestRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
     SharedRenderProgram ComputeCore::getPreviewRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getPreviewRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
     SharedRenderProgram ComputeCore::getOptimzedRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getOptimizedRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
 
@@ -2352,6 +2384,7 @@ namespace gladius
     void ComputeCore::setCodeGenerator(CodeGenerator generator)
     {
         m_codeGenerator = generator;
+        m_programs.setCodeGenerator(generator);
     }
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {

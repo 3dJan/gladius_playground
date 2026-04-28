@@ -1,4 +1,5 @@
 #include "Document.h"
+#include "opencl_test_helper.h"
 #include "testhelper.h"
 #include <compute/ComputeCore.h>
 #include <fmt/core.h>
@@ -22,6 +23,19 @@ namespace gladius_tests
         }
 
       protected:
+        std::shared_ptr<ComputeCore> createCore()
+        {
+            auto context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+
+            if (!context->isValid())
+            {
+                throw std::runtime_error(
+                  "Failed to create OpenCL Context. Did you install proper GPU drivers?");
+            }
+
+            return std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
+        }
+
         std::shared_ptr<ComputeCore> load3mf(std::filesystem::path const & path)
         {
 
@@ -45,8 +59,48 @@ namespace gladius_tests
       private:
         std::shared_ptr<ComputeCore> m_core;
         std::shared_ptr<Document> m_doc;
+      protected:
         events::SharedLogger m_logger;
     };
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithCodeGenerator_UsesOptimizedRenderProgramOnly)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Code);
+        core->refreshProgram(assembly);
+
+        EXPECT_FALSE(core->getProgramManager().hasPreviewModelSource());
+        EXPECT_EQ(core->getBestRenderProgram().get(), core->getOptimzedRenderProgram().get());
+    }
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithAutomaticCodeGenerator_SelectsPreviewUntilOptimizedIsReady)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        auto optimizedProgram = core->getOptimzedRenderProgram();
+
+        ASSERT_NE(previewProgram.get(), nullptr);
+        ASSERT_NE(optimizedProgram.get(), nullptr);
+        EXPECT_NE(previewProgram.get(), optimizedProgram.get());
+        EXPECT_TRUE(core->getProgramManager().hasModelSource());
+        EXPECT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        EXPECT_NE(core->getProgramManager().getModelSource(),
+                  core->getProgramManager().getPreviewModelSource());
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+    }
 
     TEST_F(ComputeCore_Test, DISABLED_PreComputeSDF_LoadedAssembly_EqualsExpectedResult)
     {
