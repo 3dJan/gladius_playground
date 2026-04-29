@@ -49,6 +49,49 @@ CMRC_DECLARE(gladius_resources);
 
 namespace gladius
 {
+    namespace
+    {
+        class ScopedOptimizedRenderCompilationDeferral
+        {
+          public:
+            ScopedOptimizedRenderCompilationDeferral(ComputeCore & core, bool const active)
+                : m_core(&core)
+                , m_active(active)
+                , m_previousDeferred(active ? core.isOptimizedRenderCompilationDeferred() : false)
+            {
+                if (m_active)
+                {
+                    m_core->setOptimizedRenderCompilationDeferred(true);
+                }
+            }
+
+            ~ScopedOptimizedRenderCompilationDeferral()
+            {
+                (void) restore();
+            }
+
+            /// Restore the previous setting and report whether optimized render compilation
+            /// is allowed afterwards.
+            [[nodiscard]] bool restore()
+            {
+                if (!m_active || m_restored || m_core == nullptr)
+                {
+                    return false;
+                }
+
+                m_core->setOptimizedRenderCompilationDeferred(m_previousDeferred);
+                m_restored = true;
+                return !m_previousDeferred;
+            }
+
+          private:
+            ComputeCore * m_core = nullptr;
+            bool m_active = false;
+            bool m_previousDeferred = false;
+            bool m_restored = false;
+        };
+    }
+
     using namespace std;
 
     AssemblyToken Document::waitForAssemblyToken() const
@@ -173,10 +216,13 @@ namespace gladius
         importer.loadMeshes(m_3mfmodel, *this);
     }
 
-    void Document::refreshWorker()
+    void Document::refreshWorker(RefreshMode const refreshMode)
     {
         ProfileFunction;
         auto computeToken = m_core->waitForComputeToken();
+        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
+          *m_core,
+          refreshMode == RefreshMode::InteractiveFirst};
 
         auto meshResourceState = m_core->getMeshResourceState();
         meshResourceState->signalCompilationStarted();
@@ -297,6 +343,15 @@ namespace gladius
         else
         {
             m_core->invalidatePreCompSdf("refreshWorkerFailure");
+        }
+
+        if (optimizedRenderDeferral.restore())
+        {
+            // Start the fully compiled render program only after the command-stream preview and
+            // initial SDF work are ready. The first visible frame after loading a 3MF can then use
+            // the interactive backend while optimized OpenCL compilation continues in the
+            // background.
+            m_core->recompileIfRequired();
         }
 
         meshResourceState->signalCompilationFinished();
@@ -857,8 +912,13 @@ namespace gladius
                              loadImpl(filename);
                              // Initial validation with FileLoad context - logs errors once
                              validateAssembly(nodes::ValidationContext::FileLoad);
-                             // Chain into async model refresh
-                             refreshWorker();
+                             // Chain into async model refresh. 3MF loads publish the interactive
+                             // command-stream preview first, then start the optimized renderer in
+                             // the background.
+                             auto const refreshMode = filename.extension() == ".3mf"
+                                                        ? RefreshMode::InteractiveFirst
+                                                        : RefreshMode::Normal;
+                             refreshWorker(refreshMode);
                          }
                          catch (const std::exception & e)
                          {

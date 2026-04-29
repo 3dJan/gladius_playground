@@ -264,7 +264,9 @@ namespace gladius
         auto const [hasPreviewModelSource, compileOptimizedRenderProgram] = [this]()
         {
             std::lock_guard<std::mutex> lock(m_modelSourceMutex);
-            return std::pair{m_hasPreviewModelSource, m_compileOptimizedRenderProgram};
+                        return std::pair{m_hasPreviewModelSource,
+                                                         m_compileOptimizedRenderProgram &&
+                                                             !m_deferOptimizedRenderCompilation};
         }();
 
         auto const previewCompilationRequired = hasPreviewModelSource &&
@@ -802,6 +804,18 @@ namespace gladius
     void ProgramManager::setCodeGenerator(CodeGenerator generator)
     {
         m_codeGenerator = generator;
+    }
+
+    void ProgramManager::setOptimizedRenderCompilationDeferred(bool const deferred)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        m_deferOptimizedRenderCompilation = deferred;
+    }
+
+    bool ProgramManager::isOptimizedRenderCompilationDeferred() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_deferOptimizedRenderCompilation;
     }
 
     void ProgramManager::setModelSource(std::string source)

@@ -441,6 +441,12 @@ namespace gladius
         void updateFlatAssembly();
 
       private:
+        enum class RefreshMode
+        {
+            Normal,
+            InteractiveFirst
+        };
+
         [[nodiscard]] nodes::VariantParameter &
         findParameterOrThrow(ResourceId modelId,
                              std::string const & nodeName,
@@ -450,7 +456,7 @@ namespace gladius
         void mergeImpl(const std::filesystem::path & filename);
         [[nodiscard]] bool refreshModelAsync();
         void loadAllMeshResources();
-        void refreshWorker();
+        void refreshWorker(RefreshMode refreshMode = RefreshMode::Normal);
 
         /// Dispatch a structural update via the existing refresh pipeline.
         /// @return true if a compilation was launched, false if one was already running.

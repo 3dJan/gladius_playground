@@ -2392,6 +2392,17 @@ namespace gladius
         m_codeGenerator = generator;
         m_programs.setCodeGenerator(generator);
     }
+
+    void ComputeCore::setOptimizedRenderCompilationDeferred(bool const deferred)
+    {
+        m_programs.setOptimizedRenderCompilationDeferred(deferred);
+    }
+
+    bool ComputeCore::isOptimizedRenderCompilationDeferred() const
+    {
+        return m_programs.isOptimizedRenderCompilationDeferred();
+    }
+
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

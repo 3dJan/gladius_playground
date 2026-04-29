@@ -649,6 +649,9 @@ namespace gladius
 
         void setCodeGenerator(CodeGenerator generator);
 
+        void setOptimizedRenderCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isOptimizedRenderCompilationDeferred() const;
+
         [[nodiscard]] std::shared_ptr<ModelState> getMeshResourceState() const;
 
         PlainImage createThumbnail();

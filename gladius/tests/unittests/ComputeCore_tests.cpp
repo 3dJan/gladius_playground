@@ -9,8 +9,10 @@
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <gtest/gtest.h>
+#include <thread>
 
 namespace gladius_tests
 {
@@ -109,6 +111,54 @@ namespace gladius_tests
         EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
+
+      TEST_F(ComputeCore_Test, RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
+      {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->setOptimizedRenderCompilationDeferred(true);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        auto optimizedProgram = core->getOptimzedRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        ASSERT_NE(optimizedProgram.get(), nullptr);
+
+        core->recompileIfRequired();
+
+        for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_FALSE(core->isCompilationInProgress());
+        core->recompileIfRequired();
+
+        EXPECT_TRUE(core->isOptimizedRenderCompilationDeferred());
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+        EXPECT_FALSE(optimizedProgram->isCompilationInProgress());
+        EXPECT_FALSE(optimizedProgram->isValid());
+
+        core->setOptimizedRenderCompilationDeferred(false);
+        core->recompileIfRequired();
+
+        for (auto attempts = 0; attempts < 500 && optimizedProgram->isCompilationInProgress();
+           ++attempts)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_FALSE(optimizedProgram->isCompilationInProgress());
+        core->recompileIfRequired();
+        EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
+      }
 
     TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
     {
