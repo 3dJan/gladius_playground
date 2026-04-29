@@ -1776,6 +1776,12 @@ namespace gladius
         return std::shared_ptr<RenderProgram>(m_programs.getBestRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
+
+    RenderBackend ComputeCore::getSelectedRenderBackend() const
+    {
+        return m_programs.getSelectedRenderBackend();
+    }
+
     SharedRenderProgram ComputeCore::getPreviewRenderProgram() const
     {
         return std::shared_ptr<RenderProgram>(m_programs.getPreviewRenderProgram(),

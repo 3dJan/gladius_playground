@@ -711,11 +711,7 @@ namespace gladius
         std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
         std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
 
-        bool const optimizedReady = m_compileOptimizedRenderProgram && m_optimizedRenderProgram &&
-                                    m_renderState.isModelUpToDate() &&
-                                    m_optimizedRenderProgram->isValid() &&
-                                    !m_optimizedRenderProgram->isCompilationInProgress();
-        if (optimizedReady)
+        if (isOptimizedRenderProgramReadyLocked())
         {
             return m_optimizedRenderProgram.get();
         }
@@ -726,6 +722,29 @@ namespace gladius
         }
 
         return m_optimizedRenderProgram.get();
+    }
+
+    RenderBackend ProgramManager::getSelectedRenderBackend() const
+    {
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+
+        if (isOptimizedRenderProgramReadyLocked())
+        {
+            return RenderBackend::Optimized;
+        }
+
+        if (m_hasPreviewModelSource && m_previewRenderProgram)
+        {
+            return RenderBackend::CommandStream;
+        }
+
+        if (m_optimizedRenderProgram)
+        {
+            return RenderBackend::Optimized;
+        }
+
+        return RenderBackend::Unavailable;
     }
 
     RenderProgram * ProgramManager::getRenderProgram() const
@@ -756,6 +775,13 @@ namespace gladius
     compute::ManifoldDualContouringProgram * ProgramManager::getManifoldDualContouringProgram() const
     {
         return m_manifoldDualContouringProgram.get();
+    }
+
+    bool ProgramManager::isOptimizedRenderProgramReadyLocked() const
+    {
+        return m_compileOptimizedRenderProgram && m_optimizedRenderProgram &&
+               m_renderState.isModelUpToDate() && m_optimizedRenderProgram->isValid() &&
+               !m_optimizedRenderProgram->isCompilationInProgress();
     }
 
     MeshPreparationProgram * ProgramManager::getMeshPreparationProgram() const

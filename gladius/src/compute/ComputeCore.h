@@ -565,6 +565,7 @@ namespace gladius
 
         [[nodiscard]] SharedSlicerProgram getSlicerProgram() const;
         [[nodiscard]] SharedRenderProgram getBestRenderProgram() const;
+        [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
         [[nodiscard]] SharedRenderProgram getPreviewRenderProgram() const;
         [[nodiscard]] SharedRenderProgram getOptimzedRenderProgram() const;
 

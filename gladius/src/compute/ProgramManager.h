@@ -47,6 +47,9 @@ namespace gladius
         /// program is used when available.
         [[nodiscard]] RenderProgram * getBestRenderProgram() const;
 
+        /// Return which render backend is currently selected by getBestRenderProgram().
+        [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
+
         [[nodiscard]] RenderProgram * getRenderProgram() const;
 
         [[nodiscard]] RenderProgram * getPreviewRenderProgram() const;
@@ -139,6 +142,8 @@ namespace gladius
 
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
+
+        [[nodiscard]] bool isOptimizedRenderProgramReadyLocked() const;
 
         void reinitIfNecssary();
 

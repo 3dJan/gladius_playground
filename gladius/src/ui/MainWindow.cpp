@@ -44,6 +44,40 @@ namespace gladius::ui
         return result;
     }
 
+    char const * getRenderBackendStatusLabel(RenderBackend backend)
+    {
+        switch (backend)
+        {
+        case RenderBackend::CommandStream:
+            return "Interactive";
+        case RenderBackend::Optimized:
+            return "Optimized";
+        case RenderBackend::Unavailable:
+        default:
+            return "N/A";
+        }
+    }
+
+    char const * getRenderBackendStatusTooltip(RenderBackend backend, bool isCompiling)
+    {
+        if (isCompiling)
+        {
+            return "Compiling: no renderable model kernel is ready yet.";
+        }
+
+        switch (backend)
+        {
+        case RenderBackend::CommandStream:
+            return "Interactive: command-stream preview kernel for immediate feedback while the "
+                   "optimized kernel is compiling.";
+        case RenderBackend::Optimized:
+            return "Optimized: fully compiled OpenCL kernel for fastest steady-state rendering.";
+        case RenderBackend::Unavailable:
+        default:
+            return "Render backend is not available.";
+        }
+    }
+
     MainWindow::MainWindow()
         : m_logger(std::make_shared<events::Logger>())
         , m_shortcutSettingsDialog(nullptr) // Initialize with nullptr, we'll set it later
@@ -2103,6 +2137,9 @@ namespace gladius::ui
             // Show preview mode while camera is moving, HQ mode when still
             char const * renderModeStr = "N/A";
             char const * sdfStatusStr = "";
+            char const * renderBackendStr = "N/A";
+            auto selectedRenderBackend = RenderBackend::Unavailable;
+            auto isRenderBackendCompiling = false;
             if (m_core)
             {
                 bool const cameraMoving = m_renderWindow.isCameraMoving();
@@ -2130,6 +2167,12 @@ namespace gladius::ui
                 
                 // Show SDF status when moving: indicates SDF is still computing
                 sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
+
+                selectedRenderBackend = m_core->getSelectedRenderBackend();
+                isRenderBackendCompiling = !m_core->isRendererReady();
+                renderBackendStr = isRenderBackendCompiling
+                                     ? "Compiling"
+                                     : getRenderBackendStatusLabel(selectedRenderBackend);
             }
             
             // Bounding box dimensions
@@ -2147,11 +2190,21 @@ namespace gladius::ui
                 }
             }
 
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 400.0f);
-            ImGui::Text("%.0f FPS | %s%s",
-                        ImGui::GetIO().Framerate,
-                        renderModeStr,
-                        sdfStatusStr);
+            auto const statusText = fmt::format("{:.0f} FPS | {}{} | Render: {}",
+                                                ImGui::GetIO().Framerate,
+                                                renderModeStr,
+                                                sdfStatusStr,
+                                                renderBackendStr);
+            auto const statusTextWidth = ImGui::CalcTextSize(statusText.c_str()).x;
+            auto const rightAlignedStatusX = ImGui::GetWindowWidth() - statusTextWidth - 8.0f;
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), rightAlignedStatusX));
+            ImGui::TextUnformatted(statusText.c_str());
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s",
+                                  getRenderBackendStatusTooltip(selectedRenderBackend,
+                                                                isRenderBackendCompiling));
+            }
 
             if (!m_computeAvailable)
             {

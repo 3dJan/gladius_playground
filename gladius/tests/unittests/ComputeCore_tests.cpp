@@ -78,6 +78,7 @@ namespace gladius_tests
 
         EXPECT_FALSE(core->getProgramManager().hasPreviewModelSource());
         EXPECT_EQ(core->getBestRenderProgram().get(), core->getOptimzedRenderProgram().get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
     TEST_F(ComputeCore_Test, RefreshProgram_WithAutomaticCodeGenerator_SelectsPreviewUntilOptimizedIsReady)
@@ -102,6 +103,11 @@ namespace gladius_tests
         EXPECT_NE(core->getProgramManager().getModelSource(),
                   core->getProgramManager().getPreviewModelSource());
         EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+        EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
     TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
@@ -143,6 +149,7 @@ namespace gladius_tests
         auto previewProgram = core->getPreviewRenderProgram();
         ASSERT_NE(previewProgram.get(), nullptr);
         EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
 
         ASSERT_TRUE(core->getProgramManager().hasPreviewModelSource());
         auto const previewSource = core->getProgramManager().getPreviewModelSource();
