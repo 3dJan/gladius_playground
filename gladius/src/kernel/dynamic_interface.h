@@ -29,4 +29,13 @@ enum PrimitiveType;
     buildArea, primitives, primitivesSize, data, dataSize, renderingSettings, preCompSdf,          \
       parameter, cmds, sizeOfCmds, preCompSdfBBox
 
+// Image sampling helpers used by dynamically generated model code.
+float4 sampleImageNearest4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+
+#ifdef ENABLE_VDB
+float4 sampleImageNearest4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+float4 sampleImageLinear4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+#endif // ENABLE_VDB
+
 #endif // GLADIUS_DYNAMIC_IFACE_GUARD

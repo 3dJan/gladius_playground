@@ -783,7 +783,7 @@ namespace gladius
         mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
         /// @}
 
-        CodeGenerator m_codeGenerator = CodeGenerator::Code;
+        CodeGenerator m_codeGenerator = CodeGenerator::Automatic;
 
         SharedKernelReplacements m_kernelReplacements;
 

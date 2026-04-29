@@ -593,10 +593,10 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
-        // Show progress indicator only during actual kernel compilation
-        // (not during parameter changes which just update SDF/bounding box)
-        bool const showBusyIndicator = !m_core->isRendererReady() 
-            || m_core->isAnyCompilationInProgressNonBlocking();
+        // Show the progress indicator only when no renderable program is available.
+        // In automatic mode the optimized OpenCL program may still compile in the
+        // background while the command-stream preview program is already usable.
+        bool const showBusyIndicator = !m_core->isRendererReady();
         if (showBusyIndicator)
         {
             m_view->startAnimationMode();
@@ -1225,7 +1225,7 @@ namespace gladius::ui
             processAsyncPreviewResults();
         }
 
-        if (!m_core->isRendererReady() || m_core->isAnyCompilationInProgressNonBlocking())
+        if (!m_core->isRendererReady())
         {
             m_view->startAnimationMode();
             state.isRendering = false;
@@ -2678,9 +2678,9 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
-        // Check if compilation is in progress using non-blocking atomic check
-        // Show busy indicator during actual kernel compilation
-        if (m_core->isAnyCompilationInProgressNonBlocking())
+        // Show the busy indicator only while no current preview render program is ready.
+        // Background optimized compilation should not hide the command-stream preview.
+        if (!m_core->isRendererReady())
         {
             showProgressSpinner(windowCenter, "compiling");
         }

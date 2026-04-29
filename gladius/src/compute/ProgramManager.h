@@ -174,7 +174,7 @@ namespace gladius
         ModelState m_previewRenderState;
 
         ModelState m_slicerState;
-        CodeGenerator m_codeGenerator = CodeGenerator::Code;
+        CodeGenerator m_codeGenerator = CodeGenerator::Automatic;
         bool m_isVdbSupported = false;
         bool m_isVdbRequired = false;
         bool m_isVdbActive = false;

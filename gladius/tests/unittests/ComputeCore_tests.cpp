@@ -4,10 +4,12 @@
 #include <compute/ComputeCore.h>
 #include <fmt/core.h>
 #include <nodes/Assembly.h>
+#include <nodes/DerivedNodes.h>
 #include <nodes/Model.h>
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 #include <algorithm>
+#include <cmath>
 #include <gtest/gtest.h>
 
 namespace gladius_tests
@@ -100,6 +102,85 @@ namespace gladius_tests
         EXPECT_NE(core->getProgramManager().getModelSource(),
                   core->getProgramManager().getPreviewModelSource());
         EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+    }
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        auto model = assembly->assemblyModel();
+        model->createBeginEndWithDefaultInAndOuts();
+
+        auto * minCorner = model->create<nodes::ConstantVector>();
+        minCorner->parameter()[nodes::FieldNames::X].setValue(nodes::VariantType{-5.0f});
+        minCorner->parameter()[nodes::FieldNames::Y].setValue(nodes::VariantType{-5.0f});
+        minCorner->parameter()[nodes::FieldNames::Z].setValue(nodes::VariantType{-5.0f});
+
+        auto * maxCorner = model->create<nodes::ConstantVector>();
+        maxCorner->parameter()[nodes::FieldNames::X].setValue(nodes::VariantType{5.0f});
+        maxCorner->parameter()[nodes::FieldNames::Y].setValue(nodes::VariantType{5.0f});
+        maxCorner->parameter()[nodes::FieldNames::Z].setValue(nodes::VariantType{5.0f});
+
+        auto * box = model->create<nodes::BoxMinMax>();
+        ASSERT_TRUE(model->addLink(model->getInputs().at(nodes::FieldNames::Pos).getId(),
+                                   box->parameter()[nodes::FieldNames::Pos].getId()));
+        ASSERT_TRUE(model->addLink(minCorner->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                                   box->parameter()[nodes::FieldNames::Min].getId()));
+        ASSERT_TRUE(model->addLink(maxCorner->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                                   box->parameter()[nodes::FieldNames::Max].getId()));
+        ASSERT_TRUE(model->addLink(box->getOutputs().at(nodes::FieldNames::Shape).getId(),
+                                   model->getEndNode()
+                                     ->parameter()
+                                     .at(nodes::FieldNames::Shape)
+                                     .getId()));
+        model->updateGraphAndOrderIfNeeded();
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+
+        ASSERT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        auto const previewSource = core->getProgramManager().getPreviewModelSource();
+        EXPECT_NE(previewSource.find("cmds[i].type"), std::string::npos);
+        EXPECT_NE(previewSource.find("bbBox(pos, min, max)"), std::string::npos);
+        EXPECT_EQ(previewSource.find("#ifdef ENABLE_VDB"), std::string::npos);
+
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+        ASSERT_FALSE(previewProgram->isCompilationInProgress());
+        ASSERT_TRUE(previewProgram->isValid());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives.get(), nullptr);
+        ASSERT_NO_THROW(primitives->write());
+
+        constexpr size_t imageSize = 16u;
+        ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
+        ASSERT_NO_THROW(targetImage.allocateOnDevice());
+
+        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
+                                                    *primitives,
+                                                    targetImage,
+                                                    0.0f,
+                                                    0u,
+                                                    imageSize));
+        ASSERT_NO_THROW(targetImage.read());
+
+        auto const & pixels = targetImage.getData();
+        ASSERT_EQ(pixels.size(), imageSize * imageSize);
+        EXPECT_TRUE(std::all_of(pixels.begin(),
+                                pixels.end(),
+                                [](cl_float4 const & pixel)
+                                {
+                                    return std::isfinite(pixel.s[0]) &&
+                                           std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) &&
+                                           std::isfinite(pixel.s[3]);
+                                }));
     }
 
     TEST_F(ComputeCore_Test, DISABLED_PreComputeSDF_LoadedAssembly_EqualsExpectedResult)

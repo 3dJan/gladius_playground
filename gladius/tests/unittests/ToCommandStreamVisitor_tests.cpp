@@ -216,7 +216,7 @@ namespace gladius_tests
         EXPECT_THROW(visitor.visit(*functionGradient), std::runtime_error);
     }
 
-    TEST_F(ToCommandStreamVisitorTest, Write_GeneratedSourceContainsFallbackAndDynamicImageSampler)
+    TEST_F(ToCommandStreamVisitorTest, Write_GeneratedSourceContainsFallbackAndOnlyUsedHandlers)
     {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
@@ -233,12 +233,41 @@ namespace gladius_tests
         auto const generatedSource = source.str();
 
         EXPECT_NE(generatedSource.find("isnan(shape) || isinf(shape)"), std::string::npos);
-        EXPECT_NE(generatedSource.find("if (cmds[i].type == CT_COMPOSE_MATRIX)"),
+        EXPECT_EQ(generatedSource.find("if (cmds[i].type == CT_COMPOSE_MATRIX)"),
                   std::string::npos);
-        EXPECT_NE(generatedSource.find("if (cmds[i].type == CT_MIX_SCALAR)"), std::string::npos);
+        EXPECT_EQ(generatedSource.find("if (cmds[i].type == CT_MIX_SCALAR)"), std::string::npos);
+        EXPECT_EQ(generatedSource.find("#ifdef ENABLE_VDB"), std::string::npos);
+        EXPECT_EQ(generatedSource.find("bbBox(pos, min, max)"), std::string::npos);
+    }
+
+    TEST_F(ToCommandStreamVisitorTest, Write_GeneratedSourceContainsUsedImageSamplerAndBoxHandlers)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        gladius::nodes::Assembly assembly;
+        assembly.assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        gladius::CommandBuffer cmds(*m_computeContext);
+        gladius::nodes::ToCommandStreamVisitor visitor(&cmds, &assembly);
+        assembly.visitAssemblyNodes(visitor);
+
+        auto imageSamplerCommand = Command{};
+        imageSamplerCommand.type = CT_IMAGE_SAMPLER;
+        cmds.getData().push_back(imageSamplerCommand);
+
+        auto boxCommand = Command{};
+        boxCommand.type = CT_BOX_MIN_MAX;
+        cmds.getData().push_back(boxCommand);
+
+        std::stringstream source;
+        visitor.write(source);
+        auto const generatedSource = source.str();
+
+        EXPECT_NE(generatedSource.find("#ifdef ENABLE_VDB"), std::string::npos);
+        EXPECT_NE(generatedSource.find("bbBox(pos, min, max)"), std::string::npos);
 
         auto const vdbBranch = generatedSource.find("if (isVdbGrid)");
-        auto const nearestBranch = generatedSource.find("else if (filter == 0)");
+        auto const nearestBranch = generatedSource.find("if (filter == 0)");
         EXPECT_NE(vdbBranch, std::string::npos);
         EXPECT_NE(nearestBranch, std::string::npos);
         EXPECT_LT(vdbBranch, nearestBranch);

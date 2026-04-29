@@ -3,7 +3,9 @@
 #include <fmt/core.h>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "Assembly.h"
 #include "Commands.h"
@@ -179,12 +181,104 @@ namespace gladius::nodes
         }
     }
 
-    void ToCommandStreamVisitor::write(std::ostream & out) const
+    std::unordered_set<std::string> collectUsedCommandTypeNames(CommandBuffer * commands)
+    {
+        std::unordered_set<std::string> usedCommandTypes;
+        if (commands == nullptr)
+        {
+            return usedCommandTypes;
+        }
+
+        for (auto const & command : commands->getData())
+        {
+            usedCommandTypes.insert(cmdIdToString(static_cast<CommandType>(command.type)));
+        }
+        return usedCommandTypes;
+    }
+
+    std::size_t findMatchingBrace(std::string const & source, std::size_t const openBrace)
+    {
+        auto depth = 0;
+        for (auto index = openBrace; index < source.size(); ++index)
+        {
+            if (source[index] == '{')
+            {
+                ++depth;
+            }
+            else if (source[index] == '}')
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    return index;
+                }
+            }
+        }
+        return std::string::npos;
+    }
+
+    std::string removeUnusedCommandHandlers(std::string const & source,
+                                            std::unordered_set<std::string> const & usedCommandTypes)
+    {
+        auto constexpr commandPrefix = std::string_view{"if (cmds[i].type == "};
+
+        std::string filteredSource;
+        filteredSource.reserve(source.size());
+
+        auto cursor = std::size_t{0};
+        while (cursor < source.size())
+        {
+            auto const handlerStart = source.find(commandPrefix, cursor);
+            if (handlerStart == std::string::npos)
+            {
+                filteredSource.append(source, cursor, std::string::npos);
+                break;
+            }
+
+            filteredSource.append(source, cursor, handlerStart - cursor);
+
+            auto const commandNameStart = handlerStart + commandPrefix.size();
+            auto const commandNameEnd = source.find(')', commandNameStart);
+            auto const handlerBodyStart = source.find('{', commandNameEnd);
+            if (commandNameEnd == std::string::npos || handlerBodyStart == std::string::npos)
+            {
+                filteredSource.append(source, handlerStart, std::string::npos);
+                break;
+            }
+
+            auto const handlerBodyEnd = findMatchingBrace(source, handlerBodyStart);
+            if (handlerBodyEnd == std::string::npos)
+            {
+                filteredSource.append(source, handlerStart, std::string::npos);
+                break;
+            }
+
+            auto handlerEnd = handlerBodyEnd + 1u;
+            if (handlerEnd < source.size() && source[handlerEnd] == '\n')
+            {
+                ++handlerEnd;
+            }
+
+            auto const commandName = source.substr(commandNameStart, commandNameEnd - commandNameStart);
+            if (usedCommandTypes.find(commandName) != usedCommandTypes.end())
+            {
+                filteredSource.append(source, handlerStart, handlerEnd - handlerStart);
+            }
+            cursor = handlerEnd;
+        }
+
+        return filteredSource;
+    }
+
+    void ToCommandStreamVisitor::write(std::ostream & target) const
     {
         if (m_assembly->assemblyModel()->getBeginNode() == nullptr)
         {
             return;
         }
+
+        std::ostringstream generatedSource;
+        auto & out = generatedSource;
 
         out << "\n#define GETPARAM(index, offset) \
     (cmds[i].args[index] < 0) ? out[-cmds[i].args[index]+offset] : parameter[cmds[i].args[index]+offset]\n";
@@ -1539,12 +1633,13 @@ namespace gladius::nodes
                "convert_int(GETPARAM(5,0)));\n";
         out << " int filter = convert_int(GETPARAM(6,0));\n";
         out << " bool const isVdbGrid = cmds[i].args[7] != 0;\n";
+        out << "#ifdef ENABLE_VDB\n";
         out << " if (isVdbGrid)\n";
-        out << " color = sampleImageLinear4fvdb(uvw, dimensions, start, tileStyle, "
-               "PASS_PAYLOAD_ARGS);\n";
-        out << " else if (filter == 0)\n";
-        out << " color = sampleImageNearest4f(uvw, dimensions, start, tileStyle, "
-               "PASS_PAYLOAD_ARGS);\n";
+        out << " color = sampleImageLinear4fvdb(uvw, dimensions, start, tileStyle, PASS_PAYLOAD_ARGS);\n";
+        out << " else\n";
+        out << "#endif\n";
+        out << " if (filter == 0)\n";
+        out << " color = sampleImageNearest4f(uvw, dimensions, start, tileStyle, PASS_PAYLOAD_ARGS);\n";
         out << " else\n";
         out << " color = sampleImageLinear4f(uvw, dimensions, start, tileStyle, "
                "PASS_PAYLOAD_ARGS);\n";
@@ -1554,19 +1649,21 @@ namespace gladius::nodes
         out << " out[cmds[i].output[1]] = color.w;\n";
         out << "}\n";
 
-        // bbox(float3 pos, float3 min, float3 max)
+        // bbBox(float3 pos, float3 min, float3 max)
         out << "if (cmds[i].type == CT_BOX_MIN_MAX)\n";
         out << "{\n";
         out << " float3 const pos = (float3)(GETPARAM(0,0), GETPARAM(0,1), GETPARAM(0,2));\n";
         out << " float3 const min = (float3)(GETPARAM(1,0), GETPARAM(1,1), GETPARAM(1,2));\n";
         out << " float3 const max = (float3)(GETPARAM(2,0), GETPARAM(2,1), GETPARAM(2,2));\n";
-        out << " out[cmds[i].output[0]] = bbox(pos, min, max);\n";
+        out << " out[cmds[i].output[0]] = bbBox(pos, min, max);\n";
         out << "}\n";
 
         out << "}\n"; // for loop
 
         out << m_resultStatement.str();
         out << "}\n";
+
+        target << removeUnusedCommandHandlers(generatedSource.str(), collectUsedCommandTypeNames(m_cmds));
     }
 
     bool ToCommandStreamVisitor::isOutPutOfNodeValid(const NodeBase & node)
