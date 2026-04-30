@@ -1325,6 +1325,17 @@ namespace gladius
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         refreshProgram(assembly);
     }
+
+    [[nodiscard]] bool ComputeCore::isRenderProgramReady() const
+    {
+        auto renderProgram = getBestRenderProgram();
+        if (!renderProgram)
+        {
+            return false;
+        }
+        return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
+    }
+
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
         if (!m_meshResourceState)
@@ -1335,12 +1346,7 @@ namespace gladius
         {
             return false;
         }
-        auto renderProgram = getBestRenderProgram();
-        if (!renderProgram)
-        {
-            return false;
-        }
-        return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
+        return isRenderProgramReady();
     }
 
     void ComputeCore::compileSlicerProgramBlocking()

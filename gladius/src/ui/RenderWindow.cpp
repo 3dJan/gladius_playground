@@ -596,7 +596,7 @@ namespace gladius::ui
         // Show the progress indicator only when no renderable program is available.
         // In automatic mode the optimized OpenCL program may still compile in the
         // background while the command-stream preview program is already usable.
-        bool const showBusyIndicator = !m_core->isRendererReady();
+        bool const showBusyIndicator = !m_core->isRenderProgramReady();
         if (showBusyIndicator)
         {
             m_view->startAnimationMode();
@@ -741,7 +741,7 @@ namespace gladius::ui
         ProfileFunction;
         LOG_LOCATION
 
-        if (!m_core->isRendererReady())
+        if (!m_core->isRenderProgramReady())
         {
             return;
         }
@@ -1225,7 +1225,7 @@ namespace gladius::ui
             processAsyncPreviewResults();
         }
 
-        if (!m_core->isRendererReady())
+        if (!m_core->isRenderProgramReady())
         {
             m_view->startAnimationMode();
             state.isRendering = false;
@@ -2680,7 +2680,7 @@ namespace gladius::ui
 
         // Show the busy indicator only while no current preview render program is ready.
         // Background optimized compilation should not hide the command-stream preview.
-        if (!m_core->isRendererReady())
+        if (!m_core->isRenderProgramReady())
         {
             showProgressSpinner(windowCenter, "compiling");
         }
@@ -3481,7 +3481,7 @@ namespace gladius::ui
             return !m_streamingPreviewActive.load(std::memory_order_acquire) ||
                    (cancelCheck && cancelCheck()) ||
                    (m_asyncController && !m_asyncController->isRunning()) ||
-                   !m_core->isRendererReady();
+                   !m_core->isRenderProgramReady();
         };
 
         auto lowResImage = m_core->getLowResPreviewImage();

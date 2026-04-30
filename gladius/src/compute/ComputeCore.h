@@ -594,6 +594,11 @@ namespace gladius
         void refreshProgram(nodes::SharedAssembly assembly);
         void tryRefreshProgramProtected(nodes::SharedAssembly assembly);
 
+        /// Return whether the currently selected render program can produce frames.
+        /// Unlike isRendererReady(), this intentionally ignores broader model/SDF refresh state
+        /// so the UI can keep using the command-stream preview while background work continues.
+        [[nodiscard]] bool isRenderProgramReady() const;
+
         [[nodiscard]] bool isRendererReady() const;
 
         [[nodiscard]] SharedComputeContext getComputeContext() const;

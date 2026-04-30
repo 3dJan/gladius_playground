@@ -112,8 +112,8 @@ namespace gladius_tests
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
-      TEST_F(ComputeCore_Test, RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
-      {
+    TEST_F(ComputeCore_Test, RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
+    {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
         auto core = createCore();
@@ -133,13 +133,14 @@ namespace gladius_tests
 
         for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
         {
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         ASSERT_FALSE(core->isCompilationInProgress());
         core->recompileIfRequired();
 
         EXPECT_TRUE(core->isOptimizedRenderCompilationDeferred());
+        EXPECT_TRUE(core->isRenderProgramReady());
         EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
         EXPECT_FALSE(optimizedProgram->isCompilationInProgress());
@@ -149,16 +150,39 @@ namespace gladius_tests
         core->recompileIfRequired();
 
         for (auto attempts = 0; attempts < 500 && optimizedProgram->isCompilationInProgress();
-           ++attempts)
+             ++attempts)
         {
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         ASSERT_FALSE(optimizedProgram->isCompilationInProgress());
         core->recompileIfRequired();
         EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
-      }
+    }
+
+    TEST_F(ComputeCore_Test, IsRenderProgramReady_WithModelRefreshInProgress_UsesCompiledPreview)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        core->refreshProgram(assembly);
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+
+        ASSERT_TRUE(core->isRendererReady());
+        ASSERT_TRUE(core->isRenderProgramReady());
+
+        core->getMeshResourceState()->signalCompilationStarted();
+
+        EXPECT_FALSE(core->isRendererReady());
+        EXPECT_TRUE(core->isRenderProgramReady());
+
+        core->getMeshResourceState()->signalCompilationFinished();
+    }
 
     TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
     {

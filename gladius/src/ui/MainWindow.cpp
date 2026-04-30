@@ -2169,7 +2169,7 @@ namespace gladius::ui
                 sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
 
                 selectedRenderBackend = m_core->getSelectedRenderBackend();
-                isRenderBackendCompiling = !m_core->isRendererReady();
+                isRenderBackendCompiling = !m_core->isRenderProgramReady();
                 renderBackendStr = isRenderBackendCompiling
                                      ? "Compiling"
                                      : getRenderBackendStatusLabel(selectedRenderBackend);
