@@ -160,13 +160,8 @@ namespace gladius::compute
         std::unique_ptr<cl::Buffer> m_outerThicknessFieldBuffer;
         std::unique_ptr<cl::Buffer> m_innerThicknessFieldBuffer;
 
-            // CPU copies for topology reconstruction
-            std::vector<OctreeNode> m_cpuOctreeNodes;
-            std::unordered_map<std::uint64_t, std::size_t> m_mortonToIndex;
-            std::vector<int> m_cpuVertexOffsets;
-            
-            // Flag to indicate chunked processing mode (disables maxCoord boundary check)
-            bool m_isChunkedMode{false};
+        // Flag to indicate chunked processing mode (disables maxCoord boundary check)
+        bool m_isChunkedMode{false};
 
         ManifoldDualContouringConfig m_config{};
         ManifoldDualContouringMesh m_mesh{};
@@ -188,7 +183,7 @@ namespace gladius::compute
         void constructOctree();
         void generateVertices();
         void generateIndices();
-        void refreshCpuOctreeCache();
+        void releaseExtractionBuffers();
         
         // Sharp feature post-processing
         void postProcessSharpFeatures();
