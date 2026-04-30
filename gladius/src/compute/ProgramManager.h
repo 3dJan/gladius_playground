@@ -105,11 +105,15 @@ namespace gladius
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
         void setCodeGenerator(CodeGenerator generator);
 
-        /// Temporarily defer optimized render compilation while preview and slicer compilation
-        /// continue. This allows file loading to publish the interactive command-stream preview
-        /// before the slower optimized renderer starts compiling in the background.
+        /// Temporarily defer optimized render compilation while preview compilation continues.
+        /// This allows file loading to publish the interactive command-stream preview before the
+        /// slower optimized renderer starts compiling in the background.
         void setOptimizedRenderCompilationDeferred(bool deferred);
         [[nodiscard]] bool isOptimizedRenderCompilationDeferred() const;
+
+        /// Temporarily defer slicer compilation while the render preview is published first.
+        void setSlicerCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isSlicerCompilationDeferred() const;
 
         void setModelSource(std::string source);
         void setModelSources(std::string optimizedSource,
@@ -197,6 +201,7 @@ namespace gladius
         bool m_hasPreviewModelSource = false;
         bool m_compileOptimizedRenderProgram = true;
         bool m_deferOptimizedRenderCompilation = false;
+        bool m_deferSlicerCompilation = false;
 
         /// Parameter signature from last successful compilation
         /// Used to detect when fast-path parameter updates are possible

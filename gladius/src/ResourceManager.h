@@ -27,6 +27,7 @@ namespace gladius
     }
 
     struct SpatialMeshData;
+    struct MeshSdfEvaluationConfig;
     class Mesh;
     class ResourceContext;
     class ImageStackOCLBuffer;
@@ -150,6 +151,9 @@ namespace gladius
         void addResource(ResourceKey key, io::ImageStack && stack);
         void addResource(ResourceKey key, std::unique_ptr<BeamLatticeResource> && resource);
         void addResource(ResourceKey key, SpatialMeshData && spatialData);
+        void addResource(ResourceKey key,
+                         SpatialMeshData && spatialData,
+                         MeshSdfEvaluationConfig const & evaluationConfig);
 
         /**
          * \brief Loads all resources that have not been load yet

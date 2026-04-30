@@ -277,9 +277,11 @@ namespace gladius::ui
             return;
         }
 
-        // Check if file loading is in progress - if so, show loading indicator without blocking
+        // Check if file loading is in progress. Once the interactive preview program is ready,
+        // keep rendering instead of holding the preview area on the loading overlay while slower
+        // post-load work continues in the background.
         bool const isFileLoading = m_document && m_document->isLoadingInProgress();
-        if (isFileLoading)
+        if (isFileLoading && (!m_core || !m_core->isRenderProgramReady()))
         {
             renderLoadingOverlay();
             return;

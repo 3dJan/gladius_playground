@@ -1,8 +1,11 @@
 #include "Document.h"
+#include "Mesh.h"
+#include "SpatialMeshResource.h"
 #include "opencl_test_helper.h"
 #include "testhelper.h"
 #include <compute/ComputeCore.h>
 #include <fmt/core.h>
+#include <io/3mf/MeshWriter3mf.h>
 #include <nodes/Assembly.h>
 #include <nodes/DerivedNodes.h>
 #include <nodes/Model.h>
@@ -11,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -240,6 +244,108 @@ namespace gladius_tests
         ASSERT_NO_THROW(primitives->write());
 
         constexpr size_t imageSize = 16u;
+        ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
+        ASSERT_NO_THROW(targetImage.allocateOnDevice());
+
+        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
+                                                    *primitives,
+                                                    targetImage,
+                                                    0.0f,
+                                                    0u,
+                                                    imageSize));
+        ASSERT_NO_THROW(targetImage.read());
+
+        auto const & pixels = targetImage.getData();
+        ASSERT_EQ(pixels.size(), imageSize * imageSize);
+        EXPECT_TRUE(std::all_of(pixels.begin(),
+                                pixels.end(),
+                                [](cl_float4 const & pixel)
+                                {
+                                    return std::isfinite(pixel.s[0]) &&
+                                           std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) &&
+                                           std::isfinite(pixel.s[3]);
+                                }));
+    }
+
+    TEST_F(ComputeCore_Test, LoadMesh3mf_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+
+        Mesh mesh(*core->getComputeContext());
+        auto const a = Vector3{-1.0f, -1.0f, -1.0f};
+        auto const b = Vector3{1.0f, -1.0f, -1.0f};
+        auto const c = Vector3{0.0f, 1.0f, -1.0f};
+        auto const d = Vector3{0.0f, 0.0f, 1.0f};
+        mesh.addFace(a, c, b);
+        mesh.addFace(a, b, d);
+        mesh.addFace(b, c, d);
+        mesh.addFace(c, a, d);
+
+        auto const meshPath = std::filesystem::temp_directory_path() /
+                              fmt::format("gladius-command-stream-mesh-{}.3mf",
+                                          std::chrono::steady_clock::now().time_since_epoch().count());
+
+        io::MeshWriter3mf writer(m_logger);
+        ASSERT_NO_THROW(writer.exportMesh(meshPath, mesh, "TinyTetrahedron"));
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        auto document = std::make_shared<Document>(core);
+        MeshSdfEvaluationConfig meshEvaluationConfig;
+        meshEvaluationConfig.method = MeshSdfMethod::VoxelAccelerated;
+        document->setMeshSdfEvaluationConfig(meshEvaluationConfig);
+
+        ASSERT_NO_THROW(document->loadNonBlocking(meshPath));
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (document->isLoadingInProgress() && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_FALSE(document->isLoadingInProgress());
+        ASSERT_TRUE(document->getLoadingError().empty()) << document->getLoadingError();
+
+        EXPECT_EQ(document->getMeshSdfEvaluationConfig().method, MeshSdfMethod::VoxelAccelerated);
+        SpatialMeshResource const * importedMesh = nullptr;
+        for (auto const & [key, resource] : document->getResourceManager().getResourceMap())
+        {
+          if (key.getResourceType() != ResourceType::Mesh)
+          {
+            continue;
+          }
+          importedMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+          if (importedMesh != nullptr)
+          {
+            break;
+          }
+        }
+        ASSERT_NE(importedMesh, nullptr);
+        EXPECT_EQ(importedMesh->evaluationConfig().method, MeshSdfMethod::PureBVH);
+        EXPECT_FALSE(importedMesh->needsVoxelGridBuild());
+
+        std::error_code ec;
+        std::filesystem::remove(meshPath, ec);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+
+        ASSERT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        auto const previewSource = core->getProgramManager().getPreviewModelSource();
+        EXPECT_NE(previewSource.find("CT_SIGNED_DISTANCE_TO_MESH"), std::string::npos);
+        EXPECT_NE(previewSource.find("payload((float3)"), std::string::npos);
+
+        ASSERT_FALSE(previewProgram->isCompilationInProgress());
+        ASSERT_TRUE(previewProgram->isValid());
+        ASSERT_TRUE(core->isRenderProgramReady());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives.get(), nullptr);
+        ASSERT_NO_THROW(primitives->write());
+
+        constexpr size_t imageSize = 1u;
         ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
         ASSERT_NO_THROW(targetImage.allocateOnDevice());
 

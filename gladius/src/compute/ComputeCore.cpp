@@ -2409,6 +2409,16 @@ namespace gladius
         return m_programs.isOptimizedRenderCompilationDeferred();
     }
 
+    void ComputeCore::setSlicerCompilationDeferred(bool const deferred)
+    {
+        m_programs.setSlicerCompilationDeferred(deferred);
+    }
+
+    bool ComputeCore::isSlicerCompilationDeferred() const
+    {
+        return m_programs.isSlicerCompilationDeferred();
+    }
+
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

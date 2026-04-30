@@ -261,19 +261,23 @@ namespace gladius
             m_slicerState.signalCompilationFinished();
         }
 
-        auto const [hasPreviewModelSource, compileOptimizedRenderProgram] = [this]()
+        bool hasPreviewModelSource = false;
+        bool compileOptimizedRenderProgram = false;
+        bool compileSlicer = false;
         {
             std::lock_guard<std::mutex> lock(m_modelSourceMutex);
-                        return std::pair{m_hasPreviewModelSource,
-                                                         m_compileOptimizedRenderProgram &&
-                                                             !m_deferOptimizedRenderCompilation};
-        }();
+            hasPreviewModelSource = m_hasPreviewModelSource;
+            compileOptimizedRenderProgram = m_compileOptimizedRenderProgram &&
+                                            !m_deferOptimizedRenderCompilation;
+            compileSlicer = !m_deferSlicerCompilation;
+        }
 
         auto const previewCompilationRequired = hasPreviewModelSource &&
                                                 m_previewRenderState.isCompilationRequired();
         auto const optimizedRenderCompilationRequired =
           compileOptimizedRenderProgram && m_renderState.isCompilationRequired();
-        auto const slicerCompilationRequired = m_slicerState.isCompilationRequired();
+                auto const slicerCompilationRequired =
+                    compileSlicer && m_slicerState.isCompilationRequired();
 
         if (!previewCompilationRequired && !optimizedRenderCompilationRequired &&
             !slicerCompilationRequired)
@@ -816,6 +820,18 @@ namespace gladius
     {
         std::lock_guard<std::mutex> lock(m_modelSourceMutex);
         return m_deferOptimizedRenderCompilation;
+    }
+
+    void ProgramManager::setSlicerCompilationDeferred(bool const deferred)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        m_deferSlicerCompilation = deferred;
+    }
+
+    bool ProgramManager::isSlicerCompilationDeferred() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_deferSlicerCompilation;
     }
 
     void ProgramManager::setModelSource(std::string source)

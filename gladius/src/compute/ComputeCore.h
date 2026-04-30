@@ -656,6 +656,8 @@ namespace gladius
 
         void setOptimizedRenderCompilationDeferred(bool deferred);
         [[nodiscard]] bool isOptimizedRenderCompilationDeferred() const;
+        void setSlicerCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isSlicerCompilationDeferred() const;
 
         [[nodiscard]] std::shared_ptr<ModelState> getMeshResourceState() const;
 

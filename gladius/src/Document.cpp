@@ -9,6 +9,7 @@
 #include "MeshExporter.h"
 #include "Profiling.h"
 #include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "TimeMeasurement.h"
 #include "compute/ComputeCore.h"
 #include "exceptions.h"
@@ -51,17 +52,39 @@ namespace gladius
 {
     namespace
     {
+        [[nodiscard]] MeshSdfEvaluationConfig makeInteractivePreviewMeshSdfConfig(
+          MeshSdfEvaluationConfig cfg) noexcept
+        {
+            cfg.method = MeshSdfMethod::PureBVH;
+            cfg.fwnUseSignCache = false;
+            return cfg;
+        }
+
+        [[nodiscard]] bool needsMeshSdfResourceUpdate(SpatialMeshResource const & resource,
+                                                      MeshSdfEvaluationConfig const & cfg) noexcept
+        {
+            auto const & current = resource.evaluationConfig();
+            return requiresMeshRebuild(current, cfg) ||
+                   current.fwnUseSignCache != cfg.fwnUseSignCache ||
+                   (current.method == MeshSdfMethod::FastWindingNumber &&
+                    cfg.method == MeshSdfMethod::FastWindingNumber &&
+                    current.fwnBeta != cfg.fwnBeta);
+        }
+
         class ScopedOptimizedRenderCompilationDeferral
         {
           public:
             ScopedOptimizedRenderCompilationDeferral(ComputeCore & core, bool const active)
                 : m_core(&core)
                 , m_active(active)
-                , m_previousDeferred(active ? core.isOptimizedRenderCompilationDeferred() : false)
+                , m_previousOptimizedDeferred(active ? core.isOptimizedRenderCompilationDeferred()
+                                                     : false)
+                , m_previousSlicerDeferred(active ? core.isSlicerCompilationDeferred() : false)
             {
                 if (m_active)
                 {
                     m_core->setOptimizedRenderCompilationDeferred(true);
+                    m_core->setSlicerCompilationDeferred(true);
                 }
             }
 
@@ -70,7 +93,7 @@ namespace gladius
                 (void) restore();
             }
 
-            /// Restore the previous setting and report whether optimized render compilation
+            /// Restore the previous settings and report whether any deferred compilation
             /// is allowed afterwards.
             [[nodiscard]] bool restore()
             {
@@ -79,15 +102,56 @@ namespace gladius
                     return false;
                 }
 
-                m_core->setOptimizedRenderCompilationDeferred(m_previousDeferred);
+                m_core->setOptimizedRenderCompilationDeferred(m_previousOptimizedDeferred);
+                m_core->setSlicerCompilationDeferred(m_previousSlicerDeferred);
                 m_restored = true;
-                return !m_previousDeferred;
+                return !m_previousOptimizedDeferred || !m_previousSlicerDeferred;
             }
 
           private:
             ComputeCore * m_core = nullptr;
             bool m_active = false;
-            bool m_previousDeferred = false;
+            bool m_previousOptimizedDeferred = false;
+            bool m_previousSlicerDeferred = false;
+            bool m_restored = false;
+        };
+
+        class ScopedMeshSdfEvaluationConfigOverride
+        {
+          public:
+            ScopedMeshSdfEvaluationConfigOverride(Document & document,
+                                                  MeshSdfEvaluationConfig const & cfg,
+                                                  bool const active)
+                : m_document(&document)
+                , m_active(active)
+                , m_previousConfig(active ? document.getMeshSdfEvaluationConfig()
+                                          : MeshSdfEvaluationConfig{})
+            {
+                if (m_active)
+                {
+                    m_document->setMeshSdfEvaluationConfig(cfg);
+                }
+            }
+
+            ~ScopedMeshSdfEvaluationConfigOverride()
+            {
+                restore();
+            }
+
+            void restore()
+            {
+                if (!m_active || m_restored || m_document == nullptr)
+                {
+                    return;
+                }
+                m_document->setMeshSdfEvaluationConfig(m_previousConfig);
+                m_restored = true;
+            }
+
+          private:
+            Document * m_document = nullptr;
+            bool m_active = false;
+            MeshSdfEvaluationConfig m_previousConfig{};
             bool m_restored = false;
         };
     }
@@ -192,6 +256,7 @@ namespace gladius
     {
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
 
         if (!m_3mfmodel)
         {
@@ -260,6 +325,14 @@ namespace gladius
         rebuildResourceDependencyGraph();
         loadAllMeshResources();
 
+        if (auto pendingMeshSdfConfig = takePendingMeshSdfEvaluationConfig())
+        {
+            if (applyMeshSdfEvaluationConfigToResources(*pendingMeshSdfConfig) > 0u)
+            {
+                m_primitiveDateNeedsUpdate = true;
+            }
+        }
+
         updateParameterRegistration();
         updateParameter();
         m_parameterDirty = true;
@@ -278,16 +351,26 @@ namespace gladius
         // Use non-blocking compilation with polling
         m_core->recompileIfRequired();
 
-        // Wait for compilation to complete with periodic checks
-        while (m_core->isCompilationInProgress())
+        auto const shouldWaitForInitialCompilation = [this, refreshMode]()
+        {
+            if (refreshMode == RefreshMode::InteractiveFirst)
+            {
+                return !m_core->isRenderProgramReady() && m_core->isCompilationInProgress();
+            }
+            return m_core->isCompilationInProgress();
+        };
+
+        // Wait for the compilation needed by this refresh mode. Interactive-first only needs the
+        // preview render program; slicer/optimized work can continue after the first frame.
+        while (shouldWaitForInitialCompilation())
         {
             if (isStale())
             {
-                // Wait for the in-flight GPU compile to finish so ModelState
-                // stays consistent. The GPU work is already submitted — waiting
-                // here avoids signalling "finished" while programs are still
-                // being compiled by the driver.
-                while (m_core->isCompilationInProgress())
+                // Wait for the in-flight GPU compile needed by this refresh mode to finish so
+                // ModelState stays consistent. The GPU work is already submitted — waiting here
+                // avoids signalling "finished" while required programs are still being compiled by
+                // the driver.
+                while (shouldWaitForInitialCompilation())
                 {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 }
@@ -301,48 +384,55 @@ namespace gladius
         // (signalCompilationFinished) so subsequent steps observe up-to-date slicer state.
         m_core->recompileIfRequired();
 
-        // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
-        // The async computation will atomically replace it
-        m_core->resetBoundingBox();
-
-        // Launch async SDF precomputation with OpenCL events
-        auto const & queue = m_core->getComputeContext()->GetQueue();
-        cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
-        bool const sdfEventValid = sdfEvent() != nullptr;
-
-        bool sdfUpdated = false;
-        bool sdfUpdatedViaAsync = false;
-
-        // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
-        if (sdfEventValid)
+        if (refreshMode != RefreshMode::InteractiveFirst)
         {
-            sdfEvent.wait();
-            sdfUpdated = true;
-            sdfUpdatedViaAsync = true;
-        }
-        else
-        {
-            // Fallback to synchronous computation if async launch failed
-            if (m_core->precomputeSdfForWholeBuildPlatform())
+            // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
+            // The async computation will atomically replace it
+            m_core->resetBoundingBox();
+
+            // Launch async SDF precomputation with OpenCL events
+            auto const & queue = m_core->getComputeContext()->GetQueue();
+            cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
+            bool const sdfEventValid = sdfEvent() != nullptr;
+
+            bool sdfUpdated = false;
+            bool sdfUpdatedViaAsync = false;
+
+            // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
+            if (sdfEventValid)
             {
+                sdfEvent.wait();
                 sdfUpdated = true;
+                sdfUpdatedViaAsync = true;
             }
-            else {}
-        }
-
-        if (sdfUpdated)
-        {
-            m_core->setSdfValid(true);
-            if (sdfUpdatedViaAsync)
+            else
             {
-                // Now that the SDF exists, update the bounding box serially (still off the UI
-                // thread)
-                m_core->updateBBox();
+                // Fallback to synchronous computation if async launch failed
+                if (m_core->precomputeSdfForWholeBuildPlatform())
+                {
+                    sdfUpdated = true;
+                }
+                else {}
+            }
+
+            if (sdfUpdated)
+            {
+                m_core->setSdfValid(true);
+                if (sdfUpdatedViaAsync)
+                {
+                    // Now that the SDF exists, update the bounding box serially (still off the UI
+                    // thread)
+                    m_core->updateBBox();
+                }
+            }
+            else
+            {
+                m_core->invalidatePreCompSdf("refreshWorkerFailure");
             }
         }
         else
         {
-            m_core->invalidatePreCompSdf("refreshWorkerFailure");
+            m_core->invalidatePreCompSdf("interactiveFirstInitialPreview");
         }
 
         if (optimizedRenderDeferral.restore())
@@ -499,6 +589,7 @@ namespace gladius
 
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -518,6 +609,7 @@ namespace gladius
 
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -909,15 +1001,22 @@ namespace gladius
                      {
                          try
                          {
+                                                         auto const refreshMode = filename.extension() == ".3mf"
+                                                                                                                ? RefreshMode::InteractiveFirst
+                                                                                                                : RefreshMode::Normal;
+                                                         auto const previewMeshSdfConfig = makeInteractivePreviewMeshSdfConfig(
+                                                             m_meshSdfEvaluationConfig);
+                                                         ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
+                                                             *this,
+                                                             previewMeshSdfConfig,
+                                                             refreshMode == RefreshMode::InteractiveFirst};
+
                              loadImpl(filename);
                              // Initial validation with FileLoad context - logs errors once
                              validateAssembly(nodes::ValidationContext::FileLoad);
-                             // Chain into async model refresh. 3MF loads publish the interactive
-                             // command-stream preview first, then start the optimized renderer in
-                             // the background.
-                             auto const refreshMode = filename.extension() == ".3mf"
-                                                        ? RefreshMode::InteractiveFirst
-                                                        : RefreshMode::Normal;
+                                                         // Chain into async model refresh. 3MF loads publish a lightweight
+                                                         // command-stream preview first, then start the optimized renderer and
+                                                         // slicer compilation in the background.
                              refreshWorker(refreshMode);
                          }
                          catch (const std::exception & e)
@@ -1466,6 +1565,69 @@ namespace gladius
         m_primitiveDateNeedsUpdate = true;
     }
 
+    std::size_t Document::queueMeshSdfEvaluationConfigUpdate(MeshSdfEvaluationConfig const & cfg)
+    {
+        m_meshSdfEvaluationConfig = cfg;
+
+        std::size_t affectedResources = 0u;
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh != nullptr && needsMeshSdfResourceUpdate(*spatialMesh, cfg))
+            {
+                ++affectedResources;
+            }
+        }
+
+        if (affectedResources == 0u)
+        {
+            return 0u;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_pendingMeshSdfEvaluationConfigMutex);
+            m_pendingMeshSdfEvaluationConfig = cfg;
+        }
+        m_primitiveDateNeedsUpdate = true;
+
+        // Defer the heavy resource rebuild/upload to the existing structural-refresh debounce.
+        // This gives the interactive preview at least one UI frame before voxel/FWN preparation
+        // can compete for the compute device.
+        signalStructuralEdit();
+        return affectedResources;
+    }
+
+    std::optional<MeshSdfEvaluationConfig> Document::takePendingMeshSdfEvaluationConfig()
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMeshSdfEvaluationConfigMutex);
+        auto pending = m_pendingMeshSdfEvaluationConfig;
+        m_pendingMeshSdfEvaluationConfig.reset();
+        return pending;
+    }
+
+    std::size_t Document::applyMeshSdfEvaluationConfigToResources(
+      MeshSdfEvaluationConfig const & cfg)
+    {
+        std::size_t changedResources = 0u;
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->setEvaluationConfig(cfg))
+            {
+                ++changedResources;
+            }
+        }
+        return changedResources;
+    }
+
     void Document::injectSmoothingKernel(std::string const & kernel)
     {
         m_core->injectSmoothingKernel(kernel);
@@ -1956,6 +2118,7 @@ namespace gladius
 
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
 
         // Load build items from the 3MF model
         clearBuildItems();
