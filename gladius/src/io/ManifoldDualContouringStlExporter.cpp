@@ -1,18 +1,13 @@
 #include "ManifoldDualContouringStlExporter.h"
 
-#include "3mf/ColorCompatibilityPlanner.h"
-#include "3mf/ColorExportDispatcher.h"
-#include "3mf/ColorQuantizer.h"
-#include "3mf/FaceColorSampler.h"
-#include "3mf/MeshWriter3mf.h"
+#include "3mf/MeshColorExportPipeline.h"
+#include "3mf/MeshSamplingGeometry.h"
 #include "MeshExporter.h"
-#include "MeshExporter3mf.h"
 #include "WindingRepair.h"
 
 #include "ComputeContext.h"
 #include "ComputeCore.h"
 #include "../compute/ManifoldDualContouringGpu.h"
-#include "../compute/ProgramManager.h"
 #include "../types.h"
 
 #include <Eigen/Geometry>
@@ -50,30 +45,6 @@ namespace gladius::io
             return value;
         }
 
-        [[nodiscard]] Vector3 toVector3(Eigen::Vector3f const & value)
-        {
-            return Vector3{value.x(), value.y(), value.z()};
-        }
-
-        // EdgeKey and EdgeKeyHash kept for the 3MF face-color export path
-        struct EdgeKey
-        {
-            std::uint32_t a{0U};
-            std::uint32_t b{0U};
-
-            [[nodiscard]] bool operator==(EdgeKey const & other) const noexcept
-            {
-                return a == other.a && b == other.b;
-            }
-        };
-
-        struct EdgeKeyHash
-        {
-            [[nodiscard]] std::size_t operator()(EdgeKey const & key) const noexcept
-            {
-                return (static_cast<std::size_t>(key.a) << 32U) ^ static_cast<std::size_t>(key.b);
-            }
-        };
     }
 
     ManifoldDualContouringStlExporter::ManifoldDualContouringStlExporter() = default;
@@ -474,115 +445,37 @@ namespace gladius::io
         // Write to the appropriate format
         if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
         {
-            MeshWriter3mf writer(m_logger);
-            
-            if (m_exportWithColors)
+            m_progress.store(0.85, std::memory_order_relaxed);
+
+            MeshColorExportSettings const settings{m_exportWithColors,
+                                                   m_convertToSrgb,
+                                                   m_colorMode,
+                                                   m_quantizationMode,
+                                                   m_targetApplication,
+                                                   m_maxPaletteSize};
+
+            MeshColorExportPipelineOptions pipelineOptions{};
+            pipelineOptions.faceSamplingMode =
+              m_options.simplificationMethod != SimplificationMethod::None
+                ? FaceColorSamplingMode::MajorityVote
+                : FaceColorSamplingMode::Centroid;
+            pipelineOptions.progressCallback = [this](double progress)
             {
-                m_progress.store(0.85, std::memory_order_relaxed);
-                
-                // Build faces array from indices
-                std::size_t const numFaces = repairedIndices.size() / 3;
-                std::vector<std::array<std::uint32_t, 3>> facesForSampling;
-                facesForSampling.reserve(numFaces);
-                for (std::size_t i = 0; i < repairedIndices.size(); i += 3)
-                {
-                    facesForSampling.push_back({repairedIndices[i], repairedIndices[i + 1], repairedIndices[i + 2]});
-                }
-                
-                // Sample colors using GPU
-                auto* samplingProgram = generator.getProgramManager().getDualContouringSamplingProgram();
-                auto primitives = generator.getPrimitives();
-                
-                if (samplingProgram != nullptr && primitives != nullptr)
-                {
-                    // Use multipoint majority vote for face colors when simplification is active,
-                    // as larger triangles after simplification may span color boundaries. The
-                    // majority vote samples at centroid + 3 edge midpoints per face and picks
-                    // the most frequent color, producing cleaner color transitions.
-                    bool const useMultipointSampling =
-                        m_options.simplificationMethod != SimplificationMethod::None;
+                double const mappedProgress = 0.85 + (progress * 0.15);
+                m_progress.store(mappedProgress, std::memory_order_relaxed);
+            };
 
-                    auto faceColors = useMultipointSampling
-                        ? FaceColorSampler::sampleFaceColorsMajorityVote(
-                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb)
-                        : FaceColorSampler::sampleFaceColorsAsColor8(
-                              positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-
-                    // Run compatibility planner
-                    MeshColorExportSettings const settings{
-                        m_exportWithColors,
-                        m_convertToSrgb,
-                        m_colorMode,
-                        m_quantizationMode,
-                        m_targetApplication,
-                        m_maxPaletteSize,
-                    };
-
-                    auto const uniqueColors = ColorQuantizer::countUniqueOpaqueColors(faceColors);
-                    bool const hasTransparency = ColorQuantizer::hasTransparency(faceColors);
-
-                    auto const decision = ColorCompatibilityPlanner::decide(settings, uniqueColors, hasTransparency);
-
-                    // Log warnings from the planner
-                    if (m_logger)
-                    {
-                        for (auto const& warning : decision.warnings)
-                        {
-                            m_logger->addEvent({warning, events::Severity::Warning});
-                        }
-                    }
-
-                    m_progress.store(0.90, std::memory_order_relaxed);
-
-                    auto vertexColorSupplier = [&]() -> VertexColors
-                    {
-                        return FaceColorSampler::sampleVertexColors(
-                            positions, facesForSampling, *samplingProgram, *primitives,
-                            nullptr, m_convertToSrgb);
-                    };
-                    auto multipointSupplier = [&]() -> std::vector<FaceColors>
-                    {
-                        return FaceColorSampler::sampleFaceColorsMultipoint(
-                            positions, facesForSampling, *samplingProgram, *primitives,
-                            nullptr, m_convertToSrgb);
-                    };
-
-                    dispatchColorExport(
-                        writer, m_targetFile, convertedMesh, "Mesh",
-                        faceColors, decision, settings, uniqueColors,
-                        m_document, true,
-                        vertexColorSupplier, multipointSupplier);
-
-                    m_progress.store(1.0, std::memory_order_relaxed);
-
-                    if (m_logger)
-                    {
-                        m_logger->addEvent(
-                          {fmt::format("Exported 3MF mesh with colors (representation: {})",
-                                       static_cast<int>(decision.finalRepresentation)),
-                           events::Severity::Info});
-                    }
-                }
-                else
-                {
-                    // Fallback to non-colored export if sampling is unavailable
-                    if (m_logger)
-                    {
-                        m_logger->addEvent(
-                          {"Color sampling unavailable, exporting without colors",
-                           events::Severity::Warning});
-                    }
-                    m_progress.store(0.90, std::memory_order_relaxed);
-                    writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
-                    m_progress.store(1.0, std::memory_order_relaxed);
-                }
-            }
-            else
-            {
-                m_progress.store(0.90, std::memory_order_relaxed);
-                writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
-                m_progress.store(1.0, std::memory_order_relaxed);
-            }
+            auto samplingGeometry = MeshSamplingGeometry::fromTriangleSoupMesh(convertedMesh);
+            exportMeshWithColorPipeline(m_targetFile,
+                                        convertedMesh,
+                                        "Mesh",
+                                        samplingGeometry,
+                                        generator,
+                                        settings,
+                                        m_document,
+                                        true,
+                                        m_logger,
+                                        pipelineOptions);
         }
         else
         {
