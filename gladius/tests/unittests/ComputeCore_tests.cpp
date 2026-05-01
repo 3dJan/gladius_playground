@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -164,6 +165,73 @@ namespace gladius_tests
         EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
+
+      TEST_F(ComputeCore_Test, TryRenderProgramAccess_WithProgramManagerLockHeld_ReturnsCachedPreview)
+      {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->setOptimizedRenderCompilationDeferred(true);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+
+        core->recompileIfRequired();
+        for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_FALSE(core->isCompilationInProgress());
+        core->recompileIfRequired();
+
+        ASSERT_TRUE(core->isRenderProgramReady());
+        ASSERT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+        ASSERT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+
+        std::promise<void> lockAcquired;
+        std::promise<void> releaseLock;
+        auto lockAcquiredFuture = lockAcquired.get_future();
+        auto releaseLockFuture = releaseLock.get_future();
+
+        std::thread lockHolder(
+          [&programManager = core->getProgramManager(),
+           &lockAcquired,
+           releaseLockFuture = std::move(releaseLockFuture)]() mutable
+          {
+            auto computeToken = programManager.waitForComputeToken();
+            lockAcquired.set_value();
+            releaseLockFuture.wait();
+          });
+
+        auto const lockWasAcquired = lockAcquiredFuture.wait_for(std::chrono::seconds(2)) ==
+                       std::future_status::ready;
+
+        auto tryReady = std::optional<bool>{};
+        auto tryBackend = std::optional<RenderBackend>{};
+        auto tryProgram = std::optional<SharedRenderProgram>{};
+        if (lockWasAcquired)
+        {
+          tryReady = core->tryIsRenderProgramReady();
+          tryBackend = core->tryGetSelectedRenderBackend();
+          tryProgram = core->tryGetBestRenderProgram();
+        }
+
+        releaseLock.set_value();
+        lockHolder.join();
+
+        ASSERT_TRUE(lockWasAcquired);
+        ASSERT_TRUE(tryReady.has_value());
+        EXPECT_TRUE(*tryReady);
+        ASSERT_TRUE(tryBackend.has_value());
+        EXPECT_EQ(*tryBackend, RenderBackend::CommandStream);
+        ASSERT_TRUE(tryProgram.has_value());
+        EXPECT_EQ(tryProgram->get(), previewProgram.get());
+      }
 
     TEST_F(ComputeCore_Test, IsRenderProgramReady_WithModelRefreshInProgress_UsesCompiledPreview)
     {

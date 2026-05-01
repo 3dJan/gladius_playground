@@ -1336,6 +1336,11 @@ namespace gladius
         return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
     }
 
+    std::optional<bool> ComputeCore::tryIsRenderProgramReady() const
+    {
+        return m_programs.tryIsBestRenderProgramReady();
+    }
+
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
         if (!m_meshResourceState)
@@ -1783,9 +1788,24 @@ namespace gladius
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
 
+    std::optional<SharedRenderProgram> ComputeCore::tryGetBestRenderProgram() const
+    {
+        auto renderProgram = m_programs.tryGetBestRenderProgram();
+        if (!renderProgram.has_value() || *renderProgram == nullptr)
+        {
+            return std::nullopt;
+        }
+        return SharedRenderProgram(*renderProgram, [](RenderProgram *) {});
+    }
+
     RenderBackend ComputeCore::getSelectedRenderBackend() const
     {
         return m_programs.getSelectedRenderBackend();
+    }
+
+    std::optional<RenderBackend> ComputeCore::tryGetSelectedRenderBackend() const
+    {
+        return m_programs.tryGetSelectedRenderBackend();
     }
 
     SharedRenderProgram ComputeCore::getPreviewRenderProgram() const

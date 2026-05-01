@@ -20,9 +20,11 @@
 #include <nodes/nodesfwd.h>
 #include <ui/OrbitalCamera.h>
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace gladius
 {
@@ -47,8 +49,18 @@ namespace gladius
         /// program is used when available.
         [[nodiscard]] RenderProgram * getBestRenderProgram() const;
 
+        /// Non-blocking variant of getBestRenderProgram(). Returns std::nullopt if background
+        /// compilation/loading currently owns the program-manager locks.
+        [[nodiscard]] std::optional<RenderProgram *> tryGetBestRenderProgram() const;
+
         /// Return which render backend is currently selected by getBestRenderProgram().
         [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
+
+        /// Non-blocking variant of getSelectedRenderBackend().
+        [[nodiscard]] std::optional<RenderBackend> tryGetSelectedRenderBackend() const;
+
+        /// Non-blocking readiness check for the currently selected render program.
+        [[nodiscard]] std::optional<bool> tryIsBestRenderProgramReady() const;
 
         [[nodiscard]] RenderProgram * getRenderProgram() const;
 
@@ -155,6 +167,13 @@ namespace gladius
 
         [[nodiscard]] bool isOptimizedRenderProgramReadyLocked() const;
 
+        [[nodiscard]] std::pair<RenderProgram *, RenderBackend>
+        getBestRenderProgramAndBackendLocked() const;
+        [[nodiscard]] RenderProgram * getCachedBestRenderProgram() const noexcept;
+        void updateCachedBestRenderProgram(RenderProgram const * program,
+                   RenderBackend backend) const;
+        void invalidateCachedBestRenderProgram() const noexcept;
+
         void reinitIfNecssary();
 
         void updateVdbActivationLocked();
@@ -202,6 +221,10 @@ namespace gladius
         bool m_compileOptimizedRenderProgram = true;
         bool m_deferOptimizedRenderCompilation = false;
         bool m_deferSlicerCompilation = false;
+
+        mutable std::atomic<RenderBackend> m_cachedSelectedRenderBackend{
+          RenderBackend::Unavailable};
+        mutable std::atomic<bool> m_cachedBestRenderProgramReady{false};
 
         /// Parameter signature from last successful compilation
         /// Used to detect when fast-path parameter updates are possible

@@ -160,6 +160,7 @@ namespace gladius
     void ProgramManager::reset()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        invalidateCachedBestRenderProgram();
         m_renderState.signalCompilationRequired();
         m_previewRenderState.signalCompilationRequired();
         m_slicerState.signalCompilationRequired();
@@ -717,17 +718,27 @@ namespace gladius
         std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
         std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
 
-        if (isOptimizedRenderProgramReadyLocked())
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return program;
+    }
+
+    std::optional<RenderProgram *> ProgramManager::tryGetBestRenderProgram() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
         {
-            return m_optimizedRenderProgram.get();
+            return getCachedBestRenderProgram();
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return getCachedBestRenderProgram();
         }
 
-        if (m_hasPreviewModelSource && m_previewRenderProgram)
-        {
-            return m_previewRenderProgram.get();
-        }
-
-        return m_optimizedRenderProgram.get();
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return program;
     }
 
     RenderBackend ProgramManager::getSelectedRenderBackend() const
@@ -735,22 +746,45 @@ namespace gladius
         std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
         std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
 
-        if (isOptimizedRenderProgramReadyLocked())
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return backend;
+    }
+
+    std::optional<RenderBackend> ProgramManager::tryGetSelectedRenderBackend() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
         {
-            return RenderBackend::Optimized;
+            return m_cachedSelectedRenderBackend.load(std::memory_order_acquire);
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return m_cachedSelectedRenderBackend.load(std::memory_order_acquire);
         }
 
-        if (m_hasPreviewModelSource && m_previewRenderProgram)
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return backend;
+    }
+
+    std::optional<bool> ProgramManager::tryIsBestRenderProgramReady() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
         {
-            return RenderBackend::CommandStream;
+            return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
         }
 
-        if (m_optimizedRenderProgram)
-        {
-            return RenderBackend::Optimized;
-        }
-
-        return RenderBackend::Unavailable;
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
     }
 
     RenderProgram * ProgramManager::getRenderProgram() const
@@ -788,6 +822,60 @@ namespace gladius
         return m_compileOptimizedRenderProgram && m_optimizedRenderProgram &&
                m_renderState.isModelUpToDate() && m_optimizedRenderProgram->isValid() &&
                !m_optimizedRenderProgram->isCompilationInProgress();
+    }
+
+    std::pair<RenderProgram *, RenderBackend>
+    ProgramManager::getBestRenderProgramAndBackendLocked() const
+    {
+        if (isOptimizedRenderProgramReadyLocked())
+        {
+            return {m_optimizedRenderProgram.get(), RenderBackend::Optimized};
+        }
+
+        if (m_hasPreviewModelSource && m_previewRenderProgram)
+        {
+            return {m_previewRenderProgram.get(), RenderBackend::CommandStream};
+        }
+
+        if (m_optimizedRenderProgram)
+        {
+            return {m_optimizedRenderProgram.get(), RenderBackend::Optimized};
+        }
+
+        return {nullptr, RenderBackend::Unavailable};
+    }
+
+    RenderProgram * ProgramManager::getCachedBestRenderProgram() const noexcept
+    {
+        if (!m_cachedBestRenderProgramReady.load(std::memory_order_acquire))
+        {
+            return nullptr;
+        }
+
+        switch (m_cachedSelectedRenderBackend.load(std::memory_order_acquire))
+        {
+        case RenderBackend::CommandStream:
+            return m_previewRenderProgram.get();
+        case RenderBackend::Optimized:
+            return m_optimizedRenderProgram.get();
+        case RenderBackend::Unavailable:
+        default:
+            return nullptr;
+        }
+    }
+
+    void ProgramManager::updateCachedBestRenderProgram(RenderProgram const * program,
+                                                       RenderBackend const backend) const
+    {
+        bool const ready = program && program->isValid() && !program->isCompilationInProgress();
+        m_cachedSelectedRenderBackend.store(backend, std::memory_order_release);
+        m_cachedBestRenderProgramReady.store(ready, std::memory_order_release);
+    }
+
+    void ProgramManager::invalidateCachedBestRenderProgram() const noexcept
+    {
+        m_cachedSelectedRenderBackend.store(RenderBackend::Unavailable, std::memory_order_release);
+        m_cachedBestRenderProgramReady.store(false, std::memory_order_release);
     }
 
     MeshPreparationProgram * ProgramManager::getMeshPreparationProgram() const
@@ -844,6 +932,7 @@ namespace gladius
                                          bool compileOptimizedRenderProgram)
     {
         std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        invalidateCachedBestRenderProgram();
         m_modelSource = std::move(optimizedSource);
         m_compileOptimizedRenderProgram = compileOptimizedRenderProgram;
         if (previewSource.has_value())

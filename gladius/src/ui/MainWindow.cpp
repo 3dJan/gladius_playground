@@ -2168,8 +2168,9 @@ namespace gladius::ui
                 // Show SDF status when moving: indicates SDF is still computing
                 sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
 
-                selectedRenderBackend = m_core->getSelectedRenderBackend();
-                isRenderBackendCompiling = !m_core->isRenderProgramReady();
+                selectedRenderBackend =
+                  m_core->tryGetSelectedRenderBackend().value_or(selectedRenderBackend);
+                isRenderBackendCompiling = !m_core->tryIsRenderProgramReady().value_or(false);
                 renderBackendStr = isRenderBackendCompiling
                                      ? "Compiling"
                                      : getRenderBackendStatusLabel(selectedRenderBackend);

@@ -281,7 +281,9 @@ namespace gladius::ui
         // keep rendering instead of holding the preview area on the loading overlay while slower
         // post-load work continues in the background.
         bool const isFileLoading = m_document && m_document->isLoadingInProgress();
-        if (isFileLoading && (!m_core || !m_core->isRenderProgramReady()))
+        auto const renderProgramReady = m_core ? m_core->tryIsRenderProgramReady()
+                                               : std::optional<bool>{false};
+        if (isFileLoading && !renderProgramReady.value_or(false))
         {
             renderLoadingOverlay();
             return;
@@ -598,7 +600,7 @@ namespace gladius::ui
         // Show the progress indicator only when no renderable program is available.
         // In automatic mode the optimized OpenCL program may still compile in the
         // background while the command-stream preview program is already usable.
-        bool const showBusyIndicator = !m_core->isRenderProgramReady();
+        bool const showBusyIndicator = !m_core->tryIsRenderProgramReady().value_or(false);
         if (showBusyIndicator)
         {
             m_view->startAnimationMode();
@@ -743,7 +745,7 @@ namespace gladius::ui
         ProfileFunction;
         LOG_LOCATION
 
-        if (!m_core->isRenderProgramReady())
+        if (!m_core->tryIsRenderProgramReady().value_or(false))
         {
             return;
         }
@@ -1227,7 +1229,7 @@ namespace gladius::ui
             processAsyncPreviewResults();
         }
 
-        if (!m_core->isRenderProgramReady())
+        if (!m_core->tryIsRenderProgramReady().value_or(false))
         {
             m_view->startAnimationMode();
             state.isRendering = false;
@@ -2123,7 +2125,7 @@ namespace gladius::ui
              m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch))
         {
             auto * seedBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
-            auto renderProgram = m_core->getBestRenderProgram();
+            auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
             bool const seedSourceFits = image->getWidth() >= width && image->getHeight() >= height;
             bool const seedTargetFits = seedBuffer && seedBuffer->image &&
                                         seedBuffer->image->getWidth() >= width &&
@@ -2682,7 +2684,7 @@ namespace gladius::ui
 
         // Show the busy indicator only while no current preview render program is ready.
         // Background optimized compilation should not hide the command-stream preview.
-        if (!m_core->isRenderProgramReady())
+        if (!m_core->tryIsRenderProgramReady().value_or(false))
         {
             showProgressSpinner(windowCenter, "compiling");
         }
@@ -3270,7 +3272,7 @@ namespace gladius::ui
         // These operations must happen on the UI thread with the GL context.
         auto lowResImage = m_core->getLowResPreviewImage();
         auto resultImage = m_core->getResultImage();
-        auto renderProgram = m_core->getBestRenderProgram();
+        auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
         bool scheduleAdaptivePreview = false;
 
         if (lowResImage && resultImage && renderProgram)
@@ -3483,7 +3485,7 @@ namespace gladius::ui
             return !m_streamingPreviewActive.load(std::memory_order_acquire) ||
                    (cancelCheck && cancelCheck()) ||
                    (m_asyncController && !m_asyncController->isRunning()) ||
-                   !m_core->isRenderProgramReady();
+                   !m_core->tryIsRenderProgramReady().value_or(false);
         };
 
         auto lowResImage = m_core->getLowResPreviewImage();

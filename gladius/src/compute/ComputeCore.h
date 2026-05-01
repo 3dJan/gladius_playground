@@ -565,7 +565,9 @@ namespace gladius
 
         [[nodiscard]] SharedSlicerProgram getSlicerProgram() const;
         [[nodiscard]] SharedRenderProgram getBestRenderProgram() const;
+        [[nodiscard]] std::optional<SharedRenderProgram> tryGetBestRenderProgram() const;
         [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
+        [[nodiscard]] std::optional<RenderBackend> tryGetSelectedRenderBackend() const;
         [[nodiscard]] SharedRenderProgram getPreviewRenderProgram() const;
         [[nodiscard]] SharedRenderProgram getOptimzedRenderProgram() const;
 
@@ -598,6 +600,10 @@ namespace gladius
         /// Unlike isRendererReady(), this intentionally ignores broader model/SDF refresh state
         /// so the UI can keep using the command-stream preview while background work continues.
         [[nodiscard]] bool isRenderProgramReady() const;
+
+        /// Non-blocking variant of isRenderProgramReady(). Returns std::nullopt if background
+        /// loading/compilation currently owns the program-manager locks.
+        [[nodiscard]] std::optional<bool> tryIsRenderProgramReady() const;
 
         [[nodiscard]] bool isRendererReady() const;
 
@@ -772,7 +778,7 @@ namespace gladius
         std::atomic_bool m_slicingInProgress{false};
 
         std::atomic_bool m_precompSdfIsValid{false};
-        size_t m_preCompSdfSize = 256u;
+        size_t m_preCompSdfSize = 128u;
 
         bool m_autoUpdateBoundingBox = true;
 
