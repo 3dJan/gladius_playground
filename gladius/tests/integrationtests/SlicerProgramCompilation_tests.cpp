@@ -68,9 +68,15 @@ namespace gladius_tests::slicer_program_compilation
         EXPECT_TRUE(slicerProgram->isValid());
 
         auto const logMessages = collectLogMessages();
-        EXPECT_EQ(logMessages.find("glsl_mod3f"), std::string::npos) << logMessages;
-        EXPECT_EQ(logMessages.find("use of undeclared identifier"), std::string::npos)
-          << logMessages;
+        auto const assertLogDoesNotContain = [&logMessages](char const * text)
+        {
+            EXPECT_EQ(logMessages.find(text), std::string::npos) << logMessages;
+        };
+        assertLogDoesNotContain("glsl_mod3f");
+        assertLogDoesNotContain("use of undeclared identifier");
+        assertLogDoesNotContain("OpenCL program build failed");
+        assertLogDoesNotContain("Failed to compile/link dynamic program");
+        assertLogDoesNotContain("Linked program invalid");
     }
 
     /// @test IsSlicingInProgress_WithComputeMutexHeld_DoesNotBlockUiThread

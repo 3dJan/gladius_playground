@@ -508,6 +508,14 @@ namespace gladius
         
         // Wait for all builds to complete
         CL_ERROR(m_ComputeContext->GetQueue().finish());
+
+        if (successCount > 0u)
+        {
+            // buildMeshVoxelGrid writes the voxel cache in-place on the device. Keep the host
+            // shadow buffer in sync so later m_primitives->write() calls from slicing/export do
+            // not upload the original zero-filled cache again.
+            m_primitives->data.read();
+        }
         
         logMsg(fmt::format("Built {} voxel grids", successCount));
         
@@ -551,6 +559,14 @@ namespace gladius
         {
             GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates wait for GPU");
             CL_ERROR(m_ComputeContext->GetQueue().finish());
+        }
+
+        if (successCount > 0u)
+        {
+            // FWN aggregates are also written in-place on the GPU. Export/slicing code frequently
+            // re-uploads the primitive buffer before sampling; without this read-back that upload
+            // wipes the aggregate table while the resource manager still thinks it is built.
+            m_primitives->data.read();
         }
 
         logMsg(fmt::format("Built {} mesh FWN aggregate buffers", successCount));

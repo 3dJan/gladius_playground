@@ -786,7 +786,11 @@ namespace gladius
                 auto buildParams = m_generatorContext->resourceManager.collectVoxelGridBuildParams();
                 if (!buildParams.empty())
                 {
-                    m_core->buildMeshVoxelGrids(buildParams);
+                    size_t const builtCount = m_core->buildMeshVoxelGrids(buildParams);
+                    if (builtCount == buildParams.size())
+                    {
+                        m_generatorContext->resourceManager.markVoxelGridsBuilt();
+                    }
                 }
 
                 m_primitiveDateNeedsUpdate = false;
