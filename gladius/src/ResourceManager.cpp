@@ -80,6 +80,14 @@ namespace gladius
         m_resources[key] = std::make_unique<SpatialMeshResource>(key, std::move(spatialData));
     }
 
+    void ResourceManager::addResource(ResourceKey key,
+                                      SpatialMeshData && spatialData,
+                                      MeshSdfEvaluationConfig const & evaluationConfig)
+    {
+        m_resources[key] = std::make_unique<SpatialMeshResource>(
+          key, std::move(spatialData), evaluationConfig);
+    }
+
     void ResourceManager::loadResources()
     {
         for (auto & [filename, res] : m_resources)

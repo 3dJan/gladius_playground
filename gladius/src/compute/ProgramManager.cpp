@@ -28,6 +28,7 @@
 #include "ResourceContext.h"
 #include "SlicerProgram.h"
 #include "compute/HierarchicalDCProgram.h"
+#include "compute/MeshPreparationProgram.h"
 #include "compute/ProgramManager.h"
 #include "gpgpu.h"
 #include "nodes/GraphFlattener.h"
@@ -96,12 +97,15 @@ namespace gladius
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         m_slicerProgram = std::make_unique<SlicerProgram>(m_ComputeContext, m_resources);
         m_optimizedRenderProgram = std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
+                m_previewRenderProgram = std::make_unique<RenderProgram>(m_ComputeContext, m_resources);
         m_dualContouringSamplingProgram =
           std::make_unique<DualContouringSamplingProgram>(m_ComputeContext, m_resources);
         m_hierarchicalDCProgram =
           std::make_unique<HierarchicalDCProgram>(m_ComputeContext, m_resources);
         m_manifoldDualContouringProgram =
           std::make_unique<compute::ManifoldDualContouringProgram>(m_ComputeContext, m_resources);
+        m_meshPreparationProgram =
+          std::make_unique<MeshPreparationProgram>(m_ComputeContext, m_resources);
 
         // NanoVDB is now enabled for all OpenCL runtimes, including rusticl
         // fp64 hardware support is not strictly required (OpenCL can emulate doubles)
@@ -120,27 +124,35 @@ namespace gladius
         {
             m_slicerProgram->setLogger(m_eventLogger);
             m_optimizedRenderProgram->setLogger(m_eventLogger);
+            m_previewRenderProgram->setLogger(m_eventLogger);
             m_dualContouringSamplingProgram->setLogger(m_eventLogger);
             m_hierarchicalDCProgram->setLogger(m_eventLogger);
             m_manifoldDualContouringProgram->setLogger(m_eventLogger);
+            m_meshPreparationProgram->setLogger(m_eventLogger);
         }
 
         // Set up binary caching
         auto cacheDir = openClCacheDirectory();
         m_slicerProgram->setDebugLabel("SlicerProgram");
-        m_optimizedRenderProgram->setDebugLabel("RenderProgram");
+        m_optimizedRenderProgram->setDebugLabel("OptimizedRenderProgram");
+        m_previewRenderProgram->setDebugLabel("PreviewRenderProgram");
         m_dualContouringSamplingProgram->setDebugLabel("DualContouringSamplingProgram");
         m_hierarchicalDCProgram->setDebugLabel("HierarchicalDCProgram");
         m_manifoldDualContouringProgram->setDebugLabel("ManifoldDualContouringProgram");
+        m_meshPreparationProgram->setDebugLabel("MeshPreparationProgram");
         m_slicerProgram->setCacheDirectory(cacheDir);
         m_optimizedRenderProgram->setCacheDirectory(cacheDir);
+        m_previewRenderProgram->setCacheDirectory(cacheDir);
         m_dualContouringSamplingProgram->setCacheDirectory(cacheDir);
         m_hierarchicalDCProgram->setCacheDirectory(cacheDir);
         m_manifoldDualContouringProgram->setCacheDirectory(cacheDir);
+        m_meshPreparationProgram->setCacheDirectory(cacheDir);
         m_slicerProgram->setEnableTwoLevelPipeline(true);
         m_optimizedRenderProgram->setEnableTwoLevelPipeline(true);
+        m_previewRenderProgram->setEnableTwoLevelPipeline(true);
 
         m_optimizedRenderProgram->buildKernelLib();
+        m_previewRenderProgram->buildKernelLib();
         recompileIfRequired();
         LOG_LOCATION
     }
@@ -148,7 +160,9 @@ namespace gladius
     void ProgramManager::reset()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        invalidateCachedBestRenderProgram();
         m_renderState.signalCompilationRequired();
+        m_previewRenderState.signalCompilationRequired();
         m_slicerState.signalCompilationRequired();
         m_isVdbRequired = false;
         updateVdbActivationLocked();
@@ -187,11 +201,34 @@ namespace gladius
         }
     }
 
+    void ProgramManager::compilePreviewRenderProgram()
+    {
+        ProfileFunction std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+        if (!m_previewRenderProgram || !m_hasPreviewModelSource || m_previewModelSource.empty())
+        {
+            return;
+        }
+
+        if (!m_previewRenderProgram->isCompilationInProgress())
+        {
+            m_previewRenderProgram->setEnableVdb(m_isVdbActive);
+            m_previewRenderProgram->setModelKernel(m_previewModelSource);
+            m_previewRenderProgram->recompileNonBlocking();
+            m_previewRenderState.signalCompilationStarted();
+        }
+    }
+
     void ProgramManager::compileRenderProgram()
     {
         ProfileFunction std::lock_guard<std::mutex> lock(m_modelSourceMutex);
         std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
         LOG_LOCATION
+        if (!m_compileOptimizedRenderProgram || m_modelSource.empty())
+        {
+            return;
+        }
+
         if (!m_optimizedRenderProgram->isCompilationInProgress())
         {
             LOG_LOCATION
@@ -210,6 +247,11 @@ namespace gladius
     {
         ProfileFunction;
         LOG_LOCATION
+        if (m_previewRenderProgram && !m_previewRenderProgram->isCompilationInProgress())
+        {
+            m_previewRenderState.signalCompilationFinished();
+        }
+
         if (!m_optimizedRenderProgram->isCompilationInProgress())
         {
             m_renderState.signalCompilationFinished();
@@ -220,21 +262,94 @@ namespace gladius
             m_slicerState.signalCompilationFinished();
         }
 
-        if (!m_renderState.isCompilationRequired())
+        bool hasPreviewModelSource = false;
+        bool compileOptimizedRenderProgram = false;
+        bool compileSlicer = false;
+        {
+            std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+            hasPreviewModelSource = m_hasPreviewModelSource;
+            compileOptimizedRenderProgram = m_compileOptimizedRenderProgram &&
+                                            !m_deferOptimizedRenderCompilation;
+            compileSlicer = !m_deferSlicerCompilation;
+        }
+
+        auto const previewCompilationRequired = hasPreviewModelSource &&
+                                                m_previewRenderState.isCompilationRequired();
+        auto const optimizedRenderCompilationRequired =
+          compileOptimizedRenderProgram && m_renderState.isCompilationRequired();
+                auto const slicerCompilationRequired =
+                    compileSlicer && m_slicerState.isCompilationRequired();
+
+        if (!previewCompilationRequired && !optimizedRenderCompilationRequired &&
+            !slicerCompilationRequired)
         {
             return;
         }
 
-        logMsg("starting compilation of optimized program");
-        compileRenderProgram();
+        if (previewCompilationRequired)
+        {
+            logMsg("starting compilation of command-stream preview program");
+            compilePreviewRenderProgram();
+        }
 
-        compileSlicerProgram();
+        if (optimizedRenderCompilationRequired)
+        {
+            logMsg("starting compilation of optimized program");
+            compileRenderProgram();
+        }
+
+        if (slicerCompilationRequired)
+        {
+            compileSlicerProgram();
+        }
     }
 
     void ProgramManager::recompileBlockingForManifoldDC()
     {
         ProfileFunction;
         ensureManifoldDcProgramCompiled();
+    }
+
+    bool ProgramManager::ensureSlicerProgramCompiled()
+    {
+        ProfileFunction;
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+
+        if (!m_slicerProgram || m_modelSource.empty())
+        {
+            return false;
+        }
+
+        try
+        {
+            m_slicerProgram->setEnableVdb(m_isVdbActive);
+            m_slicerProgram->setModelKernel(m_modelSource);
+            m_slicerProgram->waitForCompilation();
+
+            if (m_slicerProgram->isValid())
+            {
+                m_slicerState.signalCompilationFinished();
+            }
+
+            if (!m_slicerState.isModelUpToDate() || !m_slicerProgram->isValid())
+            {
+                m_slicerState.signalCompilationStarted();
+                m_slicerProgram->recompileBlocking();
+                if (m_slicerProgram->isValid())
+                {
+                    m_slicerState.signalCompilationFinished();
+                }
+            }
+        }
+        catch (std::exception const & e)
+        {
+            logMsg(std::string("Slicer program compilation failed: ") + e.what());
+            return false;
+        }
+
+        return m_slicerProgram->isValid() && !m_slicerProgram->isCompilationInProgress() &&
+               m_slicerState.isModelUpToDate();
     }
 
     void ProgramManager::ensureHierarchicalDcProgramCompiled()
@@ -285,10 +400,28 @@ namespace gladius
 
     void ProgramManager::recompileBlockingNoLock()
     {
-        ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        ProfileFunction;
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         propagateVdbActivationLocked();
 
-        m_optimizedRenderProgram->setModelKernel(m_modelSource);
+        if (m_hasPreviewModelSource && m_previewRenderProgram)
+        {
+            m_previewRenderState.signalCompilationStarted();
+            m_previewRenderProgram->setModelKernel(m_previewModelSource);
+            m_previewRenderProgram->recompileBlocking();
+            m_previewRenderState.signalCompilationFinished();
+        }
+
+        if (m_compileOptimizedRenderProgram && m_optimizedRenderProgram)
+        {
+            m_renderState.signalCompilationStarted();
+            m_optimizedRenderProgram->setModelKernel(m_modelSource);
+            m_optimizedRenderProgram->recompileBlocking();
+            m_renderState.signalCompilationFinished();
+        }
+
+        m_slicerState.signalCompilationStarted();
         m_slicerProgram->setModelKernel(m_modelSource);
         if (m_dualContouringSamplingProgram)
         {
@@ -305,10 +438,7 @@ namespace gladius
             m_manifoldDualContouringProgram->recompileBlocking();
         }
 
-        m_optimizedRenderProgram->recompileBlocking();
         m_slicerProgram->recompileBlocking();
-        m_renderState.signalCompilationFinished();
-
         m_slicerState.signalCompilationFinished();
     }
 
@@ -340,11 +470,29 @@ namespace gladius
          ProfileFunction;
          std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-         return (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
+         return (m_previewRenderProgram && m_previewRenderProgram->isCompilationInProgress()) ||
+             (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
              (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
              (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
              (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
-             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
+             (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress()) ||
+             (m_meshPreparationProgram && m_meshPreparationProgram->isCompilationInProgress());
+    }
+
+    [[nodiscard]] bool ProgramManager::isBlockingCompilationInProgress() const
+    {
+        ProfileFunction;
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        bool const renderCompilationBlocks = m_hasPreviewModelSource
+                                               ? (m_previewRenderProgram &&
+                                                  m_previewRenderProgram->isCompilationInProgress())
+                                               : (m_optimizedRenderProgram &&
+                                                  m_optimizedRenderProgram->isCompilationInProgress());
+
+        return renderCompilationBlocks ||
+               (m_slicerProgram && m_slicerProgram->isCompilationInProgress());
     }
 
     [[nodiscard]] bool ProgramManager::isAnyCompilationInProgressNonBlocking() const noexcept
@@ -352,11 +500,13 @@ namespace gladius
         // SAFETY: Program pointers are set during initialization and never nullified
         // during normal operation, making this lock-free check safe.
         // Each isCompilationInProgress() returns an atomic<bool>.
-        return (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
+        return (m_previewRenderProgram && m_previewRenderProgram->isCompilationInProgress()) ||
+            (m_optimizedRenderProgram && m_optimizedRenderProgram->isCompilationInProgress()) ||
             (m_slicerProgram && m_slicerProgram->isCompilationInProgress()) ||
             (m_dualContouringSamplingProgram && m_dualContouringSamplingProgram->isCompilationInProgress()) ||
             (m_hierarchicalDCProgram && m_hierarchicalDCProgram->isCompilationInProgress()) ||
-            (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress());
+            (m_manifoldDualContouringProgram && m_manifoldDualContouringProgram->isCompilationInProgress()) ||
+            (m_meshPreparationProgram && m_meshPreparationProgram->isCompilationInProgress());
     }
 
     void ProgramManager::requestShutdownAll()
@@ -365,6 +515,10 @@ namespace gladius
         if (m_optimizedRenderProgram)
         {
             m_optimizedRenderProgram->requestShutdown();
+        }
+        if (m_previewRenderProgram)
+        {
+            m_previewRenderProgram->requestShutdown();
         }
         if (m_slicerProgram)
         {
@@ -382,6 +536,10 @@ namespace gladius
         {
             m_manifoldDualContouringProgram->requestShutdown();
         }
+        if (m_meshPreparationProgram)
+        {
+            m_meshPreparationProgram->requestShutdown();
+        }
     }
 
     void ProgramManager::waitForAllCompilations()
@@ -393,6 +551,10 @@ namespace gladius
         if (m_optimizedRenderProgram)
         {
             m_optimizedRenderProgram->waitForCompilation();
+        }
+        if (m_previewRenderProgram)
+        {
+            m_previewRenderProgram->waitForCompilation();
         }
         if (m_slicerProgram)
         {
@@ -409,6 +571,10 @@ namespace gladius
         if (m_manifoldDualContouringProgram)
         {
             m_manifoldDualContouringProgram->waitForCompilation();
+        }
+        if (m_meshPreparationProgram)
+        {
+            m_meshPreparationProgram->waitForCompilation();
         }
     }
 
@@ -520,6 +686,7 @@ namespace gladius
 
         applyState(m_slicerProgram);
         applyState(m_optimizedRenderProgram);
+        applyState(m_previewRenderProgram);
         applyState(m_dualContouringSamplingProgram);
         applyState(m_hierarchicalDCProgram);
         applyState(m_manifoldDualContouringProgram);
@@ -546,7 +713,91 @@ namespace gladius
         return m_slicerProgram.get();
     }
 
+    RenderProgram * ProgramManager::getBestRenderProgram() const
+    {
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return program;
+    }
+
+    std::optional<RenderProgram *> ProgramManager::tryGetBestRenderProgram() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
+        {
+            return getCachedBestRenderProgram();
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return getCachedBestRenderProgram();
+        }
+
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return program;
+    }
+
+    RenderBackend ProgramManager::getSelectedRenderBackend() const
+    {
+        std::lock_guard<std::mutex> lockModel(m_modelSourceMutex);
+        std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
+
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return backend;
+    }
+
+    std::optional<RenderBackend> ProgramManager::tryGetSelectedRenderBackend() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
+        {
+            return m_cachedSelectedRenderBackend.load(std::memory_order_acquire);
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return m_cachedSelectedRenderBackend.load(std::memory_order_acquire);
+        }
+
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return backend;
+    }
+
+    std::optional<bool> ProgramManager::tryIsBestRenderProgramReady() const
+    {
+        std::unique_lock<std::mutex> lockModel(m_modelSourceMutex, std::try_to_lock);
+        if (!lockModel.owns_lock())
+        {
+            return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
+        }
+        std::unique_lock<std::recursive_mutex> lockCompute(m_computeMutex, std::try_to_lock);
+        if (!lockCompute.owns_lock())
+        {
+            return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
+        }
+
+        auto const [program, backend] = getBestRenderProgramAndBackendLocked();
+        updateCachedBestRenderProgram(program, backend);
+        return m_cachedBestRenderProgramReady.load(std::memory_order_acquire);
+    }
+
     RenderProgram * ProgramManager::getRenderProgram() const
+    {
+        return m_optimizedRenderProgram.get();
+    }
+
+    RenderProgram * ProgramManager::getPreviewRenderProgram() const
+    {
+        return m_previewRenderProgram.get();
+    }
+
+    RenderProgram * ProgramManager::getOptimizedRenderProgram() const
     {
         return m_optimizedRenderProgram.get();
     }
@@ -566,6 +817,72 @@ namespace gladius
         return m_manifoldDualContouringProgram.get();
     }
 
+    bool ProgramManager::isOptimizedRenderProgramReadyLocked() const
+    {
+        return m_compileOptimizedRenderProgram && m_optimizedRenderProgram &&
+               m_renderState.isModelUpToDate() && m_optimizedRenderProgram->isValid() &&
+               !m_optimizedRenderProgram->isCompilationInProgress();
+    }
+
+    std::pair<RenderProgram *, RenderBackend>
+    ProgramManager::getBestRenderProgramAndBackendLocked() const
+    {
+        if (isOptimizedRenderProgramReadyLocked())
+        {
+            return {m_optimizedRenderProgram.get(), RenderBackend::Optimized};
+        }
+
+        if (m_hasPreviewModelSource && m_previewRenderProgram)
+        {
+            return {m_previewRenderProgram.get(), RenderBackend::CommandStream};
+        }
+
+        if (m_optimizedRenderProgram)
+        {
+            return {m_optimizedRenderProgram.get(), RenderBackend::Optimized};
+        }
+
+        return {nullptr, RenderBackend::Unavailable};
+    }
+
+    RenderProgram * ProgramManager::getCachedBestRenderProgram() const noexcept
+    {
+        if (!m_cachedBestRenderProgramReady.load(std::memory_order_acquire))
+        {
+            return nullptr;
+        }
+
+        switch (m_cachedSelectedRenderBackend.load(std::memory_order_acquire))
+        {
+        case RenderBackend::CommandStream:
+            return m_previewRenderProgram.get();
+        case RenderBackend::Optimized:
+            return m_optimizedRenderProgram.get();
+        case RenderBackend::Unavailable:
+        default:
+            return nullptr;
+        }
+    }
+
+    void ProgramManager::updateCachedBestRenderProgram(RenderProgram const * program,
+                                                       RenderBackend const backend) const
+    {
+        bool const ready = program && program->isValid() && !program->isCompilationInProgress();
+        m_cachedSelectedRenderBackend.store(backend, std::memory_order_release);
+        m_cachedBestRenderProgramReady.store(ready, std::memory_order_release);
+    }
+
+    void ProgramManager::invalidateCachedBestRenderProgram() const noexcept
+    {
+        m_cachedSelectedRenderBackend.store(RenderBackend::Unavailable, std::memory_order_release);
+        m_cachedBestRenderProgramReady.store(false, std::memory_order_release);
+    }
+
+    MeshPreparationProgram * ProgramManager::getMeshPreparationProgram() const
+    {
+        return m_meshPreparationProgram.get();
+    }
+
     events::SharedLogger ProgramManager::getSharedLogger() const
     {
         return m_eventLogger;
@@ -581,18 +898,72 @@ namespace gladius
         m_codeGenerator = generator;
     }
 
-    void ProgramManager::setModelSource(std::string source)
+    void ProgramManager::setOptimizedRenderCompilationDeferred(bool const deferred)
     {
         std::lock_guard<std::mutex> lock(m_modelSourceMutex);
-        m_modelSource = std::move(source);
+        m_deferOptimizedRenderCompilation = deferred;
+    }
+
+    bool ProgramManager::isOptimizedRenderCompilationDeferred() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_deferOptimizedRenderCompilation;
+    }
+
+    void ProgramManager::setSlicerCompilationDeferred(bool const deferred)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        m_deferSlicerCompilation = deferred;
+    }
+
+    bool ProgramManager::isSlicerCompilationDeferred() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_deferSlicerCompilation;
+    }
+
+    void ProgramManager::setModelSource(std::string source)
+    {
+        setModelSources(std::move(source), std::nullopt, true);
+    }
+
+    void ProgramManager::setModelSources(std::string optimizedSource,
+                                         std::optional<std::string> previewSource,
+                                         bool compileOptimizedRenderProgram)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        invalidateCachedBestRenderProgram();
+        m_modelSource = std::move(optimizedSource);
+        m_compileOptimizedRenderProgram = compileOptimizedRenderProgram;
+        if (previewSource.has_value())
+        {
+            m_previewModelSource = std::move(*previewSource);
+            m_hasPreviewModelSource = true;
+        }
+        else
+        {
+            m_previewModelSource.clear();
+            m_hasPreviewModelSource = false;
+        }
+
         if (m_eventLogger)
         {
-            getLogger().addEvent(
-              {fmt::format("ProgramManager.setModelSource: size={} bytes", m_modelSource.size()),
-               events::Severity::Info});
+                        auto const message = fmt::format(
+                            "ProgramManager.setModelSources: optimized={} bytes preview={} bytes optimizedRender={}",
+                            m_modelSource.size(),
+                            m_previewModelSource.size(),
+                            m_compileOptimizedRenderProgram ? 1 : 0);
+                        getLogger().addEvent({message, events::Severity::Info});
         }
         m_slicerState.signalCompilationRequired();
-        m_renderState.signalCompilationRequired();
+        if (m_compileOptimizedRenderProgram)
+        {
+            m_renderState.signalCompilationRequired();
+        }
+        if (m_hasPreviewModelSource)
+        {
+            m_previewRenderState.signalCompilationRequired();
+        }
     }
 
     bool ProgramManager::hasModelSource() const
@@ -601,10 +972,22 @@ namespace gladius
         return !m_modelSource.empty();
     }
 
+    bool ProgramManager::hasPreviewModelSource() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_hasPreviewModelSource && !m_previewModelSource.empty();
+    }
+
     std::string ProgramManager::getModelSource() const
     {
         std::lock_guard<std::mutex> lock(m_modelSourceMutex);
         return m_modelSource;
+    }
+
+    std::string ProgramManager::getPreviewModelSource() const
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        return m_previewModelSource;
     }
 
     std::string ProgramManager::getDebugStateSummary() const
@@ -614,9 +997,12 @@ namespace gladius
         std::stringstream ss;
         ss << "ProgramManager: modelSource="
            << (m_modelSource.empty() ? 0 : (int) m_modelSource.size())
+              << "B previewSource=" << (m_previewModelSource.empty() ? 0 : (int) m_previewModelSource.size())
            << "B renderUpToDate=" << (m_renderState.isModelUpToDate() ? 1 : 0)
+              << " previewUpToDate=" << (m_previewRenderState.isModelUpToDate() ? 1 : 0)
            << " slicerUpToDate=" << (m_slicerState.isModelUpToDate() ? 1 : 0)
            << " renderCompiling=" << (m_optimizedRenderProgram->isCompilationInProgress() ? 1 : 0)
+              << " previewCompiling=" << (m_previewRenderProgram->isCompilationInProgress() ? 1 : 0)
               << " slicerCompiling=" << (m_slicerProgram->isCompilationInProgress() ? 1 : 0)
               << " vdbSupported=" << (m_isVdbSupported ? 1 : 0)
               << " vdbRequired=" << (m_isVdbRequired ? 1 : 0)
@@ -632,6 +1018,11 @@ namespace gladius
     ModelState const & ProgramManager::getRendererState()
     {
         return m_renderState;
+    }
+
+    ModelState const & ProgramManager::getPreviewRendererState()
+    {
+        return m_previewRenderState;
     }
 
     ParameterSignature const & ProgramManager::getCompiledParameterSignature() const

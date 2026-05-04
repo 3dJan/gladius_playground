@@ -51,6 +51,29 @@ namespace gladius
             return toLowerCopy(haystack).find(toLowerCopy(needle)) != std::string::npos;
         }
 
+        [[nodiscard]] bool isKnownBuildStatus(cl_build_status status)
+        {
+            return status == CL_BUILD_SUCCESS || status == CL_BUILD_NONE ||
+                   status == CL_BUILD_ERROR || status == CL_BUILD_IN_PROGRESS;
+        }
+
+        [[nodiscard]] std::string buildStatusToString(cl_build_status status)
+        {
+            switch (status)
+            {
+            case CL_BUILD_SUCCESS:
+                return "SUCCESS";
+            case CL_BUILD_NONE:
+                return "NONE";
+            case CL_BUILD_ERROR:
+                return "ERROR";
+            case CL_BUILD_IN_PROGRESS:
+                return "IN_PROGRESS";
+            default:
+                return "UNKNOWN(" + std::to_string(status) + ")";
+            }
+        }
+
         inline std::filesystem::path ensureDumpDir(std::filesystem::path const & cacheDir)
         {
             std::filesystem::path dir = cacheDir.empty()
@@ -229,6 +252,34 @@ namespace gladius
                 // best-effort diagnostics only
             }
             return out.str();
+        }
+
+        template <cl_device_info Info>
+        [[nodiscard]] std::string getDeviceInfoString(cl::Device const & device,
+                                                      std::string_view fallback)
+        {
+            try
+            {
+                return device.getInfo<Info>();
+            }
+            catch (...)
+            {
+            }
+            return std::string(fallback);
+        }
+
+        template <cl_platform_info Info>
+        [[nodiscard]] std::string getPlatformInfoString(cl::Platform const & platform,
+                                                        std::string_view fallback)
+        {
+            try
+            {
+                return platform.getInfo<Info>();
+            }
+            catch (...)
+            {
+            }
+            return std::string(fallback);
         }
 
         // Log build status and log output if the build failed
@@ -652,8 +703,18 @@ namespace gladius
     {
         try
         {
-            auto const status = program.getBuildInfo<CL_PROGRAM_BUILD_STATUS>(device);
-            std::string const buildLog = program.getBuildInfo<CL_PROGRAM_BUILD_LOG>(device);
+            cl_build_status status = CL_BUILD_SUCCESS;
+            auto const statusErr = program.getBuildInfo(device, CL_PROGRAM_BUILD_STATUS, &status);
+
+            std::string buildLog;
+            try
+            {
+                program.getBuildInfo(device, CL_PROGRAM_BUILD_LOG, &buildLog);
+            }
+            catch (...)
+            {
+                buildLog.clear();
+            }
 
             // Forward build log to logger if available; avoid noisy stderr
             if (!buildLog.empty() && logger)
@@ -661,10 +722,18 @@ namespace gladius
                 logger->logWarning(std::string("OpenCL build log:\n") + buildLog);
             }
 
+            if (statusErr != CL_SUCCESS || !isKnownBuildStatus(status))
+            {
+                // ROCm can report non-enum garbage here after a successful link. Do not treat
+                // that as a hard build failure; later executable/kernel validation will still
+                // reject genuinely unusable programs.
+                return;
+            }
+
             if (status != CL_BUILD_SUCCESS)
             {
                 std::string errorMsg =
-                  "OpenCL program build failed (status: " + std::to_string(status) + ")";
+                  "OpenCL program build failed (status: " + buildStatusToString(status) + ")";
                 if (!buildLog.empty())
                 {
                     errorMsg += ": " + buildLog;
@@ -869,7 +938,7 @@ namespace gladius
 
           size_t hash = 0;
 
-        // Calculate the hash of the source, device name and additional defines
+        // Calculate the hash of the source, OpenCL runtime/device identity and additional defines
         for (const auto & source : m_sources)
         {
             boost::hash_combine(hash, std::hash<std::string>{}(source));
@@ -899,8 +968,7 @@ namespace gladius
             // best effort; if we cannot load the header, skip adding it
         }
 
-        boost::hash_combine(
-          hash, std::hash<std::string>{}(m_ComputeContext->GetDevice().getInfo<CL_DEVICE_NAME>()));
+        boost::hash_combine(hash, std::hash<std::string>{}(getDeviceSignature()));
         boost::hash_combine(hash, std::hash<std::string>{}(generateDefineSymbol()));
 
         // kernel replacements
@@ -923,14 +991,13 @@ namespace gladius
 
           size_t hash = 0;
 
-        // Calculate the hash of static sources, device name and additional defines
+        // Calculate the hash of static sources, OpenCL runtime/device identity and additional defines
         for (const auto & source : m_staticSources)
         {
             boost::hash_combine(hash, std::hash<std::string>{}(source));
         }
 
-        boost::hash_combine(
-          hash, std::hash<std::string>{}(m_ComputeContext->GetDevice().getInfo<CL_DEVICE_NAME>()));
+        boost::hash_combine(hash, std::hash<std::string>{}(getDeviceSignature()));
 
         // Also include the dynamic interface header in the static hash to tie the
         // cached static library to the interface/ABI used by the dynamic part.
@@ -979,11 +1046,12 @@ namespace gladius
 
           size_t hash = 0;
 
-        // Calculate the hash of dynamic sources
+        // Calculate the hash of dynamic sources and the OpenCL runtime/device identity
         for (const auto & source : m_dynamicSources)
         {
             boost::hash_combine(hash, std::hash<std::string>{}(source));
         }
+        boost::hash_combine(hash, std::hash<std::string>{}(getDeviceSignature()));
         // Ensure dynamic hash also reflects the same compile-time defines and replacements
         boost::hash_combine(hash, std::hash<std::string>{}(generateDefineSymbol()));
         if (m_kernelReplacements)
@@ -1109,6 +1177,12 @@ namespace gladius
             m_valid = true;
             m_isCompilationInProgress = false;
             m_kernels.clear(); // Clear stale kernels when reusing existing program
+
+            m_callBackUserData.computeContext = m_ComputeContext.get();
+            m_callBackUserData.callBack = &callBack;
+            m_callBackUserData.sender = this;
+            m_callBackUserData.program = m_program.get();
+
             callBackDispatcher(nullptr, &m_callBackUserData);
             return;
         }
@@ -1308,14 +1382,16 @@ namespace gladius
                                                              "link(executable)"));
                 }
 
-                // Guard: some drivers may produce an empty executable when linking only a library
-                // with a header-only dynamic part Be strict here: require an EXECUTABLE binary with
-                // at least one kernel, otherwise force fallback.
+                // Guard: some drivers, notably ROCm, can link the static/dynamic objects into a
+                // non-executable artifact even though a single-level build succeeds. This two-level
+                // path is only an optimization, so treat that as a quiet fallback instead of a
+                // compile error.
+                bool linkedProgramUsable = false;
+                std::string fallbackReason;
                 try
                 {
-                    // Check for kernels
                     auto const numKernels = m_program->getInfo<CL_PROGRAM_NUM_KERNELS>();
-                    // Check kernel names (can be empty on some drivers when no kernels are present)
+
                     std::string kernelNames;
                     try
                     {
@@ -1323,9 +1399,9 @@ namespace gladius
                     }
                     catch (...)
                     {
-                        // ignore, keep empty
+                        // Kernel names are best-effort metadata; CL_PROGRAM_NUM_KERNELS is enough.
                     }
-                    // Check binary type
+
                     cl_program_binary_type binType{};
                     try
                     {
@@ -1339,26 +1415,29 @@ namespace gladius
 
                     bool const hasKernels = (numKernels > 0) || (!kernelNames.empty());
                     bool const isExecutable = (binType == CL_PROGRAM_BINARY_TYPE_EXECUTABLE);
-                    if (!hasKernels || !isExecutable)
+                    linkedProgramUsable = hasKernels && isExecutable;
+                    if (!linkedProgramUsable)
                     {
-                        if (m_logger)
-                        {
-                            m_logger->logWarning(
-                              std::string("CLProgram: Linked program validation failed (kernels=") +
-                              std::to_string(numKernels) +
-                              ", executable=" + (isExecutable ? "true" : "false") +
-                              "). Falling back to single-level build.");
-                        }
-                        // Force fallback by throwing to the outer catch which already routes to
-                        // single_level_compile
-                        throw std::runtime_error(
-                          "Linked program invalid: no kernels or non-executable binary");
+                        fallbackReason = std::string("kernels=") + std::to_string(numKernels) +
+                                         ", executable=" + (isExecutable ? "true" : "false");
                     }
                 }
-                catch (const std::exception &)
+                catch (const std::exception & e)
                 {
-                    // Re-throw to be handled by the outer catch which falls back to single-level
-                    throw;
+                    fallbackReason =
+                      std::string("linked-program metadata unavailable: ") + e.what();
+                }
+                catch (...)
+                {
+                    fallbackReason = "linked-program metadata unavailable";
+                }
+
+                if (!linkedProgramUsable)
+                {
+                    (void) fallbackReason;
+                    m_enableTwoLevelPipeline = false;
+                    compileSingleLevel(callBack, currentHash);
+                    return;
                 }
 
                 if (m_logger)
@@ -1392,11 +1471,6 @@ namespace gladius
                 {
                     // On diagnostics failure, avoid caching to be safe
                 }
-                if (m_logger)
-                {
-                    m_logger->logInfo("CLProgram: Saved linked program to cache");
-                }
-
                 m_hashLastSuccessfulCompilation = currentHash;
                 m_valid = true;
                 m_kernels.clear();
@@ -1413,11 +1487,13 @@ namespace gladius
             }
             catch (const std::exception & e)
             {
-                std::string errorDetails =
-                  "CLProgram: Failed to compile/link dynamic program: " + std::string(e.what());
-                if (m_logger)
+                m_enableTwoLevelPipeline = false;
+                if (m_logger && isOclDumpEnabled())
                 {
-                    m_logger->logError(errorDetails);
+                    m_logger->logInfo(m_debugLabel +
+                                      ": Two-level OpenCL compile/link unavailable; using "
+                                      "single-level build: " +
+                                      std::string(e.what()));
                 }
                 // Avoid extra stderr noise; logger already captured details
                 // Fall back to single-level compilation
@@ -1651,6 +1727,21 @@ namespace gladius
         buildFromSourceAndLinkWithLibImpl(filenames, dynamicSource, callBack, false);
     }
 
+    void CLProgram::buildCompleteProgram(const FileNames & filenames, BuildCallBack & callBack)
+    {
+        ProfileFunction;
+        m_shutdownRequested.store(false, std::memory_order_release);
+        m_valid = false;
+
+        m_staticSources.clear();
+        m_dynamicSources.clear();
+        m_sources.clear();
+        m_sourceFilenames = filenames;
+
+        loadSourceFromFile(filenames);
+        compile(callBack);
+    }
+
     void CLProgram::buildFromSourceAndLinkWithLibImpl(const FileNames & filenames,
                                                       const std::string & dynamicSource,
                                                       BuildCallBack & callBack,
@@ -1825,48 +1916,12 @@ namespace gladius
             return false;
         };
 
-        try
+        auto const implementation = getDeviceSignature();
+        if (containsCaseInsensitive(implementation, "rusticl"))
         {
-            auto const device = m_ComputeContext->GetDevice();
-            auto const deviceName = device.getInfo<CL_DEVICE_NAME>();
-            auto const deviceVendor = device.getInfo<CL_DEVICE_VENDOR>();
-            auto const deviceVersion = device.getInfo<CL_DEVICE_VERSION>();
-            auto const driverVersion = device.getInfo<CL_DRIVER_VERSION>();
-
-            std::string platformName;
-            std::string platformVendor;
-            std::string platformVersion;
-            try
-            {
-                cl::Platform platform(device.getInfo<CL_DEVICE_PLATFORM>());
-                platformName = platform.getInfo<CL_PLATFORM_NAME>();
-                platformVendor = platform.getInfo<CL_PLATFORM_VENDOR>();
-                platformVersion = platform.getInfo<CL_PLATFORM_VERSION>();
-            }
-            catch (...)
-            {
-                // Device-level strings are enough for most implementations.
-            }
-
-            auto const implementation =
-              deviceName + "|" + deviceVendor + "|" + deviceVersion + "|" + driverVersion + "|" +
-              platformName + "|" + platformVendor + "|" + platformVersion;
-
-            if (containsCaseInsensitive(implementation, "rusticl"))
-            {
-                return disableBinaryCache(
-                  "Rusticl currently crashes inside clCreateProgramWithBinary for cached "
-                  "programs; using source compilation instead.");
-            }
-        }
-        catch (const std::exception & e)
-        {
-            return disableBinaryCache(std::string("could not query OpenCL driver identity: ") +
-                                      e.what());
-        }
-        catch (...)
-        {
-            return disableBinaryCache("could not query OpenCL driver identity");
+            return disableBinaryCache(
+              "Rusticl currently crashes inside clCreateProgramWithBinary for cached "
+              "programs; using source compilation instead.");
         }
 
         m_canUseBinaryCache = true;
@@ -1985,12 +2040,43 @@ namespace gladius
     {
         try
         {
-            auto device = m_ComputeContext->GetDevice();
-            std::string deviceName = device.getInfo<CL_DEVICE_NAME>();
-            std::string driverVersion = device.getInfo<CL_DRIVER_VERSION>();
-            std::string deviceVersion = device.getInfo<CL_DEVICE_VERSION>();
+            auto const device = m_ComputeContext->GetDevice();
+            std::string platformName = "unknown_platform";
+            std::string platformVendor = "unknown_platform_vendor";
+            std::string platformVersion = "unknown_platform_version";
+            std::string platformProfile = "unknown_platform_profile";
 
-            return deviceName + "|" + driverVersion + "|" + deviceVersion;
+            try
+            {
+                cl::Platform platform(device.getInfo<CL_DEVICE_PLATFORM>());
+                platformName = getPlatformInfoString<CL_PLATFORM_NAME>(platform, "unknown_platform");
+                platformVendor = getPlatformInfoString<CL_PLATFORM_VENDOR>(
+                  platform, "unknown_platform_vendor");
+                platformVersion = getPlatformInfoString<CL_PLATFORM_VERSION>(
+                  platform, "unknown_platform_version");
+                platformProfile = getPlatformInfoString<CL_PLATFORM_PROFILE>(
+                  platform, "unknown_platform_profile");
+            }
+            catch (...)
+            {
+                // Keep device-level fields even when platform queries fail.
+            }
+
+            auto const deviceName = getDeviceInfoString<CL_DEVICE_NAME>(device, "unknown_device");
+            auto const deviceVendor =
+              getDeviceInfoString<CL_DEVICE_VENDOR>(device, "unknown_device_vendor");
+            auto const driverVersion =
+              getDeviceInfoString<CL_DRIVER_VERSION>(device, "unknown_driver_version");
+            auto const deviceVersion =
+              getDeviceInfoString<CL_DEVICE_VERSION>(device, "unknown_device_version");
+            auto const openClCVersion = getDeviceInfoString<CL_DEVICE_OPENCL_C_VERSION>(
+              device, "unknown_opencl_c_version");
+
+            return "platform=" + platformName + "|platformVendor=" + platformVendor +
+                   "|platformVersion=" + platformVersion + "|platformProfile=" +
+                   platformProfile + "|device=" + deviceName + "|deviceVendor=" + deviceVendor +
+                   "|driver=" + driverVersion + "|deviceVersion=" + deviceVersion +
+                   "|openclC=" + openClCVersion;
         }
         catch (...)
         {

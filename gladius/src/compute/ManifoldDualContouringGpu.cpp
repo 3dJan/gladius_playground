@@ -535,6 +535,12 @@ namespace gladius::compute
                 return isEnvVarSet("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES");
             }
 
+            [[nodiscard]] bool debugMdcDiagnosticsEnabled()
+            {
+                return isEnvVarSet("GLADIUS_DEBUG_MDC_DIAGNOSTICS") ||
+                       isEnvVarSet("GLADIUS_REQUIRE_WATERTIGHT");
+            }
+
             [[nodiscard]] TopologyStats computeTopologyStats(ManifoldDualContouringMesh const & mesh)
             {
                 TopologyStats stats;
@@ -676,6 +682,19 @@ namespace gladius::compute
         {
             m_meshGenerationProgressCallback(progress, phaseName);
         }
+    }
+
+    void ManifoldDualContouringGpu::releaseExtractionBuffers()
+    {
+        m_octreeBuffer.reset();
+        m_vertexBuffer.reset();
+        m_indexBuffer.reset();
+        m_countBuffer.reset();
+        m_offsetBuffer.reset();
+        m_edgeComponentBuffer.reset();
+        m_outerThicknessFieldBuffer.reset();
+        m_innerThicknessFieldBuffer.reset();
+        m_octreeNodeCount = 0U;
     }
 
     void ManifoldDualContouringGpu::loadKernels()
@@ -1048,9 +1067,6 @@ namespace gladius::compute
 
     void ManifoldDualContouringGpu::constructOctree()
     {
-        m_cpuOctreeNodes.clear();
-        m_mortonToIndex.clear();
-
         // Get bounding box from compute core
         auto bbox = m_core.getBoundingBox();
         if (!bbox.has_value())
@@ -1200,11 +1216,11 @@ namespace gladius::compute
 
             std::cout << "Octree construction complete. Total nodes after halo: "
                       << m_octreeNodeCount << std::endl;
-            refreshCpuOctreeCache();
         }
         catch (std::exception & e)
         {
             std::cerr << "Error in octree construction: " << e.what() << std::endl;
+            releaseExtractionBuffers();
         }
     }
 
@@ -1280,6 +1296,7 @@ namespace gladius::compute
         catch (std::exception & e)
         {
             std::cerr << "Error running count_vertices: " << e.what() << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1292,10 +1309,12 @@ namespace gladius::compute
         {
             queue.enqueueReadBuffer(
               *m_countBuffer, CL_TRUE, 0, numNodes * sizeof(int), counts.data());
+            m_countBuffer.reset();
         }
         catch (std::exception & e)
         {
             std::cerr << "Error reading count buffer: " << e.what() << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1307,14 +1326,13 @@ namespace gladius::compute
             totalVertices += counts[i];
         }
 
-        m_cpuVertexOffsets = offsets;
-
         std::cout << "Generating " << totalVertices << " vertices from " << numNodes
                   << " octree nodes" << std::endl;
 
         if (totalVertices == 0)
         {
             std::cout << "No vertices to generate" << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1372,6 +1390,7 @@ namespace gladius::compute
                                     0,
                                     hostVertices.size() * sizeof(GpuVertex),
                                     hostVertices.data());
+            m_vertexBuffer.reset();
 
             m_mesh.positions.clear();
             m_mesh.normals.clear();
@@ -1402,6 +1421,7 @@ namespace gladius::compute
             m_mesh.positions.clear();
             m_mesh.normals.clear();
             m_lastVertexCount = 0U;
+            releaseExtractionBuffers();
         }
     }
 
@@ -1452,6 +1472,7 @@ namespace gladius::compute
             std::vector<int> quadCounts(numNodes);
             queue.enqueueReadBuffer(
               *quadCountBuffer, CL_TRUE, 0, numNodes * sizeof(int), quadCounts.data());
+            quadCountBuffer.reset();
 
             // Debug: Count total quads and cells with quads
             int totalQuads = 0;
@@ -1466,89 +1487,92 @@ namespace gladius::compute
                       << " cells (of " << numNodes << " total nodes)" << std::endl;
 
             // Run diagnostic analysis to understand boundary hole causes
-            auto diagnostics = m_program->runQuadDiagnostics(*m_octreeBuffer, numNodes, maxCoord);
-            std::cout << "\n=== Boundary Hole Diagnostics (All 12 Edges) ===" << std::endl;
-
-            // Edge axis names for better readability
-            static char const * edgeNames[] = {
-              "Edge  0 (X at y=0,z=0)", // corners 0-1
-              "Edge  1 (Y at x=1,z=0)", // corners 1-3
-              "Edge  2 (X at y=1,z=0)", // corners 2-3
-              "Edge  3 (Y at x=0,z=0)", // corners 0-2
-              "Edge  4 (X at y=0,z=1)", // corners 4-5
-              "Edge  5 (Y at x=1,z=1)", // corners 5-7, owner
-              "Edge  6 (X at y=1,z=1)", // corners 6-7, owner
-              "Edge  7 (Y at x=0,z=1)", // corners 4-6
-              "Edge  8 (Z at x=0,y=0)", // corners 0-4
-              "Edge  9 (Z at x=1,y=0)", // corners 1-5
-              "Edge 10 (Z at x=1,y=1)", // corners 3-7, owner
-              "Edge 11 (Z at x=0,y=1)"  // corners 2-6
-            };
-
-            int totalEmitted = 0;
-            int totalSkipped = 0;
-            for (int e = 0; e < 12; ++e)
+            if (debugMdcDiagnosticsEnabled())
             {
-                int emitted = diagnostics.edgeEmitted[static_cast<std::size_t>(e)];
-                int skipped = diagnostics.edgeSkipped[static_cast<std::size_t>(e)];
-                if (emitted > 0 || skipped > 0)
+                auto diagnostics = m_program->runQuadDiagnostics(*m_octreeBuffer, numNodes, maxCoord);
+                std::cout << "\n=== Boundary Hole Diagnostics (All 12 Edges) ===" << std::endl;
+
+                // Edge axis names for better readability
+                static char const * edgeNames[] = {
+                  "Edge  0 (X at y=0,z=0)", // corners 0-1
+                  "Edge  1 (Y at x=1,z=0)", // corners 1-3
+                  "Edge  2 (X at y=1,z=0)", // corners 2-3
+                  "Edge  3 (Y at x=0,z=0)", // corners 0-2
+                  "Edge  4 (X at y=0,z=1)", // corners 4-5
+                  "Edge  5 (Y at x=1,z=1)", // corners 5-7, owner
+                  "Edge  6 (X at y=1,z=1)", // corners 6-7, owner
+                  "Edge  7 (Y at x=0,z=1)", // corners 4-6
+                  "Edge  8 (Z at x=0,y=0)", // corners 0-4
+                  "Edge  9 (Z at x=1,y=0)", // corners 1-5
+                  "Edge 10 (Z at x=1,y=1)", // corners 3-7, owner
+                  "Edge 11 (Z at x=0,y=1)"  // corners 2-6
+                };
+
+                int totalEmitted = 0;
+                int totalSkipped = 0;
+                for (int e = 0; e < 12; ++e)
                 {
-                    std::cout << edgeNames[e] << ": emitted=" << emitted << ", skipped=" << skipped
-                              << std::endl;
+                    int emitted = diagnostics.edgeEmitted[static_cast<std::size_t>(e)];
+                    int skipped = diagnostics.edgeSkipped[static_cast<std::size_t>(e)];
+                    if (emitted > 0 || skipped > 0)
+                    {
+                        std::cout << edgeNames[e] << ": emitted=" << emitted << ", skipped=" << skipped
+                                  << std::endl;
+                    }
+                    totalEmitted += emitted;
+                    totalSkipped += skipped;
                 }
-                totalEmitted += emitted;
-                totalSkipped += skipped;
-            }
-            std::cout << "Summary: " << totalEmitted << " edges emitted, " << totalSkipped
-                      << " edges skipped" << std::endl;
-            std::cout << "=================================================\n" << std::endl;
+                std::cout << "Summary: " << totalEmitted << " edges emitted, " << totalSkipped
+                          << " edges skipped" << std::endl;
+                std::cout << "=================================================\n" << std::endl;
 
-            // Run discontinuity diagnostic to detect CSG-related gradient issues
-            BBox paddedBbox;
-            paddedBbox.extend(m_cachedBboxMin);
-            paddedBbox.extend(m_cachedBboxMax);
-            Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
-            float const maxExtent = bboxSize.maxCoeff();
-            float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
-            float const gradientEpsilon = voxelSize * 0.1F;
+                // Run discontinuity diagnostic to detect CSG-related gradient issues
+                BBox paddedBbox;
+                paddedBbox.extend(m_cachedBboxMin);
+                paddedBbox.extend(m_cachedBboxMax);
+                Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
+                float const maxExtent = bboxSize.maxCoeff();
+                float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+                float const gradientEpsilon = voxelSize * 0.1F;
 
-            // Get primitives for discontinuity diagnostic
-            auto primitives = m_core.getPrimitives();
-            if (primitives)
-            {
-                auto discDiag = m_program->runDiscontinuityDiagnostics(*m_octreeBuffer,
-                                                                       numNodes,
-                                                                       paddedBbox,
-                                                                       *primitives,
-                                                                       m_config.isoValue,
-                                                                       gradientEpsilon);
-
-                if (discDiag.cells2Components > 0 || discDiag.cells3Components > 0 ||
-                    discDiag.cells4Components > 0)
+                // Get primitives for discontinuity diagnostic
+                auto primitives = m_core.getPrimitives();
+                if (primitives)
                 {
-                    std::cout << "\n=== Gradient Discontinuity Analysis ===" << std::endl;
-                    std::cout << "Cells analyzed: " << discDiag.totalCells << std::endl;
-                    std::cout << "  1 component (smooth): " << discDiag.cells1Component << " ("
-                              << (100.0F * static_cast<float>(discDiag.cells1Component) /
-                                  static_cast<float>(discDiag.totalCells))
-                              << "%)" << std::endl;
-                    std::cout << "  2 components: " << discDiag.cells2Components << " ("
-                              << (100.0F * static_cast<float>(discDiag.cells2Components) /
-                                  static_cast<float>(discDiag.totalCells))
-                              << "%)" << std::endl;
-                    if (discDiag.cells3Components > 0)
+                    auto discDiag = m_program->runDiscontinuityDiagnostics(*m_octreeBuffer,
+                                                                           numNodes,
+                                                                           paddedBbox,
+                                                                           *primitives,
+                                                                           m_config.isoValue,
+                                                                           gradientEpsilon);
+
+                    if (discDiag.cells2Components > 0 || discDiag.cells3Components > 0 ||
+                        discDiag.cells4Components > 0)
                     {
-                        std::cout << "  3 components: " << discDiag.cells3Components << std::endl;
+                        std::cout << "\n=== Gradient Discontinuity Analysis ===" << std::endl;
+                        std::cout << "Cells analyzed: " << discDiag.totalCells << std::endl;
+                        std::cout << "  1 component (smooth): " << discDiag.cells1Component << " ("
+                                  << (100.0F * static_cast<float>(discDiag.cells1Component) /
+                                      static_cast<float>(discDiag.totalCells))
+                                  << "%)" << std::endl;
+                        std::cout << "  2 components: " << discDiag.cells2Components << " ("
+                                  << (100.0F * static_cast<float>(discDiag.cells2Components) /
+                                      static_cast<float>(discDiag.totalCells))
+                                  << "%)" << std::endl;
+                        if (discDiag.cells3Components > 0)
+                        {
+                            std::cout << "  3 components: " << discDiag.cells3Components << std::endl;
+                        }
+                        if (discDiag.cells4Components > 0)
+                        {
+                            std::cout << "  4 components: " << discDiag.cells4Components << std::endl;
+                        }
+                        std::cout << "Average discontinuity score: " << discDiag.avgDiscontinuityScore
+                                  << std::endl;
+                        std::cout << "Severe discontinuities (>0.5): " << discDiag.severeDiscontinuities
+                                  << std::endl;
+                        std::cout << "========================================\n" << std::endl;
                     }
-                    if (discDiag.cells4Components > 0)
-                    {
-                        std::cout << "  4 components: " << discDiag.cells4Components << std::endl;
-                    }
-                    std::cout << "Average discontinuity score: " << discDiag.avgDiscontinuityScore
-                              << std::endl;
-                    std::cout << "Severe discontinuities (>0.5): " << discDiag.severeDiscontinuities
-                              << std::endl;
-                    std::cout << "========================================\n" << std::endl;
                 }
             }
 
@@ -1562,6 +1586,7 @@ namespace gladius::compute
 
             if (totalIndices == 0)
             {
+                releaseExtractionBuffers();
                 return;
             }
 
@@ -1599,6 +1624,7 @@ namespace gladius::compute
                                     0,
                                     totalIndices * sizeof(std::uint32_t),
                                     m_mesh.indices.data());
+            releaseExtractionBuffers();
 
             std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles via GPU"
                       << std::endl;
@@ -1607,46 +1633,7 @@ namespace gladius::compute
         {
             std::cerr << "GPU index generation failed: " << e.what() << std::endl;
             m_mesh.indices.clear();
-        }
-    }
-
-    void ManifoldDualContouringGpu::refreshCpuOctreeCache()
-    {
-        m_cpuOctreeNodes.clear();
-        m_mortonToIndex.clear();
-
-        if (m_octreeNodeCount == 0U || !m_octreeBuffer)
-        {
-            return;
-        }
-
-        auto context = m_core.getComputeContext();
-        if (!context)
-        {
-            std::cerr << "Compute context unavailable; cannot read octree buffer" << std::endl;
-            return;
-        }
-
-        try
-        {
-            m_cpuOctreeNodes.resize(m_octreeNodeCount);
-            context->GetQueue().enqueueReadBuffer(*m_octreeBuffer,
-                                                  CL_TRUE,
-                                                  0,
-                                                  m_cpuOctreeNodes.size() * sizeof(OctreeNode),
-                                                  m_cpuOctreeNodes.data());
-        }
-        catch (std::exception const & e)
-        {
-            std::cerr << "Failed to read octree buffer: " << e.what() << std::endl;
-            m_cpuOctreeNodes.clear();
-            return;
-        }
-
-        m_mortonToIndex.reserve(m_cpuOctreeNodes.size());
-        for (std::size_t i = 0; i < m_cpuOctreeNodes.size(); ++i)
-        {
-            m_mortonToIndex[m_cpuOctreeNodes[i].mortonCode] = i;
+            releaseExtractionBuffers();
         }
     }
 
@@ -2534,7 +2521,6 @@ namespace gladius::compute
 
             if (m_octreeNodeCount > 0)
             {
-                refreshCpuOctreeCache();
                 generateVertices();
                 generateIndices();
             }

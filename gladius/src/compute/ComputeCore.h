@@ -22,6 +22,7 @@
 
 #include <array>
 #include <atomic>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -564,6 +565,9 @@ namespace gladius
 
         [[nodiscard]] SharedSlicerProgram getSlicerProgram() const;
         [[nodiscard]] SharedRenderProgram getBestRenderProgram() const;
+        [[nodiscard]] std::optional<SharedRenderProgram> tryGetBestRenderProgram() const;
+        [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
+        [[nodiscard]] std::optional<RenderBackend> tryGetSelectedRenderBackend() const;
         [[nodiscard]] SharedRenderProgram getPreviewRenderProgram() const;
         [[nodiscard]] SharedRenderProgram getOptimzedRenderProgram() const;
 
@@ -591,6 +595,15 @@ namespace gladius
 
         void refreshProgram(nodes::SharedAssembly assembly);
         void tryRefreshProgramProtected(nodes::SharedAssembly assembly);
+
+        /// Return whether the currently selected render program can produce frames.
+        /// Unlike isRendererReady(), this intentionally ignores broader model/SDF refresh state
+        /// so the UI can keep using the command-stream preview while background work continues.
+        [[nodiscard]] bool isRenderProgramReady() const;
+
+        /// Non-blocking variant of isRenderProgramReady(). Returns std::nullopt if background
+        /// loading/compilation currently owns the program-manager locks.
+        [[nodiscard]] std::optional<bool> tryIsRenderProgramReady() const;
 
         [[nodiscard]] bool isRendererReady() const;
 
@@ -646,6 +659,11 @@ namespace gladius
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
 
         void setCodeGenerator(CodeGenerator generator);
+
+        void setOptimizedRenderCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isOptimizedRenderCompilationDeferred() const;
+        void setSlicerCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isSlicerCompilationDeferred() const;
 
         [[nodiscard]] std::shared_ptr<ModelState> getMeshResourceState() const;
 
@@ -710,6 +728,7 @@ namespace gladius
         bool updateBoundingBoxFast();
                 [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
                 [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
+        [[nodiscard]] bool ensureSlicerProgramReady();
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
@@ -742,7 +761,7 @@ namespace gladius
         double layerThickness_mm = 0.05;
         cl_float m_sliceHeight_mm{0.0f};
 
-        cl_float m_lastContourSliceHeight_mm{0.0f};
+        std::atomic<cl_float> m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
         std::atomic<bool> m_boundingBoxStale{false};
@@ -753,11 +772,13 @@ namespace gladius
 
         std::shared_ptr<ModelState> m_meshResourceState;
 
-        std::future<void> m_sliceFuture;
+        mutable std::future<void> m_sliceFuture;
+        mutable std::mutex m_sliceFutureMutex;
         std::mutex m_contourExtractorMutex;
+        std::atomic_bool m_slicingInProgress{false};
 
         std::atomic_bool m_precompSdfIsValid{false};
-        size_t m_preCompSdfSize = 256u;
+        size_t m_preCompSdfSize = 128u;
 
         bool m_autoUpdateBoundingBox = true;
 
@@ -779,7 +800,7 @@ namespace gladius
         mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
         /// @}
 
-        CodeGenerator m_codeGenerator = CodeGenerator::Code;
+        CodeGenerator m_codeGenerator = CodeGenerator::Automatic;
 
         SharedKernelReplacements m_kernelReplacements;
 

@@ -33,6 +33,16 @@ namespace gladius
     }
 
     SpatialMeshResource::SpatialMeshResource(ResourceKey key,
+                                             SpatialMeshData && data,
+                                             MeshSdfEvaluationConfig const & evaluationConfig)
+        : MeshResourceBase(std::move(key))
+        , m_data(std::move(data))
+        , m_evaluationConfig(evaluationConfig)
+    {
+        ResourceBase::load();
+    }
+
+    SpatialMeshResource::SpatialMeshResource(ResourceKey key,
                                              std::span<float4 const> vertices,
                                              std::span<TriangleIndices const> indices)
         : MeshResourceBase(std::move(key))

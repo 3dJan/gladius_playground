@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -179,7 +180,7 @@ namespace gladius
             }
         }
         m_contour->runPostProcessing();
-        m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
+        m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
     }
 
     void ComputeCore::generateContourQuadtree(nodes::SliceParameter const & sliceParameter)
@@ -354,7 +355,7 @@ namespace gladius
         }
 
         m_contour->runPostProcessing();
-        m_lastContourSliceHeight_mm = sliceParameter.zHeight_mm;
+        m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
     }
 
     bool ComputeCore::tryToupdateParameter(nodes::Assembly & assembly)
@@ -489,18 +490,17 @@ namespace gladius
         // Ensure primitives are uploaded to GPU
         m_primitives->write();
         
-        // Get the slicer program which includes mesh_sdf.cl with the build kernel
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build voxel grids: slicer program not ready");
+            logMsg("Cannot build voxel grids: mesh preparation program not available");
             return 0;
         }
         
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
-            if (slicerProgram->buildMeshVoxelGrid(*m_primitives, params))
+            if (meshPreparationProgram->buildMeshVoxelGrid(*m_primitives, params))
             {
                 ++successCount;
             }
@@ -508,6 +508,14 @@ namespace gladius
         
         // Wait for all builds to complete
         CL_ERROR(m_ComputeContext->GetQueue().finish());
+
+        if (successCount > 0u)
+        {
+            // buildMeshVoxelGrid writes the voxel cache in-place on the device. Keep the host
+            // shadow buffer in sync so later m_primitives->write() calls from slicing/export do
+            // not upload the original zero-filled cache again.
+            m_primitives->data.read();
+        }
         
         logMsg(fmt::format("Built {} voxel grids", successCount));
         
@@ -529,10 +537,10 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build mesh FWN aggregates: slicer program not ready");
+            logMsg("Cannot build mesh FWN aggregates: mesh preparation program not available");
             return 0;
         }
 
@@ -541,7 +549,7 @@ namespace gladius
             GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates queue kernels");
             for (auto const & params : buildParams)
             {
-                if (slicerProgram->buildMeshFwnAggregates(*m_primitives, params))
+                if (meshPreparationProgram->buildMeshFwnAggregates(*m_primitives, params))
                 {
                     ++successCount;
                 }
@@ -551,6 +559,14 @@ namespace gladius
         {
             GLADIUS_FWN_PREP_SCOPE("ComputeCore::buildMeshFwnAggregates wait for GPU");
             CL_ERROR(m_ComputeContext->GetQueue().finish());
+        }
+
+        if (successCount > 0u)
+        {
+            // FWN aggregates are also written in-place on the GPU. Export/slicing code frequently
+            // re-uploads the primitive buffer before sampling; without this read-back that upload
+            // wipes the aggregate table while the resource manager still thinks it is built.
+            m_primitives->data.read();
         }
 
         logMsg(fmt::format("Built {} mesh FWN aggregate buffers", successCount));
@@ -575,17 +591,17 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto slicerProgram = m_programs.getSlicerProgram();
-        if (!slicerProgram || !slicerProgram->isValid())
+        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        if (!meshPreparationProgram)
         {
-            logMsg("Cannot build mesh sign caches: slicer program not ready");
+            logMsg("Cannot build mesh sign caches: mesh preparation program not available");
             return 0;
         }
 
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
-            if (!slicerProgram->buildMeshSignCache(*m_primitives, params))
+            if (!meshPreparationProgram->buildMeshSignCache(*m_primitives, params))
             {
                 break;
             }
@@ -645,6 +661,12 @@ namespace gladius
     void ComputeCore::generateContours(nodes::SliceParameter sliceParameter)
     {
         ProfileFunction;
+
+        if (!ensureSlicerProgramReady())
+        {
+            logMsg("Slicer program is not ready for contour generation");
+            return;
+        }
 
         if (!updateBBox())
         {
@@ -946,8 +968,7 @@ namespace gladius
 
     bool ComputeCore::isCompilationInProgress() const
     {
-        return m_programs.getRenderProgram()->isCompilationInProgress() ||
-               m_programs.getSlicerProgram()->isCompilationInProgress();
+        return m_programs.isBlockingCompilationInProgress();
     }
 
     void ComputeCore::recompileBlockingNoLock()
@@ -1070,27 +1091,63 @@ namespace gladius
     {
         ProfileFunction
 
-          if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+        std::lock_guard<std::mutex> lockSliceFuture(m_sliceFutureMutex);
 
-        if (fabs(m_lastContourSliceHeight_mm - sliceParameter.zHeight_mm) < FLT_EPSILON)
+        if (m_slicingInProgress.load(std::memory_order_acquire))
         {
             return false;
         }
 
         if (m_sliceFuture.valid())
         {
+            if (m_sliceFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            {
+                m_slicingInProgress.store(true, std::memory_order_release);
+                return false;
+            }
             m_sliceFuture.get();
         }
+
+        if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        if (fabs(m_lastContourSliceHeight_mm.load(std::memory_order_acquire) -
+                 sliceParameter.zHeight_mm) < FLT_EPSILON)
+        {
+            return false;
+        }
+
+        m_slicingInProgress.store(true, std::memory_order_release);
         m_sliceFuture = std::async(
+          std::launch::async,
           [&, sliceParameter]()
           {
+              struct SlicingGuard
+              {
+                  ComputeCore & core;
+                  ~SlicingGuard()
+                  {
+                      core.m_slicingInProgress.store(false, std::memory_order_release);
+                  }
+              } slicingGuard{*this};
+
               FrameMarkEnd("Slicing");
-              std::lock_guard<std::mutex> lockContourExtractor(m_contourExtractorMutex);
-              generateContours(sliceParameter);
+              try
+              {
+                  std::lock_guard<std::mutex> lockContourExtractor(m_contourExtractorMutex);
+                  generateContours(sliceParameter);
+              }
+              catch (std::exception const & e)
+              {
+                  logMsg(std::string("Contour generation failed: ") + e.what());
+              }
+              catch (...)
+              {
+                  logMsg("Contour generation failed with an unknown error");
+              }
               FrameMarkEnd("Slicing");
           });
         return true;
@@ -1098,25 +1155,14 @@ namespace gladius
 
     void ComputeCore::invalidateContourCache()
     {
-        m_lastContourSliceHeight_mm = std::numeric_limits<cl_float>::quiet_NaN();
+        m_lastContourSliceHeight_mm.store(std::numeric_limits<cl_float>::quiet_NaN(),
+                                          std::memory_order_release);
     }
 
     bool ComputeCore::isSlicingInProgress() const
     {
         ProfileFunction
-
-          std::lock_guard<std::recursive_mutex>
-            lock(m_computeMutex);
-        if (!m_sliceFuture.valid())
-        {
-            return false;
-        }
-
-        if (fabs(m_lastContourSliceHeight_mm - m_sliceHeight_mm) < FLT_EPSILON)
-        {
-            return false;
-        }
-        return m_sliceFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+        return m_slicingInProgress.load(std::memory_order_acquire);
     }
 
     std::mutex & ComputeCore::getContourExtractorMutex()
@@ -1165,6 +1211,23 @@ namespace gladius
         return m_programs.isAnyCompilationInProgressNonBlocking();
     }
 
+    bool ComputeCore::ensureSlicerProgramReady()
+    {
+        ProfileFunction;
+
+        try
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+            m_programs.setVdbRequired(requiresNanoVdbLocked());
+            return m_programs.ensureSlicerProgramCompiled();
+        }
+        catch (std::exception const & e)
+        {
+            logMsg(std::string("Could not prepare slicer program: ") + e.what());
+            return false;
+        }
+    }
+
     bool ComputeCore::updateBBox()
     {
         return updateBoundingBoxFast();
@@ -1199,7 +1262,11 @@ namespace gladius
 
         m_boundingBox.reset();
         invalidatePreCompSdf("refreshProgram");
-        if (m_codeGenerator == CodeGenerator::CommandStream)
+        auto commandStreamKernel = std::optional<std::string>{};
+        auto optimizedKernel = std::optional<std::string>{};
+
+        if (m_codeGenerator == CodeGenerator::CommandStream ||
+            m_codeGenerator == CodeGenerator::Automatic)
         {
             std::stringstream modelKernel;
             getResourceContext()->getCommandBuffer().clear();
@@ -1219,17 +1286,45 @@ namespace gladius
 
             getResourceContext()->getCommandBuffer().write();
 
-            m_programs.setModelSource(modelKernel.str());
+            commandStreamKernel = modelKernel.str();
         }
 
-        if (m_codeGenerator == CodeGenerator::Code)
+        if (m_codeGenerator == CodeGenerator::Code || m_codeGenerator == CodeGenerator::Automatic)
         {
-            std::stringstream optimizedKernel;
+            std::stringstream optimizedKernelStream;
             nodes::ToOclVisitor visitor;
             assembly->visitNodes(visitor);
-            visitor.write(optimizedKernel);
+            visitor.write(optimizedKernelStream);
 
-            m_programs.setModelSource(optimizedKernel.str());
+            optimizedKernel = optimizedKernelStream.str();
+        }
+
+        if (m_codeGenerator == CodeGenerator::Automatic)
+        {
+            if (!commandStreamKernel.has_value() || !optimizedKernel.has_value())
+            {
+                logMsg("Automatic code generation failed to create both render sources");
+                return;
+            }
+            m_programs.setModelSources(*optimizedKernel, *commandStreamKernel, true);
+        }
+        else if (m_codeGenerator == CodeGenerator::CommandStream)
+        {
+            if (!commandStreamKernel.has_value())
+            {
+                logMsg("Command-stream code generation failed to create a render source");
+                return;
+            }
+            m_programs.setModelSources(*commandStreamKernel, *commandStreamKernel, false);
+        }
+        else if (m_codeGenerator == CodeGenerator::Code)
+        {
+            if (!optimizedKernel.has_value())
+            {
+                logMsg("Optimized code generation failed to create a render source");
+                return;
+            }
+            m_programs.setModelSource(*optimizedKernel);
         }
 
         // Capture parameter signature after code generation for fast-path validation
@@ -1246,6 +1341,22 @@ namespace gladius
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         refreshProgram(assembly);
     }
+
+    [[nodiscard]] bool ComputeCore::isRenderProgramReady() const
+    {
+        auto renderProgram = getBestRenderProgram();
+        if (!renderProgram)
+        {
+            return false;
+        }
+        return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
+    }
+
+    std::optional<bool> ComputeCore::tryIsRenderProgramReady() const
+    {
+        return m_programs.tryIsBestRenderProgramReady();
+    }
+
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
         if (!m_meshResourceState)
@@ -1256,12 +1367,7 @@ namespace gladius
         {
             return false;
         }
-        auto renderProgram = getBestRenderProgram();
-        if (!renderProgram)
-        {
-            return false;
-        }
-        return renderProgram->isValid() && !renderProgram->isCompilationInProgress();
+        return isRenderProgramReady();
     }
 
     void ComputeCore::compileSlicerProgramBlocking()
@@ -1549,8 +1655,8 @@ namespace gladius
                    << " precompValid="
                    << (m_precompSdfIsValid.load(std::memory_order_acquire) ? 1 : 0)
                    << " renderProgValid="
-                   << (m_programs.getRenderProgram() &&
-                       !m_programs.getRenderProgram()->isCompilationInProgress())
+                   << (m_programs.getBestRenderProgram() &&
+                       !m_programs.getBestRenderProgram()->isCompilationInProgress())
                    << " slicerValid="
                    << (m_programs.getSlicerProgram() && m_programs.getSlicerProgram()->isValid());
                 logMsg(ss.str());
@@ -1662,26 +1768,17 @@ namespace gladius
 
     SharedContourExtractor ComputeCore::getContour() const
     {
-        // Create a local copy of the future to avoid race conditions
-        // We must NOT hold the mutex while waiting to avoid deadlock
-        std::future<void> localFuture;
+        // Preserve the existing synchronous getter behavior for CLI/API callers, but never take
+        // m_computeMutex here. The slice worker may need that mutex while loading or compiling a
+        // model, and the UI polls getContour() from the render loop.
         {
-            std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+            std::lock_guard<std::mutex> lockSliceFuture(m_sliceFutureMutex);
             if (m_sliceFuture.valid())
             {
-                // Move the future to avoid race conditions
-                localFuture = std::move(const_cast<std::future<void> &>(m_sliceFuture));
+                m_sliceFuture.get();
             }
         }
 
-        // Wait for the future outside the mutex to avoid deadlock
-        if (localFuture.valid())
-        {
-            localFuture.get();
-        }
-
-        // Now acquire the mutex to safely return the contour
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         return m_contour;
     }
 
@@ -1703,17 +1800,38 @@ namespace gladius
     }
     SharedRenderProgram ComputeCore::getBestRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getBestRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
+
+    std::optional<SharedRenderProgram> ComputeCore::tryGetBestRenderProgram() const
+    {
+        auto renderProgram = m_programs.tryGetBestRenderProgram();
+        if (!renderProgram.has_value() || *renderProgram == nullptr)
+        {
+            return std::nullopt;
+        }
+        return SharedRenderProgram(*renderProgram, [](RenderProgram *) {});
+    }
+
+    RenderBackend ComputeCore::getSelectedRenderBackend() const
+    {
+        return m_programs.getSelectedRenderBackend();
+    }
+
+    std::optional<RenderBackend> ComputeCore::tryGetSelectedRenderBackend() const
+    {
+        return m_programs.tryGetSelectedRenderBackend();
+    }
+
     SharedRenderProgram ComputeCore::getPreviewRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getPreviewRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
     SharedRenderProgram ComputeCore::getOptimzedRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs.getOptimizedRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
 
@@ -2314,7 +2432,29 @@ namespace gladius
     void ComputeCore::setCodeGenerator(CodeGenerator generator)
     {
         m_codeGenerator = generator;
+        m_programs.setCodeGenerator(generator);
     }
+
+    void ComputeCore::setOptimizedRenderCompilationDeferred(bool const deferred)
+    {
+        m_programs.setOptimizedRenderCompilationDeferred(deferred);
+    }
+
+    bool ComputeCore::isOptimizedRenderCompilationDeferred() const
+    {
+        return m_programs.isOptimizedRenderCompilationDeferred();
+    }
+
+    void ComputeCore::setSlicerCompilationDeferred(bool const deferred)
+    {
+        m_programs.setSlicerCompilationDeferred(deferred);
+    }
+
+    bool ComputeCore::isSlicerCompilationDeferred() const
+    {
+        return m_programs.isSlicerCompilationDeferred();
+    }
+
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

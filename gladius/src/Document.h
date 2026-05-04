@@ -3,6 +3,7 @@
 #include "BackupManager.h"
 #include "BitmapChannel.h"
 #include "Mesh.h"
+#include "MeshSdfMethod.h"
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
@@ -438,9 +439,33 @@ namespace gladius
             return m_meshRepairConfig;
         }
 
+        /// Set the mesh-SDF evaluation configuration that subsequent 3MF imports
+        /// apply while constructing spatial mesh resources.
+        void setMeshSdfEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
+        {
+            m_meshSdfEvaluationConfig = cfg;
+        }
+
+        [[nodiscard]] MeshSdfEvaluationConfig const & getMeshSdfEvaluationConfig() const noexcept
+        {
+            return m_meshSdfEvaluationConfig;
+        }
+
+        /// Queue applying the mesh-SDF evaluation configuration to existing mesh resources.
+        /// Heavy resource rebuild/upload work is folded into the debounced background refresh so
+        /// the UI can keep showing the current preview.
+        /// @return Number of mesh resources that need a background update.
+        std::size_t queueMeshSdfEvaluationConfigUpdate(MeshSdfEvaluationConfig const & cfg);
+
         void updateFlatAssembly();
 
       private:
+        enum class RefreshMode
+        {
+            Normal,
+            InteractiveFirst
+        };
+
         [[nodiscard]] nodes::VariantParameter &
         findParameterOrThrow(ResourceId modelId,
                              std::string const & nodeName,
@@ -450,7 +475,9 @@ namespace gladius
         void mergeImpl(const std::filesystem::path & filename);
         [[nodiscard]] bool refreshModelAsync();
         void loadAllMeshResources();
-        void refreshWorker();
+        void refreshWorker(RefreshMode refreshMode = RefreshMode::Normal);
+        [[nodiscard]] std::optional<MeshSdfEvaluationConfig> takePendingMeshSdfEvaluationConfig();
+        std::size_t applyMeshSdfEvaluationConfigToResources(MeshSdfEvaluationConfig const & cfg);
 
         /// Dispatch a structural update via the existing refresh pipeline.
         /// @return true if a compilation was launched, false if one was already running.
@@ -473,6 +500,12 @@ namespace gladius
 
         /// Mesh repair configuration applied at 3MF import time.
         mesh_repair::MeshRepairConfig m_meshRepairConfig{};
+
+        /// Mesh SDF evaluation configuration applied to newly imported spatial meshes.
+        MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+
+        mutable std::mutex m_pendingMeshSdfEvaluationConfigMutex;
+        std::optional<MeshSdfEvaluationConfig> m_pendingMeshSdfEvaluationConfig;
 
         bool m_primitiveDateNeedsUpdate{true};
 

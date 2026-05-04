@@ -15,6 +15,7 @@
 #include "ResourceManager.h"
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGridManager.h"
+#include "compute/ManifoldDualContouringProgram.h"
 #include "io/3mf/Lib3mfLoader.h"
 #include "kernel/types.h"
 #include "ui/OrbitalCamera.h"
@@ -300,6 +301,111 @@ namespace gladius::tests
     // ========================================================================
     // Benchmark Tests
     // ========================================================================
+
+    /// Regression: the analytical GPU model path must return actual mesh SDF
+    /// values for every mesh evaluation backend. Timing-only render tests can
+    /// pass even when the mesh branch evaluates to empty space, so sample the
+    /// model function directly at known inside/outside points.
+    TEST_F(MeshSdfPerformance_Test, GpuSdfEvaluation_AllMeshMethods_ReturnsMeshDistance)
+    {
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createIcosphere(vertices, indices, 10.0f, 2);
+
+        auto core = std::make_shared<ComputeCore>(
+            m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives, nullptr);
+
+        gladius::compute::ManifoldDualContouringProgram sampler(
+            m_context, core->getResourceContext());
+        sampler.setLogger(m_logger);
+        sampler.setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        float const distance = payload(pos, 0, primitivesSize, PASS_PAYLOAD_ARGS);
+        return (float4)(0.0f, 0.0f, 0.0f, distance);
+    }
+    )CLC");
+
+        struct MethodCase
+        {
+            char const * label;
+            MeshSdfMethod method;
+        };
+        std::array<MethodCase, 3> const cases = {{
+            {"PureBVH", MeshSdfMethod::PureBVH},
+            {"VoxelAccelerated", MeshSdfMethod::VoxelAccelerated},
+            {"FastWindingNumber", MeshSdfMethod::FastWindingNumber},
+        }};
+
+        for (auto const & c : cases)
+        {
+            MeshSdfEvaluationConfig cfg{};
+            cfg.method = c.method;
+            cfg.useEarlyExit = false;
+            cfg.fwnUseSignCache = false;
+            cfg.fwnBeta = 4.0f;
+
+            MeshBVHBuildParams params;
+            params.maxPrimitivesPerLeaf = 4;
+            params.maxDepth = 32;
+            params.traversalCost = 1.0f;
+            params.intersectionCost = 1.0f;
+            MeshBVHBuilder builder;
+
+            ResourceKey key(ResourceId{1000}, ResourceType::Mesh);
+            SpatialMeshResource resource(key, builder.build(vertices, indices, params), cfg);
+
+            auto & settings = core->getResourceContext()->getRenderingSettings();
+            settings.meshInflationDistance = 0.0f;
+            settings.meshFwnBeta = cfg.fwnBeta;
+            settings.meshFwnFarFieldFactor = 0.0f;
+            settings.flags |= RF_DISABLE_MESH_EARLY_EXIT;
+            if (c.method == MeshSdfMethod::FastWindingNumber)
+            {
+                settings.flags |= RF_USE_MESH_FWN;
+            }
+            else
+            {
+                settings.flags &= ~RF_USE_MESH_FWN;
+            }
+
+            primitives->clear();
+            resource.write(*primitives);
+            primitives->write();
+
+            if (c.method == MeshSdfMethod::VoxelAccelerated)
+            {
+                auto params = resource.getVoxelGridBuildParams();
+                ASSERT_TRUE(params.has_value()) << c.label;
+                ASSERT_EQ(core->buildMeshVoxelGrids({*params}), 1u) << c.label;
+            }
+            else if (c.method == MeshSdfMethod::FastWindingNumber)
+            {
+                auto params = resource.getFwnAggregateBuildParams();
+                ASSERT_TRUE(params.has_value()) << c.label;
+                ASSERT_EQ(core->buildMeshFwnAggregates({*params}), 1u) << c.label;
+            }
+
+            // Export and layer extraction paths upload primitives again before sampling. GPU-built
+            // mesh caches must survive that upload via host/device synchronization.
+            primitives->write();
+
+            auto const distances = sampler.evaluateSdfBatch(
+                {Eigen::Vector3f{0.0f, 0.0f, 0.0f}, Eigen::Vector3f{15.0f, 0.0f, 0.0f}},
+                *primitives,
+                0.0f);
+            ASSERT_EQ(distances.size(), 2u) << c.label;
+            EXPECT_LT(distances[0], -5.0f) << c.label << " center distance=" << distances[0];
+            EXPECT_GT(distances[1], 2.0f) << c.label << " outside distance=" << distances[1];
+        }
+    }
 
     /// T001-T003: Baseline performance benchmark with procedural sphere
     TEST_F(MeshSdfPerformance_Test, Baseline_ProceduralSphere_RecordsPerformance)

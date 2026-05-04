@@ -237,6 +237,11 @@ float intersection(float sdfA, float sdfB)
 
 float uniteSmooth(float sdfA, float sdfB, float smoothingIntensity)
 {
+    if (smoothingIntensity <= 0.0f)
+    {
+        return min(sdfA, sdfB);
+    }
+
     float const ratio = clamp(0.5f + 0.5f * (sdfB - sdfA) / smoothingIntensity, 0.0f, 1.0f);
     return mix(sdfB, sdfA, ratio) - smoothingIntensity * ratio * (1.0f - ratio);
 }

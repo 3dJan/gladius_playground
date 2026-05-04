@@ -3,6 +3,7 @@
 #include "BeamLatticeResource.h"
 #include "Mesh.h"
 #include "MeshRepair.h"
+#include "MeshSdfMethod.h"
 #include "nodes/Assembly.h"
 #include "nodes/Model.h"
 
@@ -60,6 +61,12 @@ namespace gladius::io
         void setMeshRepairConfig(mesh_repair::MeshRepairConfig const & cfg)
         {
             m_meshRepairConfig = cfg;
+        }
+
+        /// Configure mesh-SDF evaluation for spatial mesh resources created by this importer.
+        void setMeshSdfEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
+        {
+            m_meshSdfEvaluationConfig = cfg;
         }
 
         void load(std::filesystem::path const & filename, Document & doc);
@@ -268,6 +275,7 @@ namespace gladius::io
         NodeMaps m_nodeMaps;
 
         mesh_repair::MeshRepairConfig m_meshRepairConfig{};
+        MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
     };
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);

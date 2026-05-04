@@ -4,8 +4,6 @@
 #include "mcp/MCPServer.h"
 #endif
 #include "Document.h"
-#include "ResourceManager.h"
-#include "SpatialMeshResource.h"
 #include "ui/MainWindow.h"
 
 #include <filesystem>
@@ -295,8 +293,9 @@ namespace gladius
             return 0;
         }
 
-        // 1) Mesh repair config: applies on the next 3MF import.
+        // 1) Mesh import configs: apply on the next 3MF import.
         document->setMeshRepairConfig(m_meshSdfSettings.repairConfig());
+        document->setMeshSdfEvaluationConfig(m_meshSdfSettings.evaluationConfig());
 
         // 2) Evaluation config: push to existing SpatialMeshResource instances.
         auto const evalCfg = m_meshSdfSettings.evaluationConfig();
@@ -330,38 +329,7 @@ namespace gladius
             }
         }
 
-        std::size_t rebuilt = 0;
-        auto & resources = document->getResourceManager();
-        for (auto const & [key, resource] : resources.getResourceMap())
-        {
-            if (key.getResourceType() != ResourceType::Mesh)
-            {
-                continue;
-            }
-            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
-            if (spatialMesh == nullptr)
-            {
-                continue;
-            }
-            if (spatialMesh->setEvaluationConfig(evalCfg))
-            {
-                ++rebuilt;
-            }
-        }
-        if (rebuilt > 0u)
-        {
-            // A method/resolution change may have regenerated SpatialMeshResource
-            // payloads (for example, lazily adding FWN aggregates/sign-cache storage).
-            // Mark primitive data dirty and push it once so the renderer never sees
-            // runtime FWN flags with an old non-FWN GPU payload.
-            document->invalidatePrimitiveData();
-            if (!document->updateParameter() && m_globalLogger)
-            {
-                m_globalLogger->logWarning(
-                  "Mesh SDF setting change rebuilt resource payloads, but parameter upload did not complete");
-            }
-        }
-        return rebuilt;
+        return document->queueMeshSdfEvaluationConfigUpdate(evalCfg);
     }
 
     bool Application::showUI()

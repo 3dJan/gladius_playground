@@ -391,6 +391,8 @@ namespace gladius
                                            const std::string & dynamicSource,
                                            BuildCallBack & callBack);
 
+        void buildCompleteProgram(const FileNames & filenames, BuildCallBack & callBack);
+
         void loadAndCompileLib(const FileNames & filenames);
 
         [[nodiscard]] bool isValid() const;

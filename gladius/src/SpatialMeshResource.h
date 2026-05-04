@@ -30,6 +30,14 @@ namespace gladius
         /// @param data Pre-built BVH and mesh data (moved)
         explicit SpatialMeshResource(ResourceKey key, SpatialMeshData && data);
 
+        /// Construct from pre-built spatial data with an explicit SDF evaluation configuration.
+        /// @param key Resource identifier
+        /// @param data Pre-built BVH and mesh data (moved)
+        /// @param evaluationConfig Mesh SDF evaluation configuration used while serializing payload data
+        SpatialMeshResource(ResourceKey key,
+                            SpatialMeshData && data,
+                            MeshSdfEvaluationConfig const & evaluationConfig);
+
         /// Construct from raw mesh (will build BVH)
         /// @param key Resource identifier
         /// @param vertices Vertex positions

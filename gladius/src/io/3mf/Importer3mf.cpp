@@ -1317,7 +1317,8 @@ namespace gladius::io
             MeshBVHBuilder builder;
             spatialData = builder.build(vertices, indices);
         }
-        doc.getGeneratorContext().resourceManager.addResource(key, std::move(spatialData));
+                doc.getGeneratorContext().resourceManager.addResource(
+                    key, std::move(spatialData), m_meshSdfEvaluationConfig);
 
         // Also load beam lattice if present
         loadBeamLatticeIfNecessary(model, meshObject, doc);
@@ -2221,12 +2222,16 @@ namespace gladius::io
     void loadFrom3mfFile(std::filesystem::path const filename, Document & doc)
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
         importer.load(filename, doc);
     }
 
     void mergeFrom3mfFile(std::filesystem::path filename, Document & doc)
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
         importer.merge(filename, doc);
     }
 

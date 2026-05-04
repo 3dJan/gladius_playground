@@ -1,8 +1,7 @@
 #pragma once
 #include "../EventLogger.h"
 #include "../compute/ComputeCore.h"
-#include "../io/3mf/ColorCompatibilityPlanner.h"
-#include "../io/3mf/MeshWriter3mf.h"
+#include "../io/3mf/MeshColorExportPipeline.h"
 #include "../nodes/Assembly.h"
 #include "LayerBasedMeshExporter.h"
 #include "vdb.h"
@@ -19,14 +18,7 @@ namespace gladius
 
 namespace gladius::vdb
 {
-    /// Final export-state record produced by the mesh color export pipeline
-    struct ColoredMeshExportResult
-    {
-        io::ExportRepresentation representation = io::ExportRepresentation::StandardTriangleColor;
-        bool standardsOnly = true;
-        bool transparencyIgnored = false;
-        std::vector<std::string> warnings;
-    };
+    using ColoredMeshExportResult = io::ColoredMeshExportResult;
 
     class MeshExporter3mf : public gladius::io::LayerBasedMeshExporter
     {

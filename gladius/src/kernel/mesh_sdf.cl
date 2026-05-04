@@ -62,7 +62,7 @@ struct ClosestPointResult
 /// @param bboxMin Box minimum
 /// @param bboxMax Box maximum
 /// @return Squared distance (0 if inside)
-inline float sqDistanceToAABB(float3 pos, float3 bboxMin, float3 bboxMax)
+static inline float sqDistanceToAABB(float3 pos, float3 bboxMin, float3 bboxMax)
 {
     float3 d = fmax(bboxMin - pos, fmax(pos - bboxMax, (float3)(0.0f)));
     return dot(d, d);
@@ -74,7 +74,7 @@ inline float sqDistanceToAABB(float3 pos, float3 bboxMin, float3 bboxMax)
 /// @param v0, v1, v2 Triangle vertices
 /// @param result Output: closest point details
 /// @return Squared distance
-inline float sqTriangleWithClosestPoint(float3 pos, 
+static inline float sqTriangleWithClosestPoint(float3 pos, 
                                         float3 v0, float3 v1, float3 v2,
                                         struct ClosestPointResult* result)
 {
@@ -264,7 +264,7 @@ inline float sqTriangleWithClosestPoint(float3 pos,
 /// @param pos Query point
 /// @param v0, v1, v2 Triangle vertices
 /// @return Squared distance
-inline float sqTriangleFast(float3 pos, float3 v0, float3 v1, float3 v2)
+static inline float sqTriangleFast(float3 pos, float3 v0, float3 v1, float3 v2)
 {
     // Edge vectors
     float3 ab = v1 - v0;
@@ -360,7 +360,7 @@ inline float sqTriangleFast(float3 pos, float3 v0, float3 v1, float3 v2)
 /// @param outRightChild Output: right child index (-1 if leaf)  
 /// @param outPrimStart Output: first primitive index (leaf only)
 /// @param outPrimCount Output: primitive count (leaf only)
-inline void loadBVHNodeVectorized(__global float const* nodes,
+static inline void loadBVHNodeVectorized(__global float const* nodes,
                                   int nodeIdx,
                                   float3* outBboxMin,
                                   float3* outBboxMax,
@@ -396,7 +396,7 @@ inline void loadBVHNodeVectorized(__global float const* nodes,
 /// @param outV0 Output: first vertex xyz
 /// @param outV1 Output: second vertex xyz
 /// @param outV2 Output: third vertex xyz
-inline void loadTriangleVectorized(__global float const* triangles,
+static inline void loadTriangleVectorized(__global float const* triangles,
                                    int triIdx,
                                    float3* outV0,
                                    float3* outV1,
@@ -423,7 +423,7 @@ inline void loadTriangleVectorized(__global float const* triangles,
 /// @param outV1 Output: second vertex xyz
 /// @param outV2 Output: third vertex xyz
 /// @param outFaceNormal Output: precomputed face normal xyz
-inline void loadTriangleWithNormalVectorized(__global float const* triangles,
+static inline void loadTriangleWithNormalVectorized(__global float const* triangles,
                                              int triIdx,
                                              float3* outV0,
                                              float3* outV1,
@@ -451,7 +451,7 @@ inline void loadTriangleWithNormalVectorized(__global float const* triangles,
 /// @param nodeIdx Node index to check
 /// @param pos Query point
 /// @return Squared distance to node's bounding box
-inline float sqDistanceToNodeAABB(__global float const* nodes, int nodeIdx, float3 pos)
+static inline float sqDistanceToNodeAABB(__global float const* nodes, int nodeIdx, float3 pos)
 {
     int const baseOffset = nodeIdx * 12;
     float4 bboxMin = vload4(0, nodes + baseOffset);
@@ -471,7 +471,7 @@ inline float sqDistanceToNodeAABB(__global float const* nodes, int nodeIdx, floa
 /// @param triIdx Index of the host triangle (used to address edgeNeighbors)
 /// @return Pseudo-normal at closest point. Always returned in the host triangle's outward
 ///         hemisphere — i.e. dot(result, precomputedFaceNormal) >= 0.
-inline float3 computePseudoNormalFast(struct ClosestPointResult const* result,
+static inline float3 computePseudoNormalFast(struct ClosestPointResult const* result,
                                       float3 v0, float3 v1, float3 v2,
                                       float3 precomputedFaceNormal,
                                       __global struct MeshVertexNormalGPU const* vertexNormals,
@@ -543,7 +543,7 @@ inline float3 computePseudoNormalFast(struct ClosestPointResult const* result,
 /// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param triVertexIndices Vertex indices for this triangle (3 ints)
 /// @return Pseudo-normal at closest point (may need normalization check)
-inline float3 computePseudoNormal(struct ClosestPointResult const* result,
+static inline float3 computePseudoNormal(struct ClosestPointResult const* result,
                                   float3 v0, float3 v1, float3 v2,
                                   __global struct MeshVertexNormalGPU const* vertexNormals,
                                   int vertexNormalCount,
@@ -664,7 +664,7 @@ inline float3 computePseudoNormal(struct ClosestPointResult const* result,
 ///                            If > 0, traversal stops when minSqDist < earlyExitDistanceSq.
 ///                            Set to 0.0 to disable (find exact minimum distance).
 /// @return float2(signedDistance, nearestTriangleIndex)
-inline float2 spatialMeshSDF_Core(float3 pos,
+static inline float2 spatialMeshSDF_Core(float3 pos,
                                   int nodesOffset,
                                   int trianglesOffset,
                                   int normalsOffset,
@@ -855,7 +855,7 @@ inline float2 spatialMeshSDF_Core(float3 pos,
 ///                            If > 0, traversal stops when minSqDist < earlyExitDistanceSq.
 ///                            Set to 0.0 to disable (find exact minimum distance).
 /// @return Signed distance (negative inside, positive outside)
-inline float spatialMeshSDFWithEarlyExit(float3 pos,
+static inline float spatialMeshSDFWithEarlyExit(float3 pos,
                                          int nodesOffset,
                                          int trianglesOffset,
                                          int normalsOffset,
@@ -885,7 +885,7 @@ inline float spatialMeshSDFWithEarlyExit(float3 pos,
 /// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param data Global primitive data array
 /// @return float2(signedDistance, nearestTriangleIndex)
-inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
+static inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
                                                 int nodesOffset,
                                                 int trianglesOffset,
                                                 int normalsOffset,
@@ -914,7 +914,7 @@ inline float2 spatialMeshSDF_WithTriangleIndex(float3 pos,
 /// @param vertexNormalCount Number of vertex normals (for bounds checking)
 /// @param data Global primitive data array
 /// @return Signed distance (negative inside, positive outside)
-inline float spatialMeshSDF(float3 pos,
+static inline float spatialMeshSDF(float3 pos,
                             int nodesOffset,
                             int trianglesOffset,
                             int normalsOffset,
@@ -942,7 +942,7 @@ inline float spatialMeshSDF(float3 pos,
 /// @param triCount Number of triangles
 /// @param data Global primitive data array
 /// @return Unsigned (absolute) distance to mesh surface
-inline float spatialMeshUnsignedDistance(float3 pos,
+static inline float spatialMeshUnsignedDistance(float3 pos,
                                          int nodesOffset,
                                          int trianglesOffset,
                                          int nodeCount,
@@ -1077,7 +1077,7 @@ inline float spatialMeshUnsignedDistance(float3 pos,
 /// @param voxelData Pointer to voxel data array
 /// @param voxelCount Total number of voxels
 /// @return float2(nearestTriIndex, approxSignedDist), or (-1, FLT_MAX) if out of bounds
-inline float2 lookupMeshVoxel(float3 pos,
+static inline float2 lookupMeshVoxel(float3 pos,
                                __global float const* header,
                                __global float const* voxelData,
                                int voxelCount)
@@ -1128,7 +1128,7 @@ inline float2 lookupMeshVoxel(float3 pos,
 /// @param vertexNormalCount Number of vertex normals
 /// @param data Global data array
 /// @return Signed distance
-inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
+static inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
                                               int headerOffset,
                                               int voxelDataOffset,
                                               int nodesOffset,
@@ -1204,7 +1204,7 @@ inline float spatialMeshSDF_VoxelAccelerated(float3 pos,
 
 /// Solid angle subtended at the origin by a triangle (a, b, c).
 /// @return Signed solid angle in (-2π, 2π].
-inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
+static inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 {
     float const la = length(a);
     float const lb = length(b);
@@ -1243,7 +1243,7 @@ inline float fwnSolidAngleAtOrigin(float3 a, float3 b, float3 c)
 ///             This is used only in a small near-surface band and is capped
 ///             by scene scale to avoid long-running kernels.
 /// @return winding number (~1 inside, ~0 outside; signed for non-closed input).
-inline float fwnHierarchical(float3 pos,
+static inline float fwnHierarchical(float3 pos,
                              int nodesOffset,
                              int trianglesOffset,
                              int fwnAggregatesOffset,
@@ -1382,7 +1382,7 @@ inline float fwnHierarchical(float3 pos,
 
 /// Lookup the coarse FWN sign cache.
 /// @return 1 for inside, -1 for outside, 0 when the cache cannot be used.
-inline int lookupFwnSignCache(float3 pos,
+static inline int lookupFwnSignCache(float3 pos,
                               int nodesOffset,
                               int signCacheDataOffset,
                               int signCacheResolution,
@@ -1453,7 +1453,7 @@ inline int lookupFwnSignCache(float3 pos,
 /// instead of running the hierarchical winding traversal. For a typical
 /// render (most pixels far from the surface) this drops FWN cost to nearly
 /// the cost of the magnitude path on the bulk of the image.
-inline float spatialMeshSDF_FastWindingNumber(float3 pos,
+static inline float spatialMeshSDF_FastWindingNumber(float3 pos,
                                               int nodesOffset,
                                               int trianglesOffset,
                                               int normalsOffset,

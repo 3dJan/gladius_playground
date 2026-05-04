@@ -130,9 +130,13 @@ namespace gladius::nodes
 
         void visit(SignedDistanceToMesh & signedDistanceToMesh) override;
 
+        void visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice) override;
+
         void visit(UnsignedDistanceToMesh & unsignedDistanceToMesh) override;
 
         void visit(DecomposeVector & decomposeVector) override;
+
+        void visit(DecomposeMatrix & decomposeMatrix) override;
 
         void visit(Inverse & inverse) override;
 
