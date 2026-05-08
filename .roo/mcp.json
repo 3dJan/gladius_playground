@@ -1,0 +1,75 @@
+{
+	"mcpServers": {
+		"context7": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"@upstash/context7-mcp@1.0.31"
+			],
+			"env": {
+				"CONTEXT7_API_KEY": ""
+			},
+			"alwaysAllow": [
+				"resolve-library-id",
+				"get-library-docs"
+			]
+		},
+		"oraios/serena": {
+			"type": "stdio",
+			"command": "uvx",
+			"args": [
+				"--from",
+				"git+https://github.com/oraios/serena",
+				"serena",
+				"start-mcp-server",
+				"serena==latest",
+				"--context",
+				"ide-assistant"
+			],
+			"alwaysAllow": [
+				"replace_content",
+				"replace_symbol_body",
+				"insert_after_symbol",
+				"insert_before_symbol",
+				"get_symbols_overview",
+				"find_symbol",
+				"find_referencing_symbols",
+				"find_implementations",
+				"find_declaration",
+				"get_diagnostics_for_file",
+				"rename_symbol",
+				"safe_delete_symbol",
+				"write_memory",
+				"read_memory",
+				"delete_memory",
+				"list_memories",
+				"rename_memory",
+				"edit_memory",
+				"activate_project",
+				"check_onboarding_performed",
+				"get_current_config",
+				"onboarding",
+				"initial_instructions"
+			]
+		},
+		"microsoft/markitdown": {
+			"type": "stdio",
+			"command": "uvx",
+			"args": [
+				"markitdown-mcp==0.0.1a4"
+			],
+			"disabled": true,
+			"alwaysAllow": []
+		},
+		"gladius": {
+			"type": "stdio",
+			"command": "/home/jan/projects/gladius/gladius/out/build/linux-releaseWithDebug/src/gladiusmcp",
+			"args": [
+				"--mcp-stdio",
+				"--headless"
+			],
+			"disabled": true,
+			"alwaysAllow": []
+		}
+	}
+}
