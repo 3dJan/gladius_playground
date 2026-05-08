@@ -290,6 +290,17 @@ namespace gladius::ui
             }
         }
 
+        if (ImGui::CollapsingHeader("Gamepad"))
+        {
+            if (ImGui::Button("Configure Gamepad"))
+            {
+                showGamepadSettings();
+            }
+            ImGui::Separator();
+            ImGui::Text("Use a gamepad to navigate the model editor");
+            ImGui::Separator();
+        }
+
         auto z = m_core->getSliceHeight();
         if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
         {
@@ -624,6 +635,12 @@ namespace gladius::ui
         ImGuiIO & io = ImGui::GetIO();
         processShortcuts(ShortcutContext::Global);
 
+        // Process gamepad input (only active when Model Editor is visible)
+        if (m_modelEditor.isVisible())
+        {
+            m_modelEditor.processGamepadInput();
+        }
+
         // If compute is available, validate context
         if (m_computeAvailable && m_core)
         {
@@ -924,6 +941,11 @@ namespace gladius::ui
                 if (m_meshSdfSettingsDialog.isVisible())
                 {
                     m_meshSdfSettingsDialog.render();
+                }
+
+                if (m_gamepadSettingsDialog.isVisible())
+                {
+                    m_gamepadSettingsDialog.render();
                 }
             }
 
@@ -3335,6 +3357,11 @@ namespace gladius::ui
     void MainWindow::showMeshSdfSettings()
     {
         m_meshSdfSettingsDialog.show();
+    }
+
+    void MainWindow::showGamepadSettings()
+    {
+        m_gamepadSettingsDialog.show();
     }
 
     void MainWindow::setMeshSdfSettings(MeshSdfSettings * settings,

@@ -10,6 +10,10 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "LibraryDragPayload.h"
+#include "CanvasPanController.h"
+#include "GamepadActionDispatcher.h"
+#include "GamepadState.h"
+#include "GamepadVisualFeedback.h"
 #include "LinkDragState.h"
 #include "NodeClipboard.h"
 #include "ValidationOverlay.h"
@@ -179,9 +183,22 @@ namespace gladius::ui
         // Extraction helper
         void extractSelectedNodesToFunction(const std::string & functionName);
 
-        // Copy/Paste helpers
+      public:
+        // Gamepad dispatcher helpers (public for GamepadActionDispatcher)
+        void undo();
+        void redo();
+        void processGamepadInput();
+        
+        /// @brief Get currently selected nodes from the editor.
+        std::vector<ed::NodeId> getSelectedNodes() const;
+        
+        /// @brief Copy selected nodes to clipboard.
         void copySelectionToClipboard();
+        
+        /// @brief Paste clipboard content at mouse position.
         void pasteClipboardAtMouse();
+        
+        /// @brief Check if clipboard has content.
         bool hasClipboard() const;
 
         void readBackNodePositions();
@@ -229,9 +246,6 @@ namespace gladius::ui
         void createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
                                             nodes::SharedModel const & sourceModel);
 
-        void undo();
-        void redo();
-
         // Helper method to check if a string matches the current filter
         bool matchesNodeFilter(const std::string & text) const;
 
@@ -242,7 +256,7 @@ namespace gladius::ui
         ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
 
         /// Returns the editor context for the current model, or nullptr if no model is set.
-        ed::EditorContext * getCurrentEditorContext();
+        ed::EditorContext * getCurrentEditorContext() const;
 
         bool m_visible = false;
         std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
@@ -388,6 +402,13 @@ namespace gladius::ui
 
         // Code view for snippet editing
         CodeView m_codeView;
+
+        // Gamepad system
+        GamepadActionMap m_gamepadActionMap;
+        std::unique_ptr<NodeFocusManager> m_nodeFocusManager;
+        std::unique_ptr<CanvasPanController> m_canvasPanController;
+        GamepadActionDispatcher m_gamepadDispatcher;
+        GamepadVisualFeedback m_gamepadVisualFeedback;
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

@@ -28,6 +28,7 @@
 #include "ShortcutManager.h"
 #include "ShortcutSettingsDialog.h"
 #include "MeshSdfSettingsDialog.h"
+#include "GamepadSettingsDialog.h"
 
 #include <chrono>
 
@@ -132,6 +133,11 @@ namespace gladius::ui
          * @brief Show the mesh SDF settings dialog
          */
         void showMeshSdfSettings();
+
+        /**
+         * @brief Show the gamepad settings dialog
+         */
+        void showGamepadSettings();
 
         /**
          * @brief Bind the persistent mesh SDF settings + apply hook used by the
@@ -337,6 +343,9 @@ namespace gladius::ui
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         ShortcutSettingsDialog m_shortcutSettingsDialog;
         MeshSdfSettingsDialog m_meshSdfSettingsDialog;
+
+        // Gamepad system
+        GamepadSettingsDialog m_gamepadSettingsDialog;
         /// Mirror of the dialog's Apply callback so we can invoke it
         /// programmatically after a freshly loaded document — otherwise the
         /// persisted mesh-SDF method (e.g. FastWindingNumber) is never pushed

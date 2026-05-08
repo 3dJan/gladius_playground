@@ -1,4 +1,9 @@
 #include <exception>
+#include "CanvasPanController.h"
+#include "GamepadActionDispatcher.h"
+#include "GamepadState.h"
+#include "GamepadVisualFeedback.h"
+#include "NodeFocusManager.h"
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
 #include <imguinodeeditor.h>
@@ -302,14 +307,14 @@ namespace gladius::ui
         m_editorContexts[functionId] = ctx;
         return ctx;
     }
-
-    ed::EditorContext * ModelEditor::getCurrentEditorContext()
+    
+    ed::EditorContext * ModelEditor::getCurrentEditorContext() const
     {
         if (!m_currentModel)
         {
             return nullptr;
         }
-        return getOrCreateEditorContext(m_currentModel->getResourceId());
+        return const_cast<ModelEditor *>(this)->getOrCreateEditorContext(m_currentModel->getResourceId());
     }
 
     void ModelEditor::outline()
@@ -3498,6 +3503,44 @@ namespace gladius::ui
 
         // Track last paste canvas position for offset nudging
         m_clipboard.updatePastePosition(canvas);
+    }
+
+    void ModelEditor::processGamepadInput()
+    {
+        // Update gamepad state from ImGui
+        GamepadState::instance().update();
+
+        // Early exit if no gamepad is connected
+        if (!GamepadState::instance().isAnyConnected())
+        {
+            return;
+        }
+
+        // Initialize focus manager and canvas pan controller if needed
+        if (!m_nodeFocusManager)
+        {
+            m_nodeFocusManager = std::make_unique<NodeFocusManager>();
+        }
+        if (!m_canvasPanController)
+        {
+            m_canvasPanController = std::make_unique<CanvasPanController>();
+        }
+
+        // Dispatch actions through the dispatcher (this handles navigation, selection, etc.)
+        m_gamepadDispatcher.update(GamepadState::instance(), m_gamepadActionMap, *this);
+
+        // Render visual feedback (hover rings, toasts, context indicator)
+        if (m_gamepadVisualFeedback.isActive())
+        {
+            ImGuiIO & io = ImGui::GetIO();
+            m_gamepadVisualFeedback.update(static_cast<float>(io.DeltaTime));
+        }
+    }
+
+    std::vector<ed::NodeId> ModelEditor::getSelectedNodes() const
+    {
+        ed::EditorContext * const editorContext = getCurrentEditorContext();
+        return selectedNodes(editorContext);
     }
 
 } // namespace gladius::ui
