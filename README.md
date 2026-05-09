@@ -68,75 +68,33 @@ Gladius is designed to run on Windows and Linux, but might run on other platform
 
 # Build
 
-Consider, that there are also binary packages avilable: [![Latest Release][def]](https://github.com/3MFConsortium/gladius/releases/latest)
+> Binary packages are also available: [![Latest Release][def]](https://github.com/3MFConsortium/gladius/releases/latest)
 
-## Windows
+Step-by-step build instructions are in the platform-specific guides:
 
-- Install OpenCL SDK (see above)
-- Install vcpkg (<https://github.com/Microsoft/vcpkg>)
-- Install CMake with the Visual Studio Installer
-- Setup Windows Environment Variables:
-**VCPKG_DEFAULT_TRIPLET = x64-windows (or your platform accordingly)
-** VCPKG_ROOT = Path to your vcpkg installation (required for cmake to find the vcpkg toolchain file)
-- clone this repository and update the submodules:
+- **[Building on Linux](docs/building-linux.md)** — Debian/Ubuntu, Fedora; Clang + Ninja; vcpkg; OpenCL runtime options including Rusticl and POCL
+- **[Building on Windows](docs/building-windows.md)** — Visual Studio 2022 (MSVC v143); Ninja; vcpkg; OpenCL SDK
 
-```
-git clone https://github.com/3MFConsortium/gladius
-cd gladius
-git submodule update --init --recursive
-```
+> macOS is not supported — OpenCL is deprecated and non-functional on current macOS releases.
 
-- Configure and build the project with cmake in a Visual Studio Developer prompt:
+Both guides cover:
+- OS-level package installation
+- OpenCL runtime selection (GPU vendor drivers, Mesa Rusticl, POCL)
+- vcpkg setup
+- CMake configure and build
+- IDE setup (VS Code and, on Windows, Visual Studio)
+- Troubleshooting common problems
 
-```
-cd gladius/gladius
-mkdir build
-cd build
-cmake --preset x64-release -S ../
-cmake --build .
-```
+# Troubleshooting and Known Issues
 
-During the configuration process CMake will download and compile the dependencies using vcpkg. This might take a moment.
+## Windows — GPU hangs (TDR)
 
-## Linux
-
-- Install a OpenCL SDK (see above), some distributions provide OpenCL as a package or as part of the display driver
-- Install vcpkg (<https://github.com/Microsoft/vcpkg>)
-  For debian based distros like Ubuntu you can do
-  `apt install git curl zip unzip pkgconfig`
-  `git clone https://github.com/microsoft/vcpkg.git`
-  `cd vcpkg && ./bootstrap-vcpkg.sh`
-  For other distros consult <https://learn.microsoft.com/en-us/vcpkg/concepts/supported-hosts>
-- Install CMake and Ninja
-- clone this repository and update the submodules:
-
-```
-git clone https://github.com/3MFConsortium/gladius
-cd gladius
-git submodule update --init --recursive
-```
-
-* configure and build the project with cmake:
-
-```
-# you need to cd again to get into gladius/gladius
-cd gladius 
-mkdir build
-cd build
-cmake --preset linux-release -S ../
-cmake --build ../out/build/linux-release/
-```
-
-# Troubleshooting and known Issues
-
-# Windows + slow GPU
-
-Windows restarts the display driver if it doesn't respond in a certain time (2 s by default). This can be changed by two registry values:
+Windows restarts the display driver if it does not respond within ~2 seconds. Gladius's OpenCL compute passes can exceed this limit with complex models. Fix by increasing the TDR delay in the registry — see the [Windows build guide](docs/building-windows.md#gpu-hangs--tdr-timeout-detection-and-recovery) or:
 <https://www.pugetsystems.com/labs/hpc/Working-around-TDR-in-Windows-for-a-better-GPU-computing-experience-777/>
 
 ## Multiple GPUs
 
-The current version just takes the default GPU as OpenCL device or fallbacks to the CPU, if a CPU capable OpenCL runtime is installed. If you have a notebook with an onboard GPU and an additional discrete GPU (e.g Intel HD4xxx + NVidia), the automatic choice might take the slower one. Take a look at ComputeContext.cpp if you want to change that behavior.
+Gladius selects the first available OpenCL device, which may be the slower integrated GPU on notebooks with both integrated and discrete graphics. See `gladius/src/compute/ComputeContext.cpp` to change the device selection logic, or use your GPU driver's control panel to assign Gladius to the high-performance GPU.
 
 # Design your own models
 
