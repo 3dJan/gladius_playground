@@ -1706,6 +1706,9 @@ namespace gladius::ui
 
                     ed::Begin("Model Editor");
 
+                    // Process any pending async STL imports (must run inside ed context).
+                    processPendingStlImports();
+
                     // Clear selection now that the editor context is active
                     if (m_pendingClearSelection)
                     {
@@ -2329,6 +2332,143 @@ namespace gladius::ui
         markModelAsModified();
     }
 
+    void ModelEditor::importStlDrop(std::filesystem::path const & path, ImVec2 screenPos)
+    {
+        if (!m_doc || !m_currentModel)
+        {
+            return;
+        }
+
+        std::string const displayName = path.filename().string();
+
+        // Check for an already-loaded mesh with the same display name (dedup by filename).
+        // The geometry future is skipped; we create the nodes directly on the next frame
+        // by pushing a completed (degenerate) future. Instead we handle this inline: if found,
+        // create the nodes immediately (we may be outside the editor context here, so store
+        // a pending entry with an already-ready future that returns an empty mesh as sentinel).
+
+        auto & resourceManager = m_doc->getResourceManager();
+        for (auto const & [key, res] : resourceManager.getResourceMap())
+        {
+            auto const * mesh = dynamic_cast<MeshResource const *>(res.get());
+            if (mesh && key.getDisplayName() == displayName)
+            {
+                // Already imported – reuse existing resource, create nodes next frame.
+                // We store a sentinel future (valid but returns empty mesh) so the polling
+                // loop can distinguish "dedup path" by checking the display name.
+                // Simpler: store the ResourceKey in a small wrapper struct and create a
+                // ready future. We use std::async with deferred launch for zero overhead.
+                PendingStlImport pending;
+                ResourceKey const existingKey = key;
+                pending.geometryFuture =
+                  std::async(std::launch::deferred,
+                             [existingKey]() -> vdb::TriangleMesh
+                             {
+                                 // Return empty sentinel — the display name matches an
+                                 // existing resource so processPendingStlImports will
+                                 // reuse it without calling addMeshResource.
+                                 return vdb::TriangleMesh{};
+                             });
+                pending.displayName  = displayName;
+                pending.dropScreenPos = screenPos;
+                m_pendingStlImports.push_back(std::move(pending));
+                return;
+            }
+        }
+
+        // Launch background STL load (file I/O only — document mutation stays on main thread).
+        PendingStlImport pending;
+        pending.geometryFuture = std::async(
+          std::launch::async,
+          [path]() -> vdb::TriangleMesh
+          {
+              vdb::VdbImporter reader;
+              reader.loadStl(path);
+              return reader.getMesh();
+          });
+        pending.displayName   = displayName;
+        pending.dropScreenPos = screenPos;
+        m_pendingStlImports.push_back(std::move(pending));
+    }
+
+    void ModelEditor::processPendingStlImports()
+    {
+        if (m_pendingStlImports.empty() || !m_doc || !m_currentModel)
+        {
+            return;
+        }
+
+        auto & resourceManager = m_doc->getResourceManager();
+
+        for (auto it = m_pendingStlImports.begin(); it != m_pendingStlImports.end();)
+        {
+            auto & pending = *it;
+            if (pending.geometryFuture.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
+            {
+                ++it;
+                continue;
+            }
+
+            vdb::TriangleMesh mesh = pending.geometryFuture.get();
+            std::string const & displayName = pending.displayName;
+            ImVec2 const canvasPos = ed::ScreenToCanvas(pending.dropScreenPos);
+
+            // Try to find an existing mesh resource with the same display name.
+            std::optional<ResourceKey> existingKey;
+            for (auto const & [key, res] : resourceManager.getResourceMap())
+            {
+                if (dynamic_cast<MeshResource const *>(res.get()) &&
+                    key.getDisplayName() == displayName)
+                {
+                    existingKey = key;
+                    break;
+                }
+            }
+
+            if (existingKey)
+            {
+                createMeshSdfNodesAtCanvasPos(*existingKey, canvasPos);
+            }
+            else if (!mesh.vertices.empty())
+            {
+                auto key = m_doc->addMeshResource(std::move(mesh), displayName);
+                createMeshSdfNodesAtCanvasPos(key, canvasPos);
+            }
+            else
+            {
+                // Empty mesh and no existing resource — load must have failed; log and skip.
+                if (m_doc->getSharedLogger())
+                {
+                    m_doc->getSharedLogger()->addEvent(
+                      {fmt::format("STL import failed or produced empty mesh: {}", displayName),
+                       events::Severity::Error});
+                }
+            }
+
+            it = m_pendingStlImports.erase(it);
+        }
+    }
+
+    void ModelEditor::createMeshSdfNodesAtCanvasPos(ResourceKey const & key, ImVec2 canvasPos)
+    {
+        createUndoRestorePoint("Import STL as signed distance mesh");
+
+        auto createdNode = m_currentModel->create<nodes::Resource>();
+        createdNode->setResourceId(key.getResourceId().value());
+        ed::SetNodePosition(createdNode->getId(), canvasPos);
+
+        auto signedDistanceToMesh = m_currentModel->create<nodes::SignedDistanceToMesh>();
+        ImVec2 const posWithOffset = ImVec2(canvasPos.x + 400.f, canvasPos.y);
+        m_currentModel->addLink(createdNode->getOutputValue().getId(),
+                                signedDistanceToMesh->parameter().at("mesh").getId());
+        signedDistanceToMesh->setDisplayName("SD to " + key.getDisplayName());
+        ed::SetNodePosition(signedDistanceToMesh->getId(), posWithOffset);
+
+        requestNodeFocus(signedDistanceToMesh->getId());
+        markModelAsModified();
+    }
+
     void ModelEditor::functionToolBox(ImVec2 mousePos)
     {
         auto functions = m_assembly->getFunctions();
@@ -2390,24 +2530,8 @@ namespace gladius::ui
 
             if (ImGui::Button(displayName.c_str()))
             {
-                createUndoRestorePoint("Create node");
                 auto posOnCanvas = ed::ScreenToCanvas(mousePos);
-                auto createdNode = m_currentModel->create<nodes::Resource>();
-                createdNode->setResourceId(key.getResourceId().value());
-                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
-
-                auto signedDistanceToMesh = m_currentModel->create<nodes::SignedDistanceToMesh>();
-                ImVec2 const posOnCanvasWithOffset = ImVec2(posOnCanvas.x + 400, posOnCanvas.y);
-                m_currentModel->addLink(createdNode->getOutputValue().getId(),
-                                        signedDistanceToMesh->parameter().at("mesh").getId());
-
-                signedDistanceToMesh->setDisplayName("SD to " + key.getDisplayName());
-                ed::SetNodePosition(signedDistanceToMesh->getId(), posOnCanvasWithOffset);
-
-                // Request focus on the SignedDistanceToMesh node as it's more useful to focus on
-                requestNodeFocus(signedDistanceToMesh->getId());
-
-                markModelAsModified();
+                createMeshSdfNodesAtCanvasPos(key, posOnCanvas);
             }
         }
     }

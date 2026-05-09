@@ -528,7 +528,7 @@ namespace gladius
         m_uiScale = m_baseScale * m_userScale;
     }
 
-    void GLView::handleDropCallback(GLFWwindow *, int count, const char ** paths)
+    void GLView::handleDropCallback(GLFWwindow * window, int count, const char ** paths)
     {
         // Validate parameters to prevent buffer overruns
         if (paths == nullptr || count <= 0)
@@ -536,13 +536,23 @@ namespace gladius
             return;
         }
 
+        // Capture the cursor position at the time of the drop so it can be
+        // forwarded to the drop handler (e.g. to position a new node there).
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        if (window)
+        {
+            glfwGetCursorPos(window, &cursorX, &cursorY);
+        }
+        ImVec2 const screenPos{static_cast<float>(cursorX), static_cast<float>(cursorY)};
+
         for (int i = 0; i < count; ++i)
         {
             if (paths[i] != nullptr)
             {
                 try
                 {
-                    m_fileDrop(std::filesystem::path(paths[i]));
+                    m_fileDrop(std::filesystem::path(paths[i]), screenPos);
                 }
                 catch (const std::exception & ex)
                 {

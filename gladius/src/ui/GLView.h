@@ -23,7 +23,7 @@ namespace gladius
     };
     using ViewCallBack = std::function<void()>;
     using RequestCloseCallBack = std::function<void()>;
-    using FileDropCallBack = std::function<void(const std::filesystem::path &)>;
+    using FileDropCallBack = std::function<void(const std::filesystem::path &, ImVec2)>;
 
     struct WindowSettings
     {
@@ -173,11 +173,11 @@ namespace gladius
         {
         }
 
-        static void noOpFileDrop(const std::filesystem::path &)
+        static void noOpFileDrop(const std::filesystem::path &, ImVec2)
         {
         }
 
-        void handleDropCallback(GLFWwindow *, int count, const char ** paths);
+        void handleDropCallback(GLFWwindow * window, int count, const char ** paths);
         ViewCallBack m_render = noOp;
         RequestCloseCallBack m_close = noOp;
 

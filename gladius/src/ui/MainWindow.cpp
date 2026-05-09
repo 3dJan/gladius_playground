@@ -129,7 +129,19 @@ namespace gladius::ui
         m_mainView.addViewCallBack([&]() { render(); });
         nodeEditor();
 
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
 
         // Set up welcome screen callbacks
         m_welcomeScreen.setNewModelCallback(
@@ -345,7 +357,19 @@ namespace gladius::ui
         m_renderCallback = [&]() { /* no-op until compute ready */ };
         m_mainView.setRenderCallback(m_renderCallback);
         m_mainView.addViewCallBack([&]() { render(); });
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
 
         // Start async OpenCL initialization
         startAsyncComputeInit();
