@@ -5,8 +5,10 @@
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGrid.h"
 #include "Profiling.h"
+#include "io/vdb.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace gladius
@@ -103,6 +105,16 @@ namespace gladius
                                     std::to_string(payloadHasFwnSupport) +
                                     " fwnBetaChanged=" + std::to_string(fwnBetaChanged));
         bool const newMethodSatisfied = [&]() {
+            // When the current payload has a NanoVDB companion (SDF_VDB meta entry) but the
+            // new method does not need one, the companion would cause the kernel to dispatch
+            // through the NanoVDB path even after the method switch. Force a rebuild to remove it.
+            bool const hasNanoVdbCompanion = (m_nanovdbGridOffset != 0u);
+            bool const newMethodNeedsNanoVdb = (cfg.method == MeshSdfMethod::NanoVDB);
+            if (hasNanoVdbCompanion && !newMethodNeedsNanoVdb)
+            {
+                return false;
+            }
+
             switch (cfg.method)
             {
             case MeshSdfMethod::PureBVH:
@@ -112,7 +124,7 @@ namespace gladius
             case MeshSdfMethod::VoxelAccelerated:
                 return m_voxelCount > 0;
             case MeshSdfMethod::NanoVDB:
-                return false;
+                return m_nanovdbGridOffset != 0u;
             }
             return false;
         }();
@@ -200,6 +212,7 @@ namespace gladius
     static constexpr size_t kSignCacheOffsetSlot = 1;      // signCacheDataOffset (FWN coarse sign cache; 0 = not ready)
     static constexpr size_t kSignCacheResolutionSlot = 1;  // sign cache resolution per axis
     static constexpr size_t kSignCacheBetaSlot = 1;        // beta used to build the ready sign cache
+    static constexpr size_t kNanoVdbOffsetSlot = 1;        // local float offset of the NanoVDB grid (0 = none)
 
     /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells.
     /// Each cell stores a conservative 2-bit state (unknown/outside/inside), so
@@ -221,6 +234,7 @@ namespace gladius
     static constexpr size_t kSignCacheOffsetIndex = kFwnAggregatesOffsetIndex + kFwnAggregatesSlot;         // 30
     static constexpr size_t kSignCacheResolutionIndex = kSignCacheOffsetIndex + kSignCacheOffsetSlot;       // 31
     static constexpr size_t kSignCacheBetaIndex = kSignCacheResolutionIndex + kSignCacheResolutionSlot;     // 32
+    static constexpr size_t kNanoVdbOffsetIndex = kSignCacheBetaIndex + kSignCacheBetaSlot;                 // 33
 
     void SpatialMeshResource::resetSignCacheBuildProgress() noexcept
     {
@@ -274,6 +288,11 @@ namespace gladius
         m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] =
             static_cast<float>(kSignCacheResolution);
         m_payloadData.data[m_headerStart + kSignCacheBetaIndex] = m_evaluationConfig.fwnBeta;
+        // Patch NanoVDB header slot to absolute offset (0 when NanoVDB is not active).
+        m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] =
+            (m_nanovdbGridOffset != 0u)
+                ? static_cast<float>(m_dataBaseOffset + m_nanovdbGridOffset)
+                : 0.0f;
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
@@ -415,7 +434,7 @@ namespace gladius
         metaData.start = static_cast<int>(m_payloadData.data.size());
 
         // ====================================================================
-        // Header Layout (33 floats total):
+        // Header Layout (34 floats total):
         // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
         // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
         // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -426,6 +445,7 @@ namespace gladius
         // [30]:    FWN coarse sign-cache data offset (0 = not ready)
         // [31]:    FWN coarse sign-cache resolution per axis
         // [32]:    FWN beta used to build the ready sign cache
+        // [33]:    NanoVDB grid local float offset (0 = not built)
         // ====================================================================
         
         m_headerStart = m_payloadData.data.size();
@@ -491,6 +511,7 @@ namespace gladius
         m_payloadData.data.push_back(0.0f);  // FWN sign-cache data offset (0 = not ready)
         m_payloadData.data.push_back(static_cast<float>(kSignCacheResolution));
         m_payloadData.data.push_back(m_evaluationConfig.fwnBeta);
+        m_payloadData.data.push_back(0.0f);  // NanoVDB grid local float offset (0 = not built)
 
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
@@ -656,6 +677,89 @@ namespace gladius
             m_needsFwnAggregateBuild = false;
             m_needsSignCacheBuild = false;
             m_signCacheNextWord = 0;
+        }
+
+        // NanoVDB path: rasterise mesh into a narrow-band signed distance field.
+        // The grid bytes are appended to m_payloadData.data (32-byte aligned) and a
+        // companion SDF_VDB PrimitiveMeta is pushed so the kernel can sample the grid
+        // via vdbModel(). requiresNanoVdbLocked() will detect the companion and enable
+        // ENABLE_VDB kernel compilation automatically.
+        m_nanovdbGridOffset = 0u;
+        bool const useNanovdb = (m_evaluationConfig.method == MeshSdfMethod::NanoVDB);
+        if (useNanovdb && !m_data.triangles.empty())
+        {
+            // Compute voxel size from longest bounding-box axis (100 voxels across).
+            float const bboxDx = m_data.boundingBox.max.x - m_data.boundingBox.min.x;
+            float const bboxDy = m_data.boundingBox.max.y - m_data.boundingBox.min.y;
+            float const bboxDz = m_data.boundingBox.max.z - m_data.boundingBox.min.z;
+            float const longestAxis = std::max({bboxDx, bboxDy, bboxDz});
+            float const voxelSize = std::max(longestAxis / 100.f, 0.01f);
+
+            // Build flat (non-indexed) vertex and triangle lists for OpenVDB.
+            std::vector<openvdb::Vec3s> verts;
+            std::vector<openvdb::Vec3I> tris;
+            verts.reserve(m_data.triangles.size() * 3u);
+            tris.reserve(m_data.triangles.size());
+            for (auto const & tri : m_data.triangles)
+            {
+                auto const base = static_cast<openvdb::Index32>(verts.size());
+                verts.emplace_back(tri.v0.x, tri.v0.y, tri.v0.z);
+                verts.emplace_back(tri.v1.x, tri.v1.y, tri.v1.z);
+                verts.emplace_back(tri.v2.x, tri.v2.y, tri.v2.z);
+                tris.emplace_back(base, base + 1u, base + 2u);
+            }
+
+            auto const transform =
+                openvdb::math::Transform::createLinearTransform(static_cast<double>(voxelSize));
+            float constexpr halfBandwidth = 3.0f; // voxels
+            auto sdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+                *transform, verts, tris, halfBandwidth);
+
+            // Convert to NanoVDB and serialize into m_payloadData.data.
+            auto nanoHandle = nanovdb::openToNanoVDB(openvdb::GridBase::Ptr(sdfGrid));
+
+            // 32-byte align before writing NanoVDB data.
+            constexpr size_t NANOVDB_ALIGN = 32u;
+            size_t currentByteOffset = m_payloadData.data.size() * sizeof(float);
+            size_t alignPad = (NANOVDB_ALIGN - (currentByteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+            for (size_t k = 0; k < alignPad / sizeof(float); ++k)
+            {
+                m_payloadData.data.push_back(0.0f);
+            }
+
+            m_nanovdbGridOffset = m_payloadData.data.size();
+
+            auto const required32BitBlocks =
+                static_cast<size_t>(std::ceil(static_cast<double>(nanoHandle.size()) / 4.0));
+            m_payloadData.data.resize(m_nanovdbGridOffset + required32BitBlocks);
+            void * dstPtr = static_cast<void *>(&m_payloadData.data[m_nanovdbGridOffset]);
+            std::memcpy(dstPtr, nanoHandle.data(), nanoHandle.size());
+
+            // Alignment padding after NanoVDB data.
+            currentByteOffset = m_payloadData.data.size() * sizeof(float);
+            alignPad = (NANOVDB_ALIGN - (currentByteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+            for (size_t k = 0; k < alignPad / sizeof(float); ++k)
+            {
+                m_payloadData.data.push_back(0.0f);
+            }
+
+            // Store local offset in header slot 33 (patched to absolute in write()).
+            m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] =
+                static_cast<float>(m_nanovdbGridOffset);
+
+            // Companion SDF_VDB primitive — looked up by index in the kernel
+            // and picked up by requiresNanoVdbLocked() to enable ENABLE_VDB.
+            PrimitiveMeta companion{};
+            companion.primitiveType = SDF_VDB;
+            companion.start = static_cast<int>(m_nanovdbGridOffset);
+            companion.end = static_cast<int>(m_payloadData.data.size());
+            companion.scaling = 1.0f / voxelSize;
+
+            // Push root meta first so it appears at 'i', companion at 'i+1'.
+            metaData.end = static_cast<int>(m_payloadData.data.size());
+            m_payloadData.meta.push_back(metaData);
+            m_payloadData.meta.push_back(companion);
+            return; // metaData already pushed above
         }
 
         metaData.end = static_cast<int>(m_payloadData.data.size());

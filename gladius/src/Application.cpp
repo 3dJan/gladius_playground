@@ -25,6 +25,7 @@ namespace gladius
         if (!m_headlessMode)
         {
             // Let MainWindow perform compute initialization and gracefully fall back on failure
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
     }
@@ -43,12 +44,14 @@ namespace gladius
         wireMeshSdfSettings();
         if (!m_headlessMode)
         {
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
         else
         {
             // Prepare minimal compute/document so MCP document ops work in headless mode
             m_mainWindow.setupHeadless(m_globalLogger);
+            propagateComputeCapabilities();
         }
     }
 
@@ -67,11 +70,13 @@ namespace gladius
         m_mainWindow.setOpenCLDebugEnabled(openclDebugEnabled);
         if (!m_headlessMode)
         {
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
         else
         {
             m_mainWindow.setupHeadless(m_globalLogger);
+            propagateComputeCapabilities();
         }
     }
 
@@ -86,6 +91,7 @@ namespace gladius
     {
         m_mainWindow.setConfigManager(m_configManager);
         wireMeshSdfSettings();
+        m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
         m_mainWindow.setup();
 
         // the first argument is the executable name
@@ -121,6 +127,7 @@ namespace gladius
     {
         m_mainWindow.setConfigManager(m_configManager);
         wireMeshSdfSettings();
+        m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
         m_mainWindow.setup();
 
         if (std::filesystem::exists(filename))
@@ -283,6 +290,21 @@ namespace gladius
         m_meshSdfSettings.attachConfigManager(&m_configManager);
         m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
                                         [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+    }
+
+    void Application::propagateComputeCapabilities()
+    {
+        if (auto document = getCurrentDocument())
+        {
+            if (auto core = document->getCore())
+            {
+                auto const & pm = core->getProgramManager();
+                m_mainWindow.setVdbSupported(pm.isVdbSupported(), pm.getVdbSupportFailureReason());
+                return;
+            }
+        }
+        // No compute available; leave NanoVDB grayed out with a generic message.
+        m_mainWindow.setVdbSupported(false, "No OpenCL compute context available.");
     }
 
     std::size_t Application::applyMeshSdfSettingsToCurrentDocument()

@@ -653,6 +653,12 @@ namespace gladius
         return m_isVdbSupported;
     }
 
+    std::string const & ProgramManager::getVdbSupportFailureReason() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        return m_vdbSupportFailureReason;
+    }
+
     bool ProgramManager::isVdbActive() const
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);

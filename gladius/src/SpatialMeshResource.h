@@ -192,6 +192,7 @@ namespace gladius
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
         size_t m_signCacheDataOffset = 0;
+        size_t m_nanovdbGridOffset = 0;  ///< Local float offset of the NanoVDB grid in m_payloadData (0 = not built)
         bool m_needsFwnAggregateBuild = false;
         bool m_needsSignCacheBuild = true;
         int m_signCacheNextWord = 0;

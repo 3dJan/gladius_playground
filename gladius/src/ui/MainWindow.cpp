@@ -529,6 +529,11 @@ namespace gladius::ui
         }
 
         m_computeInitState = ComputeInitState::Finalized;
+
+        if (m_onComputeReadyCallback)
+        {
+            m_onComputeReadyCallback();
+        }
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
@@ -3426,6 +3431,16 @@ namespace gladius::ui
         m_meshSdfSettingsDialog.setSettings(settings);
         m_meshSdfApplyCallback = applyCallback;
         m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
+    }
+
+    void MainWindow::setVdbSupported(bool supported, std::string const & reason)
+    {
+        m_meshSdfSettingsDialog.setVdbSupported(supported, reason);
+    }
+
+    void MainWindow::setOnComputeReadyCallback(ViewCallBack callback)
+    {
+        m_onComputeReadyCallback = std::move(callback);
     }
 
     void MainWindow::showWelcomeScreen()

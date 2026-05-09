@@ -1525,7 +1525,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
         {
             // Spatial mesh SDF using BVH traversal with optional voxel acceleration
             // ====================================================================
-            // Header Layout (33 floats total):
+            // Header Layout (34 floats total):
             // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
             // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
             // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -1536,6 +1536,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // [30]:    FWN coarse sign-cache data offset (0 = not ready)
             // [31]:    FWN coarse sign-cache resolution per axis
             // [32]:    FWN beta used to build the ready sign cache
+            // [33]:    NanoVDB grid local float offset (0 = not built)
             // ====================================================================
 
             int const headerStart = primitive.start;
@@ -1571,6 +1572,16 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                 && (fwnAggregatesOffset > 0);
             
             float meshDist;
+#ifdef ENABLE_VDB
+            // NanoVDB path: a companion SDF_VDB primitive immediately follows this entry.
+            // Use trilinear interpolation from the precomputed narrow-band float grid.
+            if (i + 1 < endIndex && primitives[i + 1].primitiveType == SDF_VDB)
+            {
+                meshDist = vdbModel(pos, i + 1, PASS_PAYLOAD_ARGS);
+                i += 1; // consume companion so the outer loop skips it
+            }
+            else
+#endif // ENABLE_VDB
             if (useFwn)
             {
                 // NOTE: voxel-magnitude reuse is disabled here even when a

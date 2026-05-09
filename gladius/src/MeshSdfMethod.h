@@ -27,8 +27,10 @@ namespace gladius
         /// (`spatialMeshSDF_VoxelAccelerated`). Higher memory cost; skips most
         /// of the BVH for far-from-surface queries.
         VoxelAccelerated = 1,
-        /// Reserved for a future NanoVDB-based path. Not implemented in any
-        /// kernel today; the UI surfaces this value as disabled.
+        /// NanoVDB-backed signed distance field. The mesh is rasterised into a
+        /// narrow-band NanoVDB float grid at import time. GPU queries use trilinear
+        /// interpolation inside the band and fall back to the voxel boundary value
+        /// outside. Requires a device that supports NanoVDB (isVdbSupported()).
         NanoVDB = 2,
         /// Fast Winding Number (Barill et al., SIGGRAPH 2018). Uses a
         /// hierarchical Barnes-Hut sum of per-node multipole aggregates on

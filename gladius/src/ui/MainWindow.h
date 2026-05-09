@@ -152,6 +152,16 @@ namespace gladius::ui
         void setMeshSdfSettings(MeshSdfSettings * settings,
                                 MeshSdfSettingsDialog::ApplyCallback applyCallback);
 
+        /// Inform the mesh SDF settings dialog whether NanoVDB is supported
+        /// on the active OpenCL device. Grays out the NanoVDB combo entry when false.
+        /// @p reason is forwarded to the dialog as a tooltip (may be empty).
+        void setVdbSupported(bool supported, std::string const & reason = {});
+
+        /// Register a callback that is invoked once when the async OpenCL compute
+        /// initialisation has finished (success or failure). Use this to react to
+        /// device capabilities that are only known after init completes.
+        void setOnComputeReadyCallback(ViewCallBack callback);
+
         /**
          * @brief Show the welcome screen and reset overlay opacity
          */
@@ -358,6 +368,7 @@ namespace gladius::ui
         /// persisted mesh-SDF method (e.g. FastWindingNumber) is never pushed
         /// into the renderer until the user opens the dialog and clicks Apply.
         MeshSdfSettingsDialog::ApplyCallback m_meshSdfApplyCallback;
+        ViewCallBack m_onComputeReadyCallback;
 
         // Compute availability flag. If false, UI runs in a limited mode without rendering.
         bool m_computeAvailable{true};

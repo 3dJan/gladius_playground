@@ -186,6 +186,11 @@ namespace gladius
          */
         void wireMeshSdfSettings();
 
+        /// Query device capabilities from the active ComputeCore and push them
+        /// to the UI (e.g. VDB support flag). Called once after setup() or
+        /// setupHeadless() initialises the compute stack.
+        void propagateComputeCapabilities();
+
         ConfigManager m_configManager;
         MeshSdfSettings m_meshSdfSettings;
         ui::MainWindow m_mainWindow;

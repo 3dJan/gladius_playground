@@ -42,6 +42,12 @@ namespace gladius::ui
         m_dirty = false;
     }
 
+    void MeshSdfSettingsDialog::setVdbSupported(bool supported, std::string const & reason) noexcept
+    {
+        m_vdbSupported = supported;
+        m_vdbNotSupportedReason = reason;
+    }
+
     namespace
     {
         char const * methodLabel(MeshSdfMethod m) noexcept
@@ -50,7 +56,7 @@ namespace gladius::ui
             {
             case MeshSdfMethod::PureBVH:           return "Pure BVH";
             case MeshSdfMethod::VoxelAccelerated:  return "Voxel-accelerated BVH";
-            case MeshSdfMethod::NanoVDB:           return "NanoVDB (not implemented)";
+            case MeshSdfMethod::NanoVDB:           return "NanoVDB";
             case MeshSdfMethod::FastWindingNumber: return "Fast winding number";
             }
             return "Pure BVH";
@@ -88,7 +94,7 @@ namespace gladius::ui
                                MeshSdfMethod::FastWindingNumber,
                                MeshSdfMethod::NanoVDB})
                 {
-                    bool const disabled = (m == MeshSdfMethod::NanoVDB);
+                    bool const disabled = (m == MeshSdfMethod::NanoVDB && !m_vdbSupported);
                     if (disabled)
                     {
                         ImGui::BeginDisabled();
@@ -109,6 +115,14 @@ namespace gladius::ui
                     if (disabled)
                     {
                         ImGui::EndDisabled();
+                        // Show why NanoVDB is unavailable when the user hovers the item.
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        {
+                            char const * reason = m_vdbNotSupportedReason.empty()
+                                                      ? "Not supported on this OpenCL device."
+                                                      : m_vdbNotSupportedReason.c_str();
+                            ImGui::SetTooltip("NanoVDB unavailable: %s", reason);
+                        }
                     }
                 }
                 ImGui::EndCombo();

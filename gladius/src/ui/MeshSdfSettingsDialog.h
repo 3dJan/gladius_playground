@@ -6,6 +6,7 @@
 #include "MeshSdfSettings.h"
 
 #include <functional>
+#include <string>
 
 namespace gladius::ui
 {
@@ -44,6 +45,11 @@ namespace gladius::ui
         /// Render the dialog. Safe to call every frame; no-op when hidden.
         void render();
 
+        /// Set whether the NanoVDB method is available on the active OpenCL device.
+        /// When @p supported is false the NanoVDB entry in the method combo is grayed out.
+        /// @p reason is shown as a tooltip on the disabled entry (may be empty).
+        void setVdbSupported(bool supported, std::string const & reason = {}) noexcept;
+
       private:
         void syncFromSettings();
 
@@ -52,6 +58,8 @@ namespace gladius::ui
 
         bool m_visible = false;
         bool m_dirty = false;
+        bool m_vdbSupported = false;
+        std::string m_vdbNotSupportedReason;
 
         // Working copies edited by the UI; flushed on Apply.
         MeshSdfEvaluationConfig m_eval{};
