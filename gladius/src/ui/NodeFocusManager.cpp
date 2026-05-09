@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <cmath>
 
-namespace gladius::ui {
+namespace gladius::ui
+{
 
-namespace {
+namespace
+{
 
 // Helper: Calculate distance squared between two points
 float distanceSquared(ImVec2 const & a, ImVec2 const & b) {
@@ -295,20 +297,26 @@ nodes::NodeId NodeFocusManager::nearestNodeInDirection(nodes::NodeId from, Navig
             continue; // Don't select the current node
         }
 
-        ImVec2 toNode = ImVec2{np.center.x - fromPos.x, np.center.y - fromPos.y};
+        ImVec2 const toNode = ImVec2{np.center.x - fromPos.x, np.center.y - fromPos.y};
+        float const dist = std::sqrt(toNode.x * toNode.x + toNode.y * toNode.y);
+        if (dist < 1e-4f)
+        {
+            continue;
+        }
+        ImVec2 const toNodeNorm = ImVec2{toNode.x / dist, toNode.y / dist};
 
         // Check if node is in the right direction
-        float dot = toNode.x * dirVec.dx + toNode.y * dirVec.dy;
-        if (dot < dirVec.minDot) {
+        float const dot = toNodeNorm.x * dirVec.dx + toNodeNorm.y * dirVec.dy;
+        if (dot < dirVec.minDot)
+        {
             continue; // Not in the right direction
         }
 
         // Calculate perpendicular distance (how aligned is it with the direction)
-        float perpDist = std::abs(toNode.x * dirVec.dy - toNode.y * dirVec.dx);
+        float const perpDist = std::abs(toNodeNorm.x * dirVec.dy - toNodeNorm.y * dirVec.dx);
 
         // Score: lower is better (closer to direction, closer in distance)
-        float dist = std::sqrt(toNode.x * toNode.x + toNode.y * toNode.y);
-        float score = dist + perpDist * 50.0f; // Weight perpendicular distance heavily
+        float const score = dist + perpDist * 50.0f;
 
         if (score < bestScore) {
             bestScore = score;
@@ -319,43 +327,14 @@ nodes::NodeId NodeFocusManager::nearestNodeInDirection(nodes::NodeId from, Navig
     return bestNode;
 }
 
-ImVec2 NodeFocusManager::getNodePosition(nodes::NodeId nodeId) const {
-    ed::EditorContext * editorContext = ed::GetCurrentEditor();
-    if (editorContext == nullptr) {
-        return ImVec2{0, 0};
-    }
-
-    // Use imguinodeeditor API to get node position
-    ed::NodeId edNodeId = ed::NodeId(static_cast<uint64_t>(nodeId));
-    
-    // Get node position from the editor
-    int nodeCount = ed::GetNodeCount();
-    
-    std::vector<ed::NodeId> nodeIds(static_cast<size_t>(nodeCount));
-    ed::GetOrderedNodeIds(nodeIds.data(), nodeCount);
-
-    for (int i = 0; i < nodeCount; ++i) {
-        if (nodeIds[i] == edNodeId) {
-            // Position is stored in the node's position attribute
-            // We need to query this from the editor context
-            // imguinodeeditor stores position internally
-            // Access via the node's position property
-            return ImVec2{0, 0}; // Placeholder - actual implementation depends on imguinodeeditor API
-        }
-    }
-
-    return ImVec2{0, 0};
+ImVec2 NodeFocusManager::getNodePosition(nodes::NodeId nodeId) const
+{
+    return ed::GetNodePosition(ed::NodeId(static_cast<uint64_t>(nodeId)));
 }
 
-ImVec2 NodeFocusManager::getNodeSize(nodes::NodeId nodeId) const {
-    ed::EditorContext * editorContext = ed::GetCurrentEditor();
-    if (editorContext == nullptr) {
-        return ImVec2{0, 0};
-    }
-
-    // Similar to getNodePosition - query node size from editor context
-    // This depends on the specific imguinodeeditor API implementation
-    return ImVec2{0, 0};
+ImVec2 NodeFocusManager::getNodeSize(nodes::NodeId nodeId) const
+{
+    return ed::GetNodeSize(ed::NodeId(static_cast<uint64_t>(nodeId)));
 }
 
 // ============================================================================

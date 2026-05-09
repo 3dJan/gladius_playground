@@ -639,6 +639,11 @@ namespace gladius::ui
         if (m_modelEditor.isVisible())
         {
             m_modelEditor.processGamepadInput();
+
+            if (m_modelEditor.consumeGamepadQuickRefRequest())
+            {
+                showGamepadQuickReference();
+            }
         }
 
         // If compute is available, validate context
@@ -947,6 +952,8 @@ namespace gladius::ui
                 {
                     m_gamepadSettingsDialog.render();
                 }
+
+                m_gamepadQuickRef.render();
             }
 
             m_welcomeScreen.render();
@@ -1552,6 +1559,26 @@ namespace gladius::ui
                 showShortcutSettings();
             }
 
+            ImGui::Separator();
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_GAMEPAD "\tGamepad Bindings...")))
+            {
+                closeMenu();
+                showGamepadSettings();
+            }
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_QUESTION_CIRCLE "\tGamepad Quick Reference")))
+            {
+                closeMenu();
+                showGamepadQuickReference();
+            }
+
+            {
+                bool const gpConnected = GamepadState::instance().isAnyConnected();
+                ImGui::TextDisabled("%s", gpConnected ? "\xe2\x97\x8f Gamepad connected" : "\xe2\x97\x8b No gamepad");
+            }
+
+            ImGui::Separator();
             if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CUBE "\tMesh SDF Settings")))
             {
                 closeMenu();
@@ -3362,6 +3389,11 @@ namespace gladius::ui
     void MainWindow::showGamepadSettings()
     {
         m_gamepadSettingsDialog.show();
+    }
+
+    void MainWindow::showGamepadQuickReference()
+    {
+        m_gamepadQuickRef.show();
     }
 
     void MainWindow::setMeshSdfSettings(MeshSdfSettings * settings,

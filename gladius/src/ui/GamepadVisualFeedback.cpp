@@ -1,6 +1,7 @@
 #include "GamepadVisualFeedback.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace gladius::ui
 {
@@ -140,22 +141,7 @@ void GamepadVisualFeedback::drawHoverRing(ImVec2 center, ImVec2 size, float radi
 void GamepadVisualFeedback::drawRoundedRectOutline(ImVec2 min, ImVec2 max, float rounding, float thickness, ImU32 color)
 {
     ImDrawList * drawList = ImGui::GetWindowDrawList();
-
-    // Expand rect outward by half thickness
-    ImVec2 halfThickness = ImVec2(thickness * 0.5f, thickness * 0.5f);
-    min = ImVec2(min.x - halfThickness.x, min.y - halfThickness.y);
-    max = ImVec2(max.x + halfThickness.x, max.y + halfThickness.y);
-
-    // Draw rounded rectangle outline
-    drawList->AddRectFilled(min, max, color, rounding);
-
-    // Draw inner rect with background color to create outline effect
-    ImVec2 innerMin = ImVec2(min.x + thickness, min.y + thickness);
-    ImVec2 innerMax = ImVec2(max.x - thickness, max.y - thickness);
-
-    // Use background color for the inner fill
-    ImU32 bgColor = ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.5f));
-    drawList->AddRectFilled(innerMin, innerMax, bgColor, rounding);
+    drawList->AddRect(min, max, color, rounding, 0, thickness);
 }
 
 void GamepadVisualFeedback::renderToast(ToastNotification const & toast) const

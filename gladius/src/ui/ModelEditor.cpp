@@ -308,13 +308,13 @@ namespace gladius::ui
         return ctx;
     }
     
-    ed::EditorContext * ModelEditor::getCurrentEditorContext() const
+    ed::EditorContext * ModelEditor::getCurrentEditorContext()
     {
         if (!m_currentModel)
         {
             return nullptr;
         }
-        return const_cast<ModelEditor *>(this)->getOrCreateEditorContext(m_currentModel->getResourceId());
+        return getOrCreateEditorContext(m_currentModel->getResourceId());
     }
 
     void ModelEditor::outline()
@@ -1819,6 +1819,11 @@ namespace gladius::ui
                     ed::End();
                     popNodeEditorTheme();
 
+                    // ── Gamepad overlays ────────────────────────────────────
+                    m_gamepadHintBar.render();
+                    m_gamepadVisualFeedback.renderContextIndicator(
+                        GamepadState::instance().isAnyConnected());
+
                     // ── Function name overlay (fixed top-left corner) ────
                     if (m_currentModel)
                     {
@@ -2983,6 +2988,10 @@ namespace gladius::ui
 
     auto selectedNodes(ed::EditorContext * const editorContext) -> std::vector<ed::NodeId>
     {
+        if (editorContext == nullptr)
+        {
+            return {};
+        }
         SetCurrentEditor(editorContext);
 
         auto const numSelectedItems = ed::GetSelectedObjectCount();
@@ -3510,26 +3519,28 @@ namespace gladius::ui
         // Update gamepad state from ImGui
         GamepadState::instance().update();
 
+        // Wire visual feedback into dispatcher on first use
+        m_gamepadDispatcher.setVisualFeedback(m_gamepadVisualFeedback);
+
+        bool const gpConnected = GamepadState::instance().isAnyConnected();
+
+        // On-connect toast: detect the connection transition
+        if (gpConnected && !m_gamepadWasConnected)
+        {
+            m_gamepadVisualFeedback.showToast("Gamepad connected! Press Start for quick reference.", 4.0f);
+        }
+        m_gamepadWasConnected = gpConnected;
+
         // Early exit if no gamepad is connected
-        if (!GamepadState::instance().isAnyConnected())
+        if (!gpConnected)
         {
             return;
         }
 
-        // Initialize focus manager and canvas pan controller if needed
-        if (!m_nodeFocusManager)
-        {
-            m_nodeFocusManager = std::make_unique<NodeFocusManager>();
-        }
-        if (!m_canvasPanController)
-        {
-            m_canvasPanController = std::make_unique<CanvasPanController>();
-        }
-
         // Dispatch actions through the dispatcher (this handles navigation, selection, etc.)
-        m_gamepadDispatcher.update(GamepadState::instance(), m_gamepadActionMap, *this);
+        m_gamepadDispatcher.update(GamepadState::instance(), GamepadActionMap::instance(), *this);
 
-        // Render visual feedback (hover rings, toasts, context indicator)
+        // Update toast timers
         if (m_gamepadVisualFeedback.isActive())
         {
             ImGuiIO & io = ImGui::GetIO();
@@ -3537,10 +3548,22 @@ namespace gladius::ui
         }
     }
 
-    std::vector<ed::NodeId> ModelEditor::getSelectedNodes() const
+    std::vector<ed::NodeId> ModelEditor::getSelectedNodes()
     {
         ed::EditorContext * const editorContext = getCurrentEditorContext();
         return selectedNodes(editorContext);
+    }
+
+    void ModelEditor::requestGamepadQuickReference()
+    {
+        m_gamepadQuickRefRequested = true;
+    }
+
+    bool ModelEditor::consumeGamepadQuickRefRequest()
+    {
+        bool const req = m_gamepadQuickRefRequested;
+        m_gamepadQuickRefRequested = false;
+        return req;
     }
 
 } // namespace gladius::ui

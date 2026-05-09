@@ -3,6 +3,7 @@
 #include "ModelEditor.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <nodes/Model.h>
 
 namespace gladius::ui
@@ -96,8 +97,11 @@ void GamepadActionDispatcher::update(GamepadState & gamepad,
                                      GamepadActionMap const & actionMap,
                                      ModelEditor & editor)
 {
+    // Refresh node spatial index each frame so directional navigation is accurate
+    m_focusManager.updateNodePositions();
+
     // Update canvas panning based on left stick
-    m_canvasPanController.update(gamepad, 1.0f / 60.0f); // Assume 60 FPS
+    m_canvasPanController.update(gamepad, ImGui::GetIO().DeltaTime);
     m_canvasPanController.applyPan();
 
     // Update zoom based on right stick/triggers
@@ -207,12 +211,19 @@ void GamepadActionDispatcher::update(GamepadState & gamepad,
     {
         dispatch(GamepadAction::NavigateForward, editor);
     }
+
+    // Start / Forward button always opens the Quick Reference overlay
+    if (gamepad.isButtonPressed(GamepadButton::Forward))
+    {
+        editor.requestGamepadQuickReference();
+    }
 }
 
 void GamepadActionDispatcher::handleNavigation(GamepadAction action, ModelEditor & editor)
 {
-    // Navigation actions update the focus manager
-    // The actual navigation happens in the update() method
+    // Navigation is handled in update() via m_focusManager.navigateFocus()
+    (void)action;
+    (void)editor;
 }
 
 void GamepadActionDispatcher::handleSelection(GamepadAction action, ModelEditor & editor)
@@ -239,7 +250,7 @@ void GamepadActionDispatcher::handleSelection(GamepadAction action, ModelEditor 
             bool isSelected = false;
             for (auto const & s : selected)
             {
-                if (static_cast<uint64_t>(s) == static_cast<uint64_t>(focused))
+                if (s.Get() == static_cast<uint64_t>(focused))
                 {
                     isSelected = true;
                     break;
@@ -274,30 +285,37 @@ void GamepadActionDispatcher::handleEditorActions(GamepadAction action, ModelEdi
     switch (action) {
     case GamepadAction::Undo:
         editor.undo();
+        showActionToast("Undo");
         break;
 
     case GamepadAction::Redo:
         editor.redo();
+        showActionToast("Redo");
         break;
 
     case GamepadAction::Compile:
         editor.requestManualCompile();
+        showActionToast("Compile");
         break;
 
     case GamepadAction::Copy:
         editor.copySelectionToClipboard();
+        showActionToast("Copy");
         break;
 
     case GamepadAction::Paste:
         editor.pasteClipboardAtMouse();
+        showActionToast("Paste");
         break;
 
     case GamepadAction::Delete:
         deleteSelectedNodes(editor);
+        showActionToast("Delete");
         break;
 
     case GamepadAction::AutoLayout:
         editor.autoLayoutNodes();
+        showActionToast("Auto Layout");
         break;
 
     case GamepadAction::CreateNode:
@@ -305,8 +323,6 @@ void GamepadActionDispatcher::handleEditorActions(GamepadAction action, ModelEdi
         break;
 
     case GamepadAction::ExtractFunction:
-        // Extract selected nodes to function - would need a dialog for naming
-        // For now, just trigger the extract flow
         editor.showExpressionDialog();
         break;
 
@@ -362,14 +378,14 @@ void GamepadActionDispatcher::selectFocusedNode(ModelEditor & editor)
         return;
     }
 
-    nodes::NodeId focusedId = m_focusManager.focusedNode();
-    // The actual selection is handled by NodeFocusManager via ed::SelectNode()
-    // This is called when the user presses the select button on a focused node
+    // TODO: Integrate with ModelEditor selection once the selection API is stabilised
+    (void)editor;
 }
 
 void GamepadActionDispatcher::deselectAll(ModelEditor & editor)
 {
-    // The actual deselection is handled by NodeFocusManager via ed::DeselectAll()
+    // TODO: Integrate with ModelEditor selection once the selection API is stabilised
+    (void)editor;
 }
 
 void GamepadActionDispatcher::openNodeMenu(ModelEditor & editor)
@@ -380,19 +396,32 @@ void GamepadActionDispatcher::openNodeMenu(ModelEditor & editor)
 
 void GamepadActionDispatcher::deleteSelectedNodes(ModelEditor & editor)
 {
-    // Delete all selected nodes
-    // Note: actual deletion would need proper editor context
+    // TODO: ModelEditor::onDeleteNode() is private; expose a public API when ready
+    (void)editor;
 }
 
 void GamepadActionDispatcher::centerView(ModelEditor & editor)
 {
-    // Request the editor to center view on content
-    // This is handled via ModelEditor's existing center view mechanism
+    // TODO: ModelEditor::m_pendingCenterViewRequest is private; expose via public API
+    (void)editor;
 }
 
 void GamepadActionDispatcher::createNode(ModelEditor & editor)
 {
     editor.showCreateNodePopup();
+}
+
+void GamepadActionDispatcher::setVisualFeedback(GamepadVisualFeedback & vf)
+{
+    m_visualFeedback = &vf;
+}
+
+void GamepadActionDispatcher::showActionToast(std::string const & message)
+{
+    if (m_visualFeedback != nullptr)
+    {
+        m_visualFeedback->showToast(message, 1.5f);
+    }
 }
 
 } // namespace gladius::ui

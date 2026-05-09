@@ -3,6 +3,7 @@
 #include "GamepadState.h"
 
 #include <imgui.h>
+#include <string>
 
 namespace gladius::ui {
 
@@ -23,8 +24,8 @@ class CanvasPanController {
     ~CanvasPanController() = default;
 
     // Non-copyable
-    CanvasPanController(const CanvasPanController &) = delete;
-    CanvasPanController & operator=(const CanvasPanController &) = delete;
+    CanvasPanController(CanvasPanController const &) = delete;
+    CanvasPanController & operator=(CanvasPanController const &) = delete;
 
     /**
      * @brief Update controller state from gamepad input.
@@ -99,32 +100,17 @@ class CanvasPanController {
   private:
     ImVec2 m_panOffset{0, 0};
     float m_zoomLevel{1.0f};
-    
+    bool m_isPanning{false};
+    bool m_isZooming{false};
+
     // Configuration
     float m_deadzone{0.25f};       // Deadzone for analog sticks
     float m_panSpeed{200.0f};      // Pixels per second for panning
     float m_zoomSpeed{0.5f};       // Zoom speed for triggers/stick
-    
+
     // Min/max zoom limits
     float m_minZoom{0.1f};         // Minimum zoom (10%)
     float m_maxZoom{5.0f};         // Maximum zoom (500%)
-
-    /**
-     * @brief Apply deadzone to a stick value.
-     * @param value Raw stick value (-1 to 1)
-     * @param deadzone Deadzone threshold
-     * @return Value with deadzone applied (returns 0 if within deadzone)
-     */
-    [[nodiscard]] float applyDeadzone(float value, float deadzone) const;
-
-    /**
-     * @brief Smoothly interpolate zoom level.
-     * @param target Target zoom level
-     * @param current Current zoom level
-     * @param deltaTime Delta time for smoothing
-     * @return Smoothed zoom level
-     */
-    [[nodiscard]] float smoothZoom(float target, float current, float deltaTime) const;
 };
 
 } // namespace gladius::ui

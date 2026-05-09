@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
+#include <algorithm>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -185,53 +186,7 @@ namespace gladius::ui
             return;
         }
 
-        // Search filter
-        ImGui::Text("Filter:");
-        ImGui::SameLine();
-        ImGui::InputText("##GamepadSearch", &m_searchFilter);
-        ImGui::SameLine();
-        if (ImGui::Button("Clear"))
-        {
-            m_searchFilter.clear();
-        }
-
-        ImGui::Separator();
-
-        // Reset all button
-        if (ImGui::Button("Reset All to Defaults"))
-        {
-            resetToDefaults();
-        }
-
-        ImGui::Separator();
-
-        // Preset profiles
-        ImGui::Text("Preset Profiles:");
-        auto presets = getPresetProfiles();
-        for (const auto & preset : presets)
-        {
-            if (ImGui::Button(preset.name.c_str()))
-            {
-                loadPreset(preset.name);
-            }
-            ImGui::SameLine();
-        }
-
-        ImGui::Separator();
-
-        // Recording state message
-        if (m_isCapturingInput)
-        {
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 220, 0, 255));
-            ImGui::TextWrapped("Press a button on the gamepad...");
-            ImGui::TextWrapped("Press Escape to cancel");
-            ImGui::PopStyleColor();
-        }
-
-        ImGui::Separator();
-
-        // Render binding list
-        renderBindingList();
+        renderGamepadBindingsPanel(m_searchFilter, m_isCapturingInput, m_capturingAction);
 
         ImGui::End();
     }
@@ -280,25 +235,26 @@ namespace gladius::ui
 
         for (auto && [key, value] : json.items())
         {
-            std::string bindingStr = value.get<std::string>();
-            GamepadButton button = configStringToButton(bindingStr);
-            if (button != GamepadButton::Count)
+            std::string const bindingStr = value.get<std::string>();
+            GamepadButton const button = configStringToButton(bindingStr);
+            if (button == GamepadButton::Count)
             {
-                // Find the action by key name
-                GamepadAction action = GamepadAction::Count;
-                for (int i = static_cast<int>(GamepadAction::NavigateUp);
-                     i < static_cast<int>(GamepadAction::Count); ++i)
+                continue;
+            }
+
+            // Find the action by JSON key name using getAllActions() loop
+            GamepadAction action = GamepadAction::Count;
+            for (auto const & [act, actionName] : actionMap.getAllActions())
+            {
+                if (actionToJsonKey(act) == key)
                 {
-                    if (actionToJsonKey(static_cast<GamepadAction>(i)) == key)
-                    {
-                        action = static_cast<GamepadAction>(i);
-                        break;
-                    }
+                    action = act;
+                    break;
                 }
-                if (action != GamepadAction::Count)
-                {
-                    actionMap.remapAction(action, button);
-                }
+            }
+            if (action != GamepadAction::Count)
+            {
+                actionMap.remapAction(action, button);
             }
         }
     }
@@ -380,6 +336,150 @@ namespace gladius::ui
         }
 
         ImGui::NextColumn();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Shared panel — can be embedded in any ImGui window
+    // ---------------------------------------------------------------------------
+
+    void renderGamepadBindingsPanel(std::string & searchFilter,
+                                    bool & isCapturingInput,
+                                    GamepadAction & capturingAction)
+    {
+        auto & actionMap = GamepadActionMap::instance();
+
+        // --- Search filter ---
+        ImGui::Text("Filter:");
+        ImGui::SameLine();
+        ImGui::InputText("##GamepadSearch", &searchFilter);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear##GPFilter"))
+        {
+            searchFilter.clear();
+        }
+
+        ImGui::Separator();
+
+        // --- Preset profiles ---
+        ImGui::Text("Preset:");
+        ImGui::SameLine();
+        auto presets = getPresetProfiles();
+        for (auto const & preset : presets)
+        {
+            if (ImGui::Button(preset.name.c_str()))
+            {
+                actionMap.resetToDefaults();
+                for (auto const & [action, button] : preset.bindings)
+                {
+                    actionMap.remapAction(action, button);
+                }
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+
+        if (ImGui::Button("Reset All to Defaults"))
+        {
+            actionMap.resetToDefaults();
+        }
+
+        ImGui::Separator();
+
+        // --- Capture state indicator ---
+        if (isCapturingInput)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 220, 0, 255));
+            ImGui::TextUnformatted("Press a button on the gamepad...");
+            ImGui::TextUnformatted("Press Escape to cancel");
+            ImGui::PopStyleColor();
+
+            // Allow cancelling with Escape
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            {
+                isCapturingInput = false;
+                capturingAction = GamepadAction::Count;
+            }
+
+            // Detect a gamepad button press and apply remap
+            for (int i = 0; i < static_cast<int>(GamepadButton::Count); ++i)
+            {
+                auto btn = static_cast<GamepadButton>(i);
+                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_GamepadFaceDown + i), false))
+                {
+                    actionMap.remapAction(capturingAction, btn);
+                    isCapturingInput = false;
+                    capturingAction = GamepadAction::Count;
+                    break;
+                }
+            }
+        }
+
+        ImGui::Separator();
+
+        // --- Binding table ---
+        auto allActions = actionMap.getAllActions();
+
+        if (ImGui::BeginTable("GPBindings", 3, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg))
+        {
+            ImGui::TableSetupColumn("Action",  ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Button",  ImGuiTableColumnFlags_WidthFixed, 130.0f);
+            ImGui::TableSetupColumn("Remap",   ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableHeadersRow();
+
+            int row = 0;
+            for (auto const & [action, name] : allActions)
+            {
+                if (action == GamepadAction::Count)
+                {
+                    continue;
+                }
+
+                // Apply search filter
+                if (!searchFilter.empty())
+                {
+                    std::string lower = name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    std::string filterLower = searchFilter;
+                    std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    if (lower.find(filterLower) == std::string::npos)
+                    {
+                        continue;
+                    }
+                }
+
+                ImGui::TableNextRow();
+                ImGui::PushID(row++);
+
+                // Action name
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(name.c_str());
+
+                // Current binding
+                ImGui::TableNextColumn();
+                if (isCapturingInput && capturingAction == action)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "< Press button... >");
+                }
+                else
+                {
+                    ImGui::TextUnformatted(actionMap.getBindingDisplay(action).c_str());
+                }
+
+                // Remap button
+                ImGui::TableNextColumn();
+                if (ImGui::Button("Remap"))
+                {
+                    isCapturingInput = true;
+                    capturingAction = action;
+                }
+
+                ImGui::PopID();
+            }
+
+            ImGui::EndTable();
+        }
     }
 
 } // namespace gladius::ui

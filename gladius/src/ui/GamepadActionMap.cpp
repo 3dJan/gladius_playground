@@ -60,6 +60,11 @@ GamepadActionMap & GamepadActionMap::instance() {
     return map;
 }
 
+GamepadActionMap::GamepadActionMap()
+{
+    initDefaultBindings();
+}
+
 void GamepadActionMap::initDefaultBindings() {
     // Navigation - D-pad
     m_bindings[GamepadAction::NavigateUp]     = GamepadButton::DPadUp;
@@ -110,7 +115,7 @@ void GamepadActionMap::initDefaultBindings() {
     auto comboIt = m_comboBindings.find(action);
     if (comboIt != m_comboBindings.end()) {
         auto const & combo = comboIt->second;
-        return gamepad.isButtonPressed(combo.shoulder) && gamepad.isButtonPressed(combo.face);
+        return isComboPressed(gamepad, combo.shoulder, combo.face);
     }
 
     // Check single button bindings

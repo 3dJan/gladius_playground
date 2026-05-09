@@ -93,11 +93,6 @@ namespace gladius::ui
          */
         void renderBindingRow(GamepadAction action, int index);
 
-        /**
-         * @brief Render preset profile buttons
-         */
-        void renderPresetProfiles();
-
         std::string m_searchFilter;
         bool m_visible = false;
 
@@ -111,5 +106,21 @@ namespace gladius::ui
         GamepadSettingsDialog(GamepadSettingsDialog &&) = delete;
         GamepadSettingsDialog & operator=(GamepadSettingsDialog &&) = delete;
     };
+
+    /**
+     * @brief Render the gamepad bindings editor panel inline.
+     *
+     * This is a standalone function so the same panel can be embedded into
+     * other dialogs (e.g. the Input Settings dialog) without duplicating logic.
+     * The @p isCapturingInput and @p capturingAction parameters carry the
+     * capture state that the caller must persist across frames.
+     *
+     * @param searchFilter    Filter string (modified in-place)
+     * @param isCapturingInput Whether a button remap is in progress (modified)
+     * @param capturingAction  Action being remapped (modified)
+     */
+    void renderGamepadBindingsPanel(std::string & searchFilter,
+                                    bool & isCapturingInput,
+                                    GamepadAction & capturingAction);
 
 } // namespace gladius::ui

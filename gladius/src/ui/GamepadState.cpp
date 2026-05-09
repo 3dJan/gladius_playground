@@ -1,113 +1,163 @@
 #include "GamepadState.h"
 
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
 
-namespace gladius::ui {
+namespace gladius::ui
+{
 
-GamepadState & GamepadState::instance() {
+GamepadState & GamepadState::instance()
+{
     static GamepadState state;
     return state;
 }
 
-void GamepadState::update() {
-    // ImGui processes gamepad input automatically when ImGuiConfigFlags_NavEnableGamepad is set.
-    // We read from ImGui's io.NavInputs[] to get analog stick values.
-    // Note: The newer ImGui versions don't expose detailed input events via InputQueueEvents,
-    // so we rely on button polling and analog values instead.
-    
+void GamepadState::update()
+{
     ImGuiIO & io = ImGui::GetIO();
-    
-    // Reset pressed/released tracking (these are frame-only events)
-    m_buttonsReleased.clear();
+
+    m_isAnyConnected = (io.BackendFlags & ImGuiBackendFlags_HasGamepad) != 0;
+
+    // Button → ImGuiKey mapping
+    struct ButtonKeyMapping
+    {
+        GamepadButton button;
+        ImGuiKey key;
+    };
+
+    constexpr ButtonKeyMapping mappings[] = {
+        {GamepadButton::A,         ImGuiKey_GamepadFaceDown  },
+        {GamepadButton::B,         ImGuiKey_GamepadFaceRight },
+        {GamepadButton::X,         ImGuiKey_GamepadFaceLeft  },
+        {GamepadButton::Y,         ImGuiKey_GamepadFaceUp    },
+        {GamepadButton::LB,        ImGuiKey_GamepadL1        },
+        {GamepadButton::RB,        ImGuiKey_GamepadR1        },
+        {GamepadButton::LStick,    ImGuiKey_GamepadL3        },
+        {GamepadButton::RStick,    ImGuiKey_GamepadR3        },
+        {GamepadButton::Back,      ImGuiKey_GamepadBack      },
+        {GamepadButton::Forward,   ImGuiKey_GamepadStart     },
+        {GamepadButton::DPadUp,    ImGuiKey_GamepadDpadUp    },
+        {GamepadButton::DPadDown,  ImGuiKey_GamepadDpadDown  },
+        {GamepadButton::DPadLeft,  ImGuiKey_GamepadDpadLeft  },
+        {GamepadButton::DPadRight, ImGuiKey_GamepadDpadRight },
+        {GamepadButton::LT,        ImGuiKey_GamepadL2        },
+        {GamepadButton::RT,        ImGuiKey_GamepadR2        },
+    };
+
     m_buttonsPressed.clear();
-    
-    // Read analog values from io.NavInputs (float range 0.0 to 1.0)
-    // These are set by the backend when gamepad axes move past a deadzone threshold
-    // Left stick X/Y (stored in NavInputs[ImGuiNavInput_LStickLeft] and ImGuiNavInput_LStickUp)
-    m_leftStick.x() = io.NavInputs[ImGuiNavInput_LStickLeft];  // Negative = left, Positive = right
-    m_leftStick.y() = io.NavInputs[ImGuiNavInput_LStickUp];    // Negative = down, Positive = up
-    
-    // Right stick - ImGui backend doesn't auto-populate right stick into NavInputs[]
-    // Right stick values would need to be read from io.MouseWheelY or custom GLFW callbacks
-    // For now, initialize to zero and update via direct axis reading if needed
-    m_rightStick.x() = 0.0f;
-    m_rightStick.y() = 0.0f;
-    
-    // Check if any gamepad is connected via ImGui
-    m_isAnyConnected = (io.BackendFlags & ImGuiBackendFlags_HasGamepad);
+    m_buttonsReleased.clear();
+
+    for (auto const & mapping : mappings)
+    {
+        bool const nowDown = ImGui::IsKeyDown(mapping.key);
+        bool const wasHeld = isButtonHeld(mapping.button);
+
+        if (nowDown && !wasHeld)
+        {
+            m_buttonsPressed.insert(mapping.button);
+        }
+        else if (!nowDown && wasHeld)
+        {
+            m_buttonsReleased.insert(mapping.button);
+        }
+
+        m_heldButtons[mapping.button] = nowDown;
+    }
+
+    // Read analog stick values via io.KeysData
+    auto getAnalog = [&io](ImGuiKey key) -> float
+    {
+        int const idx = static_cast<int>(key) - ImGuiKey_NamedKey_BEGIN;
+        return io.KeysData[idx].AnalogValue;
+    };
+
+    m_leftStick.x()  =  getAnalog(ImGuiKey_GamepadLStickRight) - getAnalog(ImGuiKey_GamepadLStickLeft);
+    m_leftStick.y()  =  getAnalog(ImGuiKey_GamepadLStickUp)    - getAnalog(ImGuiKey_GamepadLStickDown);
+    m_rightStick.x() =  getAnalog(ImGuiKey_GamepadRStickRight) - getAnalog(ImGuiKey_GamepadRStickLeft);
+    m_rightStick.y() =  getAnalog(ImGuiKey_GamepadRStickUp)    - getAnalog(ImGuiKey_GamepadRStickDown);
+
+    m_leftTrigger  = getAnalog(ImGuiKey_GamepadL2);
+    m_rightTrigger = getAnalog(ImGuiKey_GamepadR2);
 }
 
-[[nodiscard]] bool GamepadState::isButtonHeld(GamepadButton button) const {
+[[nodiscard]] bool GamepadState::isButtonHeld(GamepadButton button) const
+{
     auto it = m_heldButtons.find(button);
     return it != m_heldButtons.end() && it->second;
 }
 
-void GamepadState::setButtonHeld(GamepadButton button, bool held) {
+void GamepadState::setButtonHeld(GamepadButton button, bool held)
+{
     m_heldButtons[button] = held;
 }
 
-[[nodiscard]] bool GamepadState::isButtonHeldFor(GamepadButton button, float /*holdThreshold*/) const {
+[[nodiscard]] bool GamepadState::isButtonHeldFor(GamepadButton button, float /*holdThreshold*/) const
+{
     auto it = m_heldButtons.find(button);
-    if (it == m_heldButtons.end() || !it->second) {
+    if (it == m_heldButtons.end() || !it->second)
+    {
         return false;
     }
     // TODO: Add timing logic to check if held for the specified duration
-    return true; // Simplified - would need frame counting for accurate timing
+    return true;
 }
 
-[[nodiscard]] Eigen::Vector2f GamepadState::getLeftStick() const {
+[[nodiscard]] Eigen::Vector2f GamepadState::getLeftStick() const
+{
     return m_leftStick;
 }
 
-[[nodiscard]] Eigen::Vector2f GamepadState::getRightStick() const {
+[[nodiscard]] Eigen::Vector2f GamepadState::getRightStick() const
+{
     return m_rightStick;
 }
 
-[[nodiscard]] bool GamepadState::isLeftStickActive() const {
-    float magnitude = m_leftStick.squaredNorm();
-    return magnitude > (m_stickDeadzone * m_stickDeadzone);
+[[nodiscard]] bool GamepadState::isLeftStickActive() const
+{
+    return m_leftStick.squaredNorm() > (m_stickDeadzone * m_stickDeadzone);
 }
 
-[[nodiscard]] bool GamepadState::isRightStickActive() const {
-    float magnitude = m_rightStick.squaredNorm();
-    return magnitude > (m_stickDeadzone * m_stickDeadzone);
+[[nodiscard]] bool GamepadState::isRightStickActive() const
+{
+    return m_rightStick.squaredNorm() > (m_stickDeadzone * m_stickDeadzone);
 }
 
-[[nodiscard]] float GamepadState::getLeftTrigger() const {
+[[nodiscard]] float GamepadState::getLeftTrigger() const
+{
     return m_leftTrigger;
 }
 
-[[nodiscard]] float GamepadState::getRightTrigger() const {
+[[nodiscard]] float GamepadState::getRightTrigger() const
+{
     return m_rightTrigger;
 }
 
-[[nodiscard]] std::vector<GamepadInfo> GamepadState::connectedGamepads() const {
-    // ImGui doesn't expose individual gamepad info directly.
-    // We'd need to query GLFW for connected gamepads if detailed info is needed.
-    // For now, return empty list (state is context-aware - only active when editor is visible)
+[[nodiscard]] std::vector<GamepadInfo> GamepadState::connectedGamepads() const
+{
     return {};
 }
 
-[[nodiscard]] bool GamepadState::isAnyConnected() const {
+[[nodiscard]] bool GamepadState::isAnyConnected() const
+{
     return m_isAnyConnected;
 }
 
-[[nodiscard]] bool GamepadState::isActive() const {
+[[nodiscard]] bool GamepadState::isActive() const
+{
     return m_isAnyConnected && (ImGui::GetIO().BackendFlags & ImGuiBackendFlags_HasGamepad);
 }
 
-[[nodiscard]] bool GamepadState::isButtonPressed(GamepadButton button) const {
-    auto it = m_buttonsPressed.find(button);
-    return it != m_buttonsPressed.end();
+[[nodiscard]] bool GamepadState::isButtonPressed(GamepadButton button) const
+{
+    return m_buttonsPressed.count(button) > 0;
 }
 
-[[nodiscard]] bool GamepadState::isButtonReleased(GamepadButton button) const {
-    auto it = m_buttonsReleased.find(button);
-    return it != m_buttonsReleased.end();
+[[nodiscard]] bool GamepadState::isButtonReleased(GamepadButton button) const
+{
+    return m_buttonsReleased.count(button) > 0;
 }
 
-void GamepadState::reset() {
+void GamepadState::reset()
+{
     m_buttonsPressed.clear();
     m_buttonsReleased.clear();
     m_heldButtons.clear();

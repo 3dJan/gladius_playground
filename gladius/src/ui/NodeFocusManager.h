@@ -12,9 +12,8 @@
 
 namespace gladius::ui
 {
-    // Forward declarations for node editor types
     namespace nodes = ::gladius::nodes;
-    namespace ed = ax::NodeEditor;
+    namespace ed    = ax::NodeEditor;
     /**
      * @brief Direction for node navigation.
      */
@@ -43,8 +42,8 @@ namespace gladius::ui
         ~NodeFocusManager() = default;
 
         // Non-copyable
-        NodeFocusManager(const NodeFocusManager &) = delete;
-        NodeFocusManager & operator=(const NodeFocusManager &) = delete;
+        NodeFocusManager(NodeFocusManager const &) = delete;
+        NodeFocusManager & operator=(NodeFocusManager const &) = delete;
 
         /**
          * @brief Update the manager's knowledge of node positions.

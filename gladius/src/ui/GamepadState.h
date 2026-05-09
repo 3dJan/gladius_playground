@@ -34,8 +34,9 @@ namespace gladius::ui
     /**
      * @brief Information about a connected gamepad.
      */
-    struct GamepadInfo {
-        int instance_id{0};   ///< GLFW joystick instance ID
+    struct GamepadInfo
+    {
+        int instanceId{0};    ///< GLFW joystick instance ID
         std::string name;     ///< Human-readable gamepad name
         bool connected{false}; ///< Whether the gamepad is currently connected
     };
@@ -56,8 +57,8 @@ namespace gladius::ui
         static GamepadState & instance();
 
         // Non-copyable
-        GamepadState(const GamepadState &) = delete;
-        GamepadState & operator=(const GamepadState &) = delete;
+        GamepadState(GamepadState const &) = delete;
+        GamepadState & operator=(GamepadState const &) = delete;
 
         /**
          * @brief Update internal state from ImGui's gamepad input.

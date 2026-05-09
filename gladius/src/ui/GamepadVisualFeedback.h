@@ -6,7 +6,6 @@
 #include <Eigen/Core>
 
 #include <imgui.h>
-#include <imgui_internal.h>
 
 namespace nodes
 {

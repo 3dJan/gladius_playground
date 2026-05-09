@@ -10,8 +10,8 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "LibraryDragPayload.h"
-#include "CanvasPanController.h"
 #include "GamepadActionDispatcher.h"
+#include "GamepadHintBar.h"
 #include "GamepadState.h"
 #include "GamepadVisualFeedback.h"
 #include "LinkDragState.h"
@@ -188,9 +188,15 @@ namespace gladius::ui
         void undo();
         void redo();
         void processGamepadInput();
+
+        /// @brief Request the gamepad quick reference overlay to open.
+        void requestGamepadQuickReference();
+
+        /// @brief Check and consume a pending quick reference request.
+        [[nodiscard]] bool consumeGamepadQuickRefRequest();
         
         /// @brief Get currently selected nodes from the editor.
-        std::vector<ed::NodeId> getSelectedNodes() const;
+        std::vector<ed::NodeId> getSelectedNodes();
         
         /// @brief Copy selected nodes to clipboard.
         void copySelectionToClipboard();
@@ -255,8 +261,9 @@ namespace gladius::ui
         /// Returns the editor context for the given function, creating one if needed.
         ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
 
-        /// Returns the editor context for the current model, or nullptr if no model is set.
-        ed::EditorContext * getCurrentEditorContext() const;
+        /// Returns the editor context for the current model, creating it if needed.
+        /// Returns nullptr if no model is set.
+        ed::EditorContext * getCurrentEditorContext();
 
         bool m_visible = false;
         std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
@@ -404,11 +411,11 @@ namespace gladius::ui
         CodeView m_codeView;
 
         // Gamepad system
-        GamepadActionMap m_gamepadActionMap;
-        std::unique_ptr<NodeFocusManager> m_nodeFocusManager;
-        std::unique_ptr<CanvasPanController> m_canvasPanController;
         GamepadActionDispatcher m_gamepadDispatcher;
         GamepadVisualFeedback m_gamepadVisualFeedback;
+        GamepadHintBar m_gamepadHintBar;
+        bool m_gamepadWasConnected{false}; ///< Tracks connection state for on-connect toast
+        bool m_gamepadQuickRefRequested{false}; ///< Set by dispatcher, consumed by MainWindow
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

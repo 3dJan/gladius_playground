@@ -61,8 +61,8 @@ namespace gladius::ui
         static GamepadActionMap & instance();
 
         // Non-copyable
-        GamepadActionMap(const GamepadActionMap &) = delete;
-        GamepadActionMap & operator=(const GamepadActionMap &) = delete;
+        GamepadActionMap(GamepadActionMap const &) = delete;
+        GamepadActionMap & operator=(GamepadActionMap const &) = delete;
 
         /**
          * @brief Get the primary button(s) for an action.
@@ -130,15 +130,16 @@ namespace gladius::ui
          */
         std::vector<std::pair<GamepadAction, std::string>> getAllActions() const;
 
-      public:
-        GamepadActionMap() = default;
+      private:
+        GamepadActionMap();  ///< Initialises with default key bindings.
         ~GamepadActionMap() = default;
 
         // Default binding table: action -> primary button
         std::unordered_map<GamepadAction, GamepadButton> m_bindings;
 
         // Combo bindings: action -> (shoulder, face) pair
-        struct ComboBinding {
+        struct ComboBinding
+        {
             GamepadButton shoulder;
             GamepadButton face;
             bool active;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GamepadActionMap.h"
+#include "GamepadVisualFeedback.h"
 #include "NodeFocusManager.h"
 #include "CanvasPanController.h"
 
@@ -36,6 +37,10 @@ namespace gladius::ui
         /// @param actionMap Current action mapping configuration
         void update(GamepadState & gamepad, GamepadActionMap const & actionMap, ModelEditor & editor);
 
+        /// Inject a visual feedback object to enable action toasts.
+        /// @param vf The visual feedback object owned by ModelEditor.
+        void setVisualFeedback(GamepadVisualFeedback & vf);
+
       private:
         // Action handlers - each handles a category of actions
         void handleNavigation(GamepadAction action, ModelEditor & editor);
@@ -52,9 +57,13 @@ namespace gladius::ui
         void centerView(ModelEditor & editor);
         void createNode(ModelEditor & editor);
 
+        /// Show a brief toast if visual feedback is available.
+        void showActionToast(std::string const & message);
+
         // State
         NodeFocusManager m_focusManager;
         CanvasPanController m_canvasPanController;
+        GamepadVisualFeedback * m_visualFeedback{nullptr};
     };
 
 } // namespace gladius::ui
