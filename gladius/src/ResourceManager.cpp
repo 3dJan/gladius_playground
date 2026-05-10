@@ -82,10 +82,11 @@ namespace gladius
 
     void ResourceManager::addResource(ResourceKey key,
                                       SpatialMeshData && spatialData,
-                                      MeshSdfEvaluationConfig const & evaluationConfig)
+                                      MeshSdfEvaluationConfig const & evaluationConfig,
+                                      NanoVdbBuildPolicy const & nanovdbBuildPolicy)
     {
         m_resources[key] = std::make_unique<SpatialMeshResource>(
-          key, std::move(spatialData), evaluationConfig);
+          key, std::move(spatialData), evaluationConfig, nanovdbBuildPolicy);
     }
 
     void ResourceManager::loadResources()

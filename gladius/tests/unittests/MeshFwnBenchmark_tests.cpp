@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <random>
 #include <vector>
 

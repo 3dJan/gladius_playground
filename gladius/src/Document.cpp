@@ -52,6 +52,51 @@ namespace gladius
 {
     namespace
     {
+        constexpr double kNanoVdbBudgetUtilization = 0.5;
+
+        [[nodiscard]] NanoVdbBuildPolicy
+        makeNanoVdbBuildPolicy(SharedComputeContext const & computeContext,
+                               NanoVdbFailurePolicy const failurePolicy) noexcept
+        {
+            NanoVdbBuildPolicy policy{};
+            policy.failurePolicy = failurePolicy;
+
+            if (!computeContext)
+            {
+                return policy;
+            }
+
+            size_t const deviceGlobalMemBytes = computeContext->getDeviceGlobalMemBytes();
+            size_t const deviceMaxAllocBytes = computeContext->getDeviceMaxAllocBytes();
+
+            if (deviceGlobalMemBytes == 0u && deviceMaxAllocBytes == 0u)
+            {
+                return policy;
+            }
+
+            size_t budgetFromGlobal = 0u;
+            if (deviceGlobalMemBytes != 0u)
+            {
+                budgetFromGlobal = static_cast<size_t>(
+                  static_cast<double>(deviceGlobalMemBytes) * kNanoVdbBudgetUtilization);
+            }
+
+            if (deviceMaxAllocBytes == 0u)
+            {
+                policy.budgetBytes = budgetFromGlobal;
+                return policy;
+            }
+
+            if (budgetFromGlobal == 0u)
+            {
+                policy.budgetBytes = deviceMaxAllocBytes;
+                return policy;
+            }
+
+            policy.budgetBytes = std::min(deviceMaxAllocBytes, budgetFromGlobal);
+            return policy;
+        }
+
         [[nodiscard]] MeshSdfEvaluationConfig makeInteractivePreviewMeshSdfConfig(
           MeshSdfEvaluationConfig cfg) noexcept
         {
@@ -257,6 +302,7 @@ namespace gladius
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         if (!m_3mfmodel)
         {
@@ -964,15 +1010,34 @@ namespace gladius
 
     void Document::load(std::filesystem::path filename)
     {
-        loadImpl(filename);
-        // reset back up time
-        m_lastBackupTime = std::chrono::system_clock::now();
+        auto const previousFailurePolicy =
+          m_nanovdbFailurePolicy.exchange(NanoVdbFailurePolicy::Fail, std::memory_order_relaxed);
 
-        // Initial validation with FileLoad context - logs errors once for file loading
-        validateAssembly(nodes::ValidationContext::FileLoad);
+        try
+        {
+            loadImpl(filename);
+            // reset back up time
+            m_lastBackupTime = std::chrono::system_clock::now();
 
-        refreshModelBlocking();
-        m_core->updateBBox();
+            // Initial validation with FileLoad context - logs errors once for file loading
+            validateAssembly(nodes::ValidationContext::FileLoad);
+
+            refreshModelBlocking();
+            m_core->updateBBox();
+        }
+        catch (NanoVdbBuildRejectedError const &)
+        {
+            m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
+            newModel();
+            throw;
+        }
+        catch (...)
+        {
+            m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
+            throw;
+        }
+
+        m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
     }
 
     void Document::loadNonBlocking(std::filesystem::path filename)
@@ -1014,6 +1079,10 @@ namespace gladius
         m_futureFileLoad = std::async(std::launch::async,
                                       [this, filename]()
                                       {
+                                                                                    auto const previousFailurePolicy =
+                                                                                        m_nanovdbFailurePolicy.exchange(
+                                                                                            NanoVdbFailurePolicy::Degrade,
+                                                                                            std::memory_order_relaxed);
                                           try
                                           {
                                               auto const refreshMode = filename.extension() == ".3mf"
@@ -1054,6 +1123,8 @@ namespace gladius
                                                      events::Severity::Error});
                                               }
                                           }
+                                                                                    m_nanovdbFailurePolicy.store(previousFailurePolicy,
+                                                                                                                                             std::memory_order_relaxed);
                                           m_isLoading = false;
                                       });
     }
@@ -1290,6 +1361,13 @@ namespace gladius
             throw std::runtime_error("No core");
         }
         return m_core->getComputeContext();
+    }
+
+    NanoVdbBuildPolicy Document::getNanoVdbBuildPolicy() const
+    {
+        return makeNanoVdbBuildPolicy(
+          m_core ? m_core->getComputeContext() : SharedComputeContext{},
+          m_nanovdbFailurePolicy.load(std::memory_order_relaxed));
     }
 
     events::SharedLogger Document::getSharedLogger() const
@@ -1565,6 +1643,10 @@ namespace gladius
             {
                 io::loadFrom3mfFile(filename, *this);
             }
+            catch (NanoVdbBuildRejectedError const &)
+            {
+                throw;
+            }
             catch (std::exception const & e)
             {
                 auto logger = getSharedLogger();
@@ -1633,6 +1715,7 @@ namespace gladius
     std::size_t Document::applyMeshSdfEvaluationConfigToResources(
       MeshSdfEvaluationConfig const & cfg)
     {
+        auto const nanovdbBuildPolicy = getNanoVdbBuildPolicy();
         std::size_t changedResources = 0u;
         for (auto const & [key, resource] : getResourceManager().getResourceMap())
         {
@@ -1641,9 +1724,35 @@ namespace gladius
                 continue;
             }
             auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
-            if (spatialMesh != nullptr && spatialMesh->setEvaluationConfig(cfg))
+            if (spatialMesh != nullptr)
             {
-                ++changedResources;
+                spatialMesh->setNanoVdbBuildPolicy(nanovdbBuildPolicy);
+                bool const changed = spatialMesh->setEvaluationConfig(cfg);
+                if (changed)
+                {
+                    ++changedResources;
+                }
+
+                if (changed && spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasNanoVdbBuildIssue())
+                {
+                    auto const message = spatialMesh->formatNanoVdbBuildMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
+                }
             }
         }
         return changedResources;
@@ -2140,6 +2249,7 @@ namespace gladius
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         // Load build items from the 3MF model
         clearBuildItems();

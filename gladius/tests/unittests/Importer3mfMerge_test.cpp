@@ -2,9 +2,11 @@
 #include "testhelper.h"
 
 #include <Document.h>
+#include <SpatialMeshResource.h>
 #include <compute/ComputeCore.h>
 #include <io/3mf/Importer3mf.h>
 
+#include <chrono>
 #include <fmt/core.h>
 #include <gtest/gtest.h>
 
@@ -38,6 +40,22 @@ namespace gladius_tests
             m_core =
               std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
             m_doc = std::make_shared<Document>(m_core);
+        }
+
+        [[nodiscard]] std::filesystem::path createLargeBox3mf(float const width_mm,
+                                                              float const height_mm,
+                                                              float const depth_mm) const
+        {
+            auto sourceDoc = std::make_shared<Document>(m_core);
+            sourceDoc->newEmptyModel();
+            sourceDoc->addCustomBoxMesh(width_mm, height_mm, depth_mm);
+
+            auto const uniqueSuffix =
+              std::chrono::steady_clock::now().time_since_epoch().count();
+            auto const tempPath = std::filesystem::temp_directory_path() /
+                                  fmt::format("gladius_nanovdb_preflight_{}.3mf", uniqueSuffix);
+            sourceDoc->saveAs(tempPath, false);
+            return tempPath;
         }
 
         std::shared_ptr<Document> m_doc;
@@ -171,5 +189,59 @@ namespace gladius_tests
             << " must not be loaded as a SpatialMeshResource when NanoVDB is selected";
         }
       }
+
+        TEST_F(Importer3mfMerge_Test,
+               ImporterLoad_WithTinyNanoVdbBudget_KeepsMeshButMarksNanoVdbRejected)
+        {
+            auto const tempFile = createLargeBox3mf(600.0f, 600.0f, 600.0f);
+
+            MeshSdfEvaluationConfig meshEvaluationConfig;
+            meshEvaluationConfig.method = MeshSdfMethod::NanoVDB;
+            meshEvaluationConfig.nanovdbVoxelSize_mm = 0.1f;
+
+            io::Importer3mf importer(m_logger);
+            importer.setMeshSdfEvaluationConfig(meshEvaluationConfig);
+            importer.setNanoVdbBuildPolicy(
+              NanoVdbBuildPolicy{1u * 1024u * 1024u, NanoVdbFailurePolicy::Degrade});
+
+            m_doc->newEmptyModel();
+            ASSERT_NO_THROW(importer.load(tempFile, *m_doc));
+
+            bool foundRejectedMesh = false;
+            for (auto const & [key, resource] : m_doc->getResourceManager().getResourceMap())
+            {
+                if (key.getResourceType() != ResourceType::Mesh)
+                {
+                    continue;
+                }
+
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+                ASSERT_NE(spatialMesh, nullptr);
+                EXPECT_TRUE(spatialMesh->hasNanoVdbBuildIssue());
+                EXPECT_EQ(spatialMesh->getNanoVdbBuildInfo().result,
+                          SpatialMeshResource::NanoVdbBuildResult::PreflightRejected);
+                EXPECT_EQ(spatialMesh->getNanoVdbBuildInfo().budgetBytes, 1u * 1024u * 1024u);
+                foundRejectedMesh = true;
+            }
+
+            EXPECT_TRUE(foundRejectedMesh)
+              << "Expected the synthetic large box mesh to trigger NanoVDB preflight rejection";
+
+            std::filesystem::remove(tempFile);
+        }
+
+        TEST_F(Importer3mfMerge_Test, DocumentLoad_WithNanoVdbHugeMesh_ThrowsRejectedError)
+        {
+            auto const tempFile = createLargeBox3mf(4000.0f, 4000.0f, 4000.0f);
+
+            MeshSdfEvaluationConfig meshEvaluationConfig;
+            meshEvaluationConfig.method = MeshSdfMethod::NanoVDB;
+            meshEvaluationConfig.nanovdbVoxelSize_mm = 0.1f;
+            m_doc->setMeshSdfEvaluationConfig(meshEvaluationConfig);
+
+            EXPECT_THROW(m_doc->load(tempFile), NanoVdbBuildRejectedError);
+
+            std::filesystem::remove(tempFile);
+        }
 
 } // namespace gladius_tests

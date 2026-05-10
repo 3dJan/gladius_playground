@@ -69,6 +69,12 @@ namespace gladius::io
             m_meshSdfEvaluationConfig = cfg;
         }
 
+        /// Configure the runtime NanoVDB build policy for spatial meshes created by this importer.
+        void setNanoVdbBuildPolicy(NanoVdbBuildPolicy const & policy)
+        {
+            m_nanovdbBuildPolicy = policy;
+        }
+
         void load(std::filesystem::path const & filename, Document & doc);
 
         void merge(std::filesystem::path const & filename, Document & doc);
@@ -281,6 +287,7 @@ namespace gladius::io
 
         mesh_repair::MeshRepairConfig m_meshRepairConfig{};
         MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+        NanoVdbBuildPolicy m_nanovdbBuildPolicy{};
     };
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);

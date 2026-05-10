@@ -10,8 +10,10 @@
 
 #include "MeshRepair.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -69,6 +71,37 @@ namespace gladius
                      s.data());
         return MeshSdfMethod::VoxelAccelerated;
     }
+
+    /// Runtime-only policy for handling NanoVDB builds that are predicted to exceed the
+    /// configured memory budget. This is intentionally separate from the persisted mesh-SDF
+    /// settings: it reflects the caller context (interactive UI vs strict API load).
+    enum class NanoVdbFailurePolicy : std::uint8_t
+    {
+        /// Keep loading and degrade explicitly when NanoVDB cannot be built.
+        Degrade = 0,
+        /// Treat NanoVDB rejection as a hard load error.
+        Fail = 1,
+    };
+
+    /// Runtime-only NanoVDB build policy derived from the current caller context and compute
+    /// device limits.
+    struct NanoVdbBuildPolicy
+    {
+        /// Deterministic budget used for NanoVDB preflight checks. `0` means that no explicit
+        /// device-derived budget was available and the resource should fall back to its internal
+        /// conservative default.
+        std::size_t budgetBytes = 0u;
+
+        /// Behavior when the preflight rejects the requested NanoVDB build.
+        NanoVdbFailurePolicy failurePolicy = NanoVdbFailurePolicy::Degrade;
+    };
+
+    /// Raised when a strict NanoVDB policy rejects the requested load/build.
+    class NanoVdbBuildRejectedError : public std::runtime_error
+    {
+      public:
+        using std::runtime_error::runtime_error;
+    };
 
     /// Runtime parameters for mesh SDF evaluation. Some fields require a
     /// resource rebuild when changed (see @ref SpatialMeshResource), others are
