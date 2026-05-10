@@ -3431,6 +3431,15 @@ namespace gladius::ui
         m_meshSdfSettingsDialog.setSettings(settings);
         m_meshSdfApplyCallback = applyCallback;
         m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
+        m_meshSdfSettingsDialog.setNanoVdbIssueProvider(
+          [this]() -> NanoVdbBuildIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getNanoVdbBuildIssueSummary();
+          });
     }
 
     void MainWindow::setVdbSupported(bool supported, std::string const & reason)

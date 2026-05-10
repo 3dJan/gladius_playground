@@ -227,6 +227,30 @@ namespace gladius_tests
             EXPECT_TRUE(foundRejectedMesh)
               << "Expected the synthetic large box mesh to trigger NanoVDB preflight rejection";
 
+            auto const summary = m_doc->getNanoVdbBuildIssueSummary();
+            EXPECT_TRUE(summary.hasIssue);
+            EXPECT_EQ(summary.affectedMeshCount, 1u);
+            EXPECT_NE(summary.message.find("NanoVDB unavailable"), std::string::npos);
+
+            MeshSdfEvaluationConfig pureBvhConfig = meshEvaluationConfig;
+            pureBvhConfig.method = MeshSdfMethod::PureBVH;
+            for (auto const & [key, resource] : m_doc->getResourceManager().getResourceMap())
+            {
+                if (key.getResourceType() != ResourceType::Mesh)
+                {
+                    continue;
+                }
+
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+                ASSERT_NE(spatialMesh, nullptr);
+                spatialMesh->setEvaluationConfig(pureBvhConfig);
+            }
+
+            auto const recoveredSummary = m_doc->getNanoVdbBuildIssueSummary();
+            EXPECT_FALSE(recoveredSummary.hasIssue);
+            EXPECT_EQ(recoveredSummary.affectedMeshCount, 0u);
+            EXPECT_TRUE(recoveredSummary.message.empty());
+
             std::filesystem::remove(tempFile);
         }
 

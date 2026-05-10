@@ -23,6 +23,7 @@ namespace gladius::ui
     {
       public:
         using ApplyCallback = std::function<void()>;
+        using NanoVdbIssueProvider = std::function<NanoVdbBuildIssueSummary()>;
 
         MeshSdfSettingsDialog() = default;
         ~MeshSdfSettingsDialog() = default;
@@ -37,6 +38,9 @@ namespace gladius::ui
         /// Provide the callback invoked when the user clicks **Apply**.
         /// Typically wired to @c Application::applyMeshSdfSettingsToCurrentDocument.
         void setApplyCallback(ApplyCallback callback);
+
+        /// Provide the callback used to query runtime NanoVDB build issues.
+        void setNanoVdbIssueProvider(NanoVdbIssueProvider provider);
 
         void show();
         void hide();
@@ -55,6 +59,7 @@ namespace gladius::ui
 
         MeshSdfSettings * m_settings = nullptr;
         ApplyCallback m_applyCallback;
+  NanoVdbIssueProvider m_nanovdbIssueProvider;
 
         bool m_visible = false;
         bool m_dirty = false;

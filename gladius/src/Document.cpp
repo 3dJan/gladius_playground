@@ -34,6 +34,7 @@
 #include "nodes/ToOCLVisitor.h"
 #include "nodes/Validator.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -1370,6 +1371,56 @@ namespace gladius
           m_nanovdbFailurePolicy.load(std::memory_order_relaxed));
     }
 
+    NanoVdbBuildIssueSummary Document::getNanoVdbBuildIssueSummary() const
+    {
+        NanoVdbBuildIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr ||
+                spatialMesh->evaluationConfig().method != MeshSdfMethod::NanoVDB ||
+                !spatialMesh->hasNanoVdbBuildIssue())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+            auto const & buildInfo = spatialMesh->getNanoVdbBuildInfo();
+            summary.suggestedVoxelSize_mm = std::max(summary.suggestedVoxelSize_mm,
+                                                     buildInfo.suggestedVoxelSize_mm);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "NanoVDB is unavailable for {} mesh resources. First issue: {}",
+          summary.affectedMeshCount,
+          firstMessage);
+        return summary;
+    }
+
     events::SharedLogger Document::getSharedLogger() const
     {
         if (!m_core)
@@ -1925,6 +1976,11 @@ namespace gladius
     ResourceManager & Document::getResourceManager()
     {
         return getGeneratorContext().resourceManager;
+    }
+
+    ResourceManager const & Document::getResourceManager() const
+    {
+        return m_generatorContext->resourceManager;
     }
 
     void Document::addBoundingBoxAsMesh()

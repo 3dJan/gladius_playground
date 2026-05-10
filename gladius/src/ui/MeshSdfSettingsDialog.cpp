@@ -16,6 +16,11 @@ namespace gladius::ui
         m_applyCallback = std::move(callback);
     }
 
+    void MeshSdfSettingsDialog::setNanoVdbIssueProvider(NanoVdbIssueProvider provider)
+    {
+        m_nanovdbIssueProvider = std::move(provider);
+    }
+
     void MeshSdfSettingsDialog::show()
     {
         syncFromSettings();
@@ -158,6 +163,50 @@ namespace gladius::ui
                     "Near-field SDF resolution. 0.1 mm recommended for L-PBF (200 \xC2\xB5m "
                     "walls). A coarse face-index grid (~5\xC3\x97) covers far-field distances. "
                     "Smaller values use more GPU memory.");
+
+                if (m_nanovdbIssueProvider)
+                {
+                    auto const issue = m_nanovdbIssueProvider();
+                    if (issue.hasIssue)
+                    {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
+                                           "NanoVDB is currently degraded");
+                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
+                        ImGui::TextUnformatted(issue.message.c_str());
+                        ImGui::PopTextWrapPos();
+                        ImGui::TextDisabled(
+                          "No silent fallback was applied. Choose a recovery option and click Apply.");
+
+                        if (issue.suggestedVoxelSize_mm > m_eval.nanovdbVoxelSize_mm)
+                        {
+                            if (ImGui::Button("Set suggested voxel size"))
+                            {
+                                m_eval.nanovdbVoxelSize_mm = issue.suggestedVoxelSize_mm;
+                                m_dirty = true;
+                            }
+                            ImGui::SameLine();
+                        }
+
+                        if (ImGui::Button("Switch to Voxel-accelerated"))
+                        {
+                            m_eval.method = MeshSdfMethod::VoxelAccelerated;
+                            m_dirty = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Switch to Pure BVH"))
+                        {
+                            m_eval.method = MeshSdfMethod::PureBVH;
+                            m_dirty = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Switch to FWN"))
+                        {
+                            m_eval.method = MeshSdfMethod::FastWindingNumber;
+                            m_dirty = true;
+                        }
+                    }
+                }
             }
 
             if (m_eval.method == MeshSdfMethod::FastWindingNumber)

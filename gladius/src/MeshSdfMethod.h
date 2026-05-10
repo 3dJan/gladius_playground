@@ -96,6 +96,16 @@ namespace gladius
         NanoVdbFailurePolicy failurePolicy = NanoVdbFailurePolicy::Degrade;
     };
 
+    /// User-facing aggregate of NanoVDB build issues currently present in loaded mesh resources.
+    /// This is runtime-only state used by UI and API layers to present explicit recovery options.
+    struct NanoVdbBuildIssueSummary
+    {
+        bool hasIssue = false;
+        std::size_t affectedMeshCount = 0u;
+        std::string message;
+        float suggestedVoxelSize_mm = 0.0f;
+    };
+
     /// Raised when a strict NanoVDB policy rejects the requested load/build.
     class NanoVdbBuildRejectedError : public std::runtime_error
     {
