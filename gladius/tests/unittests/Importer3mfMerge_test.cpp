@@ -127,4 +127,49 @@ namespace gladius_tests
           << "Before: " << countBefore << ", After: " << countAfter;
     }
 
+      TEST_F(Importer3mfMerge_Test, Load_WithNanoVdb_BboxOnlyLevelSetMesh_IsNotLoadedAsResource)
+      {
+        MeshSdfEvaluationConfig meshEvaluationConfig;
+        meshEvaluationConfig.method = MeshSdfMethod::NanoVDB;
+        m_doc->setMeshSdfEvaluationConfig(meshEvaluationConfig);
+
+        ASSERT_NO_THROW(m_doc->load("examples/template.3mf"));
+
+        auto const model = m_doc->get3mfModel();
+        ASSERT_TRUE(model);
+
+        std::set<Lib3MF_uint32> bboxOnlyMeshIds;
+        auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+          auto const object = objectIterator->GetCurrentObject();
+          if (!object->IsLevelSetObject())
+          {
+            continue;
+          }
+
+          auto const levelSet = model->GetLevelSetByID(object->GetUniqueResourceID());
+          ASSERT_TRUE(levelSet);
+          if (!levelSet->GetMeshBBoxOnly())
+          {
+            continue;
+          }
+
+          auto const mesh = levelSet->GetMesh();
+          ASSERT_TRUE(mesh);
+          bboxOnlyMeshIds.insert(mesh->GetModelResourceID());
+        }
+
+        ASSERT_FALSE(bboxOnlyMeshIds.empty())
+          << "Test fixture expects the template to contain at least one bbox-only level set mesh";
+
+        auto const & resourceManager = m_doc->getResourceManager();
+        for (auto const meshId : bboxOnlyMeshIds)
+        {
+          EXPECT_FALSE(resourceManager.hasResource(ResourceKey{meshId, ResourceType::Mesh}))
+            << "bbox-only level set mesh " << meshId
+            << " must not be loaded as a SpatialMeshResource when NanoVDB is selected";
+        }
+      }
+
 } // namespace gladius_tests

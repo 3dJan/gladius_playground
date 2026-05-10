@@ -120,6 +120,12 @@ namespace gladius
         /// refreshes the primitive-buffer header but does not rebuild the mesh
         /// BVH payload.
         bool fwnUseSignCache = true;
+
+        /// Voxel size (in mm) for the NanoVDB near-field SDF grid when
+        /// @ref method is @ref MeshSdfMethod::NanoVDB. Smaller values resolve
+        /// thinner features but use more memory. For L-PBF with 200 µm walls,
+        /// 0.1 mm is recommended. **Rebuild trigger**.
+        float nanovdbVoxelSize_mm = 0.1f;
     };
 
     /// Determine whether changing @p oldCfg → @p newCfg requires acceleration
@@ -129,7 +135,8 @@ namespace gladius
                                     MeshSdfEvaluationConfig const & newCfg) noexcept
     {
         return oldCfg.method != newCfg.method ||
-               oldCfg.voxelGridResolution != newCfg.voxelGridResolution;
+               oldCfg.voxelGridResolution != newCfg.voxelGridResolution ||
+               oldCfg.nanovdbVoxelSize_mm != newCfg.nanovdbVoxelSize_mm;
     }
 
 } // namespace gladius

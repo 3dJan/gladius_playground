@@ -266,6 +266,11 @@ namespace gladius::io
 
         BoundingBox computeBoundingBox(Lib3MF::PMeshObject mesh);
 
+        /// @brief Collects mesh resource IDs that are used exclusively as bounding boxes in level
+        ///        sets (meshbboxonly=true) and not also referenced as actual geometry.
+        /// @return Set of model resource IDs that should be skipped during mesh loading.
+        std::set<Lib3MF_uint32> collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const;
+
         Lib3MF::PWrapper m_wrapper{};
 
         MeshResources m_meshObjects;

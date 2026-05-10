@@ -33,7 +33,8 @@ namespace gladius
                    a.voxelGridResolution == b.voxelGridResolution &&
                    a.fwnBeta == b.fwnBeta &&
                    a.fwnFarFieldFactor == b.fwnFarFieldFactor &&
-                   a.fwnUseSignCache == b.fwnUseSignCache;
+                   a.fwnUseSignCache == b.fwnUseSignCache &&
+                   a.nanovdbVoxelSize_mm == b.nanovdbVoxelSize_mm;
         }
     } // namespace
 
@@ -90,6 +91,8 @@ namespace gladius
             SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
         m_evaluation.fwnUseSignCache = m_config->getValue<bool>(
             SECTION_EVALUATION, "fwnUseSignCache", m_evaluation.fwnUseSignCache);
+        m_evaluation.nanovdbVoxelSize_mm = m_config->getValue<float>(
+            SECTION_EVALUATION, "nanovdbVoxelSize_mm", m_evaluation.nanovdbVoxelSize_mm);
     }
 
     void MeshSdfSettings::save()
@@ -122,6 +125,8 @@ namespace gladius
             SECTION_EVALUATION, "fwnFarFieldFactor", m_evaluation.fwnFarFieldFactor);
         m_config->setValue<bool>(
             SECTION_EVALUATION, "fwnUseSignCache", m_evaluation.fwnUseSignCache);
+        m_config->setValue<float>(
+            SECTION_EVALUATION, "nanovdbVoxelSize_mm", m_evaluation.nanovdbVoxelSize_mm);
         m_config->save();
     }
 

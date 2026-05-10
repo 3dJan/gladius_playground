@@ -679,23 +679,32 @@ namespace gladius
             m_signCacheNextWord = 0;
         }
 
-        // NanoVDB path: rasterise mesh into a narrow-band signed distance field.
-        // The grid bytes are appended to m_payloadData.data (32-byte aligned) and a
-        // companion SDF_VDB PrimitiveMeta is pushed so the kernel can sample the grid
-        // via vdbModel(). requiresNanoVdbLocked() will detect the companion and enable
-        // ENABLE_VDB kernel compilation automatically.
+        // NanoVDB path: build a 3-layer VDB acceleration structure mirroring the proven
+        // VdbImporter::writeMesh() approach. Emits 4 companion primitives after this
+        // SDF_SPATIAL_MESH_ROOT entry (kernel uses companion types to detect the layout):
+        //   i+1: SDF_MESH_TRIANGLES  – flat 9-float/tri buffer for face-index triangle lookup
+        //   i+2: SDF_VDB             – near signed-distance field (nanovdbVoxelSize_mm)
+        //   i+3: SDF_VDB_FACE_INDICES – far face-index (fixed 1mm voxels, 150mm band)
+        //   i+4: SDF_VDB_FACE_INDICES – near face-index (fixed 0.2mm voxels, 50-voxel band)
+        //
+        // IMPORTANT: face-index grids use FIXED voxel sizes (1mm/0.2mm) regardless of the
+        // user-configured nanovdbVoxelSize_mm. Using the SDF voxel size for face-index grids
+        // explodes memory: at 0.1mm with a 50mm band, a benchy-sized part produces a ~3GB
+        // sparse grid. Only the near SDF (i+2) uses the user-configured resolution.
+        // Fixed sizes match VdbImporter::writeMesh() which is the proven reference.
         m_nanovdbGridOffset = 0u;
         bool const useNanovdb = (m_evaluationConfig.method == MeshSdfMethod::NanoVDB);
         if (useNanovdb && !m_data.triangles.empty())
         {
-            // Compute voxel size from longest bounding-box axis (100 voxels across).
-            float const bboxDx = m_data.boundingBox.max.x - m_data.boundingBox.min.x;
-            float const bboxDy = m_data.boundingBox.max.y - m_data.boundingBox.min.y;
-            float const bboxDz = m_data.boundingBox.max.z - m_data.boundingBox.min.z;
-            float const longestAxis = std::max({bboxDx, bboxDy, bboxDz});
-            float const voxelSize = std::max(longestAxis / 100.f, 0.01f);
+            float const voxelSize_mm = std::max(m_evaluationConfig.nanovdbVoxelSize_mm, 0.01f);
 
-            // Build flat (non-indexed) vertex and triangle lists for OpenVDB.
+            // Fixed face-index voxel sizes — match VdbImporter::writeMesh() exactly.
+            float constexpr kFarFiVoxelSize_mm  = 1.0f;   // far  face-index: 1mm voxels
+            float constexpr kNearFiVoxelSize_mm = 0.2f;   // near face-index: 0.2mm voxels (= 1/5 mm)
+            float constexpr kFarFiBandVoxels    = 150.0f; // 150mm world band
+            float constexpr kNearFiBandVoxels   = 50.0f;  // 50 voxels = 10mm world band
+
+            // Build flat (non-indexed) world-space vertex and triangle lists for OpenVDB.
             std::vector<openvdb::Vec3s> verts;
             std::vector<openvdb::Vec3I> tris;
             verts.reserve(m_data.triangles.size() * 3u);
@@ -709,56 +718,134 @@ namespace gladius
                 tris.emplace_back(base, base + 1u, base + 2u);
             }
 
-            auto const transform =
-                openvdb::math::Transform::createLinearTransform(static_cast<double>(voxelSize));
-            float constexpr halfBandwidth = 3.0f; // voxels
-            auto sdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
-                *transform, verts, tris, halfBandwidth);
-
-            // Convert to NanoVDB and serialize into m_payloadData.data.
-            auto nanoHandle = nanovdb::openToNanoVDB(openvdb::GridBase::Ptr(sdfGrid));
-
-            // 32-byte align before writing NanoVDB data.
+            // Helper: convert an OpenVDB grid to NanoVDB, append bytes (32-byte aligned)
+            // to m_payloadData.data, and return a PrimitiveMeta (not pushed yet).
             constexpr size_t NANOVDB_ALIGN = 32u;
-            size_t currentByteOffset = m_payloadData.data.size() * sizeof(float);
-            size_t alignPad = (NANOVDB_ALIGN - (currentByteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
-            for (size_t k = 0; k < alignPad / sizeof(float); ++k)
+            auto appendVdbGrid = [&](openvdb::GridBase::Ptr grid, float scaling,
+                                     PrimitiveType primType) -> PrimitiveMeta
             {
-                m_payloadData.data.push_back(0.0f);
-            }
+                auto handle = nanovdb::openToNanoVDB(grid);
+                size_t byteOffset = m_payloadData.data.size() * sizeof(float);
+                size_t pad = (NANOVDB_ALIGN - (byteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+                for (size_t k = 0; k < pad / sizeof(float); ++k)
+                    m_payloadData.data.push_back(0.0f);
 
-            m_nanovdbGridOffset = m_payloadData.data.size();
+                int const gridStart = static_cast<int>(m_payloadData.data.size());
+                size_t const nFloats = static_cast<size_t>(
+                    std::ceil(static_cast<double>(handle.size()) / 4.0));
+                m_payloadData.data.resize(m_payloadData.data.size() + nFloats);
+                std::memcpy(&m_payloadData.data[gridStart], handle.data(), handle.size());
 
-            auto const required32BitBlocks =
-                static_cast<size_t>(std::ceil(static_cast<double>(nanoHandle.size()) / 4.0));
-            m_payloadData.data.resize(m_nanovdbGridOffset + required32BitBlocks);
-            void * dstPtr = static_cast<void *>(&m_payloadData.data[m_nanovdbGridOffset]);
-            std::memcpy(dstPtr, nanoHandle.data(), nanoHandle.size());
+                byteOffset = m_payloadData.data.size() * sizeof(float);
+                pad = (NANOVDB_ALIGN - (byteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+                for (size_t k = 0; k < pad / sizeof(float); ++k)
+                    m_payloadData.data.push_back(0.0f);
 
-            // Alignment padding after NanoVDB data.
-            currentByteOffset = m_payloadData.data.size() * sizeof(float);
-            alignPad = (NANOVDB_ALIGN - (currentByteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
-            for (size_t k = 0; k < alignPad / sizeof(float); ++k)
+                PrimitiveMeta meta{};
+                meta.primitiveType = primType;
+                meta.scaling = scaling;
+                meta.start = gridStart;
+                meta.end = static_cast<int>(m_payloadData.data.size());
+                return meta;
+            };
+
+            // Mesh adaptor: getIndexSpacePoint returns index-space coordinates
+            // (world_mm * invVoxelSize) as required by OpenVDB's meshToVolume.
+            struct IndexSpaceAdapter
             {
-                m_payloadData.data.push_back(0.0f);
-            }
+                std::vector<openvdb::Vec3s> const & vertices;
+                std::vector<openvdb::Vec3I> const & indices;
+                float invVoxelSize;
+                size_t polygonCount() const { return indices.size(); }
+                size_t pointCount() const { return vertices.size(); }
+                static size_t vertexCount(size_t) { return 3; }
+                void getIndexSpacePoint(size_t faceIdx, size_t v, openvdb::Vec3d & pos) const
+                {
+                    auto const idx = indices[faceIdx][v];
+                    auto const & pt = vertices[idx];
+                    pos = {static_cast<double>(pt.x()) * invVoxelSize,
+                           static_cast<double>(pt.y()) * invVoxelSize,
+                           static_cast<double>(pt.z()) * invVoxelSize};
+                }
+            };
 
-            // Store local offset in header slot 33 (patched to absolute in write()).
+            // -- Companion i+1: SDF_MESH_TRIANGLES (flat vertex buffer) --------------------
+            // Format: 9 consecutive floats per triangle (v0.xyz, v1.xyz, v2.xyz).
+            // The face-index VDB grids store triangle indices into this flat array.
+            PrimitiveMeta flatMeshCompanion{};
+            flatMeshCompanion.primitiveType = SDF_MESH_TRIANGLES;
+            flatMeshCompanion.start = static_cast<int>(m_payloadData.data.size());
+            for (auto const & tri : m_data.triangles)
+            {
+                m_payloadData.data.push_back(tri.v0.x);
+                m_payloadData.data.push_back(tri.v0.y);
+                m_payloadData.data.push_back(tri.v0.z);
+                m_payloadData.data.push_back(tri.v1.x);
+                m_payloadData.data.push_back(tri.v1.y);
+                m_payloadData.data.push_back(tri.v1.z);
+                m_payloadData.data.push_back(tri.v2.x);
+                m_payloadData.data.push_back(tri.v2.y);
+                m_payloadData.data.push_back(tri.v2.z);
+            }
+            flatMeshCompanion.end = static_cast<int>(m_payloadData.data.size());
+
+            // -- Companion i+2: SDF_VDB (near signed-distance field, user-configured res) --
+            auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(
+                static_cast<double>(voxelSize_mm));
+            float constexpr kNearHalfBandVoxels = 8.0f;
+            auto nearSdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+                *nearSdfTransform, verts, tris, kNearHalfBandVoxels);
+            openvdb::tools::changeBackground(nearSdfGrid->tree(),
+                                             std::numeric_limits<float>::max());
+            nearSdfGrid->pruneGrid();
+            PrimitiveMeta sdfVdbCompanion = appendVdbGrid(
+                openvdb::GridBase::Ptr(nearSdfGrid), 1.0f / voxelSize_mm, SDF_VDB);
+            m_nanovdbGridOffset = static_cast<size_t>(sdfVdbCompanion.start);
+
+            // -- Companion i+3: SDF_VDB_FACE_INDICES (far face-index, fixed 1mm / 150 voxels) --
+            auto const farFiTransform = openvdb::math::Transform::createLinearTransform(
+                static_cast<double>(kFarFiVoxelSize_mm));
+            IndexSpaceAdapter farAdaptor{verts, tris, 1.0f / kFarFiVoxelSize_mm};
+            openvdb::Int32Grid::Ptr farFaceIdxGrid = std::make_shared<openvdb::Int32Grid>();
+            farFaceIdxGrid->setTransform(farFiTransform);
+            openvdb::tools::meshToVolume<openvdb::FloatGrid, IndexSpaceAdapter>(
+                farAdaptor, *farFiTransform, kFarFiBandVoxels, kFarFiBandVoxels, 0,
+                farFaceIdxGrid.get());
+            openvdb::tools::changeBackground(farFaceIdxGrid->tree(), -1);
+            farFaceIdxGrid->setTransform(farFiTransform);
+            farFaceIdxGrid->pruneGrid();
+            PrimitiveMeta farFaceIdxCompanion = appendVdbGrid(
+                openvdb::GridBase::Ptr(farFaceIdxGrid), 1.0f / kFarFiVoxelSize_mm,
+                SDF_VDB_FACE_INDICES);
+
+            // -- Companion i+4: SDF_VDB_FACE_INDICES (near face-index, fixed 0.2mm / 50 voxels) --
+            auto const nearFiTransform = openvdb::math::Transform::createLinearTransform(
+                static_cast<double>(kNearFiVoxelSize_mm));
+            IndexSpaceAdapter nearFiAdaptor{verts, tris, 1.0f / kNearFiVoxelSize_mm};
+            openvdb::Int32Grid::Ptr nearFaceIdxGrid = std::make_shared<openvdb::Int32Grid>();
+            nearFaceIdxGrid->setTransform(nearFiTransform);
+            openvdb::tools::meshToVolume<openvdb::FloatGrid, IndexSpaceAdapter>(
+                nearFiAdaptor, *nearFiTransform, kNearFiBandVoxels, kNearFiBandVoxels, 0,
+                nearFaceIdxGrid.get());
+            openvdb::tools::changeBackground(nearFaceIdxGrid->tree(), -1);
+            nearFaceIdxGrid->setTransform(nearFiTransform);
+            nearFaceIdxGrid->pruneGrid();
+            PrimitiveMeta nearFaceIdxCompanion = appendVdbGrid(
+                openvdb::GridBase::Ptr(nearFaceIdxGrid), 1.0f / kNearFiVoxelSize_mm,
+                SDF_VDB_FACE_INDICES);
+
+            // Patch NanoVDB header slot with near-SDF offset (used by requiresNanoVdbLocked()
+            // and write() to enable ENABLE_VDB compilation; patched to absolute in write()).
             m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] =
                 static_cast<float>(m_nanovdbGridOffset);
 
-            // Companion SDF_VDB primitive — looked up by index in the kernel
-            // and picked up by requiresNanoVdbLocked() to enable ENABLE_VDB.
-            PrimitiveMeta companion{};
-            companion.primitiveType = SDF_VDB;
-            companion.start = static_cast<int>(m_nanovdbGridOffset);
-            companion.end = static_cast<int>(m_payloadData.data.size());
-            companion.scaling = 1.0f / voxelSize;
-
-            // Push root meta first so it appears at 'i', companion at 'i+1'.
+            // Push all metas in kernel order: root (i) then 4 companions (i+1..i+4).
             metaData.end = static_cast<int>(m_payloadData.data.size());
-            m_payloadData.meta.push_back(metaData);
-            m_payloadData.meta.push_back(companion);
+            m_payloadData.meta.push_back(metaData);             // i+0: SDF_SPATIAL_MESH_ROOT
+            m_payloadData.meta.push_back(flatMeshCompanion);    // i+1: SDF_MESH_TRIANGLES
+            m_payloadData.meta.push_back(sdfVdbCompanion);      // i+2: SDF_VDB
+            m_payloadData.meta.push_back(farFaceIdxCompanion);  // i+3: SDF_VDB_FACE_INDICES (far)
+            m_payloadData.meta.push_back(nearFaceIdxCompanion); // i+4: SDF_VDB_FACE_INDICES (near)
             return; // metaData already pushed above
         }
 

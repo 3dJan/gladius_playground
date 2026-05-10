@@ -1,5 +1,6 @@
 #include "MeshSdfSettingsDialog.h"
 
+#include <algorithm>
 #include <imgui.h>
 
 namespace gladius::ui
@@ -138,6 +139,25 @@ namespace gladius::ui
                 }
                 ImGui::TextDisabled(
                     "Higher = finer cache, slower build, more memory. Default 32.");
+            }
+
+            if (m_eval.method == MeshSdfMethod::NanoVDB)
+            {
+                if (ImGui::DragFloat("Voxel size (mm)",
+                                     &m_eval.nanovdbVoxelSize_mm,
+                                     0.005f,
+                                     0.01f,
+                                     2.0f,
+                                     "%.3f mm"))
+                {
+                    m_eval.nanovdbVoxelSize_mm =
+                        std::max(m_eval.nanovdbVoxelSize_mm, 0.01f);
+                    m_dirty = true;
+                }
+                ImGui::TextDisabled(
+                    "Near-field SDF resolution. 0.1 mm recommended for L-PBF (200 \xC2\xB5m "
+                    "walls). A coarse face-index grid (~5\xC3\x97) covers far-field distances. "
+                    "Smaller values use more GPU memory.");
             }
 
             if (m_eval.method == MeshSdfMethod::FastWindingNumber)

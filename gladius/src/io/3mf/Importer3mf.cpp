@@ -1169,15 +1169,71 @@ namespace gladius::io
         }
     }
 
+    std::set<Lib3MF_uint32> Importer3mf::collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const
+    {
+        std::set<Lib3MF_uint32> bboxOnlyIds;
+        std::set<Lib3MF_uint32> regularIds;
+
+        auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+            auto const object = objectIterator->GetCurrentObject();
+            if (!object->IsLevelSetObject())
+            {
+                continue;
+            }
+            auto levelSet = model->GetLevelSetByID(object->GetUniqueResourceID());
+            if (!levelSet)
+            {
+                continue;
+            }
+            auto mesh = levelSet->GetMesh();
+            if (!mesh)
+            {
+                continue;
+            }
+            auto const meshId = mesh->GetModelResourceID();
+            if (levelSet->GetMeshBBoxOnly())
+            {
+                bboxOnlyIds.insert(meshId);
+            }
+            else
+            {
+                regularIds.insert(meshId);
+            }
+        }
+
+        // Return only IDs that are exclusively used as bounding boxes (not also as real geometry)
+        std::set<Lib3MF_uint32> result;
+        for (auto const id : bboxOnlyIds)
+        {
+            if (regularIds.find(id) == regularIds.end())
+            {
+                result.insert(id);
+            }
+        }
+        return result;
+    }
+
     void Importer3mf::loadMeshes(Lib3MF::PModel model, Document & doc)
     {
-        ProfileFunction auto objectIterator = model->GetObjects();
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
 
             if (object->IsMeshObject())
             {
+                if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+                {
+                    // Skip meshes referenced only as bounding boxes in level sets;
+                    // loading them would waste memory and trigger expensive NanoVDB builds.
+                    continue;
+                }
                 auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
                 loadMeshIfNecessary(model, meshObj, doc);
             }
@@ -1192,13 +1248,25 @@ namespace gladius::io
                                  Document & doc,
                                  std::set<Lib3MF_uint32> const & resourceIds)
     {
-        ProfileFunction auto objectIterator = model->GetObjects();
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
 
             if (!object->IsMeshObject())
             {
+                continue;
+            }
+
+            if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+            {
+                // Skip meshes referenced only as bounding boxes in level sets;
+                // they are needed only for domain AABBs and must never be
+                // instantiated as SpatialMeshResources.
                 continue;
             }
 

@@ -1573,12 +1573,50 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             
             float meshDist;
 #ifdef ENABLE_VDB
-            // NanoVDB path: a companion SDF_VDB primitive immediately follows this entry.
-            // Use trilinear interpolation from the precomputed narrow-band float grid.
-            if (i + 1 < endIndex && primitives[i + 1].primitiveType == SDF_VDB)
+            // NanoVDB 4-companion path: SDF_MESH_TRIANGLES (i+1) + SDF_VDB (i+2) +
+            // SDF_VDB_FACE_INDICES far (i+3) + SDF_VDB_FACE_INDICES near (i+4).
+            // Mirrors the SDF_MESH_TRIANGLES VDB evaluation logic (lines ~1431).
+            if (i + 4 < endIndex &&
+                primitives[i + 1].primitiveType == SDF_MESH_TRIANGLES &&
+                primitives[i + 2].primitiveType == SDF_VDB &&
+                primitives[i + 3].primitiveType == SDF_VDB_FACE_INDICES &&
+                primitives[i + 4].primitiveType == SDF_VDB_FACE_INDICES)
             {
-                meshDist = vdbModel(pos, i + 1, PASS_PAYLOAD_ARGS);
-                i += 1; // consume companion so the outer loop skips it
+                int const meshIndex          = i + 1;
+                int const sdfIndex           = i + 2;
+                int const faceIndexFarIndex  = i + 3;
+                int const faceIndexNearIndex = i + 4;
+
+                int faceIndicesFar[27];
+                float const distFar =
+                    closestFaceDist(pos, meshIndex, faceIndexFarIndex, faceIndicesFar,
+                                    PASS_PAYLOAD_ARGS);
+
+                if (renderingSettings.approximation & AM_DISABLE_INTERPOLATION)
+                {
+                    meshDist = vdbModelSimple(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+                else
+                {
+                    meshDist = vdbModel(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+
+                float const signess = sign(meshDist);
+
+                if (distFar > 20.0f)
+                {
+                    meshDist = distFar * signess;
+                }
+                else if (fabs(distFar) > 0.5f)
+                {
+                    int faceIndicesNear[27];
+                    float const distNear =
+                        closestFaceDist(pos, meshIndex, faceIndexNearIndex, faceIndicesNear,
+                                        PASS_PAYLOAD_ARGS);
+                    meshDist = min(distNear, distFar) * signess;
+                }
+
+                i += 4; // consume all 4 companions
             }
             else
 #endif // ENABLE_VDB
