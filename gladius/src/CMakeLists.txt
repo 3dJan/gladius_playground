@@ -14,6 +14,7 @@ add_library(${BINARY}_lib STATIC ${SOURCES})
 add_library(${BINARY}_lib_mcp STATIC ${SOURCES})
 target_compile_definitions(${BINARY}_lib_mcp PUBLIC GLADIUS_ENABLE_MCP)
 
+
 if (MSVC)
     add_executable(${BINARY} WIN32 ${SOURCES} )
     set_property(TARGET ${BINARY} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -32,6 +33,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/contour
     ${CMAKE_CURRENT_SOURCE_DIR}/nodes
     ${CMAKE_CURRENT_SOURCE_DIR}/compute
+    ${CMAKE_CURRENT_SOURCE_DIR}/slicer
 )
 
 set (INCLUDE_PATHS
@@ -41,6 +43,7 @@ set (INCLUDE_PATHS
     ${CMAKE_CURRENT_SOURCE_DIR}/contour
     ${CMAKE_CURRENT_SOURCE_DIR}/nodes
     ${CMAKE_CURRENT_SOURCE_DIR}/compute
+    ${CMAKE_CURRENT_SOURCE_DIR}/slicer
     ${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders
     ${CMAKE_CURRENT_SOURCE_DIR}/components
     ${OPENMESH_INCLUDE_DIRS}
@@ -78,6 +81,7 @@ set(DEPENDENCIES_CORE
     NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
+    OpenMP::OpenMP_CXX
 )
 
 # MCP-only dependencies
@@ -102,8 +106,11 @@ target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
 
 # Enable AVX2 SIMD instructions for Phase 3 optimization
+# PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
+# avoiding ODR violations from mismatched struct layouts.
 if (NOT WIN32)
-    target_compile_options(${BINARY}_lib PRIVATE -mavx2 -mfma)
+    target_compile_options(${BINARY}_lib PUBLIC -mavx2 -mfma)
+    target_compile_options(${BINARY}_lib_mcp PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
 endif()
 
@@ -122,6 +129,9 @@ target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
     ${CMAKE_CURRENT_SOURCE_DIR}/mcp
 )
 target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
+if(ENABLE_UI_TESTING)
+    target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+endif()
 target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
 # Ensure the MCP-enabled static library is built before linking the executable
 add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
@@ -130,3 +140,9 @@ if (NOT WIN32)
 endif()
 # Install MCP variant if it was built in this build tree; do not fail packaging if absent
 install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)
+
+if (ENABLE_UI_TESTING)
+    target_compile_definitions(${BINARY}_lib PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    target_compile_definitions(${BINARY}_lib_mcp PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    target_compile_definitions(${BINARY} PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+endif()

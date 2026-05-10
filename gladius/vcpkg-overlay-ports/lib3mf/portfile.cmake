@@ -3,10 +3,8 @@ vcpkg_check_linkage(ONLY_DYNAMIC_LIBRARY)
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO 3MFConsortium/lib3mf
-    REF "3djan/volumetric_beamlattice_gradient"
-    SHA512 912107f0f4221d95424765acc329ffddffca2bb284ea1dbb10746c4022ae496e1168a21abe243edb37cbbe9857817246033162d7bf49422fec91789aee0dd46e
-    PATCHES
-        fix-missing-algorithm.patch
+    REF "f5555593f33a6ac3efe7ae3996315b1ebe6716b1" # v2.5 alpha 
+    SHA512 d26831de8fe0e659cb0f442d72fa15291732771cd26e76942f5770e87c97dc517ff1bfca49e190e6a74d752fee3bfb935486fe8f2124adf9ee49be0855ac796b
 )
 
 # Normalize target_link_libraries signature by inserting PRIVATE for plain-signature lines

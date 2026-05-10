@@ -304,7 +304,15 @@ namespace gladius
 
     using Skeleton = ImageImpl<cl_int>;
 
-    using PreComputedSdf = ImageImpl<cl_float>;
+    // `sdf_generator.cl` writes preview color to xyz and signed distance to w.
+    // Keep full-float color here because the low-res preview resamples this 3D
+    // field directly; any host-side distance consumer must read `.s[3]` only.
+    using PreComputedSdf = ImageImpl<cl_float4>;
+
+    /// Buffer storing traveled distances from low-res preview for HQ initialization
+    /// Format: Single-channel float (CL_R, CL_FLOAT)
+    /// Resolution: Same as low-res preview (e.g., width/4 × height/4)
+    using DistanceInitBuffer = ImageImpl<cl_float>;
 
     using MarchingSquaresStates = ImageImpl<cl_char>;
 }

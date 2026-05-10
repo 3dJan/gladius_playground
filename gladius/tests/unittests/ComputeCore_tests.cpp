@@ -1,13 +1,23 @@
 #include "Document.h"
+#include "Mesh.h"
+#include "SpatialMeshResource.h"
+#include "opencl_test_helper.h"
 #include "testhelper.h"
 #include <compute/ComputeCore.h>
 #include <fmt/core.h>
+#include <io/3mf/MeshWriter3mf.h>
 #include <nodes/Assembly.h>
+#include <nodes/DerivedNodes.h>
 #include <nodes/Model.h>
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
+#include <thread>
 
 namespace gladius_tests
 {
@@ -22,6 +32,19 @@ namespace gladius_tests
         }
 
       protected:
+        std::shared_ptr<ComputeCore> createCore()
+        {
+            auto context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+
+            if (!context->isValid())
+            {
+                throw std::runtime_error(
+                  "Failed to create OpenCL Context. Did you install proper GPU drivers?");
+            }
+
+            return std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
+        }
+
         std::shared_ptr<ComputeCore> load3mf(std::filesystem::path const & path)
         {
 
@@ -45,8 +68,375 @@ namespace gladius_tests
       private:
         std::shared_ptr<ComputeCore> m_core;
         std::shared_ptr<Document> m_doc;
+      protected:
         events::SharedLogger m_logger;
     };
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithCodeGenerator_UsesOptimizedRenderProgramOnly)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Code);
+        core->refreshProgram(assembly);
+
+        EXPECT_FALSE(core->getProgramManager().hasPreviewModelSource());
+        EXPECT_EQ(core->getBestRenderProgram().get(), core->getOptimzedRenderProgram().get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
+    }
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithAutomaticCodeGenerator_SelectsPreviewUntilOptimizedIsReady)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        auto optimizedProgram = core->getOptimzedRenderProgram();
+
+        ASSERT_NE(previewProgram.get(), nullptr);
+        ASSERT_NE(optimizedProgram.get(), nullptr);
+        EXPECT_NE(previewProgram.get(), optimizedProgram.get());
+        EXPECT_TRUE(core->getProgramManager().hasModelSource());
+        EXPECT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        EXPECT_NE(core->getProgramManager().getModelSource(),
+                  core->getProgramManager().getPreviewModelSource());
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+        EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
+    }
+
+    TEST_F(ComputeCore_Test, RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->setOptimizedRenderCompilationDeferred(true);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        auto optimizedProgram = core->getOptimzedRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        ASSERT_NE(optimizedProgram.get(), nullptr);
+
+        core->recompileIfRequired();
+
+        for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_FALSE(core->isCompilationInProgress());
+        core->recompileIfRequired();
+
+        EXPECT_TRUE(core->isOptimizedRenderCompilationDeferred());
+        EXPECT_TRUE(core->isRenderProgramReady());
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+        EXPECT_FALSE(optimizedProgram->isCompilationInProgress());
+        EXPECT_FALSE(optimizedProgram->isValid());
+
+        core->setOptimizedRenderCompilationDeferred(false);
+        core->recompileIfRequired();
+
+        for (auto attempts = 0; attempts < 500 && optimizedProgram->isCompilationInProgress();
+             ++attempts)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_FALSE(optimizedProgram->isCompilationInProgress());
+        core->recompileIfRequired();
+        EXPECT_EQ(core->getBestRenderProgram().get(), optimizedProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
+    }
+
+      TEST_F(ComputeCore_Test, TryRenderProgramAccess_WithProgramManagerLockHeld_ReturnsCachedPreview)
+      {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::Automatic);
+        core->setOptimizedRenderCompilationDeferred(true);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+
+        core->recompileIfRequired();
+        for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_FALSE(core->isCompilationInProgress());
+        core->recompileIfRequired();
+
+        ASSERT_TRUE(core->isRenderProgramReady());
+        ASSERT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+        ASSERT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+
+        std::promise<void> lockAcquired;
+        std::promise<void> releaseLock;
+        auto lockAcquiredFuture = lockAcquired.get_future();
+        auto releaseLockFuture = releaseLock.get_future();
+
+        std::thread lockHolder(
+          [&programManager = core->getProgramManager(),
+           &lockAcquired,
+           releaseLockFuture = std::move(releaseLockFuture)]() mutable
+          {
+            auto computeToken = programManager.waitForComputeToken();
+            lockAcquired.set_value();
+            releaseLockFuture.wait();
+          });
+
+        auto const lockWasAcquired = lockAcquiredFuture.wait_for(std::chrono::seconds(2)) ==
+                       std::future_status::ready;
+
+        auto tryReady = std::optional<bool>{};
+        auto tryBackend = std::optional<RenderBackend>{};
+        auto tryProgram = std::optional<SharedRenderProgram>{};
+        if (lockWasAcquired)
+        {
+          tryReady = core->tryIsRenderProgramReady();
+          tryBackend = core->tryGetSelectedRenderBackend();
+          tryProgram = core->tryGetBestRenderProgram();
+        }
+
+        releaseLock.set_value();
+        lockHolder.join();
+
+        ASSERT_TRUE(lockWasAcquired);
+        ASSERT_TRUE(tryReady.has_value());
+        EXPECT_TRUE(*tryReady);
+        ASSERT_TRUE(tryBackend.has_value());
+        EXPECT_EQ(*tryBackend, RenderBackend::CommandStream);
+        ASSERT_TRUE(tryProgram.has_value());
+        EXPECT_EQ(tryProgram->get(), previewProgram.get());
+      }
+
+    TEST_F(ComputeCore_Test, IsRenderProgramReady_WithModelRefreshInProgress_UsesCompiledPreview)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        core->refreshProgram(assembly);
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+
+        ASSERT_TRUE(core->isRendererReady());
+        ASSERT_TRUE(core->isRenderProgramReady());
+
+        core->getMeshResourceState()->signalCompilationStarted();
+
+        EXPECT_FALSE(core->isRendererReady());
+        EXPECT_TRUE(core->isRenderProgramReady());
+
+        core->getMeshResourceState()->signalCompilationFinished();
+    }
+
+    TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        auto model = assembly->assemblyModel();
+        model->createBeginEndWithDefaultInAndOuts();
+
+        auto * minCorner = model->create<nodes::ConstantVector>();
+        minCorner->parameter()[nodes::FieldNames::X].setValue(nodes::VariantType{-5.0f});
+        minCorner->parameter()[nodes::FieldNames::Y].setValue(nodes::VariantType{-5.0f});
+        minCorner->parameter()[nodes::FieldNames::Z].setValue(nodes::VariantType{-5.0f});
+
+        auto * maxCorner = model->create<nodes::ConstantVector>();
+        maxCorner->parameter()[nodes::FieldNames::X].setValue(nodes::VariantType{5.0f});
+        maxCorner->parameter()[nodes::FieldNames::Y].setValue(nodes::VariantType{5.0f});
+        maxCorner->parameter()[nodes::FieldNames::Z].setValue(nodes::VariantType{5.0f});
+
+        auto * box = model->create<nodes::BoxMinMax>();
+        ASSERT_TRUE(model->addLink(model->getInputs().at(nodes::FieldNames::Pos).getId(),
+                                   box->parameter()[nodes::FieldNames::Pos].getId()));
+        ASSERT_TRUE(model->addLink(minCorner->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                                   box->parameter()[nodes::FieldNames::Min].getId()));
+        ASSERT_TRUE(model->addLink(maxCorner->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                                   box->parameter()[nodes::FieldNames::Max].getId()));
+        ASSERT_TRUE(model->addLink(box->getOutputs().at(nodes::FieldNames::Shape).getId(),
+                                   model->getEndNode()
+                                     ->parameter()
+                                     .at(nodes::FieldNames::Shape)
+                                     .getId()));
+        model->updateGraphAndOrderIfNeeded();
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        core->refreshProgram(assembly);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+
+        ASSERT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        auto const previewSource = core->getProgramManager().getPreviewModelSource();
+        EXPECT_NE(previewSource.find("cmds[i].type"), std::string::npos);
+        EXPECT_NE(previewSource.find("bbBox(pos, min, max)"), std::string::npos);
+        EXPECT_EQ(previewSource.find("#ifdef ENABLE_VDB"), std::string::npos);
+
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+        ASSERT_FALSE(previewProgram->isCompilationInProgress());
+        ASSERT_TRUE(previewProgram->isValid());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives.get(), nullptr);
+        ASSERT_NO_THROW(primitives->write());
+
+        constexpr size_t imageSize = 16u;
+        ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
+        ASSERT_NO_THROW(targetImage.allocateOnDevice());
+
+        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
+                                                    *primitives,
+                                                    targetImage,
+                                                    0.0f,
+                                                    0u,
+                                                    imageSize));
+        ASSERT_NO_THROW(targetImage.read());
+
+        auto const & pixels = targetImage.getData();
+        ASSERT_EQ(pixels.size(), imageSize * imageSize);
+        EXPECT_TRUE(std::all_of(pixels.begin(),
+                                pixels.end(),
+                                [](cl_float4 const & pixel)
+                                {
+                                    return std::isfinite(pixel.s[0]) &&
+                                           std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) &&
+                                           std::isfinite(pixel.s[3]);
+                                }));
+    }
+
+    TEST_F(ComputeCore_Test, LoadMesh3mf_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+
+        Mesh mesh(*core->getComputeContext());
+        auto const a = Vector3{-1.0f, -1.0f, -1.0f};
+        auto const b = Vector3{1.0f, -1.0f, -1.0f};
+        auto const c = Vector3{0.0f, 1.0f, -1.0f};
+        auto const d = Vector3{0.0f, 0.0f, 1.0f};
+        mesh.addFace(a, c, b);
+        mesh.addFace(a, b, d);
+        mesh.addFace(b, c, d);
+        mesh.addFace(c, a, d);
+
+        auto const meshPath = std::filesystem::temp_directory_path() /
+                              fmt::format("gladius-command-stream-mesh-{}.3mf",
+                                          std::chrono::steady_clock::now().time_since_epoch().count());
+
+        io::MeshWriter3mf writer(m_logger);
+        ASSERT_NO_THROW(writer.exportMesh(meshPath, mesh, "TinyTetrahedron"));
+
+        core->setCodeGenerator(CodeGenerator::CommandStream);
+        auto document = std::make_shared<Document>(core);
+        MeshSdfEvaluationConfig meshEvaluationConfig;
+        meshEvaluationConfig.method = MeshSdfMethod::VoxelAccelerated;
+        document->setMeshSdfEvaluationConfig(meshEvaluationConfig);
+
+        ASSERT_NO_THROW(document->loadNonBlocking(meshPath));
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (document->isLoadingInProgress() && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_FALSE(document->isLoadingInProgress());
+        ASSERT_TRUE(document->getLoadingError().empty()) << document->getLoadingError();
+
+        EXPECT_EQ(document->getMeshSdfEvaluationConfig().method, MeshSdfMethod::VoxelAccelerated);
+        SpatialMeshResource const * importedMesh = nullptr;
+        for (auto const & [key, resource] : document->getResourceManager().getResourceMap())
+        {
+          if (key.getResourceType() != ResourceType::Mesh)
+          {
+            continue;
+          }
+          importedMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+          if (importedMesh != nullptr)
+          {
+            break;
+          }
+        }
+        ASSERT_NE(importedMesh, nullptr);
+        EXPECT_EQ(importedMesh->evaluationConfig().method, MeshSdfMethod::PureBVH);
+        EXPECT_FALSE(importedMesh->needsVoxelGridBuild());
+
+        std::error_code ec;
+        std::filesystem::remove(meshPath, ec);
+
+        auto previewProgram = core->getPreviewRenderProgram();
+        ASSERT_NE(previewProgram.get(), nullptr);
+        EXPECT_EQ(core->getBestRenderProgram().get(), previewProgram.get());
+        EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::CommandStream);
+
+        ASSERT_TRUE(core->getProgramManager().hasPreviewModelSource());
+        auto const previewSource = core->getProgramManager().getPreviewModelSource();
+        EXPECT_NE(previewSource.find("CT_SIGNED_DISTANCE_TO_MESH"), std::string::npos);
+        EXPECT_NE(previewSource.find("payload((float3)"), std::string::npos);
+
+        ASSERT_FALSE(previewProgram->isCompilationInProgress());
+        ASSERT_TRUE(previewProgram->isValid());
+        ASSERT_TRUE(core->isRenderProgramReady());
+
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives.get(), nullptr);
+        ASSERT_NO_THROW(primitives->write());
+
+        constexpr size_t imageSize = 1u;
+        ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
+        ASSERT_NO_THROW(targetImage.allocateOnDevice());
+
+        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
+                                                    *primitives,
+                                                    targetImage,
+                                                    0.0f,
+                                                    0u,
+                                                    imageSize));
+        ASSERT_NO_THROW(targetImage.read());
+
+        auto const & pixels = targetImage.getData();
+        ASSERT_EQ(pixels.size(), imageSize * imageSize);
+        EXPECT_TRUE(std::all_of(pixels.begin(),
+                                pixels.end(),
+                                [](cl_float4 const & pixel)
+                                {
+                                    return std::isfinite(pixel.s[0]) &&
+                                           std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) &&
+                                           std::isfinite(pixel.s[3]);
+                                }));
+    }
 
     TEST_F(ComputeCore_Test, DISABLED_PreComputeSDF_LoadedAssembly_EqualsExpectedResult)
     {
@@ -75,7 +465,13 @@ namespace gladius_tests
       EXPECT_EQ(bufSize, 16777216u);
 
       auto const & data = preComp.getData();
-      auto const hash = helper::computeHash(data.cbegin(), data.cend());
+      std::vector<float> distances;
+      distances.reserve(data.size());
+      for (auto const & sample : data)
+      {
+        distances.push_back(sample.s[3]);
+      }
+      auto const hash = helper::computeHash(distances.cbegin(), distances.cend());
       EXPECT_EQ(hash, 13095517456146691086u);
 
       auto bBox = core->getBoundingBox();

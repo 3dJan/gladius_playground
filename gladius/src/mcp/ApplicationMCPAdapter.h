@@ -6,19 +6,26 @@
 #pragma once
 
 #include "MCPApplicationInterface.h"
+#include <chrono>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 // Include tool headers for complete type definitions
 #include "tools/ApplicationLifecycleTool.h"
 #include "tools/DocumentLifecycleTool.h"
 #include "tools/FunctionOperationsTool.h"
+#include "tools/FunctionEvaluatorTool.h"
 #include "tools/ParameterManagementTool.h"
 #include "tools/RenderingTool.h"
 #include "tools/ResourceManagementTool.h"
 #include "tools/SceneHierarchyTool.h"
 #include "tools/UtilityTool.h"
 #include "tools/ValidationTool.h"
+#include "tools/LibraryTool.h"
 
 // Forward declarations for tools
 namespace gladius::mcp::tools
@@ -28,10 +35,12 @@ namespace gladius::mcp::tools
     class DocumentLifecycleTool;
     class ParameterManagementTool;
     class FunctionOperationsTool;
+    class FunctionEvaluatorTool;
     class ResourceManagementTool;
     class RenderingTool;
     class ValidationTool;
     class UtilityTool;
+    class LibraryTool;
 }
 
 namespace gladius
@@ -55,6 +64,27 @@ namespace gladius
         mutable std::string m_lastErrorMessage; // Store detailed error information
         std::unique_ptr<mcp::CoroMCPAdapter> m_coroAdapter; // Coroutine-based async operations
 
+        /// A single entry in the in-memory change log (max 1000 entries).
+        struct ChangeEntry
+        {
+            std::chrono::system_clock::time_point timestamp;
+            std::string type;         ///< "added" | "modified" | "deleted"
+            std::string resourceType; ///< "function" | "levelset" | "parameter" | "document"
+            uint32_t resourceId{0};
+            std::string displayName;
+        };
+
+        static constexpr size_t MAX_CHANGE_LOG_SIZE = 1000;
+        mutable std::deque<ChangeEntry> m_changeLog;
+        mutable std::mutex m_changeLogMutex;
+        mutable bool m_lastKnownFileChanged{false}; ///< Tracks Document dirty flag for UI-change detection
+
+        /// Record a change in the in-memory log, trimming oldest entries if full.
+        void recordChange(std::string const & type,
+                          std::string const & resourceType,
+                          uint32_t resourceId,
+                          std::string const & displayName) const;
+
         // Tool instances - Complete set as per refactoring plan
         // Status: 9/9 tools implemented (ApplicationLifecycle, SceneHierarchy, DocumentLifecycle,
         // ParameterManagement, FunctionOperations, ResourceManagement, Rendering, Validation,
@@ -64,10 +94,12 @@ namespace gladius
         std::unique_ptr<mcp::tools::DocumentLifecycleTool> m_documentLifecycleTool;
         std::unique_ptr<mcp::tools::ParameterManagementTool> m_parameterManagementTool;
         std::unique_ptr<mcp::tools::FunctionOperationsTool> m_functionOperationsTool;
+        std::unique_ptr<mcp::tools::FunctionEvaluatorTool> m_functionEvaluatorTool;
         std::unique_ptr<mcp::tools::ResourceManagementTool> m_resourceManagementTool;
         std::unique_ptr<mcp::tools::RenderingTool> m_renderingTool;
         std::unique_ptr<mcp::tools::ValidationTool> m_validationTool;
         std::unique_ptr<mcp::tools::UtilityTool> m_utilityTool;
+        std::unique_ptr<mcp::tools::LibraryTool> m_libraryTool;
 
         // Helper method to automatically validate after operations
         nlohmann::json performAutoValidation(bool includeOpenCL = false) const;
@@ -127,13 +159,23 @@ namespace gladius
                                      const std::vector<FunctionArgument> & arguments = {},
                                      const std::string & outputName = "") override;
 
+        std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string & name,
+                                  const std::string & snippet,
+                                  const std::string & outputType,
+                                  const std::vector<FunctionArgument> & arguments = {},
+                                  const std::string & outputName = "") override;
+
         // 3MF and implicit modeling operations
         bool validateDocumentFor3MF() const override;
         bool exportDocumentAs3MF(const std::string & path,
                                  bool includeImplicitFunctions = true) const override;
 
         // 3MF Resource creation methods (return success flag and resource ID)
-        std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) override;
+        std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> minPoint = {-10.f, -10.f, -10.f},
+          std::array<float, 3> maxPoint = {10.f, 10.f, 10.f}) override;
         std::pair<bool, uint32_t> createImage3DFunction(const std::string & name,
                                                         const std::string & imagePath,
                                                         float valueScale = 1.0f,
@@ -151,35 +193,27 @@ namespace gladius
         nlohmann::json getDocumentInfo() const override;
         std::vector<std::string> listAvailableFunctions() const override;
         nlohmann::json get3MFStructure() const override;
-        nlohmann::json getFunctionGraph(uint32_t functionId) const override;
-        nlohmann::json getNodeInfo(uint32_t functionId, uint32_t nodeId) const override;
-        nlohmann::json createNode(uint32_t functionId,
-                                  const std::string & nodeType,
-                                  const std::string & displayName,
-                                  uint32_t nodeId) override;
-        nlohmann::json setFunctionGraph(uint32_t functionId,
-                                        const nlohmann::json & graph,
-                                        bool replace = true) override;
-        nlohmann::json deleteNode(uint32_t functionId, uint32_t nodeId) override;
         nlohmann::json setParameterValue(uint32_t functionId,
                                          uint32_t nodeId,
                                          const std::string & parameterName,
                                          const nlohmann::json & value) override;
-        nlohmann::json createLink(uint32_t functionId,
-                                  uint32_t sourceNodeId,
-                                  const std::string & sourcePortName,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override;
-        nlohmann::json deleteLink(uint32_t functionId,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override;
-        nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
-                                              uint32_t referencedFunctionId,
-                                              const std::string & displayName = "") override;
-        nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                               uint32_t nodeId,
-                                                               bool autoConnect = true) override;
-        nlohmann::json removeUnusedNodes(uint32_t functionId) override;
+
+        // Function evaluation
+        nlohmann::json evaluateFunction(uint32_t functionId,
+                                        nlohmann::json const & samples) override;
+
+        // Change notifications
+        nlohmann::json getChangesSince(std::string const & isoTimestamp) const override;
+
+        // Snippet operations
+        nlohmann::json getFunctionSnippet(uint32_t functionId) const override;
+        nlohmann::json setFunctionSnippet(
+          uint32_t functionId,
+          std::string const & snippet,
+          std::string const & outputType = "float",
+          std::vector<FunctionArgument> const & arguments = {}) override;
+        nlohmann::json getProgramSnippet() const override;
+        nlohmann::json setProgramSnippet(std::string const & snippet) override;
 
         // Manufacturing validation
         nlohmann::json
@@ -220,5 +254,46 @@ namespace gladius
         bool modifyLevelSet(uint32_t levelSetModelResourceId,
                             std::optional<uint32_t> functionModelResourceId,
                             std::optional<std::string> channel) override;
+
+        // Library operations
+        nlohmann::json listLibrary(std::string const & category = "",
+                                   std::string const & query = "") const override;
+        nlohmann::json getLibraryEntryInfo(std::string const & category,
+                                           std::string const & name) const override;
+        nlohmann::json createLibraryEntry(std::string const & name,
+                                          std::string const & category,
+                                          std::string const & programSnippet,
+                                          uint32_t functionId,
+                                          std::string const & description,
+                                          std::vector<std::string> const & tags = {},
+                                          bool overwrite = false) override;
+        nlohmann::json exportToLibrary(uint32_t functionId,
+                                       std::string const & category,
+                                       std::string const & name,
+                                       std::string const & description,
+                                       bool overwrite = false,
+                                       bool keepScaffold = false) override;
+        nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & functionIds,
+                           std::string const & description,
+                           std::vector<std::string> const & tags = {},
+                           std::string const & category = "",
+                           std::string const & name = "") override;
+        nlohmann::json importLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
+        nlohmann::json deleteLibraryEntry(std::string const & category,
+                                          std::string const & name) override;
+        nlohmann::json browseBin(std::string const & category = "") const override;
+        nlohmann::json restoreBinEntry(std::string const & category,
+                                       std::string const & name) override;
+        nlohmann::json deleteBinEntry(std::string const & category,
+                                      std::string const & name) override;
+        nlohmann::json emptyBin() override;
+
+#ifdef ENABLE_UI_TESTING
+        std::vector<std::string> uiDumpItems(std::string const & parentPath) override;
+        bool uiClick(std::string const & path) override;
+        bool captureUIScreenshot(std::string const & outputPath) override;
+#endif
     };
 }

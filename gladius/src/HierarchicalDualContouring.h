@@ -63,6 +63,20 @@ namespace gladius::hierarchical_dc
         std::size_t maxNodes{10000000U};         ///< Safety limit on total nodes to prevent OOM (0 = unlimited)
         std::vector<float> thicknessLUT;         ///< Optional 3D LUT for variable thickness (RGB -> Thickness)
         int lutResolution{0};                    ///< Resolution of the LUT (e.g. 32)
+        
+        // Shell volume mode: uses two LUTs to define a material band between outer and inner boundaries
+        std::vector<float> outerLUT;             ///< 3D LUT for outer boundary thickness (layers above)
+        std::vector<float> innerLUT;             ///< 3D LUT for inner boundary thickness (layers above + this)
+        bool isInnermostLayer{false};            ///< True if no inner boundary (innermost material layer)
+        bool useShellVolumeMode{false};          ///< True to use shell volume sampling instead of single LUT
+        
+        // Surface-aligned thickness field mode: uses precomputed 3D grids for accurate surface colors
+        // When enabled, thickness is sampled from spatial position rather than color→LUT
+        std::vector<float> outerThicknessField;  ///< 3D grid: position → outer boundary thickness
+        std::vector<float> innerThicknessField;  ///< 3D grid: position → inner boundary thickness
+        int thicknessFieldResolution{0};         ///< Resolution of thickness fields (e.g., 128)
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity(); ///< Transform: world → field grid
+        bool useSurfaceAlignedThickness{false};  ///< True to use precomputed thickness fields
     };
 
     /// Quality presets for hierarchical dual contouring
@@ -112,7 +126,7 @@ namespace gladius::hierarchical_dc
         std::array<std::size_t, 8> childIndices{}; ///< Indices into node array (if !isLeaf)
         std::optional<Eigen::Vector3f> vertexPosition; ///< QEF-solved vertex (for leaves)
         std::vector<HermiteSample> hermiteSamples; ///< Hermite data collected for this leaf
-        Eigen::Vector3f vertexNormal{Eigen::Vector3f::Zero()}; ///< Averaged vertex normal
+        Eigen::Vector3f vertexNormal = Eigen::Vector3f::Zero(); ///< Averaged vertex normal
         float vertexResidual{0.0F};                ///< Residual error from QEF solve
         bool hasVertex{false};                     ///< True when a vertex was solved
     };

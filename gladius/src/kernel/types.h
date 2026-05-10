@@ -35,6 +35,12 @@ enum PrimitiveType
     SDF_PRIMITIVE_INDICES,        // Primitive indices mapping for BVH traversal
     SDF_BEAM_LATTICE_VOXEL_INDEX, // Voxel grid with primitive indices
     SDF_BEAM_LATTICE_VOXEL_TYPE,  // Voxel grid with primitive types (optional)
+
+    // Spatial mesh SDF (BVH-accelerated mesh with pseudo-normal sign)
+    SDF_SPATIAL_MESH_ROOT,        // Root node with bounding box and buffer offsets
+    SDF_SPATIAL_MESH_NODES,       // BVH node buffer (MeshBVHNode array)
+    SDF_SPATIAL_MESH_TRIS,        // Triangle buffer (MeshTriangle array)
+    SDF_SPATIAL_MESH_NORMALS,     // Vertex normal buffer (MeshVertexNormal array)
 };
 
 enum ApproximationMode
@@ -42,7 +48,8 @@ enum ApproximationMode
     AM_FULL_MODEL = (1u << 0),
     AM_HYBRID = (1u << 1),
     AM_ONLY_PRECOMPSDF = (1u << 2),
-    AM_DISABLE_INTERPOLATION = (1u << 3)
+    AM_DISABLE_INTERPOLATION = (1u << 3),
+    AM_USE_DISTANCE_INIT = (1u << 4)  // Use low-res distance buffer to initialize HQ ray start
 };
 
 enum RenderingFlags
@@ -51,7 +58,14 @@ enum RenderingFlags
     RF_CUT_OFF_OBJECT = (1u << 1),
     RF_SHOW_FIELD = (1u << 2),
     RF_SHOW_STACK = (1u << 3),
-    RF_SHOW_COORDINATE_SYSTEM = (1u << 4)
+    RF_SHOW_COORDINATE_SYSTEM = (1u << 4),
+    RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
+    RF_DEBUG_METRICS = (1u << 15),  // Enable debug metrics collection (dev builds)
+    RF_DISABLE_SHADOWS = (1u << 16),  // Skip soft-shadow computation (low-res preview)
+    RF_DISABLE_AO = (1u << 17),  // Skip ambient occlusion computation (low-res preview)
+    RF_DISABLE_MESH_EARLY_EXIT = (1u << 18)  // Force exact mesh SDF (ignore raymarcher hint)
+    ,
+    RF_USE_MESH_FWN = (1u << 19)  // Evaluate mesh SDF via Fast Winding Number (Barill et al. 2018)
 };
 
 enum SamplingFilter
@@ -150,7 +164,42 @@ struct RenderingSettings // Note that the alignment has to be considered
     float weightDistToNb;
     float weightMidPoint;
     float normalOffset;
+
+    /// Squared early-exit distance hint for mesh SDF queries.
+    /// When > 0, BVH traversal in spatialMeshSDFWithEarlyExit() can terminate as soon as
+    /// it has found a triangle within sqrt(earlyExitDistanceSq) of the query point.
+    /// The returned distance is then a safe lower bound (sphere-trace safe). Set to 0
+    /// to find the exact minimum distance. The raymarcher updates this each step from
+    /// the previous SDF reading, allowing far queries to skip most of the BVH.
+    float earlyExitDistanceSq;
+
+    /// Morphological inflation (in mm) subtracted from every mesh SDF reading before it
+    /// participates in CSG. Closes pinholes/cracks up to ~2× this value at the cost of
+    /// rounding sharp features. 0 disables inflation. Configured via MeshSdfSettings.
+    float meshInflationDistance;
+
+    /// Barnes-Hut acceptance threshold for the Fast-Winding-Number method.
+    /// A BVH subtree is approximated by its dipole when the query distance to the
+    /// area-weighted centroid exceeds @c meshFwnBeta times the subtree's bounding
+    /// radius. Higher values are more accurate, lower values are faster. Typical
+    /// range: 1.5 – 4.0. Default 2.0 (Barill et al. 2018, §4.1).
+    float meshFwnBeta;
+
+    /// Far-field skip factor for the Fast-Winding-Number method. Multiplied
+    /// with the mesh's bbox half-diagonal to obtain the unsigned-distance
+    /// threshold beyond which the cheap closest-point sign is trusted and the
+    /// expensive winding traversal is skipped. 0 disables the skip (always
+    /// run winding — exact). 0.5 is a safe default.
+    float meshFwnFarFieldFactor;
 };
+
+#ifdef COMPILING_FOR_HOST
+// Lock down the host/device layout: every member is 4 bytes and tightly packed,
+// so any future field additions in this struct must be mirrored in every OpenCL
+// translation unit that declares the same struct (see kernel/sdf.cl and friends).
+static_assert(sizeof(RenderingSettings) == 12 * sizeof(float),
+              "RenderingSettings layout drift: update kernel-side declarations and bump this assert.");
+#endif
 
 struct DistanceColor
 {
@@ -172,6 +221,17 @@ struct RayCastResult
     float edge;
     float type;
     float4 color;
+    int stepCount;  ///< Number of ray march steps (for debug metrics)
+};
+
+/// Per-frame rendering metrics for debug instrumentation (FR-014)
+/// Storage: GPU buffer for atomic updates; read back to host after frame completion
+struct RayMarchMetrics
+{
+    unsigned int totalRays;      ///< Total rays cast this frame
+    unsigned int totalSteps;     ///< Sum of steps across all rays
+    unsigned int cacheHits;      ///< Number of times cachedSdf() returned early
+    unsigned int nonConverged;   ///< Rays that hit maxRaySteps without hitting surface
 };
 
 struct Command

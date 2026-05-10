@@ -1,19 +1,22 @@
 #include <exception>
+#include "CanvasPanController.h"
+#include "GamepadActionDispatcher.h"
+#include "GamepadState.h"
+#include "GamepadVisualFeedback.h"
+#include "NodeFocusManager.h"
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
 #include <imguinodeeditor.h>
-#include <iostream>
 
 #include <algorithm>
 #include <cctype>
 #include <fmt/format.h>
 #include <limits>
+#include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
 
-// #include "../ExpressionToGraphConverter.h"
-// #include "../ExpressionParser.h"
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
 #include "../FunctionArgument.h"
@@ -30,17 +33,93 @@
 #include "Port.h"
 #include "ResourceView.h"
 #include "Style.h"
+#include "ValidationUtils.h"
+#include "ValidationOverlay.h"
 #include "Widgets.h"
+#include "OverflowMenuBar.h"
 #include "imgui.h"
 #include "nodesfwd.h"
+#include "nodes/IssueList.h"
+#include "nodes/DerivedNodes.h"
+#include "nodes/LowerFunctionGradient.h"
 #include "ui/LevelSetView.h"
 #include "ui/VolumeDataView.h"
 #include <nodes/Assembly.h>
+#include <nodes/FunctionDeduplicator.h>
 #include <nodes/Model.h>
+#include <tracy/Tracy.hpp>
 
 namespace gladius::ui
 {
     using namespace nodes;
+
+    // Layout and positioning constants
+    namespace
+    {
+        /// Horizontal offset when placing a new node relative to a selected node
+        constexpr float kNodePlacementOffsetX = 400.0f;
+        /// Default fallback node size when actual size is unavailable
+        constexpr ImVec2 kDefaultNodeSize{150.0f, 100.0f};
+        /// Width for input text fields in dialogs
+        constexpr float kInputTextWidth = 260.0f;
+        /// Standard button width in dialogs
+        constexpr float kDialogButtonWidth = 120.0f;
+        /// Standard dialog child window height for scrollable lists
+        constexpr float kDialogListHeight = 150.0f;
+        /// Standard dialog child window width
+        constexpr float kDialogListWidth = 500.0f;
+        /// Filter input width in popups
+        constexpr float kFilterInputWidth = 200.0f;
+
+        [[nodiscard]] ImVec4 colorWithAlpha(ImVec4 color, float alpha)
+        {
+            color.w = alpha;
+            return color;
+        }
+
+        void pushNodeEditorTheme()
+        {
+            auto const & style = ImGui::GetStyle();
+            float const uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+            ImVec4 const frameBg = style.Colors[ImGuiCol_FrameBg];
+            ImVec4 const border = style.Colors[ImGuiCol_Border];
+            ImVec4 const accent = style.Colors[ImGuiCol_TabActive];
+            ImVec4 const accentHover = style.Colors[ImGuiCol_TabHovered];
+            ImVec4 const accentSoft = style.Colors[ImGuiCol_HeaderHovered];
+
+            ed::PushStyleColor(ed::StyleColor_Bg, colorWithAlpha(frameBg, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_Grid, colorWithAlpha(border, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_HovNodeBorder, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_SelNodeBorder, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_NodeSelRect, colorWithAlpha(accent, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_NodeSelRectBorder, colorWithAlpha(accentHover, 0.55f));
+            ed::PushStyleColor(ed::StyleColor_HovLinkBorder, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_SelLinkBorder, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_HighlightLinkBorder, colorWithAlpha(accentSoft, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_PinRect, colorWithAlpha(accentHover, 0.18f));
+            ed::PushStyleColor(ed::StyleColor_PinRectBorder, colorWithAlpha(accentHover, 0.45f));
+            ed::PushStyleColor(ed::StyleColor_Flow, colorWithAlpha(accentHover, 0.95f));
+            ed::PushStyleColor(ed::StyleColor_FlowMarker, colorWithAlpha(accent, 1.0f));
+            ed::PushStyleColor(ed::StyleColor_GroupBg, colorWithAlpha(frameBg, 0.32f));
+            ed::PushStyleColor(ed::StyleColor_GroupBorder, colorWithAlpha(border, 0.45f));
+
+            ed::PushStyleVar(ed::StyleVar_NodeRounding, 20.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_NodeBorderWidth, 5.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_LinkStrength, 90.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_FlowMarkerDistance, 26.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_FlowSpeed, 120.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_GroupRounding, 12.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_GroupBorderWidth, 1.5f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_HoveredNodeBorderWidth, 6.f * uiScale);
+            ed::PushStyleVar(ed::StyleVar_SelectedNodeBorderWidth, 15.f * uiScale);
+        }
+
+        void popNodeEditorTheme()
+        {
+            ed::PopStyleVar(9);
+            ed::PopStyleColor(15);
+        }
+    } // namespace
 
     std::vector<ModelEditor::LayoutStrategyDescriptor> ModelEditor::layoutStrategyDescriptors()
     {
@@ -163,7 +242,7 @@ namespace gladius::ui
 
     ModelEditor::ModelEditor()
     {
-        m_editorContext = ed::CreateEditor();
+        // Editor contexts are created on-demand per function in getOrCreateEditorContext()
         m_nodeTypeToColor = createNodeTypeToColors();
 
         // Setup expression dialog callbacks
@@ -180,21 +259,62 @@ namespace gladius::ui
               // TODO: Preview the expression (maybe show variable values or graph structure)
               // For now, this is a placeholder
           });
+
+        // Setup validation overlay navigation callback
+        m_validationOverlay.setNavigationCallback(
+          [this](nodes::NodeId nodeId, nodes::ResourceId modelId)
+          { requestNodeFocus(nodeId, modelId); });
+
+        // T060: Setup ResourceView with ModelEditor for undo support in transforms
+        m_resourceView.setModelEditor(this);
     }
 
     ModelEditor::~ModelEditor()
     {
-        DestroyEditor(m_editorContext);
+        // Destroy all per-function editor contexts
+        for (auto & [id, ctx] : m_editorContexts)
+        {
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
+        }
+        m_editorContexts.clear();
     }
 
     void ModelEditor::resetEditorContext()
     {
-        if (m_editorContext != nullptr)
+        // Destroy all per-function editor contexts
+        for (auto & [id, ctx] : m_editorContexts)
         {
-            DestroyEditor(m_editorContext);
-            m_editorContext = nullptr;
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
         }
-        m_editorContext = ed::CreateEditor();
+        m_editorContexts.clear();
+        m_visitedFunctions.clear();
+    }
+
+    ed::EditorContext * ModelEditor::getOrCreateEditorContext(nodes::ResourceId functionId)
+    {
+        auto it = m_editorContexts.find(functionId);
+        if (it != m_editorContexts.end())
+        {
+            return it->second;
+        }
+        auto * ctx = ed::CreateEditor();
+        m_editorContexts[functionId] = ctx;
+        return ctx;
+    }
+    
+    ed::EditorContext * ModelEditor::getCurrentEditorContext()
+    {
+        if (!m_currentModel)
+        {
+            return nullptr;
+        }
+        return getOrCreateEditorContext(m_currentModel->getResourceId());
     }
 
     void ModelEditor::outline()
@@ -209,20 +329,57 @@ namespace gladius::ui
 
         if (ImGui::BeginMenuBar())
         {
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>(ICON_FA_TRASH "\tDelete unused resources")))
+            if (ImGui::BeginMenu(reinterpret_cast<const char *>(ICON_FA_BARS)))
             {
-                m_unusedResources = m_doc->findUnusedResources();
+                if (ImGui::MenuItem(
+                      reinterpret_cast<const char *>(ICON_FA_TRASH " Delete unused resources")))
+                {
+                    m_unusedResources = m_doc->findUnusedResources();
 
-                if (!m_unusedResources.empty())
-                {
-                    m_showDeleteUnusedResourcesConfirmation = true;
+                    if (!m_unusedResources.empty())
+                    {
+                        m_showDeleteUnusedResourcesConfirmation = true;
+                    }
+                    else if (auto logger = m_doc->getSharedLogger())
+                    {
+                        logger->addEvent(
+                          {"No unused resources found in the model", events::Severity::Info});
+                    }
                 }
-                else if (auto logger = m_doc->getSharedLogger())
+                if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                      ICON_FA_COPY " Remove duplicate functions")))
                 {
-                    logger->addEvent(
-                      {"No unused resources found in the model", events::Severity::Info});
+                    // Store state for undo support (T043)
+                    m_history.storeState(*m_assembly, "Remove duplicate functions");
+
+                    auto result = FunctionDeduplicator::deduplicate(*m_assembly);
+                    if (auto logger = m_doc->getSharedLogger())
+                    {
+                        if (result.removedCount > 0)
+                        {
+                            logger->addEvent(
+                              {fmt::format(
+                                 "Removed {} duplicate function(s), updated {} reference(s)",
+                                 result.removedCount,
+                                 result.updatedReferences),
+                               events::Severity::Info});
+                            markModelAsModified();
+                        }
+                        else
+                        {
+                            logger->addEvent(
+                              {"No duplicate functions found", events::Severity::Info});
+                        }
+                    }
                 }
+                if (ImGui::MenuItem(
+                      reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN " Show Library Browser"),
+                      nullptr,
+                      m_libraryBrowser.isVisible()))
+                {
+                    toggleLibraryVisibility();
+                }
+                ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
         }
@@ -369,12 +526,6 @@ namespace gladius::ui
             m_showAddModel = true;
         }
 
-        ImGui::SameLine();
-        if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CALCULATOR "\tExpression")))
-        {
-            showExpressionDialog();
-        }
-
         ImGui::Unindent();
 
         for (auto & model : m_assembly->getFunctions())
@@ -507,6 +658,9 @@ namespace gladius::ui
                             m_doc->deleteFunction(model.second->getResourceId());
                             m_currentModel = m_assembly->assemblyModel();
                             m_dirty = true;
+                            ImGui::TreePop();
+                            ImGui::PopID();
+                            break; // Map was modified, iterator is invalidated
                         }
                     }
 
@@ -532,6 +686,11 @@ namespace gladius::ui
                     }
 
                     ImGui::SameLine();
+                }
+
+                // Allow renaming for all non-assembly functions (including managed ones)
+                if (!isAssembly)
+                {
                     if (ImGui::Button("Rename"))
                     {
                         m_outlineRenaming = true;
@@ -654,7 +813,7 @@ namespace gladius::ui
                                    m_selectedFunctionType != FunctionType::WrapExisting) ||
                                   availableFunctionCount > 0);
 
-                if (canCreate && ImGui::Button("Create", ImVec2(120, 0)))
+                if (canCreate && ImGui::Button("Create", ImVec2(kDialogButtonWidth, 0)))
                 {
                     nodes::Model * newModel = nullptr;
                     switch (m_selectedFunctionType)
@@ -680,15 +839,18 @@ namespace gladius::ui
                     if (newModel)
                     {
                         newModel->setDisplayName(m_newModelName);
+                        // Refresh assembly reference from document - it may have been replaced
+                        setAssembly(m_doc->getAssembly());
                         m_currentModel = m_assembly->findModel(newModel->getResourceId());
                         switchModel();
                         m_showAddModel = false;
+                        m_visible = true; // Ensure ModelEditor remains visible after creating function
                         ImGui::CloseCurrentPopup();
                     }
                 }
                 ImGui::SetItemDefaultFocus();
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                if (ImGui::Button("Cancel", ImVec2(kDialogButtonWidth, 0)))
                 {
                     ImGui::CloseCurrentPopup();
                     m_showAddModel = false;
@@ -719,27 +881,97 @@ namespace gladius::ui
         // ensures pin-based new-node queries are handled.
         if (ed::BeginCreate())
         {
-            ed::PinId inputPinId, outputPinId;
-            if (ed::QueryNewLink(&inputPinId, &outputPinId))
+            // QueryNewLink returns (startId, endId). The imgui-node-editor
+            // library normalises pin order so that startId is the Output pin
+            // and endId is the Input pin, regardless of which direction the
+            // user dragged. We resolve direction from the model to stay
+            // robust against any future library changes.
+            ed::PinId startPinId{0};
+            ed::PinId endPinId{0};
+            if (ed::QueryNewLink(&startPinId, &endPinId))
             {
-                // A new link is being created between two pins.
-                // Attempt to add the link if both pins are valid.
-                if (inputPinId && outputPinId)
+                if (m_currentModel)
                 {
-                    auto const inId = static_cast<nodes::ParameterId>(inputPinId.Get());
-                    auto const outId = static_cast<nodes::PortId>(outputPinId.Get());
+                    // Determine which of the two pins is the source for drag
+                    // state tracking: prefer whichever pin is already known.
+                    ed::PinId const dragPinId = startPinId ? startPinId : endPinId;
 
-                    if (ed::AcceptNewItem())
+                    if (dragPinId)
                     {
-                        createUndoRestorePoint("Add link");
-                        if (!m_currentModel->addLink(inId, outId) &&
-                            !m_currentModel->addLink(outId, inId))
+                        auto const dragId = static_cast<int64_t>(dragPinId.Get());
+                        if (!m_linkDragState.isDragging || m_linkDragState.sourcePortId != dragId)
                         {
-                            ed::RejectNewItem();
+                            // Look the ID up in both registries to decide direction.
+                            if (auto * port = m_currentModel->getPort(
+                                  static_cast<nodes::PortId>(dragId));
+                                port != nullptr)
+                            {
+                                m_linkDragState.beginDrag(dragId,
+                                                          port->getTypeIndex(),
+                                                          true);
+                                m_linkDragState.computeCompatibility(*m_currentModel);
+                            }
+                            else
+                            {
+                                auto const & parameterRegistry =
+                                  m_currentModel->getConstParameterRegistry();
+                                if (auto const parameterIter = parameterRegistry.find(dragId);
+                                    parameterIter != parameterRegistry.end())
+                                {
+                                    auto * param = dynamic_cast<nodes::VariantParameter *>(
+                                      parameterIter->second);
+                                    if (param != nullptr)
+                                    {
+                                        m_linkDragState.beginDrag(dragId,
+                                                                  param->getTypeIndex(),
+                                                                  false);
+                                        m_linkDragState.computeCompatibility(*m_currentModel);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (startPinId && endPinId)
+                    {
+                        if (startPinId == endPinId)
+                        {
+                            ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
                         }
                         else
                         {
-                            markModelAsModified();
+                            // Resolve which pin is the output port and which is
+                            // the input parameter by looking both up in the model.
+                            auto const idA = static_cast<int64_t>(startPinId.Get());
+                            auto const idB = static_cast<int64_t>(endPinId.Get());
+
+                            nodes::PortId outputId{0};
+                            nodes::ParameterId inputId{0};
+
+                            if (m_currentModel->getPort(static_cast<nodes::PortId>(idA)) != nullptr)
+                            {
+                                outputId = static_cast<nodes::PortId>(idA);
+                                inputId = static_cast<nodes::ParameterId>(idB);
+                            }
+                            else
+                            {
+                                outputId = static_cast<nodes::PortId>(idB);
+                                inputId = static_cast<nodes::ParameterId>(idA);
+                            }
+
+                            if (ed::AcceptNewItem())
+                            {
+                                createUndoRestorePoint("Add link");
+                                if (m_currentModel->addLink(outputId, inputId))
+                                {
+                                    markModelAsModified();
+                                    m_linkDragState.reset();
+                                }
+                                else
+                                {
+                                    ed::RejectNewItem(ImVec4(1.f, 0.2f, 0.2f, 1.f), 2.0f);
+                                }
+                            }
                         }
                     }
                 }
@@ -749,6 +981,14 @@ namespace gladius::ui
             // to the dedicated helper that opens the Create Node popup when
             // appropriate.
             onQueryNewNode();
+        }
+        else
+        {
+            // Link drag ended or was cancelled — reset state
+            if (m_linkDragState.isDragging)
+            {
+                m_linkDragState.reset();
+            }
         }
         ed::EndCreate();
 
@@ -796,21 +1036,28 @@ namespace gladius::ui
     {
         // Mark the editor to re-apply node positions and refresh view on next frame
         m_nodePositionsNeedUpdate = true;
+        m_pendingCenterViewFrames = 0;
+        m_pendingCenterViewRequest = false;
         m_dirty = true;
         // Defer selection clearing until an editor is active to avoid calling NodeEditor APIs out
         // of context
         m_pendingClearSelection = true;
 
         // Schedule an initial auto-layout for models that have no meaningful positions yet,
-        // but only once per function to preserve user edits.
+        // but only once per function to preserve user edits. Unlike the previous frame-count
+        // heuristic, the actual execution is gated on measured node sizes being stable.
         if (m_currentModel)
         {
-            m_pendingAutoLayout = !m_currentModel->hasBeenLayouted();
+            m_pendingInitialAutoLayout = m_currentModel->needsAutoLayout();
         }
         else
         {
-            m_pendingAutoLayout = false;
+            m_pendingInitialAutoLayout = false;
         }
+
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
     }
 
     void ModelEditor::onQueryNewNode()
@@ -999,6 +1246,11 @@ namespace gladius::ui
     auto ModelEditor::showAndEdit() -> bool
     {
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        // Detect if the document replaced its assembly (e.g. file load, MCP operation)
+        // and re-sync before rendering the frame.
+        refreshAssembly();
+
         if (!m_currentModel || !m_assembly)
         {
             return false;
@@ -1015,355 +1267,600 @@ namespace gladius::ui
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0., 0.));
             if (ImGui::Begin("Model Editor", &m_visible, ImGuiWindowFlags_MenuBar))
             {
-                SetCurrentEditor(m_editorContext);
+                SetCurrentEditor(getCurrentEditorContext());
 
                 if (ImGui::BeginMenuBar())
                 {
+                    OverflowMenuBar overflow;
+                    overflow.begin("ModelEditorBar");
+
                     // Function extraction refactoring
+                    overflow.item(ICON_FA_CODE_BRANCH "\tExtract Function",
+                                  [&]
+                                  {
+                                      auto selection = selectedNodes(getCurrentEditorContext());
+                                      bool canExtract = !selection.empty();
+                                      if (!canExtract)
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_CODE_BRANCH "\tExtract Function"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_CODE_BRANCH "\tExtract Function")))
+                                          {
+                                              m_showExtractDialog = true;
+                                              m_extractFunctionName = "ExtractedFunction";
+                                          }
+                                      }
+                                  });
+
+                    overflow.item("Autolayout",
+                                  [&]
+                                  {
+                                      if (ImGui::MenuItem("Autolayout"))
+                                      {
+                                          autoLayout();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View",
+                                  [&]
+                                  {
+                                      if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_COMPRESS_ARROWS_ALT "\tCenter View")))
+                                      {
+                                          ed::NavigateToContent();
+                                      }
+                                  });
+
+                    // Block Undo/Redo/Copy/Paste during export
+                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+
+                    overflow.item(ICON_FA_UNDO "\tUndo",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      m_stateApplyingUndo = false;
+                                      if (m_history.canUnDo())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_UNDO "\tUndo")))
+                                          {
+                                              undo();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_UNDO "\tUndo"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_REDO "\tRedo",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      if (m_history.canReDo())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_REDO "\tRedo")))
+                                          {
+                                              redo();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_REDO "\tRedo"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_COPY "\tCopy",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      auto selectionForCopy =
+                                        selectedNodes(getCurrentEditorContext());
+                                      if (selectionForCopy.empty())
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_COPY "\tCopy"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_COPY "\tCopy")))
+                                          {
+                                              copySelectionToClipboard();
+                                          }
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_PASTE "\tPaste",
+                                  [&]
+                                  {
+                                      if (exportLocked)
+                                      {
+                                          ImGui::BeginDisabled();
+                                      }
+                                      if (!hasClipboard())
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_PASTE "\tPaste"));
+                                          ImGui::PopStyleColor();
+                                      }
+                                      else
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_PASTE "\tPaste")))
+                                          {
+                                              m_pendingPasteRequest = true;
+                                          }
+                                      }
+                                      if (exportLocked)
+                                      {
+                                          ImGui::EndDisabled();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_ROBOT "\tCompile automatically",
+                                  [&]
+                                  {
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_ROBOT "\tCompile automatically")},
+                                        &m_autoCompile);
+
+                                      if (!m_autoCompile)
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_HAMMER "\tCompile")))
+                                          {
+                                              m_isManualCompileRequested = true;
+                                          }
+                                      }
+
+                                      if (ImGui::IsItemHovered())
+                                      {
+                                          ImGui::BeginTooltip();
+                                          ImGui::TextUnformatted("Compile the model");
+                                          ImGui::Separator();
+                                          ImGui::TextUnformatted(
+                                            "If this option is enabled, the model will be compiled "
+                                            "automatically "
+                                            "when it is modified.\n"
+                                            "If this option is disabled, you have to compile the "
+                                            "model manually.");
+                                          ImGui::EndTooltip();
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_BOXES "\tAuto update bounding box",
+                                  [&]
+                                  {
+                                      auto core = m_doc->getCore();
+                                      bool autoUpdateBoundingBox =
+                                        core->isAutoUpdateBoundingBoxEnabled();
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_BOXES "\tAuto update bounding box")},
+                                        &autoUpdateBoundingBox);
+                                      if (ImGui::IsItemHovered())
+                                      {
+                                          ImGui::BeginTooltip();
+                                          ImGui::TextUnformatted("Auto update bounding box");
+                                          ImGui::Separator();
+                                          ImGui::TextUnformatted(
+                                            "If enabled, the bounding box will be updated "
+                                            "automatically when the "
+                                            "model is modified.\n"
+                                            "Deactivate this option to speed up the preview of "
+                                            "parameter changes.");
+                                          ImGui::EndTooltip();
+                                      }
+                                      core->setAutoUpdateBoundingBox(autoUpdateBoundingBox);
+
+                                      if (!autoUpdateBoundingBox)
+                                      {
+                                          if (ImGui::MenuItem("Update bounding box"))
+                                          {
+                                              core->resetBoundingBox();
+                                              core->updateBBox();
+                                              invalidateEverything();
+                                          }
+                                      }
+                                  });
+
+                    overflow.item(ICON_FA_DATABASE "\tResource Nodes",
+                                  [&]
+                                  {
+                                      bool showResourceNodes =
+                                        m_nodeViewVisitor.areResourceNodesVisible();
+                                      toggleButton(
+                                        {reinterpret_cast<const char *>(
+                                          ICON_FA_DATABASE "\tResource Nodes")},
+                                        &showResourceNodes);
+                                      m_nodeViewVisitor.setResourceNodesVisible(showResourceNodes);
+                                  });
+
+                    overflow.item(ICON_FA_TAGS "\tAdd to Group",
+                                  [&]
+                                  {
+                                      auto selection = selectedNodes(getCurrentEditorContext());
+                                      if (!selection.empty())
+                                      {
+                                          if (ImGui::MenuItem(reinterpret_cast<const char *>(
+                                                ICON_FA_TAGS "\tAdd to Group")))
+                                          {
+                                              m_showGroupAssignmentDialog = true;
+                                          }
+
+                                          if (ImGui::IsItemHovered())
+                                          {
+                                              ImGui::BeginTooltip();
+                                              ImGui::TextUnformatted(
+                                                "Assign selected nodes to a group/tag");
+                                              ImGui::Separator();
+                                              ImGui::TextUnformatted(
+                                                fmt::format("Selected nodes: {}", selection.size())
+                                                  .c_str());
+                                              ImGui::EndTooltip();
+                                          }
+                                      }
+                                      else
+                                      {
+                                          ImGui::PushStyleColor(ImGuiCol_Text,
+                                                                ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                                          ImGui::MenuItem(reinterpret_cast<const char *>(
+                                            ICON_FA_TAGS "\tAdd to Group"));
+                                          ImGui::PopStyleColor();
+
+                                          if (ImGui::IsItemHovered())
+                                          {
+                                              ImGui::BeginTooltip();
+                                              ImGui::TextUnformatted(
+                                                "Select nodes to assign them to a group");
+                                              ImGui::EndTooltip();
+                                          }
+                                      }
+                                  });
+
+                    overflow.end();
+
+                    // Non-rendering logic that must always execute
+                    if (m_pendingCenterViewRequest)
                     {
-                        auto selection = selectedNodes(m_editorContext);
-                        bool canExtract = !selection.empty();
-                        if (!canExtract)
+                        if (m_pendingCenterViewFrames > 0)
                         {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                            ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CODE_BRANCH
-                                                                           "\tExtract Function"));
-                            ImGui::PopStyleColor();
+                            --m_pendingCenterViewFrames;
                         }
                         else
                         {
-                            if (ImGui::MenuItem(reinterpret_cast<const char *>(
-                                  ICON_FA_CODE_BRANCH "\tExtract Function")))
-                            {
-                                m_showExtractDialog = true;
-                                m_extractFunctionName = "ExtractedFunction";
-                            }
+                            ed::NavigateToContent();
+                            m_pendingCenterViewRequest = false;
                         }
                     }
 
-                    ImGui::AlignTextToFramePadding();
-                    ImGui::TextUnformatted("Layout:");
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
-                    auto const * currentLayoutLabel = layoutStrategyLabel(m_selectedLayoutStrategy);
-                    if (ImGui::BeginCombo("##LayoutStrategySelector", currentLayoutLabel))
                     {
-                        bool const isAutoSelected =
-                          m_selectedLayoutStrategy == LayoutStrategyChoice::Auto;
-                        if (ImGui::Selectable(layoutStrategyLabel(LayoutStrategyChoice::Auto),
-                                              isAutoSelected))
+                        auto core = m_doc->getCore();
+                        bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
+                        auto optimizedNewState = optimized;
+
+                        if (optimizedNewState != optimized)
                         {
-                            m_selectedLayoutStrategy = LayoutStrategyChoice::Auto;
-                        }
-                        if (isAutoSelected)
-                        {
-                            ImGui::SetItemDefaultFocus();
-                        }
-
-                        for (auto const & descriptor : layoutStrategyDescriptors())
-                        {
-                            bool const isSelected =
-                              m_selectedLayoutStrategy == descriptor.choice;
-                            if (ImGui::Selectable(descriptor.displayName, isSelected))
-                            {
-                                m_selectedLayoutStrategy = descriptor.choice;
-                            }
-                            if (isSelected)
-                            {
-                                ImGui::SetItemDefaultFocus();
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Choose the auto layout algorithm.");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "Auto runs the tournament and applies the winning strategy.");
-                        ImGui::EndTooltip();
-                    }
-
-                    ImGui::SameLine();
-
-                    if (ImGui::MenuItem("Autolayout"))
-                    {
-                        autoLayout();
-                    }
-                    if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COMPRESS_ARROWS_ALT
-                                                                       "\tCenter View")))
-                    {
-                        ed::NavigateToContent();
-                    }
-
-                    m_stateApplyingUndo = false;
-                    if (m_history.canUnDo())
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_UNDO "\tUndo")))
-                        {
-                            undo();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_UNDO "\tUndo"));
-                        ImGui::PopStyleColor();
-                    }
-
-                    if (m_history.canReDo())
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_REDO "\tRedo")))
-                        {
-                            redo();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_REDO "\tRedo"));
-                        ImGui::PopStyleColor();
-                    }
-
-                    // Copy / Paste
-                    auto selectionForCopy = selectedNodes(m_editorContext);
-                    if (selectionForCopy.empty())
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COPY "\tCopy"));
-                        ImGui::PopStyleColor();
-                    }
-                    else
-                    {
-                        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_COPY "\tCopy")))
-                        {
-                            copySelectionToClipboard();
-                        }
-                    }
-
-                    if (!hasClipboard())
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_PASTE "\tPaste"));
-                        ImGui::PopStyleColor();
-                    }
-                    else
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_PASTE "\tPaste")))
-                        {
-                            // Defer paste until editor is active
-                            m_pendingPasteRequest = true;
-                        }
-                    }
-
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_ROBOT "\tCompile automatically")},
-                      &m_autoCompile);
-
-                    if (!m_autoCompile)
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_HAMMER "\tCompile")))
-                        {
-                            m_isManualCompileRequested = true;
-                        }
-                    }
-
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Compile the model");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "If this option is enabled, the model will be compiled automatically "
-                          "when it is modified.\n"
-                          "If this option is disabled, you have to compile the model manually.");
-                        ImGui::EndTooltip();
-                    }
-
-                    auto core = m_doc->getCore();
-                    bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
-                    auto optimizedNewState = optimized;
-
-                    // The command stream is currently not working
-                    // toggleButton(
-                    //   {reinterpret_cast<const char *>(ICON_FA_STOPWATCH "\tJIT optimized")},
-                    //   &optimizedNewState);
-
-                    if (optimizedNewState != optimized)
-                    {
-                        core->setCodeGenerator((optimizedNewState) ? CodeGenerator::Code
-                                                                   : CodeGenerator::CommandStream);
-                        invalidateEverything();
-                    }
-
-                    // automatic update of the bounding box
-                    bool autoUpdateBoundingBox = core->isAutoUpdateBoundingBoxEnabled();
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_BOXES "\tAuto update bounding box")},
-                      &autoUpdateBoundingBox);
-                    // Tooltip for auto update bounding box
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted("Auto update bounding box");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted(
-                          "If enabled, the bounding box will be updated automatically when the "
-                          "model is modified.\n"
-                          "Deactivate this option to speed up the preview of parameter changes.");
-                        ImGui::EndTooltip();
-                    }
-                    core->setAutoUpdateBoundingBox(autoUpdateBoundingBox);
-
-                    if (!autoUpdateBoundingBox)
-                    {
-                        if (ImGui::MenuItem("Update bounding box"))
-                        {
-                            core->resetBoundingBox();
-                            core->updateBBox();
+                            core->setCodeGenerator((optimizedNewState)
+                                                     ? CodeGenerator::Code
+                                                     : CodeGenerator::CommandStream);
                             invalidateEverything();
-                        }
-                    }
-
-                    bool showResourceNodes = m_nodeViewVisitor.areResourceNodesVisible();
-                    toggleButton(
-                      {reinterpret_cast<const char *>(ICON_FA_DATABASE "\tResource Nodes")},
-                      &showResourceNodes);
-                    m_nodeViewVisitor.setResourceNodesVisible(showResourceNodes);
-
-                    // Add group assignment functionality
-                    auto selection = selectedNodes(m_editorContext);
-                    if (!selection.empty())
-                    {
-                        if (ImGui::MenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_TAGS "\tAdd to Group")))
-                        {
-                            // TODO: Implement group assignment
-                            m_showGroupAssignmentDialog = true;
-                        }
-
-                        if (ImGui::IsItemHovered())
-                        {
-                            ImGui::BeginTooltip();
-                            ImGui::TextUnformatted("Assign selected nodes to a group/tag");
-                            ImGui::Separator();
-                            ImGui::TextUnformatted(
-                              fmt::format("Selected nodes: {}", selection.size()).c_str());
-                            ImGui::EndTooltip();
-                        }
-                    }
-                    else
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
-                        ImGui::MenuItem(
-                          reinterpret_cast<const char *>(ICON_FA_TAGS "\tAdd to Group"));
-                        ImGui::PopStyleColor();
-
-                        if (ImGui::IsItemHovered())
-                        {
-                            ImGui::BeginTooltip();
-                            ImGui::TextUnformatted("Select nodes to assign them to a group");
-                            ImGui::EndTooltip();
                         }
                     }
 
                     ImGui::EndMenuBar();
                 }
 
-                m_popupMenuFunction();
-
-                ed::SetCurrentEditor(m_editorContext);
-
-                ed::PushStyleColor(ax::NodeEditor::StyleColor_Bg,
-                                   ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
-
-                ed::Begin("Model Editor");
-
-                // Clear selection now that the editor context is active
-                if (m_pendingClearSelection)
+                // VALIDATION ISSUES OVERLAY (collapsible)
+                // Validate on demand - only when graph has changed (dirty flag).
+                // Skip validation while structural edits are pending — the graph is
+                // about to be recompiled so validation results would be immediately stale.
+                if (m_doc != nullptr)
                 {
-                    ed::ClearSelection();
-                    m_pendingClearSelection = false;
-                }
-
-                // Handle any deferred paste request once editor is active
-                if (m_pendingPasteRequest)
-                {
-                    m_pendingPasteRequest = false;
-                    pasteClipboardAtMouse();
-                }
-
-                m_nodeViewVisitor.setAssembly(m_assembly);
-                m_nodeViewVisitor.setModelEditor(this);
-                if (m_currentModel)
-                {
-                    m_nodeWidthsInitialized = m_nodeViewVisitor.columnWidthsAreInitialized();
-                    m_currentModel->visitNodes(m_nodeViewVisitor);
-
-                    // Update node groups after nodes are rendered and positioned
-                    m_nodeViewVisitor.updateNodeGroups();
-
-                    // Perform pending initial auto-layout after nodes are first rendered,
-                    // so widths/metrics are available to the layout engine.
-                    if (m_pendingAutoLayout && m_nodeWidthsInitialized)
+                    if (!m_doc->hasStructuralEditPending())
                     {
-                        m_pendingAutoLayout = false;
-                        autoLayout();
+                        ZoneScopedN("ValidateAssemblyIfDirty");
+                        m_doc->validateAssemblyIfDirty(nodes::ValidationContext::Interactive);
+                    }
+                    m_validationOverlay.render(m_doc->getIssueList());
+                }
+
+                auto popupMenuFunction = m_popupMenuFunction;
+                popupMenuFunction();
+
+                // Tab bar: always show Graph + Code; show Properties only for Image3D
+                auto previousTabMode = m_currentTabMode;
+                ImGuiTabItemFlags codeTabFlags = ImGuiTabItemFlags_None;
+                if (m_forceCodeTab)
+                {
+                    codeTabFlags = ImGuiTabItemFlags_SetSelected;
+                    m_forceCodeTab = false;
+                }
+                if (ImGui::BeginTabBar("FunctionTabs"))
+                {
+                    if (ImGui::BeginTabItem("Graph"))
+                    {
+                        m_currentTabMode = TabMode::Graph;
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Code", nullptr, codeTabFlags))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        ImGui::EndTabItem();
+                    }
+                    if (isFunctionFromImage3D())
+                    {
+                        if (ImGui::BeginTabItem("Properties"))
+                        {
+                            m_currentTabMode = TabMode::Properties;
+                            ImGui::EndTabItem();
+                        }
+                    }
+                    ImGui::EndTabBar();
+                }
+
+                // Warn about unsaved code changes when switching away from Code tab
+                if (previousTabMode == TabMode::Code && m_currentTabMode != TabMode::Code &&
+                    m_codeView.hasUnsavedChanges())
+                {
+                    ImGui::OpenPopup("Unsaved Code Changes");
+                }
+                if (ImGui::BeginPopupModal("Unsaved Code Changes", nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text("You have unsaved changes in the Code editor.");
+                    ImGui::Text("Discard changes and switch tabs?");
+                    ImGui::Separator();
+                    if (ImGui::Button("Discard", ImVec2(120, 0)))
+                    {
+                        m_codeView.discardChanges();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stay in Code", ImVec2(120, 0)))
+                    {
+                        m_currentTabMode = TabMode::Code;
+                        m_forceCodeTab = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                // Render Properties panel if in Properties tab
+                if (m_currentTabMode == TabMode::Properties)
+                {
+                    m_functionFromImage3DView.setFunction(m_currentModel.get(),
+                                                         m_assembly.get());
+                    m_functionFromImage3DView.setModelEditor(this);
+                    if (m_functionFromImage3DView.render())
+                    {
+                        parameterChanged = true;
                     }
                 }
-                onCreateNode();
-                onDeleteNode();
-
-                // Keyboard copy/paste when editor is focused
-                if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                else if (m_currentTabMode == TabMode::Code)
                 {
-                    ImGuiIO & io = ImGui::GetIO();
-                    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                    m_codeView.setFunction(m_currentModel->getResourceId(),
+                                           m_currentModel.get(),
+                                           m_assembly.get());
+                    if (m_codeView.render())
                     {
-                        copySelectionToClipboard();
-                    }
-                    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
-                    {
-                        m_pendingPasteRequest = true;
+                        parameterChanged = true;
+                        m_nodeViewVisitor.clearColumnWidths();
                     }
                 }
-
-                // Handle group movement - detect when nodes are moved and move their group members
-                m_nodeViewVisitor.handleGroupMovement();
-
-                // Handle group dragging via header/border areas - must be called before rendering
-                m_nodeViewVisitor.handleGroupDragging();
-
-                // Render node group last, to prioritize node interaction
-                m_nodeViewVisitor.renderNodeGroups();
-
-                // Allow quick navigation with mouse back/forward buttons when editor is hovered
-                if (isHovered())
+                else
                 {
-                    // Prefer key-based detection for mouse X buttons using ImGuiKey_* constants
-                    if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
-                    {
-                        goBack();
-                    }
-                    if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
-                    {
-                        goForward();
-                    }
-                }
+                    // Normal graph view
+                    auto * currentCtx = getCurrentEditorContext();
+                    ed::SetCurrentEditor(currentCtx);
+                    pushNodeEditorTheme();
 
-                // Check for group double-clicks and handle them AFTER rendering (so bounds are
-                // updated)
-                std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
-                if (!doubleClickedGroup.empty())
-                {
-                    m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
-                }
+                    // Capture the top-left corner of the editor area before
+                    // ed::Begin() claims the region, so we can place the
+                    // function-name overlay at a fixed screen position later.
+                    ImVec2 const editorOrigin = ImGui::GetCursorScreenPos();
 
-                ed::End();
-                ed::PopStyleColor();
+                    ed::Begin("Model Editor");
+
+                    // Process any pending async STL imports (must run inside ed context).
+                    processPendingStlImports();
+
+                    // Clear selection now that the editor context is active
+                    if (m_pendingClearSelection)
+                    {
+                        ed::ClearSelection();
+                        m_pendingClearSelection = false;
+                    }
+
+                    // Handle any deferred paste request once editor is active
+                    if (m_pendingPasteRequest)
+                    {
+                        m_pendingPasteRequest = false;
+                        pasteClipboardAtMouse();
+                    }
+
+                    m_nodeViewVisitor.setAssembly(m_assembly);
+                    m_nodeViewVisitor.setModelEditor(this);
+                    m_nodeViewVisitor.setExportState(m_exportState);
+                    if (m_currentModel)
+                    {
+                        ZoneScopedN("VisitNodes");
+                        m_currentModel->visitNodes(m_nodeViewVisitor);
+
+                        // Update node groups after nodes are rendered and positioned
+                        m_nodeViewVisitor.updateNodeGroups();
+                    }
+
+                    onCreateNode();
+                    onDeleteNode();
+
+                    // Keyboard copy/paste when editor is focused
+                    // Block copy/paste during export to prevent model modifications
+                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+                    if (!exportLocked &&
+                        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                    {
+                        ImGuiIO & io = ImGui::GetIO();
+                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                        {
+                            copySelectionToClipboard();
+                        }
+                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+                        {
+                            m_pendingPasteRequest = true;
+                        }
+                    }
+
+                    // Handle group dragging via header/border areas - must be called before
+                    // rendering
+                    m_nodeViewVisitor.handleGroupDragging();
+
+                    // Render node group last, to prioritize node interaction
+                    m_nodeViewVisitor.renderNodeGroups();
+
+                    // Allow quick navigation with mouse back/forward buttons when editor is
+                    // hovered
+                    if (isHovered())
+                    {
+                        // Prefer key-based detection for mouse X buttons using ImGuiKey_*
+                        // constants
+                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
+                        {
+                            goBack();
+                        }
+                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
+                        {
+                            goForward();
+                        }
+                    }
+
+                    // Check for group double-clicks and handle them AFTER rendering (so bounds
+                    // are updated)
+                    std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
+                    if (!doubleClickedGroup.empty())
+                    {
+                        m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
+                    }
+
+                    // Handle drag-and-drop from the library browser
+                    handleLibraryDrop();
+
+                    // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
+                    // Uses ed::GetHoveredNode() for correct node-level hover detection
+                    ed::NodeId hoveredNodeId = ed::GetHoveredNode();
+                    if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    {
+                        auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
+                        auto nodeOpt = m_currentModel->getNode(nodeId);
+                        if (nodeOpt)
+                        {
+                            nodes::NodeBase * node = *nodeOpt;
+                            nodes::ResourceId functionId = 0;
+                            if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                            {
+                                functionId = fc->getFunctionId();
+                            }
+                            else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
+                            {
+                                fg->resolveFunctionId();
+                                functionId = fg->getFunctionId();
+                            }
+
+                            if (functionId != 0)
+                            {
+                                // Pass nodeId as sourceNode - when user navigates back,
+                                // the view will center on this FunctionCall/FunctionGradient node
+                                navigateToFunction(functionId, nodeId);
+                            }
+                        }
+                    }
+
+                    ed::End();
+                    popNodeEditorTheme();
+
+                    // ── Gamepad overlays ────────────────────────────────────
+                    m_gamepadHintBar.render();
+                    m_gamepadVisualFeedback.renderContextIndicator(
+                        GamepadState::instance().isAnyConnected());
+
+                    // ── Function name overlay (fixed top-left corner) ────
+                    if (m_currentModel)
+                    {
+                        auto displayName = m_currentModel->getDisplayName();
+                        if (displayName.has_value() && !displayName->empty())
+                        {
+                            ImFont * font = ImGui::GetFont();
+                            float const fontSize = font->FontSize * 0.8f * m_uiScale;
+
+                            ImVec2 const padding = {12.f, 8.f};
+                            ImVec2 const textPos = {editorOrigin.x + padding.x,
+                                                    editorOrigin.y + padding.y};
+
+                            ImVec2 const textSize =
+                              font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, displayName->c_str());
+
+                            // Semi-transparent background pill
+                            ImVec2 const bgMin = {textPos.x - 6.f, textPos.y - 4.f};
+                            ImVec2 const bgMax = {textPos.x + textSize.x + 6.f,
+                                                  textPos.y + textSize.y + 4.f};
+
+                            ImDrawList * drawList = ImGui::GetWindowDrawList();
+                            drawList->AddRectFilled(
+                              bgMin, bgMax, IM_COL32(30, 30, 30, 180), 8.f);
+
+                            // Text with slight transparency
+                            drawList->AddText(
+                              font, fontSize, textPos, IM_COL32(255, 255, 255, 200),
+                              displayName->c_str());
+                        }
+                    }
+                } // end else (Graph view)
+
+                // Export overlay is now rendered at MainWindow level to block entire UI
 
                 if (m_nodeViewVisitor.haveParameterChanged())
                 {
@@ -1373,29 +1870,49 @@ namespace gladius::ui
                     m_currentModel->updateTypes();
                     if (!m_stateApplyingUndo)
                     {
-                        auto tmpAssembly = *m_assembly;
-                        m_history.storeState(tmpAssembly, "Parameter changed");
+                        // Pass *m_assembly directly — storeState() takes by const&
+                        // and copies into the undo stack only when the state differs.
+                        // Avoids creating an expensive intermediate Assembly copy.
+                        m_history.storeState(*m_assembly, "Parameter changed");
                     }
                 }
 
                 m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
 
-                if (m_nodePositionsNeedUpdate)
+                // Clear per-frame flags so they don't persist into the next frame.
+                // Without this, a single parameter change causes showAndEdit() to
+                // return true every subsequent frame, continuously bumping the async
+                // epoch and preventing HQ progressive rendering from ever starting.
+                m_nodeViewVisitor.clearPerFrameFlags();
+
+                if (m_currentTabMode == TabMode::Graph)
                 {
-                    applyNodePositions();
-                }
-                else
-                {
-                    readBackNodePositions();
+                    updateInitialAutoLayoutReadiness();
+
+                    if (m_nodePositionsNeedUpdate)
+                    {
+                        applyNodePositions();
+                    }
+                    else if (!m_pendingInitialAutoLayout)
+                    {
+                        // Do not read back positions while auto-layout is pending —
+                        // the editor context may contain default-placed garbage that
+                        // would corrupt the model and prevent auto-layout recovery.
+                        readBackNodePositions();
+                    }
                 }
             }
 
             ImGui::End();
             ImGui::PopStyleVar();
         }
-        catch (std::exception & e)
+        catch (std::exception const & e)
         {
-            std::cerr << e.what() << "\n";
+            if (m_doc && m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                    {fmt::format("Model editor error: {}", e.what()), events::Severity::Error});
+            }
         }
 
         // Extract Function dialog
@@ -1412,44 +1929,14 @@ namespace gladius::ui
                 ImGui::Separator();
                 ImGui::InputText("Function name", &m_extractFunctionName);
 
-                // --- Validation helpers (local lambdas) ---
-                auto trimCopy = [](std::string s)
-                {
-                    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-                    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
-                    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
-                    return s;
-                };
-                auto isIdentifier = [](std::string const & name)
-                {
-                    if (name.empty())
-                        return false;
-                    auto c0 = static_cast<unsigned char>(name[0]);
-                    if (!(std::isalpha(c0) || c0 == '_'))
-                        return false;
-                    for (size_t i = 1; i < name.size(); ++i)
-                    {
-                        unsigned char c = static_cast<unsigned char>(name[i]);
-                        if (!(std::isalnum(c) || c == '_'))
-                            return false;
-                    }
-                    return true;
-                };
-                auto isReserved = [](std::string const & name)
-                {
-                    // Disallow known reserved parameter names
-                    return name == "FunctionId";
-                };
-
                 // Gather selection ids and compute name proposals on first open
-                static bool initializedProposals = false;
-                if (!initializedProposals)
+                if (!m_extractDialogInitialized)
                 {
-                    initializedProposals = true;
+                    m_extractDialogInitialized = true;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
 
-                    auto selectionIds = selectedNodes(m_editorContext);
+                    auto selectionIds = selectedNodes(getCurrentEditorContext());
                     std::set<nodes::NodeId> selection;
                     for (auto const & nid : selectionIds)
                         selection.insert(static_cast<nodes::NodeId>(nid.Get()));
@@ -1464,40 +1951,19 @@ namespace gladius::ui
                     }
                 }
 
-                // Compute validation for current names
-                std::vector<bool> inputValid(m_extractInputNames.size(), true);
-                std::vector<bool> outputValid(m_extractOutputNames.size(), true);
-                std::unordered_set<std::string> seenInputs;
-                std::unordered_set<std::string> seenOutputs;
-                bool allNamesValid = true;
-                for (size_t i = 0; i < m_extractInputNames.size(); ++i)
-                {
-                    auto nameTrim = trimCopy(m_extractInputNames[i].name);
-                    bool v = isIdentifier(nameTrim) && !isReserved(nameTrim) && !nameTrim.empty();
-                    if (v)
-                    {
-                        if (seenInputs.count(nameTrim))
-                            v = false; // duplicate in inputs
-                        else
-                            seenInputs.insert(nameTrim);
-                    }
-                    inputValid[i] = v;
-                    allNamesValid = allNamesValid && v;
-                }
-                for (size_t i = 0; i < m_extractOutputNames.size(); ++i)
-                {
-                    auto nameTrim = trimCopy(m_extractOutputNames[i].name);
-                    bool v = isIdentifier(nameTrim) && !isReserved(nameTrim) && !nameTrim.empty();
-                    if (v)
-                    {
-                        if (seenOutputs.count(nameTrim))
-                            v = false; // duplicate in outputs
-                        else
-                            seenOutputs.insert(nameTrim);
-                    }
-                    outputValid[i] = v;
-                    allNamesValid = allNamesValid && v;
-                }
+                // Compute validation for current names using validation utilities
+                std::vector<std::string> inputNames;
+                std::vector<std::string> outputNames;
+                for (auto const & e : m_extractInputNames)
+                    inputNames.push_back(e.name);
+                for (auto const & e : m_extractOutputNames)
+                    outputNames.push_back(e.name);
+
+                std::vector<bool> inputValid;
+                std::vector<bool> outputValid;
+                bool const inputsValid = validation::validateUniqueNames(inputNames, inputValid);
+                bool const outputsValid = validation::validateUniqueNames(outputNames, outputValid);
+                bool const allNamesValid = inputsValid && outputsValid;
 
                 // Editable list of argument names
                 if (!m_extractInputNames.empty())
@@ -1559,7 +2025,7 @@ namespace gladius::ui
                     // Perform extraction with overrides
                     if (m_doc && m_currentModel)
                     {
-                        auto selectionIds = selectedNodes(m_editorContext);
+                        auto selectionIds = selectedNodes(getCurrentEditorContext());
                         std::set<nodes::NodeId> selection;
                         for (auto const & nid : selectionIds)
                             selection.insert(static_cast<nodes::NodeId>(nid.Get()));
@@ -1607,20 +2073,18 @@ namespace gladius::ui
                                 requestNodeFocus(result.functionCall->getId());
                             }
 
-                            if (m_assembly)
-                            {
-                                m_assembly->updateInputsAndOutputs();
-                            }
+                            // updateInputsAndOutputs() and updateTypes() are deferred to
+                            // the background refreshWorker(). The node editor will show
+                            // stale types briefly until compilation finishes.
 
                             m_currentModel->setLogger(m_doc->getSharedLogger());
-                            m_currentModel->updateTypes();
                             markModelAsModified();
                             switchModel();
                             m_nodePositionsNeedUpdate = true;
                         }
                     }
                     m_showExtractDialog = false;
-                    initializedProposals = false;
+                    m_extractDialogInitialized = false;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
                     ImGui::CloseCurrentPopup();
@@ -1629,7 +2093,7 @@ namespace gladius::ui
                 if (ImGui::Button("Cancel", ImVec2(120, 0)))
                 {
                     m_showExtractDialog = false;
-                    initializedProposals = false;
+                    m_extractDialogInitialized = false;
                     m_extractInputNames.clear();
                     m_extractOutputNames.clear();
                     ImGui::CloseCurrentPopup();
@@ -1693,16 +2157,54 @@ namespace gladius::ui
             return;
         }
 
+        // Clear all editor contexts for new document - each function will get a fresh context
+        for (auto & [id, ctx] : m_editorContexts)
+        {
+            if (ctx)
+            {
+                ed::DestroyEditor(ctx);
+            }
+        }
+        m_editorContexts.clear();
+        m_visitedFunctions.clear();
+
         m_assembly = std::move(assembly);
         m_currentModel = m_assembly->assemblyModel();
 
-        // if there are other models, we switch to the first one
-        if (m_assembly->getFunctions().size() > 1)
+        // Try to show the function referenced by the first build item's levelset.
+        // The assembly model contains FunctionCall nodes whose functionId points to the
+        // user-defined functions used by each build item.
+        auto const & assemblyModel = m_assembly->assemblyModel();
+        nodes::SharedModel initialModel;
+        if (assemblyModel)
         {
-            // find first function that is not the assembly model
+            for (auto const & [nodeId, node] : *assemblyModel)
+            {
+                if (auto const * fc = dynamic_cast<nodes::FunctionCall const *>(node.get()))
+                {
+                    auto const funcId = fc->getFunctionId();
+                    if (funcId != 0)
+                    {
+                        initialModel = m_assembly->findModel(funcId);
+                    }
+                    if (initialModel)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (initialModel)
+        {
+            m_currentModel = initialModel;
+        }
+        else if (m_assembly->getFunctions().size() > 1)
+        {
+            // Fallback: pick the first function that is not the assembly model
             for (auto & [id, model] : m_assembly->getFunctions())
             {
-                if (model->getResourceId() != m_assembly->assemblyModel()->getResourceId())
+                if (model->getResourceId() != assemblyModel->getResourceId())
                 {
                     m_currentModel = model;
                     break;
@@ -1714,7 +2216,7 @@ namespace gladius::ui
         m_history = History();
         switchModel();
         // Initialize navigation history with the current model
-        initNavigationHistory();
+        m_navHistory.reset(m_currentModel ? m_currentModel->getResourceId() : 0u);
     }
 
     bool ModelEditor::matchesNodeFilter(const std::string & text) const
@@ -1739,12 +2241,255 @@ namespace gladius::ui
         return lowerText.find(lowerFilter) != std::string::npos;
     }
 
+    void ModelEditor::handleLibraryDrop()
+    {
+        if (!m_currentModel || !m_doc)
+        {
+            return;
+        }
+
+        // Only accept the drop when the node-editor canvas is hovered.
+        auto const * payload = ImGui::GetDragDropPayload();
+        if (!payload || !payload->IsDataType(LIBRARY_DND_TYPE))
+        {
+            return;
+        }
+
+        // The payload is a pointer to the ThumbnailInfo in the library browser.
+        // We only proceed on mouse-release (drop).
+        if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            return;
+        }
+
+        auto const * const * ppFileInfo =
+          static_cast<ThreemfThumbnailExtractor::ThumbnailInfo const * const *>(payload->Data);
+        if (!ppFileInfo || !*ppFileInfo)
+        {
+            return;
+        }
+
+        auto const & fileInfo = **ppFileInfo;
+
+        // Determine which function display name to look for after merge.
+        std::string targetFunctionName;
+        if (fileInfo.hasLibraryMetadata && !fileInfo.libraryFunctionNames.empty())
+        {
+            // NOTE: Only the first tagged function gets a FunctionCall node.
+            // Additional tagged functions are imported but must be referenced manually.
+            targetFunctionName = fileInfo.libraryFunctionNames.front();
+        }
+
+        // Refresh the assembly pointer — the document may have replaced it
+        // since we last captured it (e.g. during file load).
+        refreshAssembly();
+
+        // Merge the library file and resolve the best matching function.
+        nodes::FunctionMatch match;
+        try
+        {
+            match = m_doc->mergeAndResolve(fileInfo.filePath, targetFunctionName);
+        }
+        catch (std::exception const & e)
+        {
+            if (m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                  {fmt::format("Library drop failed: {}", e.what()),
+                   events::Severity::Error});
+            }
+            return;
+        }
+
+        // Re-fetch the assembly — merge may have replaced the shared_ptr.
+        refreshAssembly();
+
+        if (match.id == 0 || !match.model)
+        {
+            return;
+        }
+
+        createFunctionCallNodeAtCursor(match.id, match.model);
+    }
+
+    void ModelEditor::createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
+                                                      nodes::SharedModel const & sourceModel)
+    {
+        createUndoRestorePoint("Import library function");
+
+        // Suspend the node editor to correctly query the mouse position
+        // in screen space (same pattern as the right-click popup).
+        ed::Suspend();
+        auto const mouseScreen = ImGui::GetMousePos();
+        ed::Resume();
+
+        auto const posOnCanvas = ed::ScreenToCanvas(mouseScreen);
+
+        auto * createdNode = m_currentModel->createFunctionCallNode(functionId, *sourceModel);
+        ed::SetNodePosition(createdNode->getId(), posOnCanvas);
+
+        requestNodeFocus(createdNode->getId());
+        markModelAsModified();
+    }
+
+    void ModelEditor::importStlDrop(std::filesystem::path const & path, ImVec2 screenPos)
+    {
+        if (!m_doc || !m_currentModel)
+        {
+            return;
+        }
+
+        std::string const displayName = path.filename().string();
+
+        // Check for an already-loaded mesh with the same display name (dedup by filename).
+        // Node creation still happens on the next editor frame because it must run while the
+        // node editor context is active.
+
+        auto & resourceManager = m_doc->getResourceManager();
+        for (auto const & [key, res] : resourceManager.getResourceMap())
+        {
+            auto const * mesh = dynamic_cast<MeshResource const *>(res.get());
+            if (mesh && key.getDisplayName() == displayName)
+            {
+                PendingStlImport pending;
+                pending.existingResourceKey = key;
+                pending.displayName = displayName;
+                pending.dropScreenPos = screenPos;
+                m_pendingStlImports.push_back(std::move(pending));
+                return;
+            }
+        }
+
+        // Launch background STL load (file I/O only — document mutation stays on main thread).
+        PendingStlImport pending;
+        pending.geometryFuture = std::async(
+          std::launch::async,
+          [path]() -> vdb::TriangleMesh
+          {
+              vdb::VdbImporter reader;
+              reader.loadStl(path);
+              return reader.getMesh();
+          });
+        pending.displayName   = displayName;
+        pending.dropScreenPos = screenPos;
+        m_pendingStlImports.push_back(std::move(pending));
+    }
+
+    void ModelEditor::processPendingStlImports()
+    {
+        if (m_pendingStlImports.empty() || !m_doc || !m_currentModel)
+        {
+            return;
+        }
+
+        auto & resourceManager = m_doc->getResourceManager();
+
+        for (auto it = m_pendingStlImports.begin(); it != m_pendingStlImports.end();)
+        {
+            auto & pending = *it;
+            ImVec2 const canvasPos = ed::ScreenToCanvas(pending.dropScreenPos);
+
+            if (pending.existingResourceKey)
+            {
+                createMeshSdfNodesAtCanvasPos(*pending.existingResourceKey, canvasPos);
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
+            if (!pending.geometryFuture.valid())
+            {
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
+            if (pending.geometryFuture.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
+            {
+                ++it;
+                continue;
+            }
+
+            vdb::TriangleMesh mesh;
+            try
+            {
+                mesh = pending.geometryFuture.get();
+            }
+            catch (std::exception const & e)
+            {
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                      {fmt::format("STL import failed for {}: {}", pending.displayName, e.what()),
+                       events::Severity::Error});
+                }
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
+            std::string const & displayName = pending.displayName;
+
+            // Try to find an existing mesh resource with the same display name.
+            std::optional<ResourceKey> existingKey;
+            for (auto const & [key, res] : resourceManager.getResourceMap())
+            {
+                if (dynamic_cast<MeshResource const *>(res.get()) &&
+                    key.getDisplayName() == displayName)
+                {
+                    existingKey = key;
+                    break;
+                }
+            }
+
+            if (existingKey)
+            {
+                createMeshSdfNodesAtCanvasPos(*existingKey, canvasPos);
+            }
+            else if (!mesh.vertices.empty())
+            {
+                auto key = m_doc->addMeshResource(std::move(mesh), displayName);
+                createMeshSdfNodesAtCanvasPos(key, canvasPos);
+            }
+            else
+            {
+                // Empty mesh and no existing resource — load must have failed; log and skip.
+                if (m_doc->getSharedLogger())
+                {
+                    m_doc->getSharedLogger()->addEvent(
+                      {fmt::format("STL import failed or produced empty mesh: {}", displayName),
+                       events::Severity::Error});
+                }
+            }
+
+            it = m_pendingStlImports.erase(it);
+        }
+    }
+
+    void ModelEditor::createMeshSdfNodesAtCanvasPos(ResourceKey const & key, ImVec2 canvasPos)
+    {
+        createUndoRestorePoint("Import STL as signed distance mesh");
+
+        auto createdNode = m_currentModel->create<nodes::Resource>();
+        createdNode->setResourceId(key.getResourceId().value());
+        ed::SetNodePosition(createdNode->getId(), canvasPos);
+
+        auto signedDistanceToMesh = m_currentModel->create<nodes::SignedDistanceToMesh>();
+        ImVec2 const posWithOffset = ImVec2(canvasPos.x + 400.f, canvasPos.y);
+        m_currentModel->addLink(createdNode->getOutputValue().getId(),
+                                signedDistanceToMesh->parameter().at("mesh").getId());
+        signedDistanceToMesh->setDisplayName("SD to " + key.getDisplayName());
+        ed::SetNodePosition(signedDistanceToMesh->getId(), posWithOffset);
+
+        requestNodeFocus(signedDistanceToMesh->getId());
+        markModelAsModified();
+    }
+
     void ModelEditor::functionToolBox(ImVec2 mousePos)
     {
         auto functions = m_assembly->getFunctions();
         for (auto & [id, model] : functions)
         {
-            if (!model || model->isManaged() || model == m_currentModel)
+            // Skip null models and current model (can't call self)
+            if (!model || model == m_currentModel)
             {
                 continue;
             }
@@ -1762,18 +2507,9 @@ namespace gladius::ui
             {
                 createUndoRestorePoint("Create node");
                 auto posOnCanvas = ed::ScreenToCanvas(mousePos);
-                // create function call node
-                auto createdNode = m_currentModel->create<nodes::FunctionCall>();
-                createdNode->setFunctionId(id); // expands to a ResourceId node during writing
-                createdNode->updateInputsAndOutputs(*model);
-                m_currentModel->registerInputs(*createdNode);
-                m_currentModel->registerOutputs(*createdNode);
-                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
-                if (model->getDisplayName().has_value())
-                {
-                    createdNode->setDisplayName(model->getDisplayName().value());
-                }
+                auto * createdNode = m_currentModel->createFunctionCallNode(id, *model);
+                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
                 // Request focus on the newly created node for keyboard-driven workflow
                 requestNodeFocus(createdNode->getId());
@@ -1808,24 +2544,8 @@ namespace gladius::ui
 
             if (ImGui::Button(displayName.c_str()))
             {
-                createUndoRestorePoint("Create node");
                 auto posOnCanvas = ed::ScreenToCanvas(mousePos);
-                auto createdNode = m_currentModel->create<nodes::Resource>();
-                createdNode->setResourceId(key.getResourceId().value());
-                ed::SetNodePosition(createdNode->getId(), posOnCanvas);
-
-                auto signedDistanceToMesh = m_currentModel->create<nodes::SignedDistanceToMesh>();
-                ImVec2 const posOnCanvasWithOffset = ImVec2(posOnCanvas.x + 400, posOnCanvas.y);
-                m_currentModel->addLink(createdNode->getOutputValue().getId(),
-                                        signedDistanceToMesh->parameter().at("mesh").getId());
-
-                signedDistanceToMesh->setDisplayName("SD to " + key.getDisplayName());
-                ed::SetNodePosition(signedDistanceToMesh->getId(), posOnCanvasWithOffset);
-
-                // Request focus on the SignedDistanceToMesh node as it's more useful to focus on
-                requestNodeFocus(signedDistanceToMesh->getId());
-
-                markModelAsModified();
+                createMeshSdfNodesAtCanvasPos(key, posOnCanvas);
             }
         }
     }
@@ -2019,11 +2739,6 @@ namespace gladius::ui
             return;
         }
 
-        // if (!m_nodeWidthsInitialized)
-        // {
-        //     return;
-        // }
-
         createUndoRestorePoint("Autolayout");
 
         // Use the dedicated layout engine for all layout operations
@@ -2035,17 +2750,16 @@ namespace gladius::ui
         config.groupPadding = m_nodeDistance * 0.5f;
 
         layoutEngine.setNodeSizeProvider([](nodes::NodeId nodeId) {
-            auto constexpr fallback = ImVec2(500.0F, 400.0F);
             auto * editorContext = ed::GetCurrentEditor();
             if (editorContext == nullptr)
             {
-                return fallback;
+                return kDefaultNodeSize;
             }
 
             auto size = ed::GetNodeSize(nodeId);
             if (size.x <= 0.0f || size.y <= 0.0f)
             {
-                return fallback;
+                return kDefaultNodeSize;
             }
 
             return size;
@@ -2102,12 +2816,151 @@ namespace gladius::ui
 
         m_nodePositionsNeedUpdate = false;
 
-        for (auto & node : *currentModel())
+        // Check if this is the first visit to this function
+        auto const funcId = m_currentModel->getResourceId();
+        bool const isFirstVisit = m_visitedFunctions.find(funcId) == m_visitedFunctions.end();
+        bool const finalizeFirstVisit = !m_pendingInitialAutoLayout;
+
+        // Only set node positions on first visit - subsequent visits preserve the editor's internal state
+        if (isFirstVisit)
         {
-            auto const targetPos = node.second->screenPos();
-            ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
+            // Ensure the correct editor context is active — navigation triggered
+            // mid-frame (e.g. double-click, back/forward) may leave the previous
+            // function's context set.
+            auto * ctx = getOrCreateEditorContext(funcId);
+            ed::SetCurrentEditor(ctx);
+
+            for (auto & node : *currentModel())
+            {
+                auto const targetPos = node.second->screenPos();
+                ed::SetNodePosition(node.first, {targetPos.x, targetPos.y});
+            }
+
+            if (finalizeFirstVisit)
+            {
+                // Schedule first-visit centering through the same path as the
+                // manual toolbar action, with a small deterministic frame delay.
+                m_pendingCenterViewRequest = true;
+                m_pendingCenterViewFrames = 2;
+                m_visitedFunctions.insert(funcId);
+            }
         }
-        ed::NavigateToContent();
+    }
+
+    bool ModelEditor::updateInitialAutoLayoutReadiness()
+    {
+        if (!m_pendingInitialAutoLayout || !m_currentModel)
+        {
+            return false;
+        }
+
+        ++m_initialAutoLayoutWaitFrames;
+
+        // Safety net: after enough frames, force auto-layout even if sizes
+        // have not fully converged.  This prevents the layout from never
+        // running (e.g. when sizes oscillate or GetNodeSize keeps returning 0).
+        constexpr int MAX_WAIT_FRAMES = 15;
+        bool const forceLayout = m_initialAutoLayoutWaitFrames >= MAX_WAIT_FRAMES;
+
+        if (!forceLayout)
+        {
+            auto * editorContext = ed::GetCurrentEditor();
+            if (editorContext == nullptr)
+            {
+                return false;
+            }
+
+            if (!m_nodeViewVisitor.columnWidthsAreInitialized())
+            {
+                return false;
+            }
+
+            std::unordered_map<nodes::NodeId, ImVec2> currentSnapshot;
+            currentSnapshot.reserve(m_currentModel->getSize());
+
+            for (auto & [nodeId, node] : *m_currentModel)
+            {
+                if (!node)
+                {
+                    continue;
+                }
+
+                ImVec2 const size = ed::GetNodeSize(nodeId);
+                if (size.x <= 0.0f || size.y <= 0.0f)
+                {
+                    m_initialAutoLayoutStableFrames = 0;
+                    return false;
+                }
+
+                currentSnapshot.emplace(nodeId, size);
+            }
+
+            if (currentSnapshot.empty())
+            {
+                return false;
+            }
+
+            auto const snapshotsMatch = [&]()
+            {
+                if (currentSnapshot.size() != m_initialAutoLayoutSizeSnapshot.size())
+                {
+                    return false;
+                }
+
+                constexpr float SIZE_EPSILON = 0.5f;
+                for (auto const & [nodeId, size] : currentSnapshot)
+                {
+                    auto const previous = m_initialAutoLayoutSizeSnapshot.find(nodeId);
+                    if (previous == m_initialAutoLayoutSizeSnapshot.end())
+                    {
+                        return false;
+                    }
+
+                    if (std::abs(size.x - previous->second.x) > SIZE_EPSILON ||
+                        std::abs(size.y - previous->second.y) > SIZE_EPSILON)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }();
+
+            if (!snapshotsMatch)
+            {
+                m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+                m_initialAutoLayoutStableFrames = 0;
+                return false;
+            }
+
+            m_initialAutoLayoutSizeSnapshot = std::move(currentSnapshot);
+            ++m_initialAutoLayoutStableFrames;
+
+            constexpr int REQUIRED_STABLE_FRAMES = 2;
+            if (m_initialAutoLayoutStableFrames < REQUIRED_STABLE_FRAMES)
+            {
+                return false;
+            }
+        }
+
+        // --- Ready: run the initial auto-layout ---
+        m_pendingInitialAutoLayout = false;
+        m_initialAutoLayoutStableFrames = 0;
+        m_initialAutoLayoutWaitFrames = 0;
+        m_initialAutoLayoutSizeSnapshot.clear();
+
+        autoLayout();
+
+        // Schedule the first-visit center-view directly so it does not
+        // depend on the indirect applyNodePositions() path.
+        m_pendingCenterViewRequest = true;
+        m_pendingCenterViewFrames = 2;
+        if (m_currentModel)
+        {
+            m_visitedFunctions.insert(m_currentModel->getResourceId());
+        }
+
+        return true;
     }
 
     void ModelEditor::placeTransformation(nodes::NodeBase & createdNode,
@@ -2122,7 +2975,7 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x - 400.0f;
+            createdNode.screenPos().x = screenPos.x - kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
         auto const csOutPut = createdNode.getOutputs()[nodes::FieldNames::Pos];
@@ -2166,7 +3019,7 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x + 400.0f;
+            createdNode.screenPos().x = screenPos.x + kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
         auto const shapeOutPut = createdNode.getOutputs().at(FieldNames::Shape);
@@ -2200,14 +3053,14 @@ namespace gladius::ui
         if (selectedNode)
         {
             auto const screenPos = selectedNode.value()->screenPos();
-            createdNode.screenPos().x = screenPos.x + 400.0F;
+            createdNode.screenPos().x = screenPos.x + kNodePlacementOffsetX;
             createdNode.screenPos().y = screenPos.y;
         }
     }
 
     void ModelEditor::placeNode(nodes::NodeBase & createdNode)
     {
-        auto selection = selectedNodes(m_editorContext);
+        auto selection = selectedNodes(getCurrentEditorContext());
         auto const category = createdNode.getCategory();
         if (!selection.empty())
         {
@@ -2273,6 +3126,10 @@ namespace gladius::ui
 
     auto selectedNodes(ed::EditorContext * const editorContext) -> std::vector<ed::NodeId>
     {
+        if (editorContext == nullptr)
+        {
+            return {};
+        }
         SetCurrentEditor(editorContext);
 
         auto const numSelectedItems = ed::GetSelectedObjectCount();
@@ -2403,6 +3260,11 @@ namespace gladius::ui
         m_libraryBrowser.refreshDirectories();
     }
 
+    void ModelEditor::renderLibraryBrowser()
+    {
+        m_libraryBrowser.render(m_doc);
+    }
+
     void ModelEditor::requestManualCompile()
     {
         m_isManualCompileRequested = true;
@@ -2434,7 +3296,7 @@ namespace gladius::ui
             return;
         }
 
-        auto selectionIds = selectedNodes(m_editorContext);
+        auto selectionIds = selectedNodes(getCurrentEditorContext());
         if (selectionIds.empty())
         {
             return;
@@ -2493,15 +3355,12 @@ namespace gladius::ui
             requestNodeFocus(fc->getId());
         }
 
-        // After wiring, update assembly IOs so downstream validation doesn't crash
-        if (m_assembly)
-        {
-            m_assembly->updateInputsAndOutputs();
-        }
+        // updateInputsAndOutputs() and updateTypes() are deferred to the
+        // background refreshWorker(). Stale types are acceptable until
+        // the compilation finishes.
 
         // Track state and UI
         m_currentModel->setLogger(m_doc->getSharedLogger());
-        m_currentModel->updateTypes();
         markModelAsModified();
         switchModel();
         m_nodePositionsNeedUpdate = true;
@@ -2546,16 +3405,22 @@ namespace gladius::ui
                 // Failed to convert expression - remove the created function
                 m_doc->deleteFunction(newModel.getResourceId());
 
-                // TODO: Show error message to user
-                std::cerr << "Failed to convert expression to graph: " << expression << std::endl;
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                        {fmt::format("Failed to convert expression to graph: {}", expression),
+                         events::Severity::Error});
+                }
             }
         }
         catch (std::exception const & ex)
         {
-
-            // Handle conversion errors
-            std::cerr << "Error creating function from expression: " << ex.what() << std::endl;
-            // TODO: Show error message to user
+            if (m_doc && m_doc->getSharedLogger())
+            {
+                m_doc->getSharedLogger()->addEvent(
+                    {fmt::format("Error creating function from expression: {}", ex.what()),
+                     events::Severity::Error});
+            }
         }
     }
 
@@ -2577,7 +3442,7 @@ namespace gladius::ui
         return true;
     }
 
-    bool ModelEditor::navigateToFunction(nodes::ResourceId functionId)
+    bool ModelEditor::navigateToFunction(nodes::ResourceId functionId, nodes::NodeId sourceNodeId)
     {
         if (!m_assembly)
         {
@@ -2590,29 +3455,13 @@ namespace gladius::ui
             return false;
         }
 
-        // Don't record no-op navigations
+        // Record navigation in history (returns false if no-op)
+        // sourceNodeId is stored as the anchor for the current function - when returning,
+        // the view will center on this node (the FunctionCall/FunctionGradient that was clicked)
         nodes::ResourceId const currentId = m_currentModel ? m_currentModel->getResourceId() : 0u;
-        if (currentId == functionId)
+        if (!m_navHistory.recordNavigation(currentId, functionId, sourceNodeId))
         {
-            return true;
-        }
-
-        if (!m_inHistoryNav)
-        {
-            // If we're not at the end, truncate forward history
-            if (!m_navHistory.empty() && (m_navIndex + 1u) < m_navHistory.size())
-            {
-                m_navHistory.erase(m_navHistory.begin() + static_cast<long>(m_navIndex + 1u),
-                                   m_navHistory.end());
-            }
-            // If history is empty, seed with current
-            if (m_navHistory.empty() && currentId != 0u)
-            {
-                m_navHistory.push_back(currentId);
-            }
-            // Push new target and advance index
-            m_navHistory.push_back(functionId);
-            m_navIndex = m_navHistory.size() - 1u;
+            return true; // No-op navigation, already at target
         }
 
         return switchToFunction(functionId);
@@ -2620,51 +3469,44 @@ namespace gladius::ui
 
     bool ModelEditor::canGoBack() const
     {
-        return !m_navHistory.empty() && m_navIndex > 0u;
+        return m_navHistory.canGoBack();
     }
 
     bool ModelEditor::canGoForward() const
     {
-        return !m_navHistory.empty() && (m_navIndex + 1u) < m_navHistory.size();
+        return m_navHistory.canGoForward();
     }
 
     bool ModelEditor::goBack()
     {
-        if (!canGoBack())
+        m_navHistory.setInHistoryNavigation(true);
+        auto const entry = m_navHistory.goBack();
+        bool const ok = (entry.functionId != 0u) && switchToFunction(entry.functionId);
+        m_navHistory.setInHistoryNavigation(false);
+        
+        // Request centering on anchor node (the node user clicked to leave this function)
+        // This will be processed in the next render frame inside ed::Begin()/End() context
+        if (ok && entry.anchorNode != 0)
         {
-            return false;
+            requestNodeFocus(entry.anchorNode);
         }
-        m_inHistoryNav = true;
-        m_navIndex -= 1u;
-        auto const targetId = m_navHistory[m_navIndex];
-        bool const ok = switchToFunction(targetId);
-        m_inHistoryNav = false;
         return ok;
     }
 
     bool ModelEditor::goForward()
     {
-        if (!canGoForward())
+        m_navHistory.setInHistoryNavigation(true);
+        auto const entry = m_navHistory.goForward();
+        bool const ok = (entry.functionId != 0u) && switchToFunction(entry.functionId);
+        m_navHistory.setInHistoryNavigation(false);
+        
+        // Request centering on anchor node
+        // This will be processed in the next render frame inside ed::Begin()/End() context
+        if (ok && entry.anchorNode != 0)
         {
-            return false;
+            requestNodeFocus(entry.anchorNode);
         }
-        m_inHistoryNav = true;
-        m_navIndex += 1u;
-        auto const targetId = m_navHistory[m_navIndex];
-        bool const ok = switchToFunction(targetId);
-        m_inHistoryNav = false;
         return ok;
-    }
-
-    void ModelEditor::initNavigationHistory()
-    {
-        m_navHistory.clear();
-        m_navIndex = 0u;
-        if (m_currentModel)
-        {
-            m_navHistory.push_back(m_currentModel->getResourceId());
-            m_navIndex = 0u;
-        }
     }
 
     bool ModelEditor::isHovered() const
@@ -2673,10 +3515,70 @@ namespace gladius::ui
         return ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) && isVisible();
     }
 
+    bool ModelEditor::isFunctionFromImage3D() const
+    {
+        if (!m_currentModel)
+        {
+            return false;
+        }
+
+        // Check if the model contains an ImageSampler node
+        for (auto const & [id, node] : *m_currentModel)
+        {
+            if (dynamic_cast<nodes::ImageSampler *>(node.get()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void ModelEditor::refreshAssembly()
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+
+        auto newAssembly = m_doc->getAssembly();
+        if (newAssembly == m_assembly)
+        {
+            return; // Same object — nothing to update.
+        }
+
+        // The document replaced its assembly (e.g. on file load).
+        // Re-map m_currentModel to the equivalent model in the new assembly.
+        auto const oldResourceId =
+            m_currentModel ? m_currentModel->getResourceId() : nodes::ResourceId{0};
+
+        m_assembly = std::move(newAssembly);
+
+        if (m_assembly && oldResourceId != 0)
+        {
+            m_currentModel = m_assembly->findModel(oldResourceId);
+        }
+        if (!m_currentModel && m_assembly)
+        {
+            m_currentModel = m_assembly->assemblyModel();
+        }
+    }
+
     void ModelEditor::requestNodeFocus(nodes::NodeId nodeId)
     {
         m_nodeToFocus = nodeId;
         m_shouldFocusNode = true;
+    }
+
+    void ModelEditor::requestNodeFocus(nodes::NodeId nodeId, nodes::ResourceId modelId)
+    {
+        // Switch to the function containing the node first
+        if (modelId != 0 && m_currentModel && m_currentModel->getResourceId() != modelId)
+        {
+            switchToFunction(modelId);
+        }
+        // Call immediately like outline does - commands are queued by node editor for next frame
+        ed::SelectNode(ed::NodeId(static_cast<uint64_t>(nodeId)));
+        ed::NavigateToSelection(true);
     }
 
     bool ModelEditor::shouldFocusNode(nodes::NodeId nodeId) const
@@ -2692,7 +3594,7 @@ namespace gladius::ui
 
     bool ModelEditor::hasClipboard() const
     {
-        return static_cast<bool>(m_clipboardModel);
+        return m_clipboard.hasContent();
     }
 
     void ModelEditor::copySelectionToClipboard()
@@ -2702,7 +3604,7 @@ namespace gladius::ui
             return;
         }
 
-        auto selection = selectedNodes(m_editorContext);
+        auto selection = selectedNodes(getCurrentEditorContext());
         if (selection.empty())
         {
             return;
@@ -2714,166 +3616,92 @@ namespace gladius::ui
             selectedIds.insert(static_cast<nodes::NodeId>(n.Get()));
         }
 
-        m_clipboardModel = std::make_unique<nodes::Model>();
-
-        std::unordered_map<nodes::NodeId, nodes::NodeBase *> cloneMap;
-
-        // Clone nodes
-        for (auto const & [id, nodePtr] : *m_currentModel)
-        {
-            if (!nodePtr || selectedIds.find(id) == selectedIds.end())
-                continue;
-            auto cloned = nodePtr->clone();
-            cloned->screenPos() = nodePtr->screenPos();
-            auto * inserted = m_clipboardModel->insert(std::move(cloned));
-            cloneMap[id] = inserted;
-        }
-
-        // Recreate intra-selection links
-        for (auto const & [origId, clonedNode] : cloneMap)
-        {
-            (void) clonedNode;
-            auto origOpt = m_currentModel->getNode(origId);
-            if (!origOpt.has_value())
-                continue;
-            nodes::NodeBase const * origNode = origOpt.value();
-            for (auto const & [paramName, param] : origNode->constParameter())
-            {
-                if (!param.getConstSource().has_value())
-                    continue;
-                auto const & src = param.getConstSource().value();
-                nodes::Port const * srcPort = m_currentModel->getPort(src.portId);
-                if (!srcPort)
-                    continue;
-                nodes::NodeId const srcNodeId = srcPort->getParentId();
-                if (cloneMap.find(srcNodeId) == cloneMap.end())
-                    continue;
-
-                nodes::Port * clonedSrcPort =
-                  cloneMap[srcNodeId]->findOutputPort(srcPort->getShortName());
-                nodes::VariantParameter * clonedTarget = cloneMap[origId]->getParameter(paramName);
-                if (clonedSrcPort && clonedTarget)
-                {
-                    m_clipboardModel->addLink(clonedSrcPort->getId(), clonedTarget->getId(), true);
-                }
-            }
-        }
+        m_clipboard.copyNodes(*m_currentModel, selectedIds);
     }
 
     void ModelEditor::pasteClipboardAtMouse()
     {
-        if (!m_currentModel || !m_clipboardModel)
+        if (!m_currentModel || !m_clipboard.hasContent())
         {
             return;
         }
 
         // Make sure we only use NodeEditor API when an editor is active
         ImVec2 mouse = ImGui::GetMousePos();
-        ImVec2 canvas = ed::ScreenToCanvas(mouse);
-        // If user pastes repeatedly, nudge new paste to avoid complete overlap
-        if (m_hadLastPastePos && std::abs(canvas.x - m_lastPasteCanvasPos.x) < 1.0f &&
-            std::abs(canvas.y - m_lastPasteCanvasPos.y) < 1.0f)
-        {
-            ++m_consecutivePasteCount;
-            canvas.x += m_pasteOffsetStep * (m_consecutivePasteCount % 5);
-            canvas.y += m_pasteOffsetStep * (m_consecutivePasteCount % 5);
-        }
-        else
-        {
-            m_consecutivePasteCount = 0;
-        }
-
-        bool first = true;
-        ImVec2 minPos{0, 0}, maxPos{0, 0};
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (!nodePtr)
-                continue;
-            ImVec2 p{nodePtr->screenPos().x, nodePtr->screenPos().y};
-            if (first)
-            {
-                minPos = maxPos = p;
-                first = false;
-            }
-            else
-            {
-                minPos.x = std::min(minPos.x, p.x);
-                minPos.y = std::min(minPos.y, p.y);
-                maxPos.x = std::max(maxPos.x, p.x);
-                maxPos.y = std::max(maxPos.y, p.y);
-            }
-        }
-
-        ImVec2 const center{(minPos.x + maxPos.x) * 0.5f, (minPos.y + maxPos.y) * 0.5f};
-        ImVec2 const delta{canvas.x - center.x, canvas.y - center.y};
+        ImVec2 rawCanvas = ed::ScreenToCanvas(mouse);
+        ImVec2 canvas = m_clipboard.getAdjustedPastePosition(rawCanvas);
 
         createUndoRestorePoint("Paste node(s)");
 
-        std::unordered_map<std::string, nodes::NodeBase *> pastedMap;
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (!nodePtr)
-                continue;
-            auto cloned = nodePtr->clone();
-            cloned->screenPos().x = nodePtr->screenPos().x + delta.x;
-            cloned->screenPos().y = nodePtr->screenPos().y + delta.y;
-            nodes::NodeBase * inserted = m_currentModel->insert(std::move(cloned));
-            pastedMap[nodePtr->getUniqueName()] = inserted;
-            ed::SetNodePosition(inserted->getId(),
-                                ImVec2(inserted->screenPos().x, inserted->screenPos().y));
-        }
+        auto pastedMap = m_clipboard.pasteNodes(*m_currentModel, canvas);
 
-        std::unordered_map<std::string, nodes::NodeBase const *> clipboardByName;
-        for (auto const & [id, nodePtr] : *m_clipboardModel)
-        {
-            (void) id;
-            if (nodePtr)
-                clipboardByName[nodePtr->getUniqueName()] = nodePtr.get();
-        }
-
-        for (auto const & [origName, newNode] : pastedMap)
-        {
-            auto it = clipboardByName.find(origName);
-            if (it == clipboardByName.end())
-                continue;
-            nodes::NodeBase const * origNode = it->second;
-            for (auto const & [paramName, param] : origNode->constParameter())
-            {
-                if (!param.getConstSource().has_value())
-                    continue;
-                auto const & src = param.getConstSource().value();
-                nodes::Port const * origSrcPort = m_clipboardModel->getPort(src.portId);
-                if (!origSrcPort)
-                    continue;
-                std::string const srcNodeUnique = origSrcPort->getParent()->getUniqueName();
-                auto pastedSrcIt = pastedMap.find(srcNodeUnique);
-                if (pastedSrcIt == pastedMap.end())
-                    continue;
-                nodes::Port * newSrcPort =
-                  pastedSrcIt->second->findOutputPort(origSrcPort->getShortName());
-                nodes::VariantParameter * newTarget = newNode->getParameter(paramName);
-                if (newSrcPort && newTarget)
-                {
-                    m_currentModel->addLink(newSrcPort->getId(), newTarget->getId(), true);
-                }
-            }
-        }
-
-        // Select newly pasted nodes and focus
+        // Set node positions in the editor and select them
         ed::ClearSelection();
         for (auto const & [_, node] : pastedMap)
         {
             (void) _;
+            ed::SetNodePosition(node->getId(),
+                                ImVec2(node->screenPos().x, node->screenPos().y));
             ed::SelectNode(node->getId(), true);
         }
         ed::NavigateToSelection(true);
 
         markModelAsModified();
 
-        // Track last paste canvas position
-        m_lastPasteCanvasPos = canvas;
-        m_hadLastPastePos = true;
+        // Track last paste canvas position for offset nudging
+        m_clipboard.updatePastePosition(canvas);
     }
+
+    void ModelEditor::processGamepadInput()
+    {
+        // Update gamepad state from ImGui
+        GamepadState::instance().update();
+
+        // Wire visual feedback into dispatcher on first use
+        m_gamepadDispatcher.setVisualFeedback(m_gamepadVisualFeedback);
+
+        bool const gpConnected = GamepadState::instance().isAnyConnected();
+
+        // On-connect toast: detect the connection transition
+        if (gpConnected && !m_gamepadWasConnected)
+        {
+            m_gamepadVisualFeedback.showToast("Gamepad connected! Press Start for quick reference.", 4.0f);
+        }
+        m_gamepadWasConnected = gpConnected;
+
+        // Early exit if no gamepad is connected
+        if (!gpConnected)
+        {
+            return;
+        }
+
+        // Dispatch actions through the dispatcher (this handles navigation, selection, etc.)
+        m_gamepadDispatcher.update(GamepadState::instance(), GamepadActionMap::instance(), *this);
+
+        // Update toast timers
+        if (m_gamepadVisualFeedback.isActive())
+        {
+            ImGuiIO & io = ImGui::GetIO();
+            m_gamepadVisualFeedback.update(static_cast<float>(io.DeltaTime));
+        }
+    }
+
+    std::vector<ed::NodeId> ModelEditor::getSelectedNodes()
+    {
+        ed::EditorContext * const editorContext = getCurrentEditorContext();
+        return selectedNodes(editorContext);
+    }
+
+    void ModelEditor::requestGamepadQuickReference()
+    {
+        m_gamepadQuickRefRequested = true;
+    }
+
+    bool ModelEditor::consumeGamepadQuickRefRequest()
+    {
+        bool const req = m_gamepadQuickRefRequested;
+        m_gamepadQuickRefRequested = false;
+        return req;
+    }
+
 } // namespace gladius::ui

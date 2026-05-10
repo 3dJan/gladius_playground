@@ -28,12 +28,17 @@ namespace gladius
 
         void waitForCompilation() const;
 
+        /// Request shutdown of any ongoing compilation
+        void requestShutdown();
+
         void dumpSource(std::filesystem::path const & path) const;
 
         // Binary caching support
         void setCacheDirectory(const std::filesystem::path & path);
         void clearCache();
         void setCacheEnabled(bool enabled);
+        void setEnableTwoLevelPipeline(bool enabled);
+        void setDebugLabel(std::string label);
         [[nodiscard]] bool isCacheEnabled() const;
 
         /**
@@ -57,7 +62,7 @@ namespace gladius
         std::unique_ptr<CLProgram> m_programFront;
         std::atomic_bool m_programSwapRequired{false};
 
-        SharedResources m_resoures;
+        SharedResources m_resources;
         BuildCallBack m_buildFinishedCallBack;
         std::function<void()> m_onProgramSwapCallBack{noOp};
 

@@ -2,6 +2,10 @@
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-single-platform.yml
 name: CMake on multiple platforms
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  VCPKG_COMMIT_ID: '6ecbbbdf31cba47aafa7cf6189b1e73e10ac61f8'
+
 on:
   push:
     branches: 
@@ -54,16 +58,16 @@ jobs:
             c_compiler: gcc
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
           submodules: true
-    - uses: TheMrMilchmann/setup-msvc-dev@v3
+    - uses: TheMrMilchmann/setup-msvc-dev@v4
       if: matrix.os == 'windows-latest'
       with:
         arch: x64
     - name: Install dependencies of glfw on linux
       if: matrix.os == 'ubuntu-latest'
-      run: sudo apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev build-essential libglfw3-dev ninja-build
+      run: sudo apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev build-essential libglfw3-dev ninja-build libomp-dev
     - name: Install Ninja with Chocolatey on Windows
       if: runner.os == 'Windows'
       run: choco install ninja -y
@@ -75,15 +79,14 @@ jobs:
         echo "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/gladius/vcpkg-triplets" >> $GITHUB_ENV
         echo "VCPKG_TARGET_TRIPLET=x64-windows-gladius" >> $GITHUB_ENV
         echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
-    - name: Setup anew (or from cache) vcpkg (and does not build any package)
-      uses: lukka/run-vcpkg@v11 # Always specify the specific _version_ of the
-                              # action you need, `v11` in this case to stay up
-                              # to date with fixes on the v11 branch.
-      with:
-        vcpkgGitCommitId: '6ecbbbdf31cba47aafa7cf6189b1e73e10ac61f8'
-        vcpkgJsonGlob: '${{ github.workspace }}/gladius/vcpkg.json'
-      env:
-        VCPKG_OVERLAY_PORTS: '${{ github.workspace }}/gladius/vcpkg-overlay-ports'
+    # The previous vcpkg setup action still targets node20, so pin and bootstrap vcpkg manually.
+    - name: Checkout pinned vcpkg
+      shell: bash
+      run: |
+        set -euxo pipefail
+        git clone --filter=blob:none --no-checkout https://github.com/microsoft/vcpkg.git vcpkg
+        git -C vcpkg checkout --force "$VCPKG_COMMIT_ID"
+        echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> "$GITHUB_ENV"
 
     - name: Bootstrap vcpkg (Linux)
       if: runner.os != 'Windows'
@@ -118,7 +121,7 @@ jobs:
 
     - name: Cache buildcache (Linux)
       if: runner.os != 'Windows'
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.buildcache
         key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
@@ -127,7 +130,7 @@ jobs:
 
     - name: Cache buildcache (Windows)
       if: runner.os == 'Windows'
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~\AppData\Local\buildcache
         key: buildcache-${{ matrix.os }}-${{ matrix.c_compiler }}-${{ github.sha }}
@@ -197,7 +200,7 @@ jobs:
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --target Generate_Installer --config ${{ matrix.build_type }}
     - name: Upload_Windows_Installer
       if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: gladius_win64
         path: ${{ steps.strings.outputs.build-output-dir }}/*.msi
@@ -206,7 +209,7 @@ jobs:
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --target Generate_Installer --config ${{ matrix.build_type }}
     - name: Upload_Linux_Package
       if: runner.os == 'Linux'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: gladius_deb
         path: ${{ steps.strings.outputs.build-output-dir }}/*.deb

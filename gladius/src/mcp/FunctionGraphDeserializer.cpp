@@ -4,6 +4,8 @@
 
 #include "FunctionGraphDeserializer.h"
 
+#include "../nodes/Assembly.h"
+#include "../nodes/DerivedNodes.h"
 #include "../nodes/Model.h"
 #include "../nodes/NodeFactory.h"
 #include "../nodes/Parameter.h"
@@ -12,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fmt/format.h>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <unordered_map>
@@ -22,9 +25,89 @@ namespace gladius
     {
         using nlohmann::json;
 
+        /// @see FunctionGraphDeserializer::applyNodeValues
+        void FunctionGraphDeserializer::applyNodeValues(nodes::NodeBase & node, json const & values)
+        {
+            for (auto const & [paramName, paramValue] : values.items())
+            {
+                // Virtual "matrix" key for ConstantMatrix batch-set
+                if (paramName == "matrix" && node.name() == "ConstantMatrix")
+                {
+                    if (paramValue.is_array() && paramValue.size() == 16)
+                    {
+                        for (int i = 0; i < 4; ++i)
+                            for (int j = 0; j < 4; ++j)
+                            {
+                                auto * p = node.getParameter(fmt::format("m{}{}", i, j));
+                                if (p)
+                                    p->setValue(nodes::VariantType{
+                                      static_cast<float>(paramValue[i * 4 + j].get<double>())});
+                            }
+                    }
+                    else if (paramValue.is_array() && paramValue.size() == 4 &&
+                             paramValue[0].is_array())
+                    {
+                        for (int i = 0; i < 4; ++i)
+                            for (int j = 0; j < 4; ++j)
+                            {
+                                auto * p = node.getParameter(fmt::format("m{}{}", i, j));
+                                if (p)
+                                    p->setValue(nodes::VariantType{
+                                      static_cast<float>(paramValue[i][j].get<double>())});
+                            }
+                    }
+                    continue;
+                }
+
+                auto * param = node.getParameter(paramName);
+                if (!param)
+                    continue;
+
+                auto typeIdx = param->getTypeIndex();
+                if (typeIdx == nodes::ParameterTypeIndex::Float && paramValue.is_number())
+                {
+                    param->setValue(
+                      nodes::VariantType{static_cast<float>(paramValue.get<double>())});
+                }
+                else if (typeIdx == nodes::ParameterTypeIndex::Int && paramValue.is_number())
+                {
+                    param->setValue(
+                      nodes::VariantType{static_cast<int>(paramValue.get<long long>())});
+                }
+                else if (typeIdx == nodes::ParameterTypeIndex::String && paramValue.is_string())
+                {
+                    param->setValue(nodes::VariantType{paramValue.get<std::string>()});
+                }
+                else if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                {
+                    nodes::float3 v{};
+                    if (paramValue.is_array() && paramValue.size() == 3)
+                    {
+                        v.x = static_cast<float>(paramValue[0].get<double>());
+                        v.y = static_cast<float>(paramValue[1].get<double>());
+                        v.z = static_cast<float>(paramValue[2].get<double>());
+                    }
+                    else if (paramValue.is_object())
+                    {
+                        v.x = static_cast<float>(paramValue.value("x", 0.0));
+                        v.y = static_cast<float>(paramValue.value("y", 0.0));
+                        v.z = static_cast<float>(paramValue.value("z", 0.0));
+                    }
+                    param->setValue(nodes::VariantType{v});
+                }
+                else if (typeIdx == nodes::ParameterTypeIndex::ResourceId &&
+                         paramValue.is_number_integer())
+                {
+                    param->setValue(nodes::VariantType{
+                      static_cast<gladius::ResourceId>(paramValue.get<long long>())});
+                }
+            }
+        }
+
         json FunctionGraphDeserializer::applyToModel(nodes::Model & model,
                                                      json const & graph,
-                                                     bool replace)
+                                                     bool replace,
+                                                     nodes::Assembly * assembly)
         {
             // Validate input
             if (!graph.is_object())
@@ -82,6 +165,47 @@ namespace gladius
                     if (!displayName.empty())
                         created->setDisplayName(displayName);
                 }
+                else if (type == "FunctionCall")
+                {
+                    // FunctionCall needs a referenced function (resourceid in values)
+                    if (!assembly)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "FunctionCall nodes require an assembly context. "
+                           "Ensure the graph is applied via set_function_graph."}};
+                    }
+
+                    ResourceId refId = 0;
+                    if (jn.contains("values") && jn["values"].contains("resourceid"))
+                    {
+                        refId = static_cast<ResourceId>(
+                          jn["values"]["resourceid"].get<long long>());
+                    }
+                    if (refId == 0)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "FunctionCall node (id=" + std::to_string(clientId) +
+                             ") requires values.resourceid"}};
+                    }
+
+                    auto refModel = assembly->findModel(refId);
+                    if (!refModel)
+                    {
+                        return json{
+                          {"success", false},
+                          {"error",
+                           "Referenced function (resourceid=" + std::to_string(refId) +
+                             ") not found in assembly"}};
+                    }
+
+                    created = model.createFunctionCallNode(refId, *refModel);
+                    if (!displayName.empty())
+                        created->setDisplayName(displayName);
+                }
                 else
                 {
                     auto newNode = nodes::NodeFactory::createNode(type);
@@ -113,6 +237,12 @@ namespace gladius
                 if (clientId != 0 && created)
                 {
                     idMap[clientId] = created;
+                }
+
+                // Apply initial parameter values from "values" object
+                if (created && jn.contains("values") && jn["values"].is_object())
+                {
+                    FunctionGraphDeserializer::applyNodeValues(*created, jn["values"]);
                 }
             }
 

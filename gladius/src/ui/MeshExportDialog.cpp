@@ -105,6 +105,25 @@ namespace gladius::ui
         }
     }
 
+    template <typename Exporter>
+    void MeshExportDialog::applyColorSettings(Exporter& exporter, bool exportColors)
+    {
+        exporter.setExportWithColors(exportColors);
+        exporter.setConvertToSrgb(m_convertToSrgb);
+        exporter.setColorMode(m_colorMode);
+        exporter.setQuantizationMode(m_quantizationMode);
+        exporter.setTargetApplication(m_targetApplication);
+        if (m_overridePaletteSize)
+        {
+            exporter.setMaxPaletteSize(
+                static_cast<std::uint32_t>(m_maxPaletteSize));
+        }
+        else
+        {
+            exporter.setMaxPaletteSize(std::nullopt);
+        }
+    }
+
     void MeshExportDialog::show(std::filesystem::path suggestedFilename)
     {
         if (!m_visible)
@@ -225,6 +244,10 @@ namespace gladius::ui
         {
             m_manifoldExporter.finalize();
         }
+        else if (m_activeExporter == &m_shellExporter)
+        {
+            m_shellExporter.finalize();
+        }
         else
         {
             BaseExportDialog::finalizeExport();
@@ -236,23 +259,16 @@ namespace gladius::ui
 
     void MeshExportDialog::onExportCancelled()
     {
-        if (m_activeExporter == &m_layeredExporter)
+        // Signal cancellation to the export worker - don't block!
+        // The export loop will check isCancellationRequested() and exit early.
+        // Cleanup happens when the export finishes (via finalizeExport/resetState).
+        m_cancellationToken.requestCancellation();
+        
+        // Update ExportState to show "Cancelling..." phase in UI
+        if (m_exportState != nullptr)
         {
-            m_layeredExporter.finalize();
+            m_exportState->requestCancellation();
         }
-        else if (m_activeExporter == &m_layeredExporter3mf)
-        {
-            m_layeredExporter3mf.finalize();
-        }
-        else if (m_activeExporter == &m_dualExporter)
-        {
-            m_dualExporter.finalize();
-        }
-        else if (m_activeExporter == &m_manifoldExporter)
-        {
-            m_manifoldExporter.finalize();
-        }
-        resetState();
     }
 
     void MeshExportDialog::onExportCompleted()
@@ -298,6 +314,11 @@ namespace gladius::ui
                     failed = m_manifoldExporter.hasError();
                     failureMessage = m_manifoldExporter.errorMessage();
                 }
+                else if (finishedExporter == &m_shellExporter)
+                {
+                    failed = m_shellExporter.hasError();
+                    failureMessage = m_shellExporter.errorMessage();
+                }
 
                 try
                 {
@@ -337,7 +358,39 @@ namespace gladius::ui
                     }
                 }
 
-                if (failed)
+                // Check if export was cancelled - treat as distinct from failure
+                bool const wasCancelled = m_cancellationToken.isCancelled();
+
+                if (wasCancelled)
+                {
+                    // Export was cancelled by user - show cancellation message
+                    m_exportInProgress = false;
+                    m_exportCompleted = false;
+                    m_statusMessage = "Export cancelled";
+                    m_statusIsError = false;
+                    m_errorMessage.clear();
+                    if (m_exportState != nullptr)
+                    {
+                        m_exportState->endExport();
+                    }
+                    // Clean up any partial output file
+                    if (!m_targetFile.empty())
+                    {
+                        std::error_code ec;
+                        if (std::filesystem::exists(m_targetFile, ec))
+                        {
+                            std::filesystem::remove(m_targetFile, ec);
+                            if (ec)
+                            {
+                                // Log warning but don't fail - the cancel itself succeeded
+                                std::cerr << "Warning: Failed to delete partial export file: "
+                                          << m_targetFile.string() << " (" << ec.message() << ")"
+                                          << std::endl;
+                            }
+                        }
+                    }
+                }
+                else if (failed)
                 {
                     m_exportInProgress = false;
                     m_exportCompleted = false;
@@ -368,10 +421,20 @@ namespace gladius::ui
                 
                 ImGui::Spacing();
                 
-                if (ImGui::Button("Cancel Export"))
+                // Check if cancellation is already requested
+                bool const isCancelling = m_cancellationToken.isCancelled();
+                
+                if (isCancelling)
+                {
+                    // Show disabled "Cancelling..." button when cancellation is in progress
+                    ImGui::BeginDisabled(true);
+                    ImGui::Button("Cancelling...");
+                    ImGui::EndDisabled();
+                }
+                else if (ImGui::Button("Cancel Export"))
                 {
                     onExportCancelled();
-                    m_statusMessage = "Export cancelled";
+                    m_statusMessage = "Cancelling export...";
                     m_statusIsError = false;
                 }
                 
@@ -563,12 +626,6 @@ namespace gladius::ui
                         qualityIndex = i;
                         m_manifoldQualityPreset =
                           static_cast<io::ManifoldDualContouringQuality>(i);
-                        
-                        // Sync maxDepth with the selected preset
-                        io::ManifoldDualContouringOptions tempOpts{};
-                        tempOpts.qualityPreset = m_manifoldQualityPreset;
-                        tempOpts.applyPreset();
-                        m_manifoldMaxDepth = tempOpts.maxDepth;
                     }
                     if (selected)
                     {
@@ -577,30 +634,6 @@ namespace gladius::ui
                 }
                 ImGui::EndCombo();
             }
-
-            ImGui::Checkbox("Enable GPU acceleration", &m_manifoldEnableGpu);
-            ImGui::Checkbox("Allow CPU fallback", &m_manifoldAllowCpuFallback);
-            ImGui::Checkbox("Enable Morton caching", &m_manifoldEnableCaching);
-
-            ImGui::InputFloat("ISO value", &m_manifoldIsoValue, 0.01F, 0.1F, "%.4f");
-
-            int depthInput = static_cast<int>(m_manifoldMaxDepth);
-            if (ImGui::InputInt("Maximum depth", &depthInput))
-            {
-                depthInput = std::max(depthInput, 1);
-                m_manifoldMaxDepth = static_cast<std::size_t>(depthInput);
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("higher values capture more detail");
-
-                        ImGui::Separator();
-                        ImGui::Text("Watertightness (Experimental)");
-                        ImGui::Checkbox("Enable hierarchical octree", &m_manifoldEnableHierarchicalOctree);
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("global Morton octree with 2:1 balancing");
-                        ImGui::TextWrapped(
-                            "When enabled, Gladius uses a global balanced octree intended to improve watertightness/manifoldness. "
-                            "This may increase memory usage and runtime.");
 
             ImGui::Separator();
             ImGui::Text("Minimum Feature Size (Thin Walls)");
@@ -612,92 +645,39 @@ namespace gladius::ui
             }
             ImGui::SameLine();
             ImGui::TextDisabled("world units; 0 = disabled");
-            
-            if (m_manifoldMinFeatureSize > 0.0F)
-            {
-                ImGui::Checkbox("Enable chunking", &m_manifoldEnableChunking);
-                ImGui::SameLine();
-                ImGui::TextDisabled("divide-and-conquer for memory efficiency");
-
-                if (m_manifoldEnableHierarchicalOctree)
-                {
-                    ImGui::TextDisabled("Note: chunking is ignored when hierarchical octree is enabled.");
-                }
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Sharp Feature Post-Processing");
-            
-            ImGui::Checkbox("Enable sharp feature refinement", &m_manifoldEnableSharpFeaturePostProcess);
-            if (m_manifoldEnableSharpFeaturePostProcess)
-            {
-                ImGui::Indent();
-                
-                ImGui::SliderFloat("Angle threshold", 
-                                   &m_manifoldSharpFeatureAngleThreshold, 
-                                   0.0F, 1.0F, 
-                                   "cos(angle) = %.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("lower = more sensitive (0.5 = ~60°)");
-                
-                int subdivIters = static_cast<int>(m_manifoldSubdivisionIterations);
-                if (ImGui::SliderInt("Subdivision iterations", &subdivIters, 1, 3))
-                {
-                    m_manifoldSubdivisionIterations = static_cast<std::size_t>(subdivIters);
-                }
-                
-                ImGui::Checkbox("Project to surface", &m_manifoldProjectToSurface);
-                
-                ImGui::Unindent();
-            }
 
             ImGui::Separator();
             ImGui::Text("Mesh Simplification");
             
-            // Simplification method selection
-            char const * const simplificationMethods[] = {"None", "QEM (SDF-aware)"};
-            int const numMethods = 2;
-            if (ImGui::BeginCombo("Simplification##simplmethod", simplificationMethods[m_manifoldSimplificationMethod]))
+            ImGui::Checkbox("Enable mesh simplification", &m_manifoldEnableSimplification);
+            if (m_exportWithColors && m_modelHasVolumetricColor)
             {
-                for (int i = 0; i < numMethods; ++i)
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0F, 0.7F, 0.0F, 1.0F), "(!)" );
+                if (ImGui::IsItemHovered())
                 {
-                    bool const isSelected = (m_manifoldSimplificationMethod == i);
-                    if (ImGui::Selectable(simplificationMethods[i], isSelected))
-                    {
-                        m_manifoldSimplificationMethod = i;
-                    }
-                    if (isSelected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
+                    ImGui::SetTooltip("Color exports may look better with\n"
+                                      "simplification disabled.");
                 }
-                ImGui::EndCombo();
             }
             
-            if (m_manifoldSimplificationMethod == 1)  // QEM SDF-aware
+            if (m_manifoldEnableSimplification)
             {
                 ImGui::Indent();
                 
-                ImGui::SliderFloat("Max SDF error", 
-                                   &m_manifoldSimplificationMaxSdfError, 
-                                   0.001F, 0.1F, 
-                                   "%.3f mm");
+                ImGui::SliderFloat("Tolerance##simpltol",
+                                   &m_manifoldSimplificationTolerance,
+                                   0.001F, 1.0F,
+                                   "%.3f mm",
+                                   ImGuiSliderFlags_Logarithmic);
                 ImGui::SameLine();
-                ImGui::TextDisabled("maximum deviation from surface");
-                
-                ImGui::SliderFloat("SDF weight", 
-                                   &m_manifoldSimplificationSdfWeight, 
-                                   0.0F, 1.0F, 
-                                   "%.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("weight for position error");
-                
-                ImGui::SliderFloat("Normal weight", 
-                                   &m_manifoldSimplificationNormalWeight, 
-                                   0.0F, 1.0F, 
-                                   "%.2f");
-                ImGui::SameLine();
-                ImGui::TextDisabled("weight for triangle orientation error");
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("Maximum surface deviation allowed during\n"
+                                      "simplification. Set this to your printer's\n"
+                                      "layer height or XY resolution.");
+                }
                 
                 ImGui::Unindent();
             }
@@ -815,6 +795,71 @@ namespace gladius::ui
         ImGui::Spacing();
         ImGui::Spacing();
 
+        // Compatibility tuning section
+        ImGui::Text("Compatibility");
+        ImGui::Separator();
+
+        ImGui::BeginDisabled(!colorExportAvailable || !m_exportWithColors);
+
+        // Target application selector
+        ImGui::Text("Target Application:");
+        ImGui::SameLine();
+        int targetIdx = static_cast<int>(m_targetApplication);
+        char const* targetLabels[] = {"None (portable)", "PrusaSlicer", "OrcaSlicer"};
+        if (ImGui::Combo("##TargetApp", &targetIdx, targetLabels, 3))
+        {
+            m_targetApplication = static_cast<io::TargetApplication>(targetIdx);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Select a target slicer for optimized export.\n"
+                "'None' produces standard-only output portable to any 3MF viewer.");
+        }
+        if (m_targetApplication != io::TargetApplication::None)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                "Warning: Portability to other slicers may be reduced.");
+        }
+
+        // Quantization mode
+        ImGui::Text("Quantization:");
+        ImGui::SameLine();
+        int quantMode = static_cast<int>(m_quantizationMode);
+        char const* quantLabels[] = {"Disabled", "Adaptive"};
+        if (ImGui::Combo("##QuantMode", &quantMode, quantLabels, 2))
+        {
+            m_quantizationMode = static_cast<io::QuantizationMode>(quantMode);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Adaptive: Automatically reduce colors to fit a palette for slicer compatibility.\n"
+                "Disabled: Preserve all unique colors (may not produce printable regions).");
+        }
+
+        // Optional palette size override
+        ImGui::Checkbox("Override palette size", &m_overridePaletteSize);
+        if (m_overridePaletteSize)
+        {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            int const maxSlider = (m_targetApplication != io::TargetApplication::None) ? 16 : 256;
+            m_maxPaletteSize = std::min(m_maxPaletteSize, maxSlider);
+            ImGui::SliderInt("##PaletteSize", &m_maxPaletteSize, 2, maxSlider, "%d colors");
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Limit the number of distinct colors in the export.\n"
+                "When unchecked, the palette is sized automatically.");
+        }
+
+        ImGui::EndDisabled();
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
         // HueForge-style color → thickness exploration dialog
         ImGui::BeginDisabled(!colorExportAvailable);
         if (ImGui::Button("Color \u2192 Shell Thickness..."))
@@ -844,6 +889,20 @@ namespace gladius::ui
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("One build item per shell with solid colors.");
+                ImGui::EndDisabled();
+
+                // Surface color sampling option (nested under shell export)
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::Indent();
+                ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                {
+                        ImGui::SetTooltip(
+                            "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                            "This fixes color accuracy for projected images and textures.\n"
+                            "Recommended for HueForge-style multi-color prints.");
+                }
+                ImGui::Unindent();
                 ImGui::EndDisabled();
 
                 ImGui::Indent();
@@ -1045,29 +1104,18 @@ namespace gladius::ui
         options.enableGpu = m_manifoldEnableGpu;
         options.enableCpuFallback = m_manifoldAllowCpuFallback;
         options.enableCaching = m_manifoldEnableCaching;
-        options.isoValue = m_manifoldIsoValue;
-        if (m_manifoldMaxDepth > 0U)
-        {
-            options.maxDepth = m_manifoldMaxDepth;
-            if (options.initialDepth > options.maxDepth)
-            {
-                options.initialDepth = options.maxDepth;
-            }
-        }
         options.minFeatureSize = m_manifoldMinFeatureSize;
-        options.enableChunking = m_manifoldEnableChunking;
         options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
         options.projectToSurface = m_manifoldProjectToSurface;
-        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-        options.simplificationQemWeight = std::max(0.0F,
-          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+        options.simplificationMethod = m_manifoldEnableSimplification
+            ? io::SimplificationMethod::QemFast
+            : io::SimplificationMethod::None;
+        options.enableSimplification = m_manifoldEnableSimplification;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
         auto * core = m_computeCore;
         io::PaletteExtractionOptions paletteOptions{};
@@ -1119,126 +1167,50 @@ namespace gladius::ui
             throw std::runtime_error("No precomputed LUTs available for shell export");
         }
 
-        core.updateBBox();
-
-        // Derive a per-layer thickness solution using LUTs when available; fallback to min thickness
-        io::ThicknessSolution solution(stack.size());
-        for (std::size_t i = 0; i < solution.thicknesses.size(); ++i)
-        {
-            float thickness = m_colorToThicknessDialog.getConstraints().minThickness;
-            if (i < precomputedLuts.size() && !precomputedLuts[i].empty())
-            {
-                int const res = std::max(2, lutResolution);
-                std::size_t const idx =
-                  (static_cast<std::size_t>(res - 1) * static_cast<std::size_t>(res) +
-                   static_cast<std::size_t>(res - 1)) * static_cast<std::size_t>(res) +
-                  static_cast<std::size_t>(res - 1);
-                if (idx < precomputedLuts[i].size())
-                {
-                    thickness = precomputedLuts[i][idx];
-                }
-            }
-            solution.thicknesses[i] = thickness;
-        }
-
+        // Build MDC options from current settings
         io::ManifoldDualContouringOptions options{};
         options.qualityPreset = m_manifoldQualityPreset;
         options.applyPreset();
         options.enableGpu = m_manifoldEnableGpu;
         options.enableCpuFallback = m_manifoldAllowCpuFallback;
         options.enableCaching = m_manifoldEnableCaching;
-        options.isoValue = m_manifoldIsoValue;
-        if (m_manifoldMaxDepth > 0U)
-        {
-            options.maxDepth = m_manifoldMaxDepth;
-            if (options.initialDepth > options.maxDepth)
-            {
-                options.initialDepth = options.maxDepth;
-            }
-        }
         options.minFeatureSize = m_manifoldMinFeatureSize;
-        options.enableChunking = m_manifoldEnableChunking;
         options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
         options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
         options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
         options.projectToSurface = m_manifoldProjectToSurface;
-        options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-        options.enableSimplification = (m_manifoldSimplificationMethod != 0);
-        options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-        options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-        options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-        options.simplificationQemWeight = std::max(0.0F,
-          1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+        options.simplificationMethod = m_manifoldEnableSimplification
+            ? io::SimplificationMethod::QemFast
+            : io::SimplificationMethod::None;
+        options.enableSimplification = m_manifoldEnableSimplification;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
+        // Build shell export config
+        io::ShellExportConfig config;
+        config.filamentStack = std::move(stack);
+        config.precomputedLuts = precomputedLuts;
+        config.lutResolution = lutResolution;
+        config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
+        config.mdcOptions = std::move(options);
+        config.useSurfaceColorSampling = m_useSurfaceColorSampling;
+
+        // Reset cancellation token for the new export
+        m_cancellationToken.reset();
+
+        // Configure and start async shell export
+        m_shellExporter.setConfig(std::move(config));
+        m_shellExporter.setDocument(m_document);
+        m_shellExporter.setCancellationToken(&m_cancellationToken);
+        m_shellExporter.beginExport(m_targetFile, core);
+        m_activeExporter = &m_shellExporter;
+
+        // Enable progress tracking and UI lock
         m_exportInProgress = true;
         if (m_exportState != nullptr)
         {
             m_exportState->beginExport("3MF shell export");
-        }
-
-        io::ShellGenerator generator(core, *const_cast<Document*>(m_document));
-        auto shells = generator.generateShells(
-            stack,
-            solution,
-            options,
-            lutResolution,
-            m_colorToThicknessDialog.getConstraints(),
-            &precomputedLuts);
-
-        if (shells.empty())
-        {
-            throw std::runtime_error("Shell generation produced no meshes");
-        }
-
-        ComputeContext * context = core.getComputeContext().get();
-
-        // Build vector of (mesh, name, material color)
-        std::vector<std::tuple<std::shared_ptr<Mesh>, std::string, Eigen::Vector3f>> meshesWithColors;
-        meshesWithColors.reserve(shells.size());
-
-        for (auto const & shell : shells)
-        {
-            auto mesh = std::make_shared<Mesh>(*context);
-
-            for (std::size_t idx = 0; idx + 2 < shell.indices.size(); idx += 3)
-            {
-                auto const i0 = shell.indices[idx + 0];
-                auto const i1 = shell.indices[idx + 1];
-                auto const i2 = shell.indices[idx + 2];
-
-                if (i0 >= shell.vertices.size() || i1 >= shell.vertices.size() || i2 >= shell.vertices.size())
-                {
-                    continue;
-                }
-
-                mesh->addFace(shell.vertices[i0], shell.vertices[i1], shell.vertices[i2]);
-            }
-
-            mesh->write();
-            std::string const name = fmt::format("Shell_L{}_{}", shell.layerIndex, shell.filamentName);
-
-            // Lookup material color from stack
-            Eigen::Vector3f color{1.0F, 1.0F, 1.0F};
-            if (static_cast<std::size_t>(shell.layerIndex) < stack.size())
-            {
-                color = stack[static_cast<std::size_t>(shell.layerIndex)].reflectanceColor;
-            }
-
-            meshesWithColors.emplace_back(std::move(mesh), name, color);
-        }
-
-        io::MeshWriter3mf writer(nullptr);
-        writer.exportMeshesWithMaterialColors(m_targetFile, meshesWithColors, m_document, true);
-
-        m_exportInProgress = false;
-        m_exportCompleted = true;
-        m_statusMessage = "Exported shell meshes to 3MF";
-        m_statusIsError = false;
-
-        if (m_exportState != nullptr)
-        {
-            m_exportState->endExport();
         }
     }
 
@@ -1293,9 +1265,7 @@ namespace gladius::ui
                 m_layeredExporter3mf.setQualityLevel(quality);
                 // Enable color export if checkbox is checked and model has color
                 bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
-                m_layeredExporter3mf.setExportWithColors(exportColors);
-                m_layeredExporter3mf.setConvertToSrgb(m_convertToSrgb);
-                m_layeredExporter3mf.setColorMode(m_colorMode);
+                applyColorSettings(m_layeredExporter3mf, exportColors);
                 m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
                 m_activeExporter = &m_layeredExporter3mf;
             }
@@ -1342,18 +1312,8 @@ namespace gladius::ui
             options.enableGpu = m_manifoldEnableGpu;
             options.enableCpuFallback = m_manifoldAllowCpuFallback;
             options.enableCaching = m_manifoldEnableCaching;
-            options.isoValue = m_manifoldIsoValue;
-            if (m_manifoldMaxDepth > 0U)
-            {
-                options.maxDepth = m_manifoldMaxDepth;
-                if (options.initialDepth > options.maxDepth)
-                {
-                    options.initialDepth = options.maxDepth;
-                }
-            }
             // Minimum feature size and chunking
             options.minFeatureSize = m_manifoldMinFeatureSize;
-            options.enableChunking = m_manifoldEnableChunking;
             options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
             // Sharp feature post-processing options
             options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
@@ -1361,15 +1321,12 @@ namespace gladius::ui
             options.subdivisionIterations = m_manifoldSubdivisionIterations;
             options.projectToSurface = m_manifoldProjectToSurface;
             // Mesh simplification options
-            options.simplificationMethod = static_cast<io::SimplificationMethod>(m_manifoldSimplificationMethod);
-            options.enableSimplification = (m_manifoldSimplificationMethod != 0);  // Legacy support
-            // QEM SDF-aware options
-            options.simplificationMaxSdfError = m_manifoldSimplificationMaxSdfError;
-            options.simplificationSdfWeight = m_manifoldSimplificationSdfWeight;
-            options.simplificationNormalWeight = m_manifoldSimplificationNormalWeight;
-            // QEM weight is the remainder after SDF and normal weights
-            options.simplificationQemWeight = std::max(0.0F, 
-                1.0F - m_manifoldSimplificationSdfWeight - m_manifoldSimplificationNormalWeight);
+            options.simplificationMethod = m_manifoldEnableSimplification
+                ? io::SimplificationMethod::QemFast
+                : io::SimplificationMethod::None;
+            options.enableSimplification = m_manifoldEnableSimplification;
+            options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+            options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
 
             m_manifoldExporter.setOptions(options);
             // Set output format and document for 3MF support
@@ -1378,15 +1335,20 @@ namespace gladius::ui
             m_manifoldExporter.setDocument(m_document);
             // Enable color export if checkbox is checked and model has color (3MF only)
             bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
-            m_manifoldExporter.setExportWithColors(exportColors);
-            m_manifoldExporter.setConvertToSrgb(m_convertToSrgb);
-            m_manifoldExporter.setColorMode(m_colorMode);
+            applyColorSettings(m_manifoldExporter, exportColors);
             m_manifoldExporter.beginExport(m_targetFile, core);
             m_activeExporter = &m_manifoldExporter;
             break;
         }
         default:
             throw std::runtime_error("Unsupported surface extraction method");
+        }
+
+        // Reset cancellation token for the new export and pass it to the exporter
+        m_cancellationToken.reset();
+        if (m_activeExporter != nullptr)
+        {
+            m_activeExporter->setCancellationToken(&m_cancellationToken);
         }
 
         m_exportInProgress = true;

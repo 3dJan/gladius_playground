@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.21)
 
 include(GoogleTest)
 include(CTest) # Add this line
@@ -16,8 +16,6 @@ if(NOT ENABLE_OPENCL_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/ToCommandStreamVisitor_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Builder_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeOpenCL_tests.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringOctree_tests.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/MeshBaseline_tests.cpp"
   )
   message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring unit tests")
 endif()
@@ -32,6 +30,7 @@ file(GLOB TEST_MCP_SOURCES CONFIGURE_DEPENDS
 )
 target_sources(${BINARY} PRIVATE ${TEST_MCP_SOURCES})
 target_compile_definitions(${BINARY} PRIVATE GLADIUS_ENABLE_MCP)
+target_compile_definitions(${BINARY} PRIVATE GLADIUS_KERNEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/kernel")
 
 if(MSVC)
  target_compile_options(${BINARY} PRIVATE  /W3 /WX /D_USE_MATH_DEFINES)
@@ -44,7 +43,7 @@ endif()
 set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD 20)
 set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD_REQUIRED ON)
 
-target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../components/nanovdb)
+target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../src/slicer ../../components/nanovdb)
 
 # OpenGL is needed because gladius_lib links imgui which uses OpenGL
 find_package(OpenGL REQUIRED)
@@ -81,5 +80,16 @@ file(COPY "../../components/licenses" DESTINATION ".")
 file(MAKE_DIRECTORY "examples")
 file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 
-# Use gtest_discover_tests for automatic test discovery
-gtest_discover_tests(${BINARY})
+# Copy example implicit models used by library export tests
+file(COPY "../../examples/implicit/RadialRadiator.3mf" DESTINATION "testdata/")
+
+# Use gtest_discover_tests for automatic test discovery with 'unit' label
+# DISCOVERY_MODE POST_BUILD allows set_tests_properties to work after discovery
+gtest_discover_tests(${BINARY}
+    PROPERTIES LABELS "unit"
+    DISCOVERY_MODE POST_BUILD
+)
+
+# Component labels are applied via CTest include script
+# See: gladius/tests/cmake/ComponentLabels.cmake
+

@@ -77,6 +77,19 @@ namespace gladius
 
         explicit ComputeContext(EnableGLOutput enableOutput);
 
+        /**
+         * @brief Construct ComputeContext with a pre-selected accelerator
+         *
+         * This constructor allows separating the slow device enumeration phase
+         * (via queryAccelerators()) from the context creation phase. Useful for
+         * deferred initialization where enumeration runs on a background thread
+         * and context creation (which may require GL interop) runs on the main thread.
+         *
+         * @param enableOutput Whether to enable GL output/interop
+         * @param accelerator The pre-selected accelerator (device + platform + capabilities)
+         */
+        ComputeContext(EnableGLOutput enableOutput, Accelerator const & accelerator);
+
         /// @brief Check if OpenCL acceleration is available on the system
         /// @return true if OpenCL is available and at least one suitable device is found, false
         /// otherwise
@@ -213,6 +226,7 @@ namespace gladius
 
       private:
         void initContext();
+        void initContextWithAccelerator(Accelerator const & accelerator);
         void queryDeviceMemoryCaps();
         bool tryQueryVendorFreeMem(size_t & freeBytesOut) const; // best-effort
 

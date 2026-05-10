@@ -64,6 +64,25 @@ namespace gladius::ui
                 ImGui::Checkbox("All vertices ", &m_renderSourceVertices);
                 ImGui::SameLine();
                 ImGui::Checkbox("Jumps ", &m_showJumps);
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Adaptive contour", &m_useAdaptiveContour))
+                {
+                    core.invalidateContourCache();
+                    m_contoursNeedRefetch = true;
+                }
+                if (m_useAdaptiveContour)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "(memory-efficient)");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    if (ImGui::InputFloat("Min feature (mm)", &m_minFeatureSize_mm, 0.0f, 0.0f, "%.3f"))
+                    {
+                        m_minFeatureSize_mm = std::max(0.01f, m_minFeatureSize_mm);
+                        core.invalidateContourCache();
+                        m_contoursNeedRefetch = true;
+                    }
+                }
             }
             if (m_distanceMeasurement.end.has_value() && m_distanceMeasurement.start.has_value())
             {
@@ -291,26 +310,20 @@ namespace gladius::ui
             {
                 auto sliceParameter = contourOnlyParameter();
                 sliceParameter.zHeight_mm = core.getSliceHeight();
+                sliceParameter.useAdaptiveContour = m_useAdaptiveContour;
+                sliceParameter.minFeatureSize_mm = m_minFeatureSize_mm;
                 if (core.requestContourUpdate(sliceParameter))
                 {
-                    m_contours.reset();
-
-                    drawList->PopClipRect();
-
-                    // Render screen rulers even during contour updates
-                    renderScreenRulers(drawList, fullCanvasStart, fullCanvasSize);
-
-                    ImGui::End();
-                    ImGui::PopStyleVar();
-                    return windowIsActuallyVisible;
+                    m_contoursNeedRefetch = true;
                 }
             }
 
-            if (!m_contours.has_value() && !core.isSlicingInProgress())
+            if ((!m_contours.has_value() || m_contoursNeedRefetch) && !core.isSlicingInProgress())
             {
                 auto const & contourExtractor = core.getContour();
                 std::lock_guard<std::mutex> lockContourExtractor(core.getContourExtractorMutex());
                 m_contours = contourExtractor->getContour();
+                m_contoursNeedRefetch = false;
 
                 // If we just got contours but they're empty, mark as empty
                 if (m_contours.has_value() && m_contours->empty())
@@ -319,7 +332,7 @@ namespace gladius::ui
                 }
             }
 
-            if (!core.isSlicingInProgress() && m_contours.has_value())
+            if (m_contours.has_value())
             {
                 // Check if we should auto-center: contours were empty before and now we have
                 // content
@@ -394,7 +407,7 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar();
-        if (core.isSlicingInProgress() || core.isAnyCompilationInProgress())
+        if (core.isSlicingInProgress() || core.isAnyCompilationInProgressNonBlocking())
         {
             view.startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -407,8 +420,9 @@ namespace gladius::ui
             bool open = true;
 
             ImGui::SetNextWindowBgAlpha(0.0f);
+            ImGui::SetNextWindowPos(windowCenter, ImGuiCond_Always, {0.5f, 0.5f});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
-            ImGui::SetNextWindowPos({windowCenter.x - 30.f, windowCenter.y - 30.f});
             if (ImGui::Begin("SliceProgressIndicator", &open, window_flags))
             {
 
@@ -420,6 +434,7 @@ namespace gladius::ui
                                            10.0f);
                 ImGui::End();
             }
+            ImGui::PopStyleVar(); // WindowBorderSize
         }
         return windowIsActuallyVisible;
     }

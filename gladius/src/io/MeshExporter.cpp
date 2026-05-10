@@ -23,7 +23,7 @@ namespace gladius::vdb
                 for (int x = 0; x < static_cast<int>(sdf.getWidth()); ++x)
                 {
                     Coord xyz(x, y, z);
-                    const auto value = sdf.getValue(x, y, z);
+                    const auto value = sdf.getValue(x, y, z).s[3];
                     if (fabs(value) < bandwidth_mm)
                     {
                         accessor.setValue(xyz, value);

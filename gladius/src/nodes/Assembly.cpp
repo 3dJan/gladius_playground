@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
+#include <set>
 
 namespace gladius::nodes
 {
@@ -165,6 +166,75 @@ namespace gladius::nodes
             return nullptr;
         }
         return modelIter->second;
+    }
+
+    FunctionMatch Assembly::findImportedFunction(
+        std::string const & targetName,
+        std::set<ResourceId> const & existingIds,
+        SharedModel const & excludeModel) const
+    {
+        FunctionMatch match;
+
+        // Strategy 1: find a function whose display name matches the target.
+        // Prefer newly imported over pre-existing.
+        if (!targetName.empty())
+        {
+            for (auto const & [id, model] : m_subModels)
+            {
+                if (!model)
+                {
+                    continue;
+                }
+                auto const name = model->getDisplayName();
+                if (name.has_value() && *name == targetName)
+                {
+                    if (existingIds.count(id) == 0 || match.id == 0)
+                    {
+                        match.id = id;
+                        match.model = model;
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: pick the first newly imported function.
+        if (match.id == 0)
+        {
+            for (auto const & [id, model] : m_subModels)
+            {
+                if (!model || model == excludeModel)
+                {
+                    continue;
+                }
+                if (existingIds.count(id) == 0)
+                {
+                    match.id = id;
+                    match.model = model;
+                    break;
+                }
+            }
+        }
+
+        // Strategy 3: everything already existed — find by name.
+        if (match.id == 0 && !targetName.empty())
+        {
+            for (auto const & [id, model] : m_subModels)
+            {
+                if (!model || model == excludeModel)
+                {
+                    continue;
+                }
+                auto const name = model->getDisplayName();
+                if (name.has_value() && *name == targetName)
+                {
+                    match.id = id;
+                    match.model = model;
+                    break;
+                }
+            }
+        }
+
+        return match;
     }
 
     void Assembly::updateInputsAndOutputs()

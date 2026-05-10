@@ -1,21 +1,25 @@
 #include "ManifoldDualContouringStlExporter.h"
 
-#include "3mf/FaceColorSampler.h"
-#include "3mf/MeshWriter3mf.h"
+#include "3mf/MeshColorExportPipeline.h"
+#include "3mf/MeshSamplingGeometry.h"
 #include "MeshExporter.h"
-#include "MeshExporter3mf.h"
+#include "WindingRepair.h"
 
 #include "ComputeContext.h"
 #include "ComputeCore.h"
 #include "../compute/ManifoldDualContouringGpu.h"
-#include "../compute/ProgramManager.h"
 #include "../types.h"
 
 #include <Eigen/Geometry>
 #include <fmt/format.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -41,264 +45,6 @@ namespace gladius::io
             return value;
         }
 
-        [[nodiscard]] Vector3 toVector3(Eigen::Vector3f const & value)
-        {
-            return Vector3{value.x(), value.y(), value.z()};
-        }
-
-        struct EdgeKey
-        {
-            std::uint32_t a{0U};
-            std::uint32_t b{0U};
-
-            [[nodiscard]] bool operator==(EdgeKey const & other) const noexcept
-            {
-                return a == other.a && b == other.b;
-            }
-        };
-
-        struct EdgeKeyHash
-        {
-            [[nodiscard]] std::size_t operator()(EdgeKey const & key) const noexcept
-            {
-                return (static_cast<std::size_t>(key.a) << 32U) ^ static_cast<std::size_t>(key.b);
-            }
-        };
-
-        struct EdgeRef
-        {
-            std::uint32_t a{0U};
-            std::uint32_t b{0U};
-            std::uint32_t triId{0U};
-            std::uint8_t dir{0U}; // 0: min->max, 1: max->min
-        };
-
-        [[nodiscard]] double computeSignedVolume(
-          std::vector<Eigen::Vector3f> const & positions,
-          std::vector<std::uint32_t> const & indices)
-        {
-            if (indices.size() < 3U)
-            {
-                return 0.0;
-            }
-
-            double volume6 = 0.0;
-            for (std::size_t i = 0U; i + 2U < indices.size(); i += 3U)
-            {
-                std::size_t const ia = static_cast<std::size_t>(indices[i + 0U]);
-                std::size_t const ib = static_cast<std::size_t>(indices[i + 1U]);
-                std::size_t const ic = static_cast<std::size_t>(indices[i + 2U]);
-                if (ia >= positions.size() || ib >= positions.size() || ic >= positions.size())
-                {
-                    continue;
-                }
-
-                Eigen::Vector3d const a = positions[ia].cast<double>();
-                Eigen::Vector3d const b = positions[ib].cast<double>();
-                Eigen::Vector3d const c = positions[ic].cast<double>();
-                volume6 += a.dot(b.cross(c));
-            }
-            return volume6 / 6.0;
-        }
-
-        struct WindingRepairStats
-        {
-            std::size_t triangleCount{0U};
-            std::size_t adjacencyConstraints{0U};
-            std::size_t components{0U};
-            std::size_t flippedTriangles{0U};
-            bool hadInconsistency{false};
-            bool flippedGlobalOrientation{false};
-        };
-
-        /// Ensures local winding consistency across shared edges by flipping triangles.
-        ///
-        /// This targets the class of defects where the mesh is topologically closed in an
-        /// *undirected* sense (each edge has exactly two incident triangles) but triangles
-        /// have inconsistent orientation, causing oriented-edge conflicts that many slicers
-        /// may report as "open" or "broken" edges.
-        [[nodiscard]] WindingRepairStats repairTriangleWindingConsistency(
-          std::vector<Eigen::Vector3f> const & positions,
-          std::vector<std::uint32_t> & indices)
-        {
-            WindingRepairStats stats;
-            if (indices.size() < 3U || (indices.size() % 3U) != 0U)
-            {
-                return stats;
-            }
-
-            std::size_t const triCount = indices.size() / 3U;
-            stats.triangleCount = triCount;
-
-            std::vector<EdgeRef> edgeRefs;
-            edgeRefs.reserve(triCount * 3U);
-
-            for (std::size_t triId = 0U; triId < triCount; ++triId)
-            {
-                std::uint32_t const i0 = indices[triId * 3U + 0U];
-                std::uint32_t const i1 = indices[triId * 3U + 1U];
-                std::uint32_t const i2 = indices[triId * 3U + 2U];
-                if (i0 == i1 || i1 == i2 || i2 == i0)
-                {
-                    continue;
-                }
-
-                auto pushEdge = [&edgeRefs, triId](std::uint32_t from, std::uint32_t to)
-                {
-                    if (from == to)
-                    {
-                        return;
-                    }
-
-                    std::uint32_t const lo = std::min(from, to);
-                    std::uint32_t const hi = std::max(from, to);
-                    std::uint8_t const dir = (from == lo) ? 0U : 1U;
-                    edgeRefs.push_back(EdgeRef{lo, hi, static_cast<std::uint32_t>(triId), dir});
-                };
-
-                pushEdge(i0, i1);
-                pushEdge(i1, i2);
-                pushEdge(i2, i0);
-            }
-
-            if (edgeRefs.empty())
-            {
-                return stats;
-            }
-
-            std::sort(edgeRefs.begin(),
-                      edgeRefs.end(),
-                      [](EdgeRef const & lhs, EdgeRef const & rhs)
-                      {
-                          if (lhs.a != rhs.a)
-                          {
-                              return lhs.a < rhs.a;
-                          }
-                          if (lhs.b != rhs.b)
-                          {
-                              return lhs.b < rhs.b;
-                          }
-                          return lhs.triId < rhs.triId;
-                      });
-
-            std::vector<std::array<std::uint32_t, 3>> neighbors(triCount, {
-              std::numeric_limits<std::uint32_t>::max(),
-              std::numeric_limits<std::uint32_t>::max(),
-              std::numeric_limits<std::uint32_t>::max()});
-            std::vector<std::array<std::uint8_t, 3>> neighborXor(triCount, {0U, 0U, 0U});
-            std::vector<std::uint8_t> degree(triCount, 0U);
-
-            auto addConstraint = [&neighbors, &neighborXor, &degree](std::uint32_t from,
-                                                                     std::uint32_t to,
-                                                                     std::uint8_t requiredXor)
-            {
-                std::uint8_t & d = degree[from];
-                if (d >= 3U)
-                {
-                    return;
-                }
-                neighbors[from][d] = to;
-                neighborXor[from][d] = requiredXor;
-                ++d;
-            };
-
-            // Build triangle adjacency with XOR constraints.
-            std::size_t idx = 0U;
-            while (idx < edgeRefs.size())
-            {
-                std::size_t const start = idx;
-                std::uint32_t const a = edgeRefs[idx].a;
-                std::uint32_t const b = edgeRefs[idx].b;
-                while (idx < edgeRefs.size() && edgeRefs[idx].a == a && edgeRefs[idx].b == b)
-                {
-                    ++idx;
-                }
-                std::size_t const count = idx - start;
-                if (count != 2U)
-                {
-                    continue;
-                }
-
-                EdgeRef const & e0 = edgeRefs[start + 0U];
-                EdgeRef const & e1 = edgeRefs[start + 1U];
-                if (e0.triId == e1.triId)
-                {
-                    continue;
-                }
-
-                std::uint8_t const requiredXor = (e0.dir == e1.dir) ? 1U : 0U;
-                addConstraint(e0.triId, e1.triId, requiredXor);
-                addConstraint(e1.triId, e0.triId, requiredXor);
-                ++stats.adjacencyConstraints;
-            }
-
-            // Assign flips per connected component.
-            std::vector<std::int8_t> flip(triCount, static_cast<std::int8_t>(-1));
-            std::queue<std::uint32_t> queue;
-
-            for (std::uint32_t t = 0U; t < static_cast<std::uint32_t>(triCount); ++t)
-            {
-                if (degree[t] == 0U || flip[t] != static_cast<std::int8_t>(-1))
-                {
-                    continue;
-                }
-
-                ++stats.components;
-                flip[t] = 0;
-                queue.push(t);
-
-                while (!queue.empty())
-                {
-                    std::uint32_t const cur = queue.front();
-                    queue.pop();
-
-                    std::uint8_t const d = degree[cur];
-                    for (std::uint8_t n = 0U; n < d; ++n)
-                    {
-                        std::uint32_t const other = neighbors[cur][n];
-                        if (other == std::numeric_limits<std::uint32_t>::max())
-                        {
-                            continue;
-                        }
-
-                        std::uint8_t const requiredXor = neighborXor[cur][n];
-                        std::int8_t const desired = static_cast<std::int8_t>(flip[cur] ^ requiredXor);
-                        if (flip[other] == static_cast<std::int8_t>(-1))
-                        {
-                            flip[other] = desired;
-                            queue.push(other);
-                        }
-                        else if (flip[other] != desired)
-                        {
-                            stats.hadInconsistency = true;
-                        }
-                    }
-                }
-            }
-
-            // Apply flips.
-            for (std::size_t triId = 0U; triId < triCount; ++triId)
-            {
-                if (flip[triId] == 1)
-                {
-                    std::swap(indices[triId * 3U + 1U], indices[triId * 3U + 2U]);
-                    ++stats.flippedTriangles;
-                }
-            }
-
-            // Optional: enforce outward global orientation (positive signed volume) when possible.
-            double const volume = computeSignedVolume(positions, indices);
-            if (volume < 0.0)
-            {
-                for (std::size_t triId = 0U; triId < triCount; ++triId)
-                {
-                    std::swap(indices[triId * 3U + 1U], indices[triId * 3U + 2U]);
-                }
-                stats.flippedGlobalOrientation = true;
-            }
-
-            return stats;
-        }
     }
 
     ManifoldDualContouringStlExporter::ManifoldDualContouringStlExporter() = default;
@@ -337,6 +83,21 @@ namespace gladius::io
     void ManifoldDualContouringStlExporter::setColorMode(ColorMode mode)
     {
         m_colorMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setQuantizationMode(QuantizationMode mode)
+    {
+        m_quantizationMode = mode;
+    }
+
+    void ManifoldDualContouringStlExporter::setMaxPaletteSize(std::optional<std::uint32_t> maxPaletteSize)
+    {
+        m_maxPaletteSize = maxPaletteSize;
+    }
+
+    void ManifoldDualContouringStlExporter::setTargetApplication(TargetApplication targetApplication)
+    {
+        m_targetApplication = targetApplication;
     }
 
     void ManifoldDualContouringStlExporter::beginExport(std::filesystem::path const & fileName,
@@ -448,7 +209,14 @@ namespace gladius::io
             throw std::runtime_error("Mesh generation failed, bounding box is empty");
         }
 
-        m_progress = 0.25;
+        // Check for cancellation after bbox computation
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
+        m_progress = 0.05;
 
         compute::ManifoldDualContouringGpu gpuPipeline(generator);
         compute::ManifoldDualContouringConfig config{};
@@ -471,6 +239,9 @@ namespace gladius::io
             case SimplificationMethod::None:
                 config.simplificationMethod = compute::SimplificationMethod::None;
                 break;
+            case SimplificationMethod::QemFast:
+                config.simplificationMethod = compute::SimplificationMethod::QemFast;
+                break;
             case SimplificationMethod::QemSdfAware:
                 config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
                 break;
@@ -487,8 +258,46 @@ namespace gladius::io
         config.simplificationMaxPasses = m_options.simplificationMaxPasses;
         config.simplificationTargetTriangles = m_options.simplificationTargetTriangles;
         config.simplificationTargetReduction = m_options.simplificationTargetReduction;
-        gpuPipeline.setConfig(config);
+        // Map io → compute termination mode via explicit switch (keeps enums in sync)
+        switch (m_options.simplificationTerminationMode)
+        {
+            case SimplificationTerminationMode::TargetTriangleCount:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetTriangleCount;
+                break;
+            case SimplificationTerminationMode::TargetReductionPercent:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::TargetReductionPercent;
+                break;
+            case SimplificationTerminationMode::ErrorBounded:
+                config.simplificationTerminationMode = compute::SimplificationTerminationMode::ErrorBounded;
+                break;
+        }
+        config.simplificationMaxGeometricError = m_options.simplificationMaxError;
+        gpuPipeline.setConfig(std::move(config));
+        
+        // Wire progress callback to update exporter's atomic progress
+        // Mesh generation phase spans 5-80% of total export progress
+        gpuPipeline.setMeshGenerationProgressCallback(
+            [this](float meshProgress, std::string_view /*phaseName*/) {
+                // Map mesh generation progress (0.0-1.0) to exporter progress (0.05-0.80)
+                // This gives mesh generation 75% of the total export progress
+                double const exportProgress = 0.05 + static_cast<double>(meshProgress) * 0.75;
+                m_progress.store(exportProgress, std::memory_order_relaxed);
+            });
+        
+        // Wire cancellation callback so the GPU pipeline can check frequently
+        gpuPipeline.setCancellationCheckCallback(
+            [this]() -> bool {
+                return isCancellationRequested();
+            });
+        
         gpuPipeline.generateMesh();
+
+        // Check for cancellation after mesh generation (most expensive step)
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
 
         auto const & mesh = gpuPipeline.getMesh();
         if (mesh.indices.empty())
@@ -496,7 +305,15 @@ namespace gladius::io
             throw std::runtime_error("Manifold dual contouring produced an empty mesh");
         }
 
-        m_progress = 0.7;
+        m_progress = 0.80;
+
+        // Check for cancellation before file write
+        if (isCancellationRequested())
+        {
+            m_state = State::Idle;
+            return;
+        }
+
         writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals);
 
         if (m_logger)
@@ -512,7 +329,7 @@ namespace gladius::io
       ComputeCore & generator,
       std::vector<Eigen::Vector3f> const & positions,
       std::vector<std::uint32_t> const & indices,
-      std::vector<Eigen::Vector3f> const & normals) const
+      std::vector<Eigen::Vector3f> const & normals)
     {
         if (indices.size() % 3U != 0U)
         {
@@ -529,6 +346,8 @@ namespace gladius::io
         {
             throw std::runtime_error("Compute context unavailable for mesh export");
         }
+
+        m_progress.store(0.82, std::memory_order_relaxed);
 
         // Repair winding inconsistencies on the indexed mesh before converting to triangle soup.
         // This prevents slicers from interpreting an otherwise watertight mesh as broken.
@@ -549,16 +368,29 @@ namespace gladius::io
 
         Mesh convertedMesh(*computeContext);
 
-        for (std::size_t i = 0U; i + 2U < repairedIndices.size(); i += 3U)
+        // Pre-allocate and fill the Mesh buffers in parallel using OpenMP.
+        std::size_t const numFaces = repairedIndices.size() / 3U;
+        auto& faceNormalsVec = convertedMesh.getFaceNormals().getData();
+        auto& verticesVec = convertedMesh.getVertices().getData();
+        auto& vertexNormalsVec = convertedMesh.getVertexNormals().getData();
+        faceNormalsVec.resize(numFaces);
+        verticesVec.resize(numFaces * 3U);
+        vertexNormalsVec.resize(numFaces * 3U);
+
+        std::atomic<bool> hasOutOfRangeIndex{false};
+
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t fi = 0; fi < static_cast<std::ptrdiff_t>(numFaces); ++fi)
         {
-            auto const idxA = static_cast<std::size_t>(repairedIndices[i + 0U]);
-            auto const idxB = static_cast<std::size_t>(repairedIndices[i + 1U]);
-            auto const idxC = static_cast<std::size_t>(repairedIndices[i + 2U]);
+            auto const base = static_cast<std::size_t>(fi) * 3U;
+            auto const idxA = static_cast<std::size_t>(repairedIndices[base + 0U]);
+            auto const idxB = static_cast<std::size_t>(repairedIndices[base + 1U]);
+            auto const idxC = static_cast<std::size_t>(repairedIndices[base + 2U]);
 
             if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
             {
-                throw std::runtime_error(
-                  "Manifold dual contouring mesh references out-of-range vertex indices");
+                hasOutOfRangeIndex.store(true, std::memory_order_relaxed);
+                continue;
             }
 
             Eigen::Vector3f const a = positions[idxA];
@@ -568,34 +400,41 @@ namespace gladius::io
             Eigen::Vector3f normal = (b - a).cross(c - a);
             if (normal.squaredNorm() <= 1e-12F)
             {
-                if (idxA < normals.size())
-                {
-                    normal = normals[idxA];
-                }
-                else
-                {
-                    normal = Eigen::Vector3f{0.0F, 0.0F, 1.0F};
-                }
+                normal = (idxA < normals.size()) ? normals[idxA]
+                                                 : Eigen::Vector3f{0.0F, 0.0F, 1.0F};
             }
             else
             {
                 normal.normalize();
             }
 
-            Face faceData{};
-            faceData.normal = toVector3(normal);
-            faceData.vertices = {toVector3(a), toVector3(b), toVector3(c)};
+            faceNormalsVec[fi] = {normal.x(), normal.y(), normal.z(), 0.F};
+
+            verticesVec[fi * 3U + 0U] = {a.x(), a.y(), a.z(), 0.F};
+            verticesVec[fi * 3U + 1U] = {b.x(), b.y(), b.z(), 0.F};
+            verticesVec[fi * 3U + 2U] = {c.x(), c.y(), c.z(), 0.F};
+
             if (idxA < normals.size() && idxB < normals.size() && idxC < normals.size())
             {
-                faceData.vertexNormals = {
-                  toVector3(normals[idxA]), toVector3(normals[idxB]), toVector3(normals[idxC])};
+                auto const& nA = normals[idxA];
+                auto const& nB = normals[idxB];
+                auto const& nC = normals[idxC];
+                vertexNormalsVec[fi * 3U + 0U] = {nA.x(), nA.y(), nA.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 1U] = {nB.x(), nB.y(), nB.z(), 0.F};
+                vertexNormalsVec[fi * 3U + 2U] = {nC.x(), nC.y(), nC.z(), 0.F};
             }
             else
             {
-                faceData.vertexNormals = {faceData.normal, faceData.normal, faceData.normal};
+                vertexNormalsVec[fi * 3U + 0U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 1U] = faceNormalsVec[fi];
+                vertexNormalsVec[fi * 3U + 2U] = faceNormalsVec[fi];
             }
+        }
 
-            convertedMesh.addFace(faceData);
+        if (hasOutOfRangeIndex.load(std::memory_order_relaxed))
+        {
+            throw std::runtime_error(
+              "Manifold dual contouring mesh references out-of-range vertex indices");
         }
 
         if (convertedMesh.getNumberOfFaces() == 0U)
@@ -606,74 +445,43 @@ namespace gladius::io
         // Write to the appropriate format
         if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
         {
-            MeshWriter3mf writer(m_logger);
-            
-            if (m_exportWithColors)
+            m_progress.store(0.85, std::memory_order_relaxed);
+
+            MeshColorExportSettings const settings{m_exportWithColors,
+                                                   m_convertToSrgb,
+                                                   m_colorMode,
+                                                   m_quantizationMode,
+                                                   m_targetApplication,
+                                                   m_maxPaletteSize};
+
+            MeshColorExportPipelineOptions pipelineOptions{};
+            pipelineOptions.faceSamplingMode =
+              m_options.simplificationMethod != SimplificationMethod::None
+                ? FaceColorSamplingMode::MajorityVote
+                : FaceColorSamplingMode::Centroid;
+            pipelineOptions.progressCallback = [this](double progress)
             {
-                // Build faces array from indices
-                std::size_t const numFaces = repairedIndices.size() / 3;
-                std::vector<std::array<std::uint32_t, 3>> facesForSampling;
-                facesForSampling.reserve(numFaces);
-                for (std::size_t i = 0; i < repairedIndices.size(); i += 3)
-                {
-                    facesForSampling.push_back({repairedIndices[i], repairedIndices[i + 1], repairedIndices[i + 2]});
-                }
-                
-                // Sample colors using GPU
-                auto* samplingProgram = generator.getProgramManager().getDualContouringSamplingProgram();
-                auto primitives = generator.getPrimitives();
-                
-                if (samplingProgram != nullptr && primitives != nullptr)
-                {
-                    if (m_colorMode == ColorMode::PerVertex)
-                    {
-                        auto vertexColors = FaceColorSampler::sampleVertexColors(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        writer.exportMeshWithVertexColors(m_targetFile, convertedMesh, "Mesh", vertexColors, m_document, true);
-                        
-                        if (m_logger)
-                        {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with per-vertex colors"),
-                               events::Severity::Info});
-                        }
-                    }
-                    else
-                    {
-                        auto faceColors = FaceColorSampler::sampleFaceColorsAsColor8(
-                            positions, facesForSampling, *samplingProgram, *primitives, nullptr, m_convertToSrgb);
-                        
-                        writer.exportMeshWithColors(m_targetFile, convertedMesh, "Mesh", faceColors, m_document, true);
-                        
-                        if (m_logger)
-                        {
-                            m_logger->addEvent(
-                              {fmt::format("Exported 3MF mesh with {} face colors", faceColors.colors.size()),
-                               events::Severity::Info});
-                        }
-                    }
-                }
-                else
-                {
-                    // Fallback to non-colored export if sampling is unavailable
-                    if (m_logger)
-                    {
-                        m_logger->addEvent(
-                          {"Color sampling unavailable, exporting without colors",
-                           events::Severity::Warning});
-                    }
-                    writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
-                }
-            }
-            else
-            {
-                writer.exportMesh(m_targetFile, convertedMesh, "Mesh", m_document, true);
-            }
+                double const mappedProgress = 0.85 + (progress * 0.15);
+                m_progress.store(mappedProgress, std::memory_order_relaxed);
+            };
+
+            auto samplingGeometry = MeshSamplingGeometry::fromTriangleSoupMesh(convertedMesh);
+            exportMeshWithColorPipeline(m_targetFile,
+                                        convertedMesh,
+                                        "Mesh",
+                                        samplingGeometry,
+                                        generator,
+                                        settings,
+                                        m_document,
+                                        true,
+                                        m_logger,
+                                        pipelineOptions);
         }
         else
         {
+            m_progress.store(0.90, std::memory_order_relaxed);
             vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+            m_progress.store(1.0, std::memory_order_relaxed);
         }
     }
 }

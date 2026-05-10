@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GamepadSettingsDialog.h"
 #include "ShortcutManager.h"
 #include <memory>
 #include <string>
@@ -70,6 +71,11 @@ namespace gladius::ui
         bool m_isCapturingInput = false;
         std::string m_capturingForActionId;
         ShortcutCombo m_pendingShortcut;
+
+        // Gamepad tab capture state (shared with renderGamepadBindingsPanel)
+        std::string m_gamepadSearchFilter;
+        bool m_gamepadCapturing = false;
+        GamepadAction m_gamepadCapturingAction = GamepadAction::Count;
 
         // Disable copy and move
         ShortcutSettingsDialog(ShortcutSettingsDialog const &) = delete;

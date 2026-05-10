@@ -3,16 +3,20 @@
 #include "BackupManager.h"
 #include "BitmapChannel.h"
 #include "Mesh.h"
+#include "MeshSdfMethod.h"
 #include "compute/ComputeCore.h"
 #include "io/3mf/Importer3mf.h"
+#include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
+#include "nodes/IssueList.h"
 #include "nodes/Model.h"
 #include "ui/GLView.h"
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -23,6 +27,19 @@ namespace gladius
     /// Tokens for assembly mutex access
     using AssemblyToken = std::lock_guard<std::mutex>;
     using OptionalAssemblyToken = std::optional<AssemblyToken>;
+
+    /// Monotonically increasing counter identifying each structural graph edit.
+    /// Incremented on the UI thread; read by background workers to detect staleness.
+    using StructuralEditEpoch = std::atomic<uint64_t>;
+
+    /// Controls debounce timing for structural edit dispatch.
+    /// All members are accessed on the UI thread only.
+    struct StructuralEditDebouncer
+    {
+        std::atomic<bool> pending{false};
+        std::chrono::steady_clock::time_point lastEditTime{};
+        std::chrono::milliseconds debounceDelay{50};
+    };
 
     namespace vdb
     {
@@ -114,9 +131,38 @@ namespace gladius
         explicit Document(std::shared_ptr<ComputeCore> core);
         [[nodiscard]] bool refreshModelIfNoCompilationIsRunning();
 
+        /// Signal that a structural graph edit occurred.
+        /// Increments the edit epoch and arms the debouncer for background dispatch.
+        void signalStructuralEdit();
+
+        /// @return true if a structural edit is pending dispatch (debouncer armed).
+        [[nodiscard]] bool hasStructuralEditPending() const;
+
+        /// Dispatch the background structural update if the debounce window has elapsed.
+        /// Call this once per frame from the main loop.
+        /// @return true if a compilation was actually launched.
+        bool dispatchStructuralUpdateIfReady();
+
+        /// @return Current structural edit epoch value.
+        [[nodiscard]] uint64_t structuralEditEpoch() const;
+
         void load(std::filesystem::path filename);
         void loadNonBlocking(std::filesystem::path filename);
         void merge(std::filesystem::path filename);
+
+        /// Import functions from another file without triggering recompilation.
+        /// Use when the caller will create additional nodes before compilation.
+        void mergeOnly(std::filesystem::path filename);
+
+        /// Merge a library file and resolve the best matching imported function.
+        /// Does NOT trigger recompilation — the caller is expected to create a
+        /// FunctionCall node and let the flag-driven mechanism handle it.
+        /// @param filename  Path to the .3mf library file.
+        /// @param targetFunctionName  Display name to match (empty = first new).
+        /// @return FunctionMatch with the resolved function (id==0 on failure).
+        [[nodiscard]] nodes::FunctionMatch
+        mergeAndResolve(std::filesystem::path filename,
+                        std::string const & targetFunctionName);
 
         /**
          * @brief Check if a file is currently being loaded asynchronously
@@ -135,7 +181,8 @@ namespace gladius
         void newEmptyModel();
         void newFromTemplate();
 
-        void updateParameter();
+        /// @return true if the parameter values were successfully pushed to the GPU
+        bool updateParameter();
         void updateParameterRegistration();
         void updatePayload();
         void refreshModelBlocking();
@@ -145,8 +192,13 @@ namespace gladius
                          io::StlExportOptions const & options);
 
         void markFileAsChanged();
+
+        /// @brief Check if the file has unsaved changes.
+        [[nodiscard]] bool isFileChanged() const { return m_fileChanged; }
+
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
+        nodes::SharedAssembly getFlatAssembly() const;
 
         /**
          * @brief Get the current assembly filename
@@ -225,6 +277,7 @@ namespace gladius
         void deleteFunction(ResourceId id);
 
         ResourceManager & getResourceManager();
+        ResourceManager const & getResourceManager() const;
 
         void addBoundingBoxAsMesh();
         void addCustomBoxMesh(float width,
@@ -237,6 +290,9 @@ namespace gladius
         void addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius);
 
         ResourceKey addImageStackResource(std::filesystem::path const & path);
+
+        /// Import image stack with padding support - returns ImportResult for notification handling
+        io::ImportResult addImageStackResourceWithPadding(std::filesystem::path const & path);
 
         // syncing of the 3MF model with the document
 
@@ -297,14 +353,49 @@ namespace gladius
         void rebuildResourceDependencyGraph();
 
         /**
+         * @brief Mark validation as needing to be re-run.
+         *
+         * Called when the graph structure changes (nodes added/removed, connections changed).
+         * The next call to validateAssemblyIfDirty() will re-run validation.
+         */
+        void markValidationDirty();
+
+        /**
+         * @brief Validate the assembly only if marked dirty.
+         *
+         * Efficient method for UI use - only re-validates when the graph has changed.
+         * Clears the dirty flag after validation.
+         *
+         * @param context The validation context (Interactive, FileLoad, or Api)
+         * @return True if the assembly is valid, false otherwise
+         */
+        bool validateAssemblyIfDirty(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
          * @brief Validates the current assembly
          *
          * Validates the assembly using the nodes::Validator.
-         * Logs any validation errors.
+         * Populates the issue list with any validation errors.
+         * When called during file loading or API operations, also logs events.
          *
+         * @param context The validation context (Interactive, FileLoad, or Api)
          * @return True if the assembly is valid, false otherwise
          */
-        bool validateAssembly() const;
+        bool validateAssembly(nodes::ValidationContext context = nodes::ValidationContext::Interactive);
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings
+         *
+         * @return Reference to the issue list
+         */
+        nodes::IssueList& getIssueList();
+
+        /**
+         * @brief Get the issue list containing validation errors and warnings (const version)
+         *
+         * @return Const reference to the issue list
+         */
+        nodes::IssueList const& getIssueList() const;
 
         /**
          * @brief Get the backup manager instance
@@ -337,9 +428,52 @@ namespace gladius
          */
         bool isUiMode() const;
 
+        /// Set the mesh-repair configuration that any subsequent 3MF import will
+        /// apply to triangle meshes before BVH construction. Defaults to all-disabled.
+        void setMeshRepairConfig(mesh_repair::MeshRepairConfig const & cfg)
+        {
+            m_meshRepairConfig = cfg;
+        }
+
+        [[nodiscard]] mesh_repair::MeshRepairConfig const & getMeshRepairConfig() const noexcept
+        {
+            return m_meshRepairConfig;
+        }
+
+        /// Set the mesh-SDF evaluation configuration that subsequent 3MF imports
+        /// apply while constructing spatial mesh resources.
+        void setMeshSdfEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
+        {
+            m_meshSdfEvaluationConfig = cfg;
+        }
+
+        [[nodiscard]] MeshSdfEvaluationConfig const & getMeshSdfEvaluationConfig() const noexcept
+        {
+            return m_meshSdfEvaluationConfig;
+        }
+
+        /// Runtime NanoVDB build policy derived from the current caller context and compute
+        /// device limits.
+        [[nodiscard]] NanoVdbBuildPolicy getNanoVdbBuildPolicy() const;
+
+        /// Summarize NanoVDB build issues on currently loaded mesh resources, if any.
+        [[nodiscard]] NanoVdbBuildIssueSummary getNanoVdbBuildIssueSummary() const;
+
+        /// Queue applying the mesh-SDF evaluation configuration to existing mesh resources.
+        /// Heavy resource rebuild/upload work is folded into the debounced background refresh so
+        /// the UI can keep showing the current preview.
+        /// @return Number of mesh resources that need a background update.
+        std::size_t queueMeshSdfEvaluationConfigUpdate(MeshSdfEvaluationConfig const & cfg);
+
         void updateFlatAssembly();
 
       private:
+        enum class RefreshMode
+        {
+            Normal,
+            InteractiveFirst
+        };
+
         [[nodiscard]] nodes::VariantParameter &
         findParameterOrThrow(ResourceId modelId,
                              std::string const & nodeName,
@@ -347,9 +481,15 @@ namespace gladius
 
         void loadImpl(const std::filesystem::path & filename);
         void mergeImpl(const std::filesystem::path & filename);
-        void refreshModelAsync();
+        [[nodiscard]] bool refreshModelAsync();
         void loadAllMeshResources();
-        void refreshWorker();
+        void refreshWorker(RefreshMode refreshMode = RefreshMode::Normal);
+        [[nodiscard]] std::optional<MeshSdfEvaluationConfig> takePendingMeshSdfEvaluationConfig();
+        std::size_t applyMeshSdfEvaluationConfigToResources(MeshSdfEvaluationConfig const & cfg);
+
+        /// Dispatch a structural update via the existing refresh pipeline.
+        /// @return true if a compilation was launched, false if one was already running.
+        bool dispatchStructuralUpdate();
 
         void updateMemoryOffsets();
 
@@ -365,6 +505,17 @@ namespace gladius
         bool m_fileChanged{false};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
+
+        /// Mesh repair configuration applied at 3MF import time.
+        mesh_repair::MeshRepairConfig m_meshRepairConfig{};
+
+        /// Mesh SDF evaluation configuration applied to newly imported spatial meshes.
+        MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+
+        std::atomic<NanoVdbFailurePolicy> m_nanovdbFailurePolicy{NanoVdbFailurePolicy::Degrade};
+
+        mutable std::mutex m_pendingMeshSdfEvaluationConfigMutex;
+        std::optional<MeshSdfEvaluationConfig> m_pendingMeshSdfEvaluationConfig;
 
         bool m_primitiveDateNeedsUpdate{true};
 
@@ -394,6 +545,18 @@ namespace gladius
 
         /// Flag to track if UI mode is active (determines if backups should be created)
         bool m_uiMode = false;
+
+        /// Flag to track if validation needs to be re-run
+        std::atomic<bool> m_validationDirty{true};
+
+        /// Issue list containing validation errors and warnings
+        nodes::IssueList m_issueList;
+
+        /// Structural edit epoch — monotonically increasing on each structural graph edit.
+        StructuralEditEpoch m_structuralEditEpoch{0};
+
+        /// Debouncer controlling when the background structural update is dispatched.
+        StructuralEditDebouncer m_structuralDebouncer;
     };
 
     using SharedDocument = std::shared_ptr<Document>;

@@ -1,10 +1,13 @@
 #pragma once
 
+#include "AsyncThumbnailLoader.h"
 #include "BackupManager.h"
 #include "ThreemfThumbnailExtractor.h"
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <list>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -125,6 +128,24 @@ namespace gladius::ui
          */
         void setExamplesDirectory(const std::filesystem::path & examplesPath);
 
+        /**
+         * @brief Retrieves and clears the pending file open path
+         *
+         * Call this after the welcome screen closes to get the path of the file
+         * that was clicked, if any.
+         *
+         * @return std::optional<std::filesystem::path> The file path to open, or empty if none
+         */
+        [[nodiscard]] std::optional<std::filesystem::path> processFileOpen();
+
+        /**
+         * @brief Checks if there is a pending file open request
+         *
+         * @return true if a file was clicked and is waiting to be opened
+         * @return false if no file is pending
+         */
+        [[nodiscard]] bool hasPendingFileOpen() const noexcept;
+
       private:
         /// Callback for when a file should be opened
         std::function<void(const std::filesystem::path &)> m_openFileCallback;
@@ -138,6 +159,12 @@ namespace gladius::ui
         /// Flag indicating whether the welcome screen is visible
         bool m_isVisible = true;
 
+        /// Flag to prevent processing multiple clicks in the same frame
+        bool m_clickProcessed = false;
+
+        /// Path of file to open (set when thumbnail clicked, cleared after processing)
+        std::optional<std::filesystem::path> m_pendingFileOpen;
+
         /// Thumbnail size for the recent files grid
         float m_thumbnailSize = 150.0f;
 
@@ -147,11 +174,16 @@ namespace gladius::ui
         /// Thumbnail extractor for recent files
         std::unique_ptr<ThreemfThumbnailExtractor> m_thumbnailExtractor;
 
+        /// Async thumbnail loader for background loading
+        std::unique_ptr<AsyncThumbnailLoader> m_asyncLoader;
+
         /// Logger for error reporting
         events::SharedLogger m_logger;
 
-        /// List of thumbnail info for recent files
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> m_thumbnailInfos;
+        /// List of thumbnail info for recent files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_thumbnailInfos;
 
         /// Flag to indicate if thumbnails need to be regenerated
         bool m_needsRefresh = true;
@@ -165,6 +197,9 @@ namespace gladius::ui
         /// Currently active tab
         WelcomeTab m_activeTab = WelcomeTab::RecentFiles;
 
+        /// Flag to indicate if initial tab selection has been made
+        bool m_initialTabSet = false;
+
         /// Flag to indicate if backup tab should be selected by default
         bool m_preferBackupTab = false;
 
@@ -174,8 +209,10 @@ namespace gladius::ui
         /// List of example files with their modification timestamps
         std::vector<std::pair<std::filesystem::path, std::time_t>> m_exampleFiles;
 
-        /// List of thumbnail info for example files
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> m_exampleThumbnailInfos;
+        /// List of thumbnail info for example files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_exampleThumbnailInfos;
 
         /// Flag to indicate if example thumbnails need to be regenerated
         bool m_examplesNeedRefresh = true;
@@ -208,7 +245,7 @@ namespace gladius::ui
 
         /// Helper method to render a thumbnail grid
         void
-        renderThumbnailGrid(std::vector<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
+        renderThumbnailGrid(std::list<ThreemfThumbnailExtractor::ThumbnailInfo> & thumbnailInfos,
                             float availableWidth,
                             const char * placeholderIcon,
                             bool showTimestamp);
@@ -233,5 +270,9 @@ namespace gladius::ui
         /// Helper method to render file tooltip with common information
         void renderFileTooltip(const ThreemfThumbnailExtractor::ThumbnailInfo & info,
                                bool showTimestamp);
+
+        /// Helper method to handle file click and set pending file open
+        /// @return true if the click was processed, false if already processed this frame
+        bool trySetPendingFileOpen(std::filesystem::path const & path);
     };
 }

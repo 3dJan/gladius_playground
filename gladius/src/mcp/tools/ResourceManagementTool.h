@@ -6,6 +6,7 @@
 #pragma once
 
 #include "MCPToolBase.h"
+#include <array>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -34,9 +35,14 @@ namespace gladius
             /**
              * @brief Create a level set from a function
              * @param functionId The ID of the function to convert to a level set
+             * @param minPoint Minimum corner of the bounding box (default: {-10,-10,-10})
+             * @param maxPoint Maximum corner of the bounding box (default: {10,10,10})
              * @return Pair of success flag and level set resource ID
              */
-            std::pair<bool, uint32_t> createLevelSet(uint32_t functionId);
+            std::pair<bool, uint32_t> createLevelSet(
+              uint32_t functionId,
+              std::array<float, 3> minPoint = {-10.f, -10.f, -10.f},
+              std::array<float, 3> maxPoint = {10.f, 10.f, 10.f});
 
             /**
              * @brief Create a function from 3D image data

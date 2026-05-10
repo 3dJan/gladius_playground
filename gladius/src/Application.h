@@ -2,6 +2,7 @@
 
 #include "ConfigManager.h"
 #include "EventLogger.h"
+#include "MeshSdfSettings.h"
 #include "ui/MainWindow.h"
 #include <atomic>
 #include <memory>
@@ -58,6 +59,19 @@ namespace gladius
         ConfigManager const & getConfigManager() const
         {
             return m_configManager;
+        }
+
+        /**
+         * @brief Get the persistent mesh SDF settings (repair + evaluation)
+         * @return Reference to the MeshSdfSettings instance
+         */
+        MeshSdfSettings & getMeshSdfSettings()
+        {
+            return m_meshSdfSettings;
+        }
+        MeshSdfSettings const & getMeshSdfSettings() const
+        {
+            return m_meshSdfSettings;
         }
 
         /**
@@ -152,8 +166,33 @@ namespace gladius
          */
         std::shared_ptr<Document> getCurrentDocument() const;
 
+        /**
+         * @brief Propagate the current MeshSdfSettings to the active document.
+         *
+         * Updates the document's mesh-repair config (used at next 3MF import) and
+         * iterates all SpatialMeshResource instances so they pick up the latest
+         * evaluation method / voxel resolution. Resources whose acceleration
+         * structure changed will be rebuilt synchronously inside this call.
+         *
+         * @return Number of SpatialMeshResource instances that were rebuilt.
+         */
+        std::size_t applyMeshSdfSettingsToCurrentDocument();
+
       private:
+        /**
+         * @brief Common construction-time wiring shared by every constructor:
+         *        attach the ConfigManager-backed MeshSdfSettings and bind the
+         *        MainWindow's "Mesh SDF Settings" dialog to the apply hook.
+         */
+        void wireMeshSdfSettings();
+
+        /// Query device capabilities from the active ComputeCore and push them
+        /// to the UI (e.g. VDB support flag). Called once after setup() or
+        /// setupHeadless() initialises the compute stack.
+        void propagateComputeCapabilities();
+
         ConfigManager m_configManager;
+        MeshSdfSettings m_meshSdfSettings;
         ui::MainWindow m_mainWindow;
         events::SharedLogger m_globalLogger;
 

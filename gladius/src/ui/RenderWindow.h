@@ -15,6 +15,7 @@
 
 namespace gladius::ui
 {
+    class ExportState;
     class ShortcutManager;
 }
 
@@ -37,7 +38,7 @@ namespace gladius::ui
         bool isRendering = false;
         bool isMoving = false;
         size_t currentLine = 0;
-        size_t renderingStepSize = 20;
+        size_t renderingStepSize = 100; ///< Lines rendered per frame during progressive rendering
 
         float fpsPreviousError = 0.0f;
         float fpsIntegral = 0.0f;
@@ -58,11 +59,34 @@ namespace gladius::ui
          */
         void setDocument(Document * doc);
 
+        /// @brief Set the export state reference. Preview rendering is suppressed while
+        /// an export is in progress to avoid GPU contention.
+        void setExportState(ExportState const * exportState);
+
         void renderWindow();
         void updateCamera();
         bool isRenderingInProgress() const;
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
+        void invalidateViewDueToParameterChange();
+
+        /// Suppress HQ front-buffer display until the next full invalidation.
+        /// Lightweight alternative to invalidateView() that does not bump the epoch.
+        void suppressHQDisplay();
+
+        /// Start/stop the streaming preview loop for interactive parameter editing.
+        /// While active, a worker coroutine pushes the latest parameter values to the
+        /// GPU and renders low-res previews in a tight loop, bypassing the per-frame
+        /// scheduling round-trip through the UI thread.
+        void startStreamingPreview();
+        void stopStreamingPreview();
+        [[nodiscard]] bool isStreamingPreviewActive() const;
+
+        /// Cancel all in-flight async work (streaming preview, SDF, bbox, render jobs)
+        /// by stopping streaming and bumping the epoch. Call before operations that
+        /// invalidate GPU programs/resources (e.g. file load).
+        void cancelAllAsyncWork();
+
         void renderScene(RenderWindowState & state);
 
         void hide();
@@ -128,9 +152,19 @@ namespace gladius::ui
 
         bool isFocused() const;
 
+        /**
+         * @brief Check if camera is currently moving (for UI status display)
+         * @return true if the camera is being manipulated
+         */
+        [[nodiscard]] bool isCameraMoving() const;
+
       private:
         void render(RenderWindowState & state);
-        void slider();
+        void renderLoadingOverlay();
+        void renderBusyOverlay();
+        void renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage);
+        void showProgressSpinner(ImVec2 const & windowCenter, char const * label);
+        void slider(ImVec2 const & areaMin, ImVec2 const & areaMax);
         void initializeAsyncRendering();
         void renderSync(RenderWindowState & state);
         void renderAsync(RenderWindowState & state);
@@ -161,15 +195,30 @@ namespace gladius::ui
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
+        // Async preview rendering (non-blocking low-res preview during camera movement)
+        bool scheduleAsyncPreviewJob();
+        coro::task<async_rendering::FrameResultMeta> executeAsyncPreviewJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void processAsyncPreviewResults();
+
+        // Streaming preview loop (tight render loop during parameter drag)
+        bool scheduleStreamingPreviewJob();
+        coro::task<async_rendering::FrameResultMeta> executeStreamingPreviewJob(
+          async_rendering::RenderJob const & job,
+          async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+
         GLView * m_view{};
 
         ComputeCore * m_core;
         Document * m_document{nullptr};
+        ExportState const * m_exportState{nullptr};
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         gladius::ConfigManager * m_configManager;
 
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
+        std::atomic<bool> m_suppressHQDisplay{false};
         std::atomic<bool> m_preComputedSdfDirty{true};
         std::atomic<bool> m_forceLowResRenderOnNextFrame{false};
 
@@ -277,11 +326,34 @@ namespace gladius::ui
         std::atomic<bool> m_asyncBboxUpdatePending{
           false}; // Tracks if bbox needs update after current job
         std::atomic<bool> m_asyncSdfJobInFlight{false};
+
+        /// Debounce delay before recomputing a stale bounding box
+        static constexpr auto kBboxDebounceDelay = std::chrono::milliseconds(1000);
+        std::chrono::steady_clock::time_point m_lastParameterChangeTime{};
+        std::atomic<uint64_t> m_asyncSdfInFlightEpoch{0};
         std::atomic<bool> m_lowResFeedbackPending{false};
+        std::atomic<uint64_t> m_lastLowResPreviewEpoch{0};
         bool m_asyncInitialized{false};
+        bool m_compilationInvalidated{false};
 
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
+
+        // Async preview rendering state (separate from HQ progressive rendering)
+        std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation
+        std::atomic<bool> m_asyncPreviewJobInFlight{false}; ///< True if preview job is executing
+        std::atomic<uint64_t> m_asyncPreviewFrameId{0};     ///< Latest completed preview frame ID
+        uint64_t m_asyncPreviewFrameCounter{0};             ///< Counter for generating unique frame IDs
+        std::chrono::steady_clock::time_point m_asyncPreviewEnqueueTime{}; ///< For latency tracking
+
+        // Streaming preview state (tight render loop during parameter drag)
+        std::atomic<bool> m_streamingPreviewActive{false}; ///< True while streaming loop should run
+        std::atomic<bool> m_streamingJobInFlight{false};   ///< True while streaming coroutine is executing
+        std::atomic<bool> m_streamingFrameConsumed{true};  ///< Handshake: UI thread sets true after resample
+
+        // Framebuffer preservation during resize (prevents flicker)
+        bool m_preserveContentDuringResize{false}; ///< Keep displaying old texture during resize
+        bool m_deferredResizePending{false}; ///< Buffer reallocation deferred until render completes
     };
 }

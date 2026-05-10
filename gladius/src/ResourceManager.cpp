@@ -2,7 +2,9 @@
 
 #include "BeamLatticeResource.h"
 #include "ImageStackResource.h"
+#include "Profiling.h"
 #include "ResourceContext.h"
+#include "SpatialMeshResource.h"
 #include "StlResource.h"
 #include "VdbImporter.h"
 #include "VdbResource.h"
@@ -10,7 +12,9 @@
 #include <fmt/format.h>
 #include <lodepng.h>
 
-#include "MeshResource.h"
+#include <algorithm>
+
+#include "MeshResourceVdb.h"
 
 namespace gladius
 {
@@ -52,7 +56,7 @@ namespace gladius
 
     void ResourceManager::addResource(ResourceKey key, vdb::TriangleMesh && mesh)
     {
-        m_resources[key] = std::make_unique<MeshResource>(key, std::move(mesh));
+        m_resources[key] = std::make_unique<MeshResourceVdb>(key, std::move(mesh));
     }
 
     void ResourceManager::addResource(ResourceKey key, openvdb::GridBase::Ptr && grid)
@@ -69,6 +73,20 @@ namespace gladius
                                       std::unique_ptr<BeamLatticeResource> && resource)
     {
         m_resources[key] = std::move(resource);
+    }
+
+    void ResourceManager::addResource(ResourceKey key, SpatialMeshData && spatialData)
+    {
+        m_resources[key] = std::make_unique<SpatialMeshResource>(key, std::move(spatialData));
+    }
+
+    void ResourceManager::addResource(ResourceKey key,
+                                      SpatialMeshData && spatialData,
+                                      MeshSdfEvaluationConfig const & evaluationConfig,
+                                      NanoVdbBuildPolicy const & nanovdbBuildPolicy)
+    {
+        m_resources[key] = std::make_unique<SpatialMeshResource>(
+          key, std::move(spatialData), evaluationConfig, nanovdbBuildPolicy);
     }
 
     void ResourceManager::loadResources()
@@ -142,5 +160,184 @@ namespace gladius
 
         // remove the resource
         m_resources.erase(iter);
+    }
+    
+    std::vector<MeshVoxelGridBuildParams> ResourceManager::collectVoxelGridBuildParams() const
+    {
+        std::vector<MeshVoxelGridBuildParams> params;
+        params.reserve(m_resources.size());  // Upper bound estimate
+        
+        for (auto const & [key, resource] : m_resources)
+        {
+            // Fast path: skip non-mesh resources without RTTI
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            
+            auto* spatialMesh = dynamic_cast<SpatialMeshResource*>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsVoxelGridBuild())
+            {
+                auto buildParams = spatialMesh->getVoxelGridBuildParams();
+                if (buildParams.has_value())
+                {
+                    params.push_back(buildParams.value());
+                }
+            }
+        }
+        
+        return params;
+    }
+
+    std::vector<MeshSignCacheBuildParams> ResourceManager::collectSignCacheBuildParams() const
+    {
+        GLADIUS_FWN_PREP_SCOPE("ResourceManager::collectSignCacheBuildParams");
+        std::vector<MeshSignCacheBuildParams> params;
+        params.reserve(m_resources.size());  // Upper bound estimate
+
+        for (auto const & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr &&
+                !spatialMesh->needsFwnAggregateBuild() &&
+                spatialMesh->needsSignCacheBuild() &&
+                spatialMesh->usesFwnSignCache())
+            {
+                auto buildParams = spatialMesh->getSignCacheBuildParams();
+                if (buildParams.has_value())
+                {
+                    params.push_back(buildParams.value());
+                }
+            }
+        }
+
+        GLADIUS_FWN_PREP_LOG_IF(!params.empty(),
+                                "ResourceManager::collectSignCacheBuildParams collected=" +
+                                    std::to_string(params.size()));
+        return params;
+    }
+
+    std::vector<MeshFwnAggregateBuildParams> ResourceManager::collectFwnAggregateBuildParams() const
+    {
+        GLADIUS_FWN_PREP_SCOPE("ResourceManager::collectFwnAggregateBuildParams");
+        std::vector<MeshFwnAggregateBuildParams> params;
+        params.reserve(m_resources.size());
+
+        for (auto const & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr &&
+                spatialMesh->needsFwnAggregateBuild())
+            {
+                auto buildParams = spatialMesh->getFwnAggregateBuildParams();
+                if (buildParams.has_value())
+                {
+                    buildParams->resourceKey = key;
+                    params.push_back(buildParams.value());
+                }
+            }
+        }
+
+        GLADIUS_FWN_PREP_LOG_IF(!params.empty(),
+                                "ResourceManager::collectFwnAggregateBuildParams collected=" +
+                                    std::to_string(params.size()));
+        return params;
+    }
+    
+    void ResourceManager::markVoxelGridsBuilt()
+    {
+        for (auto & [key, resource] : m_resources)
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            
+            auto* spatialMesh = dynamic_cast<SpatialMeshResource*>(resource.get());
+            if (spatialMesh != nullptr && spatialMesh->needsVoxelGridBuild())
+            {
+                spatialMesh->markVoxelGridBuilt();
+            }
+        }
+    }
+
+    void ResourceManager::markFwnAggregatesBuilt(std::vector<MeshFwnAggregateBuildParams> const & buildParams,
+                                                 size_t builtCount)
+    {
+        GLADIUS_FWN_PREP_SCOPE_IF("ResourceManager::markFwnAggregatesBuilt", !buildParams.empty());
+        GLADIUS_FWN_PREP_LOG_IF(!buildParams.empty(),
+                                "ResourceManager::markFwnAggregatesBuilt built=" +
+                                    std::to_string(builtCount) +
+                                    " requested=" + std::to_string(buildParams.size()));
+        size_t const count = std::min(builtCount, buildParams.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto const & params = buildParams[i];
+            if (params.resourceKey.has_value())
+            {
+                auto * resource = getResourcePtr(params.resourceKey.value());
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+                if (spatialMesh != nullptr)
+                {
+                    spatialMesh->markFwnAggregatesBuilt();
+                }
+                continue;
+            }
+
+            // Compatibility fallback for tests or direct callers that construct
+            // MeshFwnAggregateBuildParams without ResourceManager metadata.
+            for (auto & [key, resource] : m_resources)
+            {
+                if (key.getResourceType() != ResourceType::Mesh)
+                {
+                    continue;
+                }
+
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+                auto build = spatialMesh != nullptr ? spatialMesh->getFwnAggregateBuildParams() : std::nullopt;
+                if (build.has_value() && build->fwnAggregatesOffset == params.fwnAggregatesOffset)
+                {
+                    spatialMesh->markFwnAggregatesBuilt();
+                    break;
+                }
+            }
+        }
+    }
+
+    void ResourceManager::markSignCacheBuildProgress(std::vector<MeshSignCacheBuildParams> const & buildParams,
+                                                     size_t queuedCount)
+    {
+        size_t const count = std::min(queuedCount, buildParams.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto const & params = buildParams[i];
+            for (auto & [key, resource] : m_resources)
+            {
+                if (key.getResourceType() != ResourceType::Mesh)
+                {
+                    continue;
+                }
+
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+                if (spatialMesh != nullptr &&
+                    spatialMesh->needsSignCacheBuild() &&
+                    spatialMesh->usesFwnSignCache() &&
+                    spatialMesh->signCacheReadyHostOffset() == params.signCacheReadyOffset)
+                {
+                    spatialMesh->markSignCacheBuildQueued(params);
+                    break;
+                }
+            }
+        }
     }
 }

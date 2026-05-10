@@ -10,13 +10,13 @@ namespace gladius::compute
 {
     // Match the payload structure from other DC programs
     #define PAYLOAD_ARGUMENTS                                                                          \
-        m_resoures->getBuildArea(), primitives.primitives.getBuffer(),                                 \
+        m_resources->getBuildArea(), primitives.primitives.getBuffer(),                                 \
           static_cast<cl_uint>(primitives.primitives.getSize()), primitives.data.getBuffer(),          \
-          static_cast<cl_uint>(primitives.data.getSize()), m_resoures->getRenderingSettings(),         \
-          m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
-          m_resoures->getCommandBuffer().getBuffer(),                                                  \
-          static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
-          m_resoures->getPreCompSdfBBox()
+          static_cast<cl_uint>(primitives.data.getSize()), m_resources->getRenderingSettings(),         \
+          m_resources->getPrecompSdfBuffer().getBuffer(), m_resources->getParameterBuffer().getBuffer(), \
+          m_resources->getCommandBuffer().getBuffer(),                                                  \
+          static_cast<cl_int>(m_resources->getCommandBuffer().getData().size()),                        \
+          m_resources->getPreCompSdfBBox()
 
     ManifoldDualContouringProgram::ManifoldDualContouringProgram(SharedComputeContext context,
                                                                  SharedResources const & resources)
@@ -568,5 +568,487 @@ namespace gladius::compute
         result.severeDiscontinuities = counters[6];
 
         return result;
+    }
+
+    void ManifoldDualContouringProgram::constructOctreeWithThicknessField(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t & nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        std::uint32_t initialDepth,
+        std::uint32_t maxDepth,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        std::vector<OctreeNode> rootNodes(1);
+        rootNodes[0].mortonCode = 0;
+        rootNodes[0].edgeMask = 0xFFF;
+        rootNodes[0].internalMask = 0;
+        rootNodes[0].depth = 0;
+        std::memset(rootNodes[0].padding, 0, sizeof(rootNodes[0].padding));
+
+        auto currentBuffer = std::make_unique<cl::Buffer>(
+            m_ComputeContext->GetContext(),
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            rootNodes.size() * sizeof(OctreeNode),
+            rootNodes.data());
+
+        std::size_t currentNodeCount = 1;
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        // Pack matrix as float16 (row-major)
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        for (std::uint32_t depth = 0; depth < maxDepth; ++depth)
+        {
+            std::size_t maxChildren = currentNodeCount * 8;
+
+            auto nextBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                maxChildren * sizeof(OctreeNode));
+
+            auto countBuffer = std::make_unique<cl::Buffer>(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                sizeof(int));
+
+            int zero = 0;
+            m_ComputeContext->GetQueue().enqueueWriteBuffer(*countBuffer, CL_TRUE, 0, sizeof(int), &zero);
+
+            cl::NDRange global(currentNodeCount);
+
+            m_programFront->run("construct_octree_level_with_thickness",
+                               cl::NullRange,
+                               global,
+                               *currentBuffer,
+                               *nextBuffer,
+                               *countBuffer,
+                               static_cast<int>(currentNodeCount),
+                               clBboxMin,
+                               clBboxMax,
+                               depth,
+                               maxDepth,
+                               initialDepth,
+                               PAYLOAD_ARGUMENTS,
+                               outerThicknessField,
+                               innerThicknessField,
+                               thicknessFieldResolution,
+                               clWorldToGrid,
+                               static_cast<int>(isInnermostLayer ? 1 : 0));
+
+            m_ComputeContext->GetQueue().enqueueReadBuffer(*countBuffer, CL_TRUE, 0, sizeof(int), &currentNodeCount);
+
+            if (currentNodeCount == 0)
+            {
+                break;
+            }
+
+            currentBuffer = std::move(nextBuffer);
+        }
+
+        octreeBuffer = std::move(currentBuffer);
+        nodeCount = currentNodeCount;
+    }
+
+    void ManifoldDualContouringProgram::countVerticesWithThicknessField(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer & countBuffer,
+        std::size_t nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer,
+        float gradientEpsilon)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("count_vertices_with_thickness",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           countBuffer,
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           outerThicknessField,
+                           innerThicknessField,
+                           thicknessFieldResolution,
+                           clWorldToGrid,
+                           static_cast<int>(isInnermostLayer ? 1 : 0),
+                           gradientEpsilon);
+    }
+
+    void ManifoldDualContouringProgram::generateVerticesWithThicknessField(
+        cl::Buffer const & octreeBuffer,
+        cl::Buffer const & offsetBuffer,
+        cl::Buffer & vertexBuffer,
+        cl::Buffer & edgeComponentBuffer,
+        std::size_t nodeCount,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer,
+        float gradientEpsilon)
+    {
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        cl_float3 clBboxMin = {{bboxMin.x(), bboxMin.y(), bboxMin.z()}};
+        cl_float3 clBboxMax = {{bboxMax.x(), bboxMax.y(), bboxMax.z()}};
+
+        cl_float16 clWorldToGrid;
+        for (int i = 0; i < 16; ++i)
+        {
+            clWorldToGrid.s[i] = worldToThicknessField.data()[i];
+        }
+
+        cl::NDRange global(nodeCount);
+
+        m_programFront->run("emit_vertices_with_thickness",
+                           cl::NullRange,
+                           global,
+                           octreeBuffer,
+                           offsetBuffer,
+                           vertexBuffer,
+                           edgeComponentBuffer,
+                           static_cast<int>(nodeCount),
+                           clBboxMin,
+                           clBboxMax,
+                           PAYLOAD_ARGUMENTS,
+                           outerThicknessField,
+                           innerThicknessField,
+                           thicknessFieldResolution,
+                           clWorldToGrid,
+                           static_cast<int>(isInnermostLayer ? 1 : 0),
+                           gradientEpsilon);
+    }
+
+    void ManifoldDualContouringProgram::addHaloNodesWithThicknessField(
+        std::unique_ptr<cl::Buffer> & octreeBuffer,
+        std::size_t & nodeCount,
+        std::uint32_t maxCoord,
+        std::uint8_t depth,
+        Eigen::Vector3f const & bboxMin,
+        Eigen::Vector3f const & bboxMax,
+        Primitives const & primitives,
+        cl::Buffer const & outerThicknessField,
+        cl::Buffer const & innerThicknessField,
+        int thicknessFieldResolution,
+        Eigen::Matrix4f const & worldToThicknessField,
+        bool isInnermostLayer)
+    {
+        // For now, use the standard halo node generation with isoValue=0
+        // The halo nodes just need to exist for watertight quad emission;
+        // their exact positions will be computed with thickness in emit_vertices_with_thickness.
+        addHaloNodes(octreeBuffer, nodeCount, maxCoord, depth, bboxMin, bboxMax, primitives, 0.0F);
+    }
+
+    std::vector<float> ManifoldDualContouringProgram::evaluateSdfBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        Primitives const & primitives,
+        float isoValue)
+    {
+        std::vector<float> results(positions.size(), 0.0F);
+        if (positions.empty())
+        {
+            return results;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const posCount = static_cast<cl_uint>(positions.size());
+
+        // Pack positions into flat float array
+        std::vector<float> posFlat(positions.size() * 3U);
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer posBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer sdfBuf(ctx, CL_MEM_WRITE_ONLY,
+                          results.size() * sizeof(float));
+
+        cl::NDRange global(positions.size());
+
+        m_programFront->run("evaluate_sdf_batch",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           sdfBuf,
+                           posCount,
+                           isoValue,
+                           PAYLOAD_ARGUMENTS);
+
+        m_ComputeContext->GetQueue().enqueueReadBuffer(
+            sdfBuf, CL_TRUE, 0, results.size() * sizeof(float), results.data());
+
+        return results;
+    }
+
+    void ManifoldDualContouringProgram::evaluateSdfGradientBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<float> & outSdfValues,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        outSdfValues.assign(positions.size(), 0.0F);
+        outGradients.assign(positions.size(), Eigen::Vector3f::Zero());
+        if (positions.empty())
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const posCount = static_cast<cl_uint>(positions.size());
+
+        // Pack positions into flat float array
+        std::vector<float> posFlat(positions.size() * 3U);
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer posBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer sdfBuf(ctx, CL_MEM_WRITE_ONLY,
+                          positions.size() * sizeof(float));
+        cl::Buffer gradBuf(ctx, CL_MEM_WRITE_ONLY,
+                           positions.size() * 3U * sizeof(float));
+
+        cl::NDRange global(positions.size());
+
+        m_programFront->run("evaluate_sdf_gradient_batch",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           sdfBuf,
+                           gradBuf,
+                           posCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+        queue.enqueueReadBuffer(
+            sdfBuf, CL_TRUE, 0, positions.size() * sizeof(float), outSdfValues.data());
+
+        std::vector<float> gradFlat(positions.size() * 3U);
+        queue.enqueueReadBuffer(
+            gradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U + 0U],
+                                               gradFlat[i * 3U + 1U],
+                                               gradFlat[i * 3U + 2U]);
+        }
+    }
+
+    void ManifoldDualContouringProgram::hermiteBisectAndGradientBatch(
+        std::vector<Eigen::Vector3f> const & starts,
+        std::vector<Eigen::Vector3f> const & ends,
+        std::vector<float> const & startValues,
+        std::vector<float> const & endValues,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<Eigen::Vector3f> & outPositions,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        auto const count = starts.size();
+        outPositions.resize(count);
+        outGradients.resize(count);
+
+        if (count == 0U)
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const edgeCount = static_cast<cl_uint>(count);
+
+        // Pack into flat arrays
+        std::vector<float> startsFlat(count * 3U);
+        std::vector<float> endsFlat(count * 3U);
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            startsFlat[i * 3U + 0U] = starts[i].x();
+            startsFlat[i * 3U + 1U] = starts[i].y();
+            startsFlat[i * 3U + 2U] = starts[i].z();
+            endsFlat[i * 3U + 0U] = ends[i].x();
+            endsFlat[i * 3U + 1U] = ends[i].y();
+            endsFlat[i * 3U + 2U] = ends[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        cl::Buffer startsBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             startsFlat.size() * sizeof(float), startsFlat.data());
+        cl::Buffer endsBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           endsFlat.size() * sizeof(float), endsFlat.data());
+        cl::Buffer startValBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                               count * sizeof(float), const_cast<float*>(startValues.data()));
+        cl::Buffer endValBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                             count * sizeof(float), const_cast<float*>(endValues.data()));
+        cl::Buffer outPosBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+        cl::Buffer outGradBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+
+        cl::NDRange global(count);
+
+        m_programFront->run("hermite_bisect_and_gradient",
+                           cl::NullRange,
+                           global,
+                           startsBuf,
+                           endsBuf,
+                           startValBuf,
+                           endValBuf,
+                           outPosBuf,
+                           outGradBuf,
+                           edgeCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        std::vector<float> posFlat(count * 3U);
+        queue.enqueueReadBuffer(outPosBuf, CL_TRUE, 0, posFlat.size() * sizeof(float), posFlat.data());
+
+        std::vector<float> gradFlat(count * 3U);
+        queue.enqueueReadBuffer(outGradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            outPositions[i] = Eigen::Vector3f(posFlat[i * 3U], posFlat[i * 3U + 1U], posFlat[i * 3U + 2U]);
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U], gradFlat[i * 3U + 1U], gradFlat[i * 3U + 2U]);
+        }
+    }
+
+    void ManifoldDualContouringProgram::newtonProjectToSurfaceBatch(
+        std::vector<Eigen::Vector3f> const & positions,
+        std::vector<Eigen::Vector3f> const & bboxMins,
+        std::vector<Eigen::Vector3f> const & bboxMaxs,
+        Primitives const & primitives,
+        float isoValue,
+        float epsilon,
+        std::vector<Eigen::Vector3f> & outPositions,
+        std::vector<Eigen::Vector3f> & outGradients)
+    {
+        auto const count = positions.size();
+        outPositions.resize(count);
+        outGradients.resize(count);
+
+        if (count == 0U)
+        {
+            return;
+        }
+
+        ensureCompiled();
+        swapProgramsIfNeeded();
+
+        auto const pointCount = static_cast<cl_uint>(count);
+
+        // Pack into flat arrays
+        std::vector<float> posFlat(count * 3U);
+        std::vector<float> bMinFlat(count * 3U);
+        std::vector<float> bMaxFlat(count * 3U);
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            posFlat[i * 3U + 0U] = positions[i].x();
+            posFlat[i * 3U + 1U] = positions[i].y();
+            posFlat[i * 3U + 2U] = positions[i].z();
+            bMinFlat[i * 3U + 0U] = bboxMins[i].x();
+            bMinFlat[i * 3U + 1U] = bboxMins[i].y();
+            bMinFlat[i * 3U + 2U] = bboxMins[i].z();
+            bMaxFlat[i * 3U + 0U] = bboxMaxs[i].x();
+            bMaxFlat[i * 3U + 1U] = bboxMaxs[i].y();
+            bMaxFlat[i * 3U + 2U] = bboxMaxs[i].z();
+        }
+
+        auto & ctx = m_ComputeContext->GetContext();
+        // positions buffer is read-write (kernel overwrites with projected positions)
+        cl::Buffer posBuf(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                          posFlat.size() * sizeof(float), posFlat.data());
+        cl::Buffer bMinBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           bMinFlat.size() * sizeof(float), bMinFlat.data());
+        cl::Buffer bMaxBuf(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                           bMaxFlat.size() * sizeof(float), bMaxFlat.data());
+        cl::Buffer outGradBuf(ctx, CL_MEM_WRITE_ONLY, count * 3U * sizeof(float));
+
+        cl::NDRange global(count);
+
+        m_programFront->run("newton_project_to_surface",
+                           cl::NullRange,
+                           global,
+                           posBuf,
+                           bMinBuf,
+                           bMaxBuf,
+                           outGradBuf,
+                           pointCount,
+                           isoValue,
+                           epsilon,
+                           PAYLOAD_ARGUMENTS);
+
+        auto & queue = m_ComputeContext->GetQueue();
+
+        queue.enqueueReadBuffer(posBuf, CL_TRUE, 0, posFlat.size() * sizeof(float), posFlat.data());
+
+        std::vector<float> gradFlat(count * 3U);
+        queue.enqueueReadBuffer(outGradBuf, CL_TRUE, 0, gradFlat.size() * sizeof(float), gradFlat.data());
+
+        for (std::size_t i = 0U; i < count; ++i)
+        {
+            outPositions[i] = Eigen::Vector3f(posFlat[i * 3U], posFlat[i * 3U + 1U], posFlat[i * 3U + 2U]);
+            outGradients[i] = Eigen::Vector3f(gradFlat[i * 3U], gradFlat[i * 3U + 1U], gradFlat[i * 3U + 2U]);
+        }
     }
 }

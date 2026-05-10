@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    WiX fragment: EOSPRINT 2 plugin registry entries for gladius.
+
+    EOSPRINT discovers gladius via the following priority order:
+      1. <EOSPRINT install dir>\plugins\gladius\gladiuslib.dll  (bundled)
+      2. HKEY_CURRENT_USER  registry entry  (per-user)
+      3. HKEY_LOCAL_MACHINE registry entry  (system-wide)  ← written here
+
+    Registry structure (see docs for full details):
+      HKLM\SOFTWARE\gladius\EosprintPlugin\Versions\<version>\
+          InstallPath  REG_SZ  – directory containing gladiuslib.dll
+          DllName      REG_SZ  – "gladiuslib.dll"
+          EosprintMin  REG_SZ  – minimum compatible EOSPRINT version
+          ApiVersion   REG_SZ  – plugin API version implemented by this build
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Fragment>
+        <DirectoryRef Id="INSTALL_ROOT">
+            <Component Id="C_EosprintPluginRegistry"
+                       Guid="B7D5A3F1-C8E2-4691-9F0A-3E6B8D1C2E47">
+                <!--
+                    InstallPath is the key path so WiX uses the registry entry
+                    to determine whether this component is installed.
+                    [INSTALL_ROOT] expands to the installation directory at
+                    install time (no trailing backslash).
+                -->
+                <RegistryKey Root="HKLM"
+                             Key="SOFTWARE\gladius\EosprintPlugin\Versions\@GLADIUS_VERSION@">
+                    <RegistryValue Name="InstallPath"
+                                   Type="string"
+                                   Value="[INSTALL_ROOT]"
+                                   KeyPath="yes" />
+                    <RegistryValue Name="DllName"
+                                   Type="string"
+                                   Value="gladiuslib.dll" />
+                    <RegistryValue Name="EosprintMin"
+                                   Type="string"
+                                   Value="@GLADIUS_EOSPRINT_MIN_VERSION@" />
+                    <RegistryValue Name="ApiVersion"
+                                   Type="string"
+                                   Value="@GLADIUS_PLUGIN_API_VERSION@" />
+                </RegistryKey>
+            </Component>
+        </DirectoryRef>
+
+        <!-- Top-level optional feature for EOSPRINT plugin registration -->
+        <Feature Id="F_EosprintPlugin"
+                 Title="Register as EOSPRINT 2 Plugin"
+                 Description="Writes registry entries so EOSPRINT 2 can locate gladius when it is not bundled inside the EOSPRINT plugins directory."
+                 Level="1"
+                 Absent="allow"
+                 AllowAdvertise="no"
+                 Display="expand"
+                 InstallDefault="local">
+            <ComponentRef Id="C_EosprintPluginRegistry" />
+        </Feature>
+    </Fragment>
+</Wix>

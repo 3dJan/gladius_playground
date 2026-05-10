@@ -3,9 +3,15 @@
 #include "Document.h"
 #include "ExportState.h"
 #include "FileDialogService.h"
+#include "ImageStackView.h"
+#include "ResourceKey.h"
+
+#include <unordered_map>
 
 namespace gladius::ui
 {
+    class ModelEditor;
+
     /// @brief Identifies async file dialog operations in ResourceView
     enum class ResourceViewDialogOp
     {
@@ -23,6 +29,12 @@ namespace gladius::ui
         void setExportState(ExportState * state)
         {
             m_exportState = state;
+        }
+
+        /// @brief Set the model editor for undo support in transforms (T060)
+        void setModelEditor(ModelEditor * editor)
+        {
+            m_modelEditor = editor;
         }
 
       private:
@@ -56,11 +68,22 @@ namespace gladius::ui
         std::string m_beamLatticeStlFilename;
         float m_beamDiameter = 1.0f;
 
+        // Dialog state for FunctionFromImage3D creation
+        bool m_showCreateFunctionDialog = false;
+        std::string m_newFunctionName;
+        std::optional<ResourceId> m_pendingImageStackId;
+
         // Async file dialog
         AsyncFileDialog m_asyncFileDialog;
         ResourceViewDialogOp m_asyncDialogOp{ResourceViewDialogOp::None};
 
         // Export state for blocking UI modifications
         ExportState * m_exportState{nullptr};
+
+        // Model editor for undo support (T060)
+        ModelEditor * m_modelEditor{nullptr};
+
+        // ImageStackView instances per resource
+        std::unordered_map<ResourceKey, ImageStackView> m_imageStackViews;
     };
 }

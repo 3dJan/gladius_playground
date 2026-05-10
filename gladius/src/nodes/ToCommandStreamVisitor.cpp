@@ -3,7 +3,9 @@
 #include <fmt/core.h>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "Assembly.h"
 #include "Commands.h"
@@ -46,141 +48,237 @@ namespace gladius::nodes
     {
         switch (cmdType)
         {
-        case CT_CONSTANT_SCALAR:
-            return "CT_CONSTANT_SCALAR";
-        case CT_CONSTANT_VECTOR:
-            return "CT_CONSTANT_VECTOR";
-        case CT_CONSTANT_MATRIX:
-            return "CT_CONSTANT_MATRIX";
-        case CT_SIGNED_DISTANCE_TO_MESH:
-            return "CT_SIGNED_DISTANCE_TO_MESH";
-        case CT_ADDITION_SCALAR:
-            return "CT_ADDITION_SCALAR";
-        case CT_ADDITION_VECTOR:
-            return "CT_ADDITION_VECTOR";
-        case CT_ADDITION_MATRIX:
-            return "CT_ADDITION_MATRIX";
-        case CT_SUBTRACTION_SCALAR:
-            return "CT_SUBTRACTION_SCALAR";
-        case CT_SUBTRACTION_VECTOR:
-            return "CT_SUBTRACTION_VECTOR";
-        case CT_SUBTRACTION_MATRIX:
-            return "CT_SUBTRACTION_MATRIX";
-        case CT_MULTIPLICATION_SCALAR:
-            return "CT_MULTIPLICATION_SCALAR";
-        case CT_MULTIPLICATION_VECTOR:
-            return "CT_MULTIPLICATION_VECTOR";
-        case CT_MULTIPLICATION_MATRIX:
-            return "CT_MULTIPLICATION_MATRIX";
-        case CT_TRANSFORMATION:
-            return "CT_TRANSFORMATION";
-        case CT_SINE_SCALAR:
-            return "CT_SINE_SCALAR";
-        case CT_SINE_VECTOR:
-            return "CT_SINE_VECTOR";
-        case CT_SINE_MATRIX:
-            return "CT_SINE_MATRIX";
-        case CT_COSINE_SCALAR:
-            return "CT_COSINE_SCALAR";
-        case CT_COSINE_VECTOR:
-            return "CT_COSINE_VECTOR";
-        case CT_COSINE_MATRIX:
-            return "CT_COSINE_MATRIX";
-        case CT_TANGENT_SCALAR:
-            return "CT_TANGENT_SCALAR";
-        case CT_TANGENT_VECTOR:
-            return "CT_TANGENT_VECTOR";
-        case CT_TANGENT_MATRIX:
-            return "CT_TANGENT_MATRIX";
-        case CT_ARC_SIN_SCALAR:
-            return "CT_ARC_SIN_SCALAR";
-        case CT_ARC_SIN_VECTOR:
-            return "CT_ARC_SIN_VECTOR";
-        case CT_ARC_SIN_MATRIX:
-            return "CT_ARC_SIN_MATRIX";
-        case CT_ARC_COS_SCALAR:
-            return "CT_ARC_COS_SCALAR";
-        case CT_ARC_COS_VECTOR:
-            return "CT_ARC_COS_VECTOR";
-        case CT_ARC_COS_MATRIX:
-            return "CT_ARC_COS_MATRIX";
-        case CT_ARC_TAN_SCALAR:
-            return "CT_ARC_TAN_SCALAR";
-        case CT_ARC_TAN_VECTOR:
-            return "CT_ARC_TAN_VECTOR";
-        case CT_ARC_TAN_MATRIX:
-            return "CT_ARC_TAN_MATRIX";
-        case CT_ARC_TAN2_SCALAR:
-            return "CT_ARC_TAN2_SCALAR";
-        case CT_ARC_TAN2_VECTOR:
-            return "CT_ARC_TAN2_VECTOR";
-        case CT_ARC_TAN2_MATRIX:
-            return "CT_ARC_TAN2_MATRIX";
-        case CT_POW_SCALAR:
-            return "CT_POW_SCALAR";
-        case CT_POW_VECTOR:
-            return "CT_POW_VECTOR";
-        case CT_POW_MATRIX:
-            return "CT_POW_MATRIX";
-        case CT_SQRT_SCALAR:
-            return "CT_SQRT_SCALAR";
-        case CT_SQRT_VECTOR:
-            return "CT_SQRT_VECTOR";
-        case CT_SQRT_MATRIX:
-            return "CT_SQRT_MATRIX";
-        case CT_FMOD_SCALAR:
-            return "CT_FMOD_SCALAR";
-        case CT_FMOD_VECTOR:
-            return "CT_FMOD_VECTOR";
-        case CT_FMOD_MATRIX:
-            return "CT_MOD_MATRIX";
-        case CT_MOD_SCALAR:
-            return "CT_MOD_SCALAR";
-        case CT_MOD_VECTOR:
-            return "CT_MOD_VECTOR";
-        case CT_MOD_MATRIX:
-            return "CT_MOD_MATRIX";
-        case CT_MAX_SCALAR:
-            return "CT_MAX_SCALAR";
-        case CT_MAX_VECTOR:
-            return "CT_MAX_VECTOR";
-        case CT_MAX_MATRIX:
-            return "CT_MAX_MATRIX";
-        case CT_MIN_SCALAR:
-            return "CT_MIN_SCALAR";
-        case CT_MIN_VECTOR:
-            return "CT_MIN_VECTOR";
-        case CT_MIN_MATRIX:
-            return "CT_MIN_MATRIX";
-        case CT_ABS_SCALAR:
-            return "CT_ABS_SCALAR";
-        case CT_ABS_VECTOR:
-            return "CT_ABS_VECTOR";
-        case CT_ABS_MATRIX:
-            return "CT_ABS_MATRIX";
-        case CT_DOT_PRODUCT:
-            return "CT_DOT_PRODUCT";
-        case CT_LENGTH:
-            return "CT_LENGTH";
-        case CT_RESOURCE:
-            return "CT_RESOURCE";
-        case CT_DECOMPOSE_VECTOR:
-            return "CT_DECOMPOSE_VECTOR";
-        case CT_COMPOSE_VECTOR:
-            return "CT_COMPOSE_VECTOR";
-        case CT_END:
-            return "CT_END";
+#define GLADIUS_COMMAND_TYPE_CASE(commandType)                                                     \
+        case commandType:                                                                          \
+            return #commandType
+            GLADIUS_COMMAND_TYPE_CASE(CT_END);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CONSTANT_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CONSTANT_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CONSTANT_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COMPOSE_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COMPOSE_VECTOR_FROM_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COMPOSE_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COMPOSE_MATRIX_FROM_COLUMNS);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COMPOSE_MATRIX_FROM_ROWS);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DECOMPOSE_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DECOMPOSE_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ADDITION_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ADDITION_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ADDITION_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MULTIPLICATION_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MULTIPLICATION_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MULTIPLICATION_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SUBTRACTION_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SUBTRACTION_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SUBTRACTION_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DIVISION_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DIVISION_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DIVISION_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_DOT_PRODUCT);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CROSS_PRODUCT);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MATRIX_VECTOR_MULTIPLICATION);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TRANSPOSE);
+            GLADIUS_COMMAND_TYPE_CASE(CT_INVERSE);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINE_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINE_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINE_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSINE_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSINE_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSINE_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINH_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINH_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SINH_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSH_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSH_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_COSH_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANH_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANH_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANH_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANGENT_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANGENT_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TANGENT_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_SIN_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_SIN_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_SIN_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_COS_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_COS_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_COS_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN2_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN2_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ARC_TAN2_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIN_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIN_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIN_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MAX_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MAX_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MAX_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ABS_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ABS_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ABS_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SQRT_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SQRT_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SQRT_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FMOD_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FMOD_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FMOD_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MOD_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MOD_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MOD_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_POW_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_POW_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_POW_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_EXP_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_EXP_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_EXP_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG2_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG2_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG2_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG10_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG10_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LOG10_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SELECT_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SELECT_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SELECT_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CLAMP_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CLAMP_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CLAMP_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ROUND_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ROUND_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_ROUND_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CEIL_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CEIL_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_CEIL_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FLOOR_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FLOOR_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FLOOR_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SIGN_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SIGN_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SIGN_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FRACT_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FRACT_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_FRACT_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_SIGNED_DISTANCE_TO_MESH);
+            GLADIUS_COMMAND_TYPE_CASE(CT_UNSIGNED_DISTANCE_TO_MESH);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LENGTH);
+            GLADIUS_COMMAND_TYPE_CASE(CT_RESOURCE);
+            GLADIUS_COMMAND_TYPE_CASE(CT_TRANSFORMATION);
+            GLADIUS_COMMAND_TYPE_CASE(CT_LABEL);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIX_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIX_VECTOR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_MIX_MATRIX);
+            GLADIUS_COMMAND_TYPE_CASE(CT_VECTOR_FROM_SCALAR);
+            GLADIUS_COMMAND_TYPE_CASE(CT_IMAGE_SAMPLER);
+            GLADIUS_COMMAND_TYPE_CASE(CT_BOX_MIN_MAX);
+#undef GLADIUS_COMMAND_TYPE_CASE
         default:
             return "Unknown command type";
         }
     }
 
-    void ToCommandStreamVisitor::write(std::ostream & out) const
+    std::unordered_set<std::string> collectUsedCommandTypeNames(CommandBuffer * commands)
+    {
+        std::unordered_set<std::string> usedCommandTypes;
+        if (commands == nullptr)
+        {
+            return usedCommandTypes;
+        }
+
+        for (auto const & command : commands->getData())
+        {
+            usedCommandTypes.insert(cmdIdToString(static_cast<CommandType>(command.type)));
+        }
+        return usedCommandTypes;
+    }
+
+    std::size_t findMatchingBrace(std::string const & source, std::size_t const openBrace)
+    {
+        auto depth = 0;
+        for (auto index = openBrace; index < source.size(); ++index)
+        {
+            if (source[index] == '{')
+            {
+                ++depth;
+            }
+            else if (source[index] == '}')
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    return index;
+                }
+            }
+        }
+        return std::string::npos;
+    }
+
+    std::string removeUnusedCommandHandlers(std::string const & source,
+                                            std::unordered_set<std::string> const & usedCommandTypes)
+    {
+        auto constexpr commandPrefix = std::string_view{"if (cmds[i].type == "};
+
+        std::string filteredSource;
+        filteredSource.reserve(source.size());
+
+        auto cursor = std::size_t{0};
+        while (cursor < source.size())
+        {
+            auto const handlerStart = source.find(commandPrefix, cursor);
+            if (handlerStart == std::string::npos)
+            {
+                filteredSource.append(source, cursor, std::string::npos);
+                break;
+            }
+
+            filteredSource.append(source, cursor, handlerStart - cursor);
+
+            auto const commandNameStart = handlerStart + commandPrefix.size();
+            auto const commandNameEnd = source.find(')', commandNameStart);
+            auto const handlerBodyStart = source.find('{', commandNameEnd);
+            if (commandNameEnd == std::string::npos || handlerBodyStart == std::string::npos)
+            {
+                filteredSource.append(source, handlerStart, std::string::npos);
+                break;
+            }
+
+            auto const handlerBodyEnd = findMatchingBrace(source, handlerBodyStart);
+            if (handlerBodyEnd == std::string::npos)
+            {
+                filteredSource.append(source, handlerStart, std::string::npos);
+                break;
+            }
+
+            auto handlerEnd = handlerBodyEnd + 1u;
+            if (handlerEnd < source.size() && source[handlerEnd] == '\n')
+            {
+                ++handlerEnd;
+            }
+
+            auto const commandName = source.substr(commandNameStart, commandNameEnd - commandNameStart);
+            if (usedCommandTypes.find(commandName) != usedCommandTypes.end())
+            {
+                filteredSource.append(source, handlerStart, handlerEnd - handlerStart);
+            }
+            cursor = handlerEnd;
+        }
+
+        return filteredSource;
+    }
+
+    void ToCommandStreamVisitor::write(std::ostream & target) const
     {
         if (m_assembly->assemblyModel()->getBeginNode() == nullptr)
         {
             return;
         }
+
+        std::ostringstream generatedSource;
+        auto & out = generatedSource;
 
         out << "\n#define GETPARAM(index, offset) \
     (cmds[i].args[index] < 0) ? out[-cmds[i].args[index]+offset] : parameter[cmds[i].args[index]+offset]\n";
@@ -214,22 +312,12 @@ namespace gladius::nodes
 
         out << "if (cmds[i].type == CT_CONSTANT_MATRIX)\n";
         out << "{\n";
-        out << " out[cmds[i].output[0]] = GETPARAM(0,0);\n";
-        out << " out[cmds[i].output[0]+1] = GETPARAM(0,1);\n";
-        out << " out[cmds[i].output[0]+2] = GETPARAM(0,2);\n";
-        out << " out[cmds[i].output[0]+3] = GETPARAM(0,3);\n";
-        out << " out[cmds[i].output[0]+4] = GETPARAM(0,4);\n";
-        out << " out[cmds[i].output[0]+5] = GETPARAM(0,5);\n";
-        out << " out[cmds[i].output[0]+6] = GETPARAM(0,6);\n";
-        out << " out[cmds[i].output[0]+7] = GETPARAM(0,7);\n";
-        out << " out[cmds[i].output[0]+8] = GETPARAM(0,8);\n";
-        out << " out[cmds[i].output[0]+9] = GETPARAM(0,9);\n";
-        out << " out[cmds[i].output[0]+10] = GETPARAM(0,10);\n";
-        out << " out[cmds[i].output[0]+11] = GETPARAM(0,11);\n";
-        out << " out[cmds[i].output[0]+12] = GETPARAM(0,12);\n";
-        out << " out[cmds[i].output[0]+13] = GETPARAM(0,13);\n";
-        out << " out[cmds[i].output[0]+14] = GETPARAM(0,14);\n";
-        out << " out[cmds[i].output[0]+15] = GETPARAM(0,15);\n";
+        for (int component = 0; component < 16; ++component)
+        {
+            out << fmt::format(" out[cmds[i].output[0]+{}] = GETPARAM({},0);\n",
+                               component,
+                               component);
+        }
         out << "}\n";
 
         out << "if (cmds[i].type == CT_SIGNED_DISTANCE_TO_MESH)\n";
@@ -878,29 +966,21 @@ namespace gladius::nodes
 
         out << "if (cmds[i].type == CT_MOD_VECTOR)\n";
         out << "{\n";
-        out << " out[cmds[i].output[0]] = glsl_mod3f(GETPARAM(0,0), GETPARAM(1,0));\n";
-        out << " out[cmds[i].output[0]+1] = glsl_mod3f(GETPARAM(0,1), GETPARAM(1,1));\n";
-        out << " out[cmds[i].output[0]+2] = glsl_mod3f(GETPARAM(0,2), GETPARAM(1,2));\n";
+        out << " out[cmds[i].output[0]] = glsl_mod1f(GETPARAM(0,0), GETPARAM(1,0));\n";
+        out << " out[cmds[i].output[0]+1] = glsl_mod1f(GETPARAM(0,1), GETPARAM(1,1));\n";
+        out << " out[cmds[i].output[0]+2] = glsl_mod1f(GETPARAM(0,2), GETPARAM(1,2));\n";
         out << "}\n";
 
         out << "if (cmds[i].type == CT_MOD_MATRIX)\n";
         out << "{\n";
-        out << " out[cmds[i].output[0]] = glsl_mod16f(GETPARAM(0,0), GETPARAM(1,0));\n";
-        out << " out[cmds[i].output[0]+1] = glsl_mod16f(GETPARAM(0,1), GETPARAM(1,1));\n";
-        out << " out[cmds[i].output[0]+2] = glsl_mod16f(GETPARAM(0,2), GETPARAM(1,2));\n";
-        out << " out[cmds[i].output[0]+3] = glsl_mod16f(GETPARAM(0,3), GETPARAM(1,3));\n";
-        out << " out[cmds[i].output[0]+4] = glsl_mod16f(GETPARAM(0,4), GETPARAM(1,4));\n";
-        out << " out[cmds[i].output[0]+5] = glsl_mod16f(GETPARAM(0,5), GETPARAM(1,5));\n";
-        out << " out[cmds[i].output[0]+6] = glsl_mod16f(GETPARAM(0,6), GETPARAM(1,6));\n";
-        out << " out[cmds[i].output[0]+7] = glsl_mod16f(GETPARAM(0,7), GETPARAM(1,7));\n";
-        out << " out[cmds[i].output[0]+8] = glsl_mod16f(GETPARAM(0,8), GETPARAM(1,8));\n";
-        out << " out[cmds[i].output[0]+9] = glsl_mod16f(GETPARAM(0,9), GETPARAM(1,9));\n";
-        out << " out[cmds[i].output[0]+10] = glsl_mod16f(GETPARAM(0,10), GETPARAM(1,10));\n";
-        out << " out[cmds[i].output[0]+11] = glsl_mod16f(GETPARAM(0,11), GETPARAM(1,11));\n";
-        out << " out[cmds[i].output[0]+12] = glsl_mod16f(GETPARAM(0,12), GETPARAM(1,12));\n";
-        out << " out[cmds[i].output[0]+13] = glsl_mod16f(GETPARAM(0,13), GETPARAM(1,13));\n";
-        out << " out[cmds[i].output[0]+14] = glsl_mod16f(GETPARAM(0,14), GETPARAM(1,14));\n";
-        out << " out[cmds[i].output[0]+15] = glsl_mod16f(GETPARAM(0,15), GETPARAM(1,15));\n";
+        for (int component = 0; component < 16; ++component)
+        {
+            out << fmt::format(
+              " out[cmds[i].output[0]+{}] = glsl_mod1f(GETPARAM(0,{}), GETPARAM(1,{}));\n",
+              component,
+              component,
+              component);
+        }
         out << "}\n";
 
         out << "if (cmds[i].type == CT_MAX_SCALAR)\n";
@@ -1059,6 +1139,16 @@ namespace gladius::nodes
         out << " out[cmds[i].output[15]] = GETPARAM(0,15);\n";
         out << "}\n";
 
+        out << "if (cmds[i].type == CT_COMPOSE_MATRIX)\n";
+        out << "{\n";
+        for (int component = 0; component < 16; ++component)
+        {
+            out << fmt::format(" out[cmds[i].output[0]+{}] = GETPARAM({},0);\n",
+                               component,
+                               component);
+        }
+        out << "}\n";
+
         out << "if (cmds[i].type == CT_COMPOSE_MATRIX_FROM_COLUMNS)\n";
         out << "{\n";
         out << " out[cmds[i].output[0]] = GETPARAM(0,0);\n";
@@ -1073,10 +1163,10 @@ namespace gladius::nodes
         out << " out[cmds[i].output[0]+9] = GETPARAM(1,2);\n";
         out << " out[cmds[i].output[0]+10] = GETPARAM(2,2);\n";
         out << " out[cmds[i].output[0]+11] = GETPARAM(3,2);\n";
-        out << " out[cmds[i].output[0]+12] = GETPARAM(0,3);\n";
-        out << " out[cmds[i].output[0]+13] = GETPARAM(1,3);\n";
-        out << " out[cmds[i].output[0]+14] = GETPARAM(2,3);\n";
-        out << " out[cmds[i].output[0]+15] = GETPARAM(3,3);\n";
+        out << " out[cmds[i].output[0]+12] = 0.f;\n";
+        out << " out[cmds[i].output[0]+13] = 0.f;\n";
+        out << " out[cmds[i].output[0]+14] = 0.f;\n";
+        out << " out[cmds[i].output[0]+15] = 1.f;\n";
         out << "}\n";
 
         out << "if (cmds[i].type == CT_COMPOSE_MATRIX_FROM_ROWS)\n";
@@ -1084,19 +1174,19 @@ namespace gladius::nodes
         out << " out[cmds[i].output[0]] = GETPARAM(0,0);\n";
         out << " out[cmds[i].output[0]+1] = GETPARAM(0,1);\n";
         out << " out[cmds[i].output[0]+2] = GETPARAM(0,2);\n";
-        out << " out[cmds[i].output[0]+3] = GETPARAM(0,3);\n";
+        out << " out[cmds[i].output[0]+3] = 0.f;\n";
         out << " out[cmds[i].output[0]+4] = GETPARAM(1,0);\n";
         out << " out[cmds[i].output[0]+5] = GETPARAM(1,1);\n";
         out << " out[cmds[i].output[0]+6] = GETPARAM(1,2);\n";
-        out << " out[cmds[i].output[0]+7] = GETPARAM(1,3);\n";
+        out << " out[cmds[i].output[0]+7] = 0.f;\n";
         out << " out[cmds[i].output[0]+8] = GETPARAM(2,0);\n";
         out << " out[cmds[i].output[0]+9] = GETPARAM(2,1);\n";
         out << " out[cmds[i].output[0]+10] = GETPARAM(2,2);\n";
-        out << " out[cmds[i].output[0]+11] = GETPARAM(2,3);\n";
+        out << " out[cmds[i].output[0]+11] = 0.f;\n";
         out << " out[cmds[i].output[0]+12] = GETPARAM(3,0);\n";
         out << " out[cmds[i].output[0]+13] = GETPARAM(3,1);\n";
         out << " out[cmds[i].output[0]+14] = GETPARAM(3,2);\n";
-        out << " out[cmds[i].output[0]+15] = GETPARAM(3,3);\n";
+        out << " out[cmds[i].output[0]+15] = 1.f;\n";
         out << "}\n";
 
         out << "if (cmds[i].type == CT_VECTOR_FROM_SCALAR)\n";
@@ -1300,6 +1390,30 @@ namespace gladius::nodes
                "GETPARAM(2,15));\n";
         out << "}\n";
 
+                out << "if (cmds[i].type == CT_MIX_SCALAR)\n";
+                out << "{\n";
+                out << " out[cmds[i].output[0]] = mix(GETPARAM(0,0), GETPARAM(1,0), GETPARAM(2,0));\n";
+                out << "}\n";
+
+                out << "if (cmds[i].type == CT_MIX_VECTOR)\n";
+                out << "{\n";
+                out << " out[cmds[i].output[0]] = mix(GETPARAM(0,0), GETPARAM(1,0), GETPARAM(2,0));\n";
+                out << " out[cmds[i].output[0]+1] = mix(GETPARAM(0,1), GETPARAM(1,1), GETPARAM(2,0));\n";
+                out << " out[cmds[i].output[0]+2] = mix(GETPARAM(0,2), GETPARAM(1,2), GETPARAM(2,0));\n";
+                out << "}\n";
+
+                out << "if (cmds[i].type == CT_MIX_MATRIX)\n";
+                out << "{\n";
+                for (int component = 0; component < 16; ++component)
+                {
+                        out << fmt::format(
+                            " out[cmds[i].output[0]+{}] = mix(GETPARAM(0,{}), GETPARAM(1,{}), GETPARAM(2,0));\n",
+                            component,
+                            component,
+                            component);
+                }
+                out << "}\n";
+
         out << "if (cmds[i].type == CT_SELECT_SCALAR)\n";
         out << "{\n";
         out << " bool const b0 = GETPARAM(0,0) > GETPARAM(1,0);\n";
@@ -1488,33 +1602,22 @@ namespace gladius::nodes
 
         out << "if (cmds[i].type == CT_FRACT_VECTOR)\n";
         out << "{\n";
-        out << " float3 ipart;\n";
-        out << " float3 const fpart = fract(GETPARAM(0,0), &ipart);\n";
-        out << " out[cmds[i].output[0]] = fpart.x;\n";
-        out << " out[cmds[i].output[0]+1] = fpart.y;\n";
-        out << " out[cmds[i].output[0]+2] = fpart.z;\n";
+        out << " float ipart;\n";
+        out << " out[cmds[i].output[0]] = fract(GETPARAM(0,0), &ipart);\n";
+        out << " out[cmds[i].output[0]+1] = fract(GETPARAM(0,1), &ipart);\n";
+        out << " out[cmds[i].output[0]+2] = fract(GETPARAM(0,2), &ipart);\n";
         out << "}\n";
 
         out << "if (cmds[i].type == CT_FRACT_MATRIX)\n";
         out << "{\n";
-        out << " float16 ipart;\n";
-        out << " float16 const fpart = fract(GETPARAM(0,0), &ipart);\n";
-        out << " out[cmds[i].output[0]] = fpart.s0;\n";
-        out << " out[cmds[i].output[0]+1] = fpart.s1;\n";
-        out << " out[cmds[i].output[0]+2] = fpart.s2;\n";
-        out << " out[cmds[i].output[0]+3] = fpart.s3;\n";
-        out << " out[cmds[i].output[0]+4] = fpart.s4;\n";
-        out << " out[cmds[i].output[0]+5] = fpart.s5;\n";
-        out << " out[cmds[i].output[0]+6] = fpart.s6;\n";
-        out << " out[cmds[i].output[0]+7] = fpart.s7;\n";
-        out << " out[cmds[i].output[0]+8] = fpart.s8;\n";
-        out << " out[cmds[i].output[0]+9] = fpart.s9;\n";
-        out << " out[cmds[i].output[0]+10] = fpart.sa;\n";
-        out << " out[cmds[i].output[0]+11] = fpart.sb;\n";
-        out << " out[cmds[i].output[0]+12] = fpart.sc;\n";
-        out << " out[cmds[i].output[0]+13] = fpart.sd;\n";
-        out << " out[cmds[i].output[0]+14] = fpart.se;\n";
-        out << " out[cmds[i].output[0]+15] = fpart.sf;\n";
+        out << " float ipart;\n";
+        for (int component = 0; component < 16; ++component)
+        {
+            out << fmt::format(
+              " out[cmds[i].output[0]+{}] = fract(GETPARAM(0,{}), &ipart);\n",
+              component,
+              component);
+        }
         out << "}\n";
 
         // sampleImageNearest4f(float3 uvw, float3 dimensions, int start, PAYLOAD_ARGS)
@@ -1529,9 +1632,14 @@ namespace gladius::nodes
                "convert_int(GETPARAM(4,0)), "
                "convert_int(GETPARAM(5,0)));\n";
         out << " int filter = convert_int(GETPARAM(6,0));\n";
+        out << " bool const isVdbGrid = cmds[i].args[7] != 0;\n";
+        out << "#ifdef ENABLE_VDB\n";
+        out << " if (isVdbGrid)\n";
+        out << " color = sampleImageLinear4fvdb(uvw, dimensions, start, tileStyle, PASS_PAYLOAD_ARGS);\n";
+        out << " else\n";
+        out << "#endif\n";
         out << " if (filter == 0)\n";
-        out << " color = sampleImageNearest4f(uvw, dimensions, start, tileStyle, "
-               "PASS_PAYLOAD_ARGS);\n";
+        out << " color = sampleImageNearest4f(uvw, dimensions, start, tileStyle, PASS_PAYLOAD_ARGS);\n";
         out << " else\n";
         out << " color = sampleImageLinear4f(uvw, dimensions, start, tileStyle, "
                "PASS_PAYLOAD_ARGS);\n";
@@ -1541,19 +1649,21 @@ namespace gladius::nodes
         out << " out[cmds[i].output[1]] = color.w;\n";
         out << "}\n";
 
-        // bbox(float3 pos, float3 min, float3 max)
+        // bbBox(float3 pos, float3 min, float3 max)
         out << "if (cmds[i].type == CT_BOX_MIN_MAX)\n";
         out << "{\n";
         out << " float3 const pos = (float3)(GETPARAM(0,0), GETPARAM(0,1), GETPARAM(0,2));\n";
         out << " float3 const min = (float3)(GETPARAM(1,0), GETPARAM(1,1), GETPARAM(1,2));\n";
         out << " float3 const max = (float3)(GETPARAM(2,0), GETPARAM(2,1), GETPARAM(2,2));\n";
-        out << " out[cmds[i].output[0]] = bbox(pos, min, max);\n";
+        out << " out[cmds[i].output[0]] = bbBox(pos, min, max);\n";
         out << "}\n";
 
         out << "}\n"; // for loop
 
         out << m_resultStatement.str();
         out << "}\n";
+
+        target << removeUnusedCommandHandlers(generatedSource.str(), collectUsedCommandTypeNames(m_cmds));
     }
 
     bool ToCommandStreamVisitor::isOutPutOfNodeValid(const NodeBase & node)
@@ -1734,10 +1844,21 @@ namespace gladius::nodes
         cmd.args[3] = getLookUpIndex(ending.parameter().at(FieldNames::Shape))[0];
 
         m_cmds->getData().push_back(cmd);
-        m_resultStatement << "struct Command ending = cmds[sizeOfCmds-1];";
-        m_resultStatement
-          << "return (float4) (GETPARAM2(ending.args[0]), GETPARAM2(ending.args[1]), "
-             "GETPARAM2(ending.args[2]), GETPARAM2(ending.args[3]));\n";
+        m_resultStatement << "struct Command ending = cmds[sizeOfCmds-1];\n";
+        m_resultStatement << "float const shape = GETPARAM2(ending.args[3]);\n";
+        if (auto const fallbackValue = m_assembly->getFallbackValueLevelSet(); fallbackValue)
+        {
+            m_resultStatement << fmt::format(
+              "return (float4) (GETPARAM2(ending.args[0]), GETPARAM2(ending.args[1]), "
+              "GETPARAM2(ending.args[2]), isnan(shape) || isinf(shape) ? {} : shape);\n",
+              *fallbackValue);
+        }
+        else
+        {
+            m_resultStatement
+              << "return (float4) (GETPARAM2(ending.args[0]), GETPARAM2(ending.args[1]), "
+                 "GETPARAM2(ending.args[2]), shape);\n";
+        }
 
         m_endReached = true;
     }
@@ -1765,8 +1886,9 @@ namespace gladius::nodes
 
         cmd.output[0] = acquireOutputIndex(boxMinMax.getOutputs().at(FieldNames::Shape), 1);
 
-        cmd.args[0] = getLookUpIndex(boxMinMax.parameter().at(FieldNames::Min))[0];
-        cmd.args[1] = getLookUpIndex(boxMinMax.parameter().at(FieldNames::Max))[0];
+        cmd.args[0] = getLookUpIndex(boxMinMax.parameter().at(FieldNames::Pos))[0];
+        cmd.args[1] = getLookUpIndex(boxMinMax.parameter().at(FieldNames::Min))[0];
+        cmd.args[2] = getLookUpIndex(boxMinMax.parameter().at(FieldNames::Max))[0];
 
         m_cmds->getData().push_back(cmd);
     }
@@ -1875,7 +1997,7 @@ namespace gladius::nodes
         cmd.type = CT_COMPOSE_MATRIX;
         cmd.id = composeMatrix.getId();
 
-        cmd.output[0] = acquireOutputIndex(composeMatrix.getOutputs()[FieldNames::Matrix], 16);
+        cmd.output[0] = acquireOutputIndex(composeMatrix.getOutputs()[FieldNames::Result], 16);
 
         cmd.args[0] = getLookUpIndex(composeMatrix.parameter().at(FieldNames::M00))[0];
         cmd.args[1] = getLookUpIndex(composeMatrix.parameter().at(FieldNames::M01))[0];
@@ -1909,12 +2031,12 @@ namespace gladius::nodes
         cmd.id = composeMatrixFromColumns.getId();
 
         cmd.output[0] =
-          acquireOutputIndex(composeMatrixFromColumns.getOutputs()[FieldNames::Matrix], 16);
+          acquireOutputIndex(composeMatrixFromColumns.getOutputs()[FieldNames::Result], 16);
 
-        cmd.args[0] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::A))[0];
-        cmd.args[1] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::B))[0];
-        cmd.args[2] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::C))[0];
-        cmd.args[3] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::D))[0];
+        cmd.args[0] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::Col0))[0];
+        cmd.args[1] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::Col1))[0];
+        cmd.args[2] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::Col2))[0];
+        cmd.args[3] = getLookUpIndex(composeMatrixFromColumns.parameter().at(FieldNames::Col3))[0];
 
         m_cmds->getData().push_back(cmd);
     }
@@ -1931,12 +2053,12 @@ namespace gladius::nodes
         cmd.id = composeMatrixFromRows.getId();
 
         cmd.output[0] =
-          acquireOutputIndex(composeMatrixFromRows.getOutputs()[FieldNames::Matrix], 16);
+          acquireOutputIndex(composeMatrixFromRows.getOutputs()[FieldNames::Result], 16);
 
-        cmd.args[0] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::A))[0];
-        cmd.args[1] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::B))[0];
-        cmd.args[2] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::C))[0];
-        cmd.args[3] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::D))[0];
+        cmd.args[0] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::Row0))[0];
+        cmd.args[1] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::Row1))[0];
+        cmd.args[2] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::Row2))[0];
+        cmd.args[3] = getLookUpIndex(composeMatrixFromRows.parameter().at(FieldNames::Row3))[0];
 
         m_cmds->getData().push_back(cmd);
     }
@@ -1961,6 +2083,30 @@ namespace gladius::nodes
 
         m_cmds->getData().push_back(cmd);
     }
+
+        void ToCommandStreamVisitor::visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice)
+        {
+                if (!isOutPutOfNodeValid(signedDistanceToBeamLattice))
+                {
+                        return;
+                }
+
+                Command cmd;
+                cmd.type = CT_SIGNED_DISTANCE_TO_MESH;
+                cmd.id = signedDistanceToBeamLattice.getId();
+
+                cmd.output[0] = acquireOutputIndex(
+                    signedDistanceToBeamLattice.getOutputs().at(FieldNames::Distance), 1);
+
+                cmd.args[0] =
+                    getLookUpIndex(signedDistanceToBeamLattice.parameter().at(FieldNames::Pos))[0];
+                cmd.args[1] =
+                    getLookUpIndex(signedDistanceToBeamLattice.parameter().at(FieldNames::Start))[0];
+                cmd.args[2] =
+                    getLookUpIndex(signedDistanceToBeamLattice.parameter().at(FieldNames::End))[0];
+
+                m_cmds->getData().push_back(cmd);
+        }
 
     void ToCommandStreamVisitor::visit(UnsignedDistanceToMesh & unsignedDistanceToMesh)
     {
@@ -2117,9 +2263,11 @@ namespace gladius::nodes
         cmd.type = CT_TRANSPOSE;
         cmd.id = transpose.getId();
 
-        cmd.output[0] = acquireOutputIndex(transpose.getOutputs().at(FieldNames::Result), 1);
+        cmd.output[0] = acquireOutputIndex(transpose.getOutputs().at(FieldNames::Matrix), 16);
 
-        cmd.args[0] = getLookUpIndex(transpose.parameter().at(FieldNames::Matrix))[0];
+        cmd.args[0] = getLookUpIndex(transpose.parameter().at(FieldNames::A))[0];
+
+        m_cmds->getData().push_back(cmd);
     }
 
     void ToCommandStreamVisitor::visit(Sine & sine)
@@ -2261,21 +2409,12 @@ namespace gladius::nodes
         }
 
         Command cmd;
-        auto const dimension = power.parameter().at(FieldNames::Base).getSize();
-        switch (dimension)
+        if (power.parameter().at(FieldNames::Base).getSize() != 1)
         {
-        case 1:
-            cmd.type = CT_POW_SCALAR;
-            break;
-        case 3:
-            cmd.type = CT_POW_VECTOR;
-            break;
-        case 16:
-            cmd.type = CT_POW_MATRIX;
-            break;
-        default:
-            throw std::runtime_error("dimension not supported");
+            throw std::runtime_error(
+              "Pow command stream output is scalar; vector/matrix inputs are not supported");
         }
+        cmd.type = CT_POW_SCALAR;
         cmd.id = power.getId();
 
         cmd.output[0] = acquireOutputIndex(power.getOutputs().at(FieldNames::Value), 1);
@@ -2659,6 +2798,7 @@ namespace gladius::nodes
         cmd.args[4] = getLookUpIndex(imageSampler.parameter().at(FieldNames::TileStyleV))[0];
         cmd.args[5] = getLookUpIndex(imageSampler.parameter().at(FieldNames::TileStyleW))[0];
         cmd.args[6] = getLookUpIndex(imageSampler.parameter().at(FieldNames::Filter))[0];
+        cmd.args[7] = imageSampler.isVdbGrid() ? 1 : 0;
 
         m_cmds->getData().push_back(cmd);
     }
@@ -2685,6 +2825,44 @@ namespace gladius::nodes
         m_cmds->getData().push_back(cmd);
     }
 
+    void ToCommandStreamVisitor::visit(DecomposeMatrix & decomposeMatrix)
+    {
+        if (!isOutPutOfNodeValid(decomposeMatrix))
+        {
+            return;
+        }
+
+        Command cmd;
+        cmd.type = CT_DECOMPOSE_MATRIX;
+        cmd.id = decomposeMatrix.getId();
+
+        std::array<char const *, 16> const matrixFields{FieldNames::M00,
+                                                        FieldNames::M01,
+                                                        FieldNames::M02,
+                                                        FieldNames::M03,
+                                                        FieldNames::M10,
+                                                        FieldNames::M11,
+                                                        FieldNames::M12,
+                                                        FieldNames::M13,
+                                                        FieldNames::M20,
+                                                        FieldNames::M21,
+                                                        FieldNames::M22,
+                                                        FieldNames::M23,
+                                                        FieldNames::M30,
+                                                        FieldNames::M31,
+                                                        FieldNames::M32,
+                                                        FieldNames::M33};
+        for (size_t i = 0; i < matrixFields.size(); ++i)
+        {
+            cmd.output[i] =
+              acquireOutputIndex(decomposeMatrix.getOutputs().at(matrixFields[i]), 1);
+        }
+
+        cmd.args[0] = getLookUpIndex(decomposeMatrix.parameter().at(FieldNames::Matrix))[0];
+
+        m_cmds->getData().push_back(cmd);
+    }
+
     void ToCommandStreamVisitor::visit(Inverse & inverse)
     {
         if (!isOutPutOfNodeValid(inverse))
@@ -2696,7 +2874,7 @@ namespace gladius::nodes
         cmd.type = CT_INVERSE;
         cmd.id = inverse.getId();
 
-        cmd.output[0] = acquireOutputIndex(inverse.getOutputs().at(FieldNames::Result), 16);
+        cmd.output[0] = acquireOutputIndex(inverse.getOutputs().at(FieldNames::Matrix), 16);
 
         cmd.args[0] = getLookUpIndex(inverse.parameter().at(FieldNames::A))[0];
 
@@ -2721,17 +2899,17 @@ namespace gladius::nodes
         m_cmds->getData().push_back(cmd);
     }
 
-    void ToCommandStreamVisitor::visit(FunctionCall &)
+    void ToCommandStreamVisitor::visit(FunctionCall & functionCall)
     {
-        return;
+        throw std::runtime_error(fmt::format(
+          "FunctionCall '{}' reached ToCommandStreamVisitor. Run the lowering/flattening pipeline before command-stream generation.",
+          functionCall.getUniqueName()));
     }
 
-    void ToCommandStreamVisitor::visit(FunctionGradient &)
+    void ToCommandStreamVisitor::visit(FunctionGradient & functionGradient)
     {
-        // TODO: Command stream support for FunctionGradient is not yet implemented.
-        // FunctionGradient requires multiple function evaluations (central differences)
-        // which would need special command stream handling. For now, this node is only
-        // supported in OpenCL code generation (ToOCLVisitor).
-        return;
+        throw std::runtime_error(fmt::format(
+          "FunctionGradient '{}' reached ToCommandStreamVisitor. Run LowerFunctionGradient and flatten the assembly before command-stream generation.",
+          functionGradient.getUniqueName()));
     }
 } // namespace gladius::nodes

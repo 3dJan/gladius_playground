@@ -376,6 +376,17 @@ namespace gladius::nodes
             return m_visible;
         }
 
+        /// Mark this parameter as internal (runtime-only, never serialised to 3MF).
+        void markAsInternal()
+        {
+            m_isInternal = true;
+        }
+
+        [[nodiscard]] bool isInternal() const
+        {
+            return m_isInternal;
+        }
+
         std::string const & getArgumentAssoziation() const
         {
             return m_argumentAssoziation;
@@ -446,6 +457,16 @@ namespace gladius::nodes
             m_inputSourceRequired = required;
         }
 
+        void setSortIndex(int index)
+        {
+            m_sortIndex = index;
+        }
+
+        [[nodiscard]] int getSortIndex() const
+        {
+            return m_sortIndex;
+        }
+
         [[nodiscard]] bool isInputSourceRequired() const
         {
             return m_inputSourceRequired;
@@ -464,6 +485,12 @@ namespace gladius::nodes
 
         bool m_isValid{true};
         bool m_inputSourceRequired{true};
+        // m_isInternal is set once at node construction and must survive parameter
+        // assignment. If a Parameter is reassigned (e.g. from parameterFromType()),
+        // the compiler-generated operator= will reset this to false unless the
+        // assignment is guarded by an isInternal() check (as in Importer3mf).
+        bool m_isInternal{false};
+        int m_sortIndex{0};
     };
 
     using VariantParameter = Parameter<VariantType>;

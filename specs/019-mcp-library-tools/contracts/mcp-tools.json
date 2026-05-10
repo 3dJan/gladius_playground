@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCP Library Tool Schemas",
+  "description": "JSON-RPC tool input/output schemas for Gladius MCP library tools. Each tool follows the existing MCP registration pattern: registerTool(name, description, inputSchema, handler).",
+  "tools": {
+    "list_library": {
+      "name": "list_library",
+      "description": "List all library categories and their entries. Returns category names, entry names, descriptions, and tagged function IDs. Scans both shipped and user library directories.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Optional: filter to a specific category (subdirectory name). If omitted, lists all categories."
+          }
+        },
+        "required": []
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "library_root": { "type": "string", "description": "Absolute path to user library directory" },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "is_shipped": { "type": "boolean" },
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string", "description": "Filename without .3mf extension" },
+                      "description": { "type": "string" },
+                      "tagged_function_ids": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                      },
+                      "has_metadata": { "type": "boolean" },
+                      "is_shipped": { "type": "boolean" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "available_categories": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Listed when an invalid category is specified"
+          },
+          "usage_example": {
+            "type": "object",
+            "description": "Example invocation with correct parameters"
+          }
+        }
+      }
+    },
+
+    "get_library_entry_info": {
+      "name": "get_library_entry_info",
+      "description": "Get detailed information about a specific library entry, including function list with names, types, and input/output parameter signatures. Does NOT open the file as the active document.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "name": { "type": "string" },
+          "category": { "type": "string" },
+          "description": { "type": "string" },
+          "path": { "type": "string" },
+          "is_shipped": { "type": "boolean" },
+          "functions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "resource_id": { "type": "integer" },
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "is_tagged": { "type": "boolean", "description": "Whether this function is tagged for import" },
+                "inputs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "type": { "type": "string" }
+                    }
+                  }
+                },
+                "outputs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "type": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "available_categories": { "type": "array", "items": { "type": "string" } },
+          "available_entries": { "type": "array", "items": { "type": "string" } },
+          "usage_example": { "type": "object" }
+        }
+      }
+    },
+
+    "create_library_entry": {
+      "name": "create_library_entry",
+      "description": "Create a new library entry from a math expression. Creates a 3MF file with the specified function, library metadata, and saves it to the user library directory. Expression syntax: variables x,y,z; operators + - * /; functions sin, cos, tan, sqrt, abs, exp, log, pow; constants pi and e. Use pow(a,b) instead of ^ operator.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Entry name (will be used as filename, alphanumeric + hyphens + underscores)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name, created if needed)"
+          },
+          "expression": {
+            "type": "string",
+            "description": "Math expression defining the SDF function. Example: 'sin(x*2*pi/10) + sin(y*2*pi/10) + sin(z*2*pi/10)'"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the function"
+          },
+          "arguments": {
+            "type": "array",
+            "description": "Optional custom function arguments. If omitted, x,y,z are auto-detected and mapped to a vec3 'pos' argument.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string", "enum": ["float", "vec3"] }
+              },
+              "required": ["name", "type"]
+            }
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "If true, overwrite an existing entry with the same name. Default: false.",
+            "default": false
+          }
+        },
+        "required": ["name", "category", "expression", "description"]
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "path": { "type": "string", "description": "Absolute path to the created 3MF file" },
+          "name": { "type": "string" },
+          "category": { "type": "string" },
+          "function_id": { "type": "integer", "description": "Resource ID of the created function" },
+          "message": { "type": "string" }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "supported_syntax": {
+            "type": "object",
+            "description": "Included when expression parsing fails",
+            "properties": {
+              "operators": { "type": "string" },
+              "functions": { "type": "string" },
+              "constants": { "type": "string" },
+              "example_expressions": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "required_parameters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "description": { "type": "string" }
+              }
+            }
+          },
+          "usage_example": { "type": "object" }
+        }
+      }
+    },
+
+    "export_to_library": {
+      "name": "export_to_library",
+      "description": "Export a function from the current document to the library. The function and all its transitive dependencies are exported as a library entry with proper metadata. The current document is preserved (metadata is temporarily added then removed).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "function_id": {
+            "type": "integer",
+            "description": "ModelResourceID of the function to export (from get_3mf_structure)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name, created if needed)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name (filename without .3mf extension)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "If true, overwrite an existing entry. Default: false.",
+            "default": false
+          }
+        },
+        "required": ["function_id", "category", "name", "description"]
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "category": { "type": "string" },
+          "tagged_function_ids": { "type": "array", "items": { "type": "integer" } },
+          "message": { "type": "string" }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "available_function_ids": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "integer" },
+                "name": { "type": "string" }
+              }
+            },
+            "description": "Listed when the specified function_id does not exist"
+          },
+          "usage_example": { "type": "object" }
+        }
+      }
+    },
+
+    "import_library_entry": {
+      "name": "import_library_entry",
+      "description": "Import a library entry's tagged functions (and their dependencies) into the current document. The imported functions can then be used via create_function_call_node. Requires an active document.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "imported_functions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "original_id": { "type": "integer" },
+                "new_id": { "type": "integer" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "message": { "type": "string" },
+          "hint": { "type": "string", "description": "Suggests next step, e.g., 'Use create_function_call_node with new_id to reference this function'" }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "available_categories": { "type": "array", "items": { "type": "string" } },
+          "available_entries": { "type": "array", "items": { "type": "string" } },
+          "usage_example": { "type": "object" }
+        }
+      }
+    },
+
+    "delete_library_entry": {
+      "name": "delete_library_entry",
+      "description": "Delete a library entry from the user library. Cannot delete shipped (read-only) library entries.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Library category (subdirectory name)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name (filename without .3mf extension)"
+          }
+        },
+        "required": ["category", "name"]
+      },
+      "successResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "deleted_path": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "errorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "is_shipped": { "type": "boolean", "description": "True if the entry is shipped and cannot be deleted" },
+          "usage_example": { "type": "object" }
+        }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <future>
 
 #include "../ConfigManager.h"
 #include "../Document.h"
@@ -12,10 +13,13 @@
 #include "ExportState.h"
 #include "FileDialogService.h"
 #include "GLView.h"
+#include "LibraryExportDialog.h"
 #include "LogView.h"
 #include "MeshExportDialog.h"
 #include "ModelEditor.h"
 #include "Outline.h"
+#include "ParameterThrottle.h"
+#include "RecentFilesManager.h"
 #include "RenderWindow.h"
 #include "SliceView.h"
 #include "WelcomeScreen.h"
@@ -23,6 +27,9 @@
 // includes for the shortcut system
 #include "ShortcutManager.h"
 #include "ShortcutSettingsDialog.h"
+#include "MeshSdfSettingsDialog.h"
+#include "GamepadSettingsDialog.h"
+#include "GamepadQuickRef.h"
 
 #include <chrono>
 
@@ -67,6 +74,7 @@ namespace gladius::ui
         void setConfigManager(ConfigManager & configManager)
         {
             m_configManager = &configManager;
+            m_recentFilesManager = std::make_unique<RecentFilesManager>(m_configManager);
         }
 
         void setup(std::shared_ptr<ComputeCore> core,
@@ -75,6 +83,7 @@ namespace gladius::ui
         void dragParameter(const std::string & label, float * valuePtr, float minVal, float maxVal);
         void renderSettingsDialog();
         void open(const std::filesystem::path & filename);
+        void setStartupFile(std::filesystem::path filename);
         void startMainLoop();
         void setup();
 
@@ -99,6 +108,11 @@ namespace gladius::ui
             return m_computeAvailable;
         }
 
+        GLView & getGLView()
+        {
+            return m_mainView;
+        }
+
         /**
          * @brief Initialize the shortcut system
          * Registers standard keyboard shortcuts for the application
@@ -115,6 +129,38 @@ namespace gladius::ui
          * @brief Show the shortcut settings dialog
          */
         void showShortcutSettings();
+
+        /**
+         * @brief Show the mesh SDF settings dialog
+         */
+        void showMeshSdfSettings();
+
+        /**
+         * @brief Show the gamepad settings dialog
+         */
+        void showGamepadSettings();
+
+        /**
+         * @brief Show the gamepad quick reference overlay
+         */
+        void showGamepadQuickReference();
+
+        /**
+         * @brief Bind the persistent mesh SDF settings + apply hook used by the
+         *        "Mesh SDF Settings" menu entry.
+         */
+        void setMeshSdfSettings(MeshSdfSettings * settings,
+                                MeshSdfSettingsDialog::ApplyCallback applyCallback);
+
+        /// Inform the mesh SDF settings dialog whether NanoVDB is supported
+        /// on the active OpenCL device. Grays out the NanoVDB combo entry when false.
+        /// @p reason is forwarded to the dialog as a tooltip (may be empty).
+        void setVdbSupported(bool supported, std::string const & reason = {});
+
+        /// Register a callback that is invoked once when the async OpenCL compute
+        /// initialisation has finished (success or failure). Use this to react to
+        /// device capabilities that are only known after init completes.
+        void setOnComputeReadyCallback(ViewCallBack callback);
 
         /**
          * @brief Show the welcome screen and reset overlay opacity
@@ -169,10 +215,14 @@ namespace gladius::ui
         void meshExportDialog();
         void cliExportDialog();
         void showExitPopUp();
+        void showExportInProgressWarning();
         void showSaveBeforeFileOperationPopUp();
         void logViewer();
         void renderStatusBar();
         void renderComputeErrorModal();
+
+        /// Renders a fullscreen semi-transparent overlay when export is in progress
+        void renderExportOverlay();
 
         void refreshModel();
 
@@ -190,6 +240,12 @@ namespace gladius::ui
         void importImageStack();
 
         /**
+         * @brief Helper to load a file asynchronously and defer editor reset
+         * @param filename Path to the file to load
+         */
+        void loadFileDeferred(const std::filesystem::path & filename);
+
+        /**
          * @brief Save rendering settings to configuration
          */
         void saveRenderSettings();
@@ -202,18 +258,21 @@ namespace gladius::ui
         void onPreviewProgramSwap();
 
         /**
-         * @brief Add a file to the list of recently modified files
-         * @param filePath Path to the file that has been modified
+         * @brief Add a file to the recent files list
+         * @param filePath Path to the file
          */
-        void addToRecentFiles(const std::filesystem::path & filePath);
+        void addToRecentFiles(std::filesystem::path const & filePath);
 
         /**
-         * @brief Get the list of recently modified files
+         * @brief Get the list of recent files
          * @param maxCount Maximum number of files to return
          * @return List of pairs containing file paths and timestamps
          */
         std::vector<std::pair<std::filesystem::path, std::time_t>>
         getRecentFiles(size_t maxCount = 100) const;
+
+        /// Recent files manager
+        std::unique_ptr<RecentFilesManager> m_recentFilesManager;
 
         GLView m_mainView;
 
@@ -226,6 +285,7 @@ namespace gladius::ui
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
+        ParameterThrottle m_parameterThrottle;
 
         ViewCallBack m_renderCallback;
 
@@ -235,8 +295,10 @@ namespace gladius::ui
         bool m_isSlicePreviewVisible{false};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
+        bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;
+        std::optional<std::filesystem::path> m_startupFile;
 
         float m_mainMenuPosX{-400.f}; // used for the move in animation
 
@@ -245,6 +307,7 @@ namespace gladius::ui
         bool m_showAuthoringTools{true};
         MeshExportDialog m_meshExporterDialog;
         CliExportDialog m_cliExportDialog;
+        LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
         RenderWindow m_renderWindow;
@@ -254,6 +317,15 @@ namespace gladius::ui
         std::shared_ptr<Document> m_doc;
         events::SharedLogger m_logger;
 
+        /// @brief State for async file loading coordination
+        enum class AsyncLoadState
+        {
+            Idle,
+            Loading,
+            LoadingWithReset
+        };
+        AsyncLoadState m_asyncLoadState{AsyncLoadState::Idle};
+
         // Flag to remember if library browser was visible
         bool m_isLibraryBrowserVisible = false;
 
@@ -261,7 +333,7 @@ namespace gladius::ui
 
         bool m_initialized = false;
 
-        bool m_showSettings = false;
+        bool m_showSettings = true;
 
         size_t m_lastEventCount{};
 
@@ -286,6 +358,17 @@ namespace gladius::ui
         // Shortcut system
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         ShortcutSettingsDialog m_shortcutSettingsDialog;
+        MeshSdfSettingsDialog m_meshSdfSettingsDialog;
+
+        // Gamepad system
+        GamepadSettingsDialog m_gamepadSettingsDialog;
+        GamepadQuickRef m_gamepadQuickRef;
+        /// Mirror of the dialog's Apply callback so we can invoke it
+        /// programmatically after a freshly loaded document — otherwise the
+        /// persisted mesh-SDF method (e.g. FastWindingNumber) is never pushed
+        /// into the renderer until the user opens the dialog and clicks Apply.
+        MeshSdfSettingsDialog::ApplyCallback m_meshSdfApplyCallback;
+        ViewCallBack m_onComputeReadyCallback;
 
         // Compute availability flag. If false, UI runs in a limited mode without rendering.
         bool m_computeAvailable{true};
@@ -306,5 +389,33 @@ namespace gladius::ui
 
         // Export state for blocking UI modifications during mesh export
         ExportState m_exportState;
+
+        // --- Deferred OpenCL initialization ---
+        /// @brief State of the async compute initialization
+        enum class ComputeInitState
+        {
+            NotStarted,   ///< Not yet started
+            InProgress,   ///< Async device enumeration running
+            Completed,    ///< Enumeration completed, needs finalization on main thread
+            Finalized     ///< Fully initialized
+        };
+        ComputeInitState m_computeInitState{ComputeInitState::NotStarted};
+
+        /// @brief Result of async device enumeration
+        struct ComputeEnumResult
+        {
+            AcceleratorList accelerators;
+            bool success = false;
+            std::string errorMessage;
+        };
+
+        /// @brief Future for async compute initialization
+        std::future<ComputeEnumResult> m_computeInitFuture;
+
+        /// @brief Start async compute initialization
+        void startAsyncComputeInit();
+
+        /// @brief Poll and finalize async compute initialization (called from render loop)
+        void pollComputeInit();
     };
 }

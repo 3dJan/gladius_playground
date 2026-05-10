@@ -108,9 +108,11 @@ namespace gladius
         }
 
         [[nodiscard]] const Buffer<cl_float4> & getFaceNormals() const;
+        [[nodiscard]] Buffer<cl_float4> & getFaceNormals();
         [[nodiscard]] const Buffer<cl_float4> & getVertices() const;
         [[nodiscard]] const Buffer<cl_float4> & getVertexNormals() const;
         [[nodiscard]] Buffer<cl_float4> & getVertices();
+        [[nodiscard]] Buffer<cl_float4> & getVertexNormals();
 
       private:
         Buffer<cl_float4> m_vertices;
@@ -119,6 +121,11 @@ namespace gladius
     };
 
     inline const Buffer<cl_float4> & Mesh::getFaceNormals() const
+    {
+        return m_faceNormals;
+    }
+
+    inline Buffer<cl_float4> & Mesh::getFaceNormals()
     {
         return m_faceNormals;
     }
@@ -134,6 +141,11 @@ namespace gladius
     }
 
     inline const Buffer<cl_float4> & Mesh::getVertexNormals() const
+    {
+        return m_vertexNormals;
+    }
+
+    inline Buffer<cl_float4> & Mesh::getVertexNormals()
     {
         return m_vertexNormals;
     }

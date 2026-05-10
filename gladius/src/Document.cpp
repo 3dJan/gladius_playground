@@ -5,8 +5,11 @@
 #include "CliWriter.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
+#include "MeshBVH.h"
 #include "MeshExporter.h"
+#include "Profiling.h"
 #include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "TimeMeasurement.h"
 #include "compute/ComputeCore.h"
 #include "exceptions.h"
@@ -14,6 +17,7 @@
 #include "io/3mf/BeamLatticeExporter.h"
 #include "io/3mf/ImageExtractor.h"
 #include "io/3mf/ImageStackCreator.h"
+#include "io/3mf/LibraryMetadata.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
@@ -30,12 +34,15 @@
 #include "nodes/ToOCLVisitor.h"
 #include "nodes/Validator.h"
 
+#include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <tracy/Tracy.hpp>
 #include <utility>
 
 #include <cmrc/cmrc.hpp>
@@ -44,6 +51,195 @@ CMRC_DECLARE(gladius_resources);
 
 namespace gladius
 {
+    namespace
+    {
+        constexpr double kNanoVdbBudgetUtilization = 0.5;
+
+        [[nodiscard]] NanoVdbBuildPolicy
+        makeNanoVdbBuildPolicy(SharedComputeContext const & computeContext,
+                               NanoVdbFailurePolicy const failurePolicy) noexcept
+        {
+            NanoVdbBuildPolicy policy{};
+            policy.failurePolicy = failurePolicy;
+
+            if (!computeContext)
+            {
+                return policy;
+            }
+
+            size_t const deviceGlobalMemBytes = computeContext->getDeviceGlobalMemBytes();
+            size_t const deviceMaxAllocBytes = computeContext->getDeviceMaxAllocBytes();
+
+            if (deviceGlobalMemBytes == 0u && deviceMaxAllocBytes == 0u)
+            {
+                return policy;
+            }
+
+            size_t budgetFromGlobal = 0u;
+            if (deviceGlobalMemBytes != 0u)
+            {
+                budgetFromGlobal = static_cast<size_t>(
+                  static_cast<double>(deviceGlobalMemBytes) * kNanoVdbBudgetUtilization);
+            }
+
+            if (deviceMaxAllocBytes == 0u)
+            {
+                policy.budgetBytes = budgetFromGlobal;
+                return policy;
+            }
+
+            if (budgetFromGlobal == 0u)
+            {
+                policy.budgetBytes = deviceMaxAllocBytes;
+                return policy;
+            }
+
+            policy.budgetBytes = std::min(deviceMaxAllocBytes, budgetFromGlobal);
+            return policy;
+        }
+
+        [[nodiscard]] MeshSdfEvaluationConfig makeInteractivePreviewMeshSdfConfig(
+          MeshSdfEvaluationConfig cfg) noexcept
+        {
+            cfg.method = MeshSdfMethod::PureBVH;
+            cfg.fwnUseSignCache = false;
+            return cfg;
+        }
+
+        [[nodiscard]] bool needsMeshSdfResourceUpdate(SpatialMeshResource const & resource,
+                                                      MeshSdfEvaluationConfig const & cfg) noexcept
+        {
+            auto const & current = resource.evaluationConfig();
+            return requiresMeshRebuild(current, cfg) ||
+                   current.fwnUseSignCache != cfg.fwnUseSignCache ||
+                   (current.method == MeshSdfMethod::FastWindingNumber &&
+                    cfg.method == MeshSdfMethod::FastWindingNumber &&
+                    current.fwnBeta != cfg.fwnBeta);
+        }
+
+        class ScopedNanoVdbFailurePolicy
+        {
+          public:
+            ScopedNanoVdbFailurePolicy(std::atomic<NanoVdbFailurePolicy> & policy,
+                                       NanoVdbFailurePolicy const next) noexcept
+                : m_policy(policy)
+                , m_previous(policy.exchange(next, std::memory_order_relaxed))
+            {
+            }
+
+            ~ScopedNanoVdbFailurePolicy() noexcept
+            {
+                m_policy.store(m_previous, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<NanoVdbFailurePolicy> & m_policy;
+            NanoVdbFailurePolicy m_previous;
+        };
+
+        class ScopedLoadingFlag
+        {
+          public:
+            explicit ScopedLoadingFlag(std::atomic<bool> & loading) noexcept
+                : m_loading(loading)
+            {
+                m_loading.store(true, std::memory_order_relaxed);
+            }
+
+            ~ScopedLoadingFlag() noexcept
+            {
+                m_loading.store(false, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<bool> & m_loading;
+        };
+
+        class ScopedOptimizedRenderCompilationDeferral
+        {
+          public:
+            ScopedOptimizedRenderCompilationDeferral(ComputeCore & core, bool const active)
+                : m_core(&core)
+                , m_active(active)
+                , m_previousOptimizedDeferred(active ? core.isOptimizedRenderCompilationDeferred()
+                                                     : false)
+                , m_previousSlicerDeferred(active ? core.isSlicerCompilationDeferred() : false)
+            {
+                if (m_active)
+                {
+                    m_core->setOptimizedRenderCompilationDeferred(true);
+                    m_core->setSlicerCompilationDeferred(true);
+                }
+            }
+
+            ~ScopedOptimizedRenderCompilationDeferral()
+            {
+                (void) restore();
+            }
+
+            /// Restore the previous settings and report whether any deferred compilation
+            /// is allowed afterwards.
+            [[nodiscard]] bool restore()
+            {
+                if (!m_active || m_restored || m_core == nullptr)
+                {
+                    return false;
+                }
+
+                m_core->setOptimizedRenderCompilationDeferred(m_previousOptimizedDeferred);
+                m_core->setSlicerCompilationDeferred(m_previousSlicerDeferred);
+                m_restored = true;
+                return !m_previousOptimizedDeferred || !m_previousSlicerDeferred;
+            }
+
+          private:
+            ComputeCore * m_core = nullptr;
+            bool m_active = false;
+            bool m_previousOptimizedDeferred = false;
+            bool m_previousSlicerDeferred = false;
+            bool m_restored = false;
+        };
+
+        class ScopedMeshSdfEvaluationConfigOverride
+        {
+          public:
+            ScopedMeshSdfEvaluationConfigOverride(Document & document,
+                                                  MeshSdfEvaluationConfig const & cfg,
+                                                  bool const active)
+                : m_document(&document)
+                , m_active(active)
+                , m_previousConfig(active ? document.getMeshSdfEvaluationConfig()
+                                          : MeshSdfEvaluationConfig{})
+            {
+                if (m_active)
+                {
+                    m_document->setMeshSdfEvaluationConfig(cfg);
+                }
+            }
+
+            ~ScopedMeshSdfEvaluationConfigOverride()
+            {
+                restore();
+            }
+
+            void restore()
+            {
+                if (!m_active || m_restored || m_document == nullptr)
+                {
+                    return;
+                }
+                m_document->setMeshSdfEvaluationConfig(m_previousConfig);
+                m_restored = true;
+            }
+
+          private:
+            Document * m_document = nullptr;
+            bool m_active = false;
+            MeshSdfEvaluationConfig m_previousConfig{};
+            bool m_restored = false;
+        };
+    }
+
     using namespace std;
 
     AssemblyToken Document::waitForAssemblyToken() const
@@ -95,49 +291,144 @@ namespace gladius
         m_backupManager.initialize();
     }
 
-    void Document::refreshModelAsync()
+    bool Document::refreshModelAsync()
     {
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
+
+        // Validation moved to refreshWorker() to avoid blocking the UI thread.
+        // The worker validates first and exits early if the model is invalid.
+
+        // Signal compilation started on the UI thread BEFORE launching the worker.
+        // This ensures isRendererReady() returns false immediately, preventing
+        // render() from rendering a frame with stale state (flicker).
+        // The worker also calls signalCompilationStarted() after acquiring the
+        // compute token — that call is redundant but harmless.
+        m_core->getMeshResourceState()->signalCompilationStarted();
+
         // saveBackup();
         {
-            m_futureModelRefresh = std::async(std::launch::async, [&]() { refreshWorker(); });
+            m_futureModelRefresh = std::async(std::launch::async,
+                                              [&]()
+                                              {
+                                                  try
+                                                  {
+                                                      refreshWorker();
+                                                  }
+                                                  catch (std::exception const & e)
+                                                  {
+                                                      auto logger = getSharedLogger();
+                                                      if (logger)
+                                                      {
+                                                          logger->addEvent(
+                                                            {std::string(
+                                                               "Background compilation failed: ") +
+                                                               e.what(),
+                                                             events::Severity::Error});
+                                                      }
+                                                      m_core->getMeshResourceState()
+                                                        ->signalCompilationFinished();
+                                                  }
+                                              });
         }
+        return true;
     }
 
     void Document::loadAllMeshResources()
     {
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         if (!m_3mfmodel)
         {
             return;
         }
 
+        if (m_resourceDependencyGraph)
+        {
+            ZoneScopedN("Document::loadReachableMeshResources");
+            importer.loadMeshes(
+              m_3mfmodel,
+              *this,
+              m_resourceDependencyGraph->getAllRequiredResourceIdsForBuildItems());
+            return;
+        }
+
+        // The normal load path builds this graph before mesh extraction so
+        // unused mesh resources can be skipped. If this fallback path is used,
+        // keep loading all meshes rather than risking missing geometry.
+        assert(m_resourceDependencyGraph &&
+               "Resource dependency graph should be built before loading meshes");
         importer.loadMeshes(m_3mfmodel, *this);
     }
 
-    void Document::refreshWorker()
+    void Document::refreshWorker(RefreshMode const refreshMode)
     {
         ProfileFunction;
         auto computeToken = m_core->waitForComputeToken();
+        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
+          *m_core,
+          refreshMode == RefreshMode::InteractiveFirst};
 
         auto meshResourceState = m_core->getMeshResourceState();
         meshResourceState->signalCompilationStarted();
 
+        // Capture the structural edit epoch at the start of this worker run.
+        // If a new structural edit arrives while we're working, the epoch will
+        // differ and we can exit early instead of completing stale work.
+        auto const startEpoch = m_structuralEditEpoch.load(std::memory_order_acquire);
+        auto const isStale = [this, startEpoch]()
+        {
+            return m_structuralEditEpoch.load(std::memory_order_acquire) != startEpoch;
+        };
+
+        // Validate early: skip expensive compilation if model is in an invalid
+        // state (e.g. nodes with missing connections during graph editing).
+        // This used to run on the UI thread; running here avoids blocking it.
+        if (!validateAssembly())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
+        if (isStale())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
         m_assembly->updateInputsAndOutputs();
 
+        // Build the lightweight 3MF resource dependency graph before extracting
+        // mesh geometry, so loadAllMeshResources() can skip meshes that are not
+        // reachable from any build item. Large unused meshes then no longer
+        // contribute BVH/repair/payload work on first frame.
+        rebuildResourceDependencyGraph();
         loadAllMeshResources();
+
+        if (auto pendingMeshSdfConfig = takePendingMeshSdfEvaluationConfig())
+        {
+            if (applyMeshSdfEvaluationConfigToResources(*pendingMeshSdfConfig) > 0u)
+            {
+                m_primitiveDateNeedsUpdate = true;
+            }
+        }
 
         updateParameterRegistration();
         updateParameter();
         m_parameterDirty = true;
         m_contoursDirty = true;
 
-        // Rebuild resource dependency graph
-        rebuildResourceDependencyGraph();
+        if (isStale())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
         updateFlatAssembly();
 
         m_core->refreshProgram(m_flatAssembly);
@@ -145,9 +436,32 @@ namespace gladius
         // Use non-blocking compilation with polling
         m_core->recompileIfRequired();
 
-        // Wait for compilation to complete with periodic checks
-        while (m_core->isCompilationInProgress())
+        auto const shouldWaitForInitialCompilation = [this, refreshMode]()
         {
+            if (refreshMode == RefreshMode::InteractiveFirst)
+            {
+                return !m_core->isRenderProgramReady() && m_core->isCompilationInProgress();
+            }
+            return m_core->isCompilationInProgress();
+        };
+
+        // Wait for the compilation needed by this refresh mode. Interactive-first only needs the
+        // preview render program; slicer/optimized work can continue after the first frame.
+        while (shouldWaitForInitialCompilation())
+        {
+            if (isStale())
+            {
+                // Wait for the in-flight GPU compile needed by this refresh mode to finish so
+                // ModelState stays consistent. The GPU work is already submitted — waiting here
+                // avoids signalling "finished" while required programs are still being compiled by
+                // the driver.
+                while (shouldWaitForInitialCompilation())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                meshResourceState->signalCompilationFinished();
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
@@ -155,48 +469,64 @@ namespace gladius
         // (signalCompilationFinished) so subsequent steps observe up-to-date slicer state.
         m_core->recompileIfRequired();
 
-        // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
-        // The async computation will atomically replace it
-        m_core->resetBoundingBox();
-
-        // Launch async SDF precomputation with OpenCL events
-        auto const & queue = m_core->getComputeContext()->GetQueue();
-        cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
-        bool const sdfEventValid = sdfEvent() != nullptr;
-
-        bool sdfUpdated = false;
-        bool sdfUpdatedViaAsync = false;
-
-        // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
-        if (sdfEventValid)
+        if (refreshMode != RefreshMode::InteractiveFirst)
         {
-            sdfEvent.wait();
-            sdfUpdated = true;
-            sdfUpdatedViaAsync = true;
-        }
-        else
-        {
-            // Fallback to synchronous computation if async launch failed
-            if (m_core->precomputeSdfForWholeBuildPlatform())
+            // Don't invalidate SDF - let it stay valid during recomputation to avoid flicker
+            // The async computation will atomically replace it
+            m_core->resetBoundingBox();
+
+            // Launch async SDF precomputation with OpenCL events
+            auto const & queue = m_core->getComputeContext()->GetQueue();
+            cl::Event sdfEvent = m_core->precomputeSdfAsync(queue);
+            bool const sdfEventValid = sdfEvent() != nullptr;
+
+            bool sdfUpdated = false;
+            bool sdfUpdatedViaAsync = false;
+
+            // Wait for SDF computation to complete (non-blocking on CPU, async on GPU)
+            if (sdfEventValid)
             {
+                sdfEvent.wait();
                 sdfUpdated = true;
+                sdfUpdatedViaAsync = true;
             }
-            else {}
-        }
-
-        if (sdfUpdated)
-        {
-            m_core->setSdfValid(true);
-            if (sdfUpdatedViaAsync)
+            else
             {
-                // Now that the SDF exists, update the bounding box serially (still off the UI
-                // thread)
-                m_core->updateBBox();
+                // Fallback to synchronous computation if async launch failed
+                if (m_core->precomputeSdfForWholeBuildPlatform())
+                {
+                    sdfUpdated = true;
+                }
+                else {}
+            }
+
+            if (sdfUpdated)
+            {
+                m_core->setSdfValid(true);
+                if (sdfUpdatedViaAsync)
+                {
+                    // Now that the SDF exists, update the bounding box serially (still off the UI
+                    // thread)
+                    m_core->updateBBox();
+                }
+            }
+            else
+            {
+                m_core->invalidatePreCompSdf("refreshWorkerFailure");
             }
         }
         else
         {
-            m_core->invalidatePreCompSdf("refreshWorkerFailure");
+            m_core->invalidatePreCompSdf("interactiveFirstInitialPreview");
+        }
+
+        if (optimizedRenderDeferral.restore())
+        {
+            // Start the fully compiled render program only after the command-stream preview and
+            // initial SDF work are ready. The first visible frame after loading a 3MF can then use
+            // the interactive backend while optimized OpenCL compilation continues in the
+            // background.
+            m_core->recompileIfRequired();
         }
 
         meshResourceState->signalCompilationFinished();
@@ -217,25 +547,26 @@ namespace gladius
             return;
         }
 
-        nodes::Assembly assemblyToFlat{*m_assembly};
-
-        nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
-        gradientLowering.run();
-
-        nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat, getSharedLogger()};
-        normalizeLowering.run();
-
-        nodes::OptimizeOutputs optimizer{&assemblyToFlat};
-        optimizer.optimize();
-
-        // Pass the dependency graph to the flattener if available
-        nodes::GraphFlattener flattener =
-          m_resourceDependencyGraph
-            ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
-            : nodes::GraphFlattener(assemblyToFlat);
-
         try
         {
+            nodes::Assembly assemblyToFlat{*m_assembly};
+
+            nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
+            gradientLowering.run();
+
+            nodes::LowerNormalizeDistanceField normalizeLowering{assemblyToFlat,
+                                                                  getSharedLogger()};
+            normalizeLowering.run();
+
+            nodes::OptimizeOutputs optimizer{&assemblyToFlat};
+            optimizer.optimize();
+
+            // Pass the dependency graph to the flattener if available
+            nodes::GraphFlattener flattener =
+              m_resourceDependencyGraph
+                ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
+                : nodes::GraphFlattener(assemblyToFlat);
+
             m_flatAssembly = std::make_shared<nodes::Assembly>(flattener.flatten());
         }
         catch (std::exception const & e)
@@ -243,7 +574,7 @@ namespace gladius
             auto logger = getSharedLogger();
             if (logger)
                 logger->addEvent(
-                  {"Error flattening assembly: " + std::string(e.what()), Severity::Error});
+                  {std::string("Error flattening assembly: ") + e.what(), Severity::Error});
         }
     }
 
@@ -327,9 +658,7 @@ namespace gladius
             return false;
         }
 
-        refreshModelAsync();
-
-        return true;
+        return refreshModelAsync();
     }
 
     void Document::newModel()
@@ -344,6 +673,8 @@ namespace gladius
         m_3mfmodel.reset();
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -362,6 +693,8 @@ namespace gladius
         m_3mfmodel.reset();
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
         m_core->getResourceContext()->clearImageStacks();
@@ -374,16 +707,17 @@ namespace gladius
         if (!std::filesystem::exists(templateFiletName))
         {
             newModel();
+            return;
         }
         loadNonBlocking(templateFiletName);
     }
 
-    void Document::updateParameter()
+    bool Document::updateParameter()
     {
         ProfileFunction;
         if (!m_assembly || !m_core)
         {
-            return;
+            return false;
         }
 
         updatePayload();
@@ -425,6 +759,7 @@ namespace gladius
         }
 
         m_parameterDirty = !updateSucceeded;
+        return updateSucceeded;
     }
 
     void Document::updateParameterRegistration()
@@ -467,6 +802,10 @@ namespace gladius
             }
 
             auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                return; // Background worker holds the compute mutex; skip to avoid blocking
+            }
 
             if (!m_generatorContext)
             {
@@ -497,8 +836,8 @@ namespace gladius
 
             CL_ERROR(m_core->getComputeContext()->GetQueue().finish());
 
-            updateMemoryOffsets(); // determines which resources are needed            if
-                                   // (m_primitiveDateNeedsUpdate)
+            updateMemoryOffsets(); // determines which resources are needed
+            if (m_primitiveDateNeedsUpdate)
             {
                 if (m_generatorContext->primitives)
                 {
@@ -527,12 +866,56 @@ namespace gladius
 
                 m_generatorContext->resourceManager.loadResources();
                 m_generatorContext->resourceManager.writeResources(*m_generatorContext->primitives);
+                
+                // Build voxel acceleration grids for spatial mesh resources on GPU
+                auto buildParams = m_generatorContext->resourceManager.collectVoxelGridBuildParams();
+                if (!buildParams.empty())
+                {
+                    size_t const builtCount = m_core->buildMeshVoxelGrids(buildParams);
+                    if (builtCount == buildParams.size())
+                    {
+                        m_generatorContext->resourceManager.markVoxelGridsBuilt();
+                    }
+                }
+
+                m_primitiveDateNeedsUpdate = false;
+            }
+
+            // Build FWN aggregate buffers on the GPU before any FWN render or
+            // sign-cache kernel can consume them. This replaces the previous
+            // CPU aggregate pre-pass while preserving in-order queue safety.
+            auto fwnAggregateBuildParams = m_generatorContext->resourceManager.collectFwnAggregateBuildParams();
+            if (!fwnAggregateBuildParams.empty())
+            {
+                GLADIUS_FWN_PREP_SCOPE("Document::updatePrimitiveData FWN aggregate stage");
+                GLADIUS_FWN_PREP_LOG("Document::updatePrimitiveData FWN aggregate builds=" +
+                                     std::to_string(fwnAggregateBuildParams.size()));
+                size_t const builtCount = m_core->buildMeshFwnAggregates(fwnAggregateBuildParams);
+                if (builtCount > 0u)
+                {
+                    m_generatorContext->resourceManager.markFwnAggregatesBuilt(fwnAggregateBuildParams,
+                                                                               builtCount);
+                }
+            }
+
+            // Queue bounded coarse FWN sign-cache work. The cache becomes visible
+            // to kernels only after the final queued ready-offset patch executes,
+            // so FWN falls back to full winding traversal until the cache is ready.
+            auto signCacheBuildParams = m_generatorContext->resourceManager.collectSignCacheBuildParams();
+            if (!signCacheBuildParams.empty())
+            {
+                GLADIUS_FWN_PREP_SCOPE("Document::updatePrimitiveData FWN sign-cache stage");
+                GLADIUS_FWN_PREP_LOG("Document::updatePrimitiveData FWN sign-cache steps=" +
+                                     std::to_string(signCacheBuildParams.size()));
+                size_t const queuedCount = m_core->buildMeshSignCaches(signCacheBuildParams);
+                if (queuedCount > 0u)
+                {
+                    m_generatorContext->resourceManager.markSignCacheBuildProgress(signCacheBuildParams, queuedCount);
+                }
             }
 
             // update start and end indices
             updateMemoryOffsets();
-
-            m_primitiveDateNeedsUpdate = false;
         }
         catch (std::exception const & e)
         {
@@ -656,6 +1039,7 @@ namespace gladius
     void Document::markFileAsChanged()
     {
         m_fileChanged = true;
+        m_validationDirty = true;
     }
 
     void Document::invalidatePrimitiveData()
@@ -665,18 +1049,46 @@ namespace gladius
 
     void Document::load(std::filesystem::path filename)
     {
-        loadImpl(filename);
-        // reset back up time
-        m_lastBackupTime = std::chrono::system_clock::now();
-        refreshModelBlocking();
-        m_core->updateBBox();
+        ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                      NanoVdbFailurePolicy::Fail};
+
+        try
+        {
+            loadImpl(filename);
+            // reset back up time
+            m_lastBackupTime = std::chrono::system_clock::now();
+
+            // Initial validation with FileLoad context - logs errors once for file loading
+            validateAssembly(nodes::ValidationContext::FileLoad);
+
+            refreshModelBlocking();
+            m_core->updateBBox();
+        }
+        catch (NanoVdbBuildRejectedError const &)
+        {
+            newModel();
+            throw;
+        }
     }
 
     void Document::loadNonBlocking(std::filesystem::path filename)
     {
-        // Wait for any previous load operation to complete
+        // Collect any finished previous load operation without blocking the caller. A still
+        // running load owns document/compute state; waiting here would freeze the UI thread.
         if (m_futureFileLoad.valid())
         {
+            if (m_futureFileLoad.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
+            {
+                auto logger = getSharedLogger();
+                if (logger)
+                {
+                    logger->addEvent({"Ignored file load request: another file is still loading",
+                                      events::Severity::Warning});
+                }
+                return;
+            }
+
             try
             {
                 m_futureFileLoad.get();
@@ -693,35 +1105,64 @@ namespace gladius
             m_loadingError.clear();
         }
 
-        m_isLoading = true;
-
         // Launch async file loading
-        m_futureFileLoad =
-          std::async(std::launch::async,
-                     [this, filename]()
-                     {
-                         try
-                         {
-                             loadImpl(filename);
-                             // Chain into async model refresh
-                             refreshWorker();
-                         }
-                         catch (const std::exception & e)
-                         {
-                             // Store error for UI to display
-                             {
-                                 std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
-                                 m_loadingError = e.what();
-                             }
-                             auto logger = getSharedLogger();
-                             if (logger)
-                             {
-                                 logger->addEvent({fmt::format("File load error: {}", e.what()),
-                                                   events::Severity::Error});
-                             }
-                         }
-                         m_isLoading = false;
-                     });
+        m_isLoading.store(true, std::memory_order_relaxed);
+        try
+        {
+            m_futureFileLoad = std::async(
+              std::launch::async,
+              [this, filename]()
+              {
+                  ScopedLoadingFlag loadingScope{m_isLoading};
+                  ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                                NanoVdbFailurePolicy::Degrade};
+
+                  try
+                  {
+                      auto const refreshMode = filename.extension() == ".3mf"
+                                                 ? RefreshMode::InteractiveFirst
+                                                 : RefreshMode::Normal;
+                      auto const previewMeshSdfConfig =
+                        makeInteractivePreviewMeshSdfConfig(m_meshSdfEvaluationConfig);
+                      ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
+                        *this, previewMeshSdfConfig, refreshMode == RefreshMode::InteractiveFirst};
+
+                      loadImpl(filename);
+                      // Initial validation with FileLoad context - logs
+                      // errors once
+                      validateAssembly(nodes::ValidationContext::FileLoad);
+                      // Chain into async model refresh. 3MF loads publish
+                      // a lightweight command-stream preview first, then
+                      // start the optimized renderer and slicer
+                      // compilation in the background.
+                      refreshWorker(refreshMode);
+                  }
+                  catch (std::exception const & e)
+                  {
+                      // Store error for UI to display
+                      {
+                          std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                          m_loadingError = e.what();
+                      }
+                      auto logger = getSharedLogger();
+                      if (logger)
+                      {
+                          logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                            events::Severity::Error});
+                      }
+                  }
+                  catch (...)
+                  {
+                      std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                      m_loadingError = "Unknown file load error";
+                  }
+              });
+        }
+        catch (...)
+        {
+            m_isLoading.store(false, std::memory_order_relaxed);
+            throw;
+        }
     }
 
     bool Document::isLoadingInProgress() const
@@ -738,18 +1179,75 @@ namespace gladius
     void Document::merge(std::filesystem::path filename)
     {
         mergeImpl(filename);
-        refreshModelAsync();
+        (void) refreshModelAsync(); // Result intentionally ignored for merge
+    }
+
+    void Document::mergeOnly(std::filesystem::path filename)
+    {
+        mergeImpl(filename);
+    }
+
+    nodes::FunctionMatch Document::mergeAndResolve(std::filesystem::path filename,
+                                                   std::string const & targetFunctionName)
+    {
+        // Snapshot existing function IDs before the merge.
+        std::set<nodes::ResourceId> existingIds;
+        if (m_assembly)
+        {
+            for (auto const & [id, _] : m_assembly->getFunctions())
+            {
+                existingIds.insert(id);
+            }
+        }
+
+        // Try selective import: prune the source to only the tagged function
+        // and its transitive dependencies before merging.
+        if (filename.extension() == ".3mf")
+        {
+            auto prunedModel = io::pruneSourceForImport(filename, getSharedLogger());
+            if (prunedModel.has_value())
+            {
+                io::mergeModelInto3mfDoc(*prunedModel, filename, *this);
+            }
+            else
+            {
+                mergeImpl(filename);
+            }
+        }
+        else
+        {
+            mergeImpl(filename);
+        }
+        m_primitiveDateNeedsUpdate = true;
+
+        if (!m_assembly)
+        {
+            return {};
+        }
+
+        return m_assembly->findImportedFunction(targetFunctionName, existingIds, nullptr);
     }
 
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
     {
         if (filename.extension() == ".3mf")
         {
-            // Only acquire a compute token if we need to render a thumbnail.
-            if (writeThumbnail)
+            if (writeThumbnail && m_core)
             {
                 auto computeToken = m_core->waitForComputeToken();
-                (void) computeToken; // suppress unused warning in Release
+                (void) computeToken;
+
+                // Ensure the GPU pipeline is fully up-to-date so the
+                // thumbnail reflects the latest model state (colors, geometry, etc.).
+                updateParameterRegistration();
+                updateParameter();
+                updateFlatAssembly();
+                m_core->tryRefreshProgramProtected(getFlatAssembly());
+
+                if (!m_core->prepareImageRendering())
+                {
+                    writeThumbnail = false;
+                }
             }
             io::saveTo3mfFile(filename, *this, writeThumbnail);
         }
@@ -767,6 +1265,11 @@ namespace gladius
     {
 
         return m_assembly;
+    }
+
+    nodes::SharedAssembly Document::getFlatAssembly() const
+    {
+        return m_flatAssembly;
     }
 
     std::optional<std::filesystem::path> Document::getCurrentAssemblyFilename() const
@@ -896,6 +1399,63 @@ namespace gladius
         return m_core->getComputeContext();
     }
 
+    NanoVdbBuildPolicy Document::getNanoVdbBuildPolicy() const
+    {
+        return makeNanoVdbBuildPolicy(
+          m_core ? m_core->getComputeContext() : SharedComputeContext{},
+          m_nanovdbFailurePolicy.load(std::memory_order_relaxed));
+    }
+
+    NanoVdbBuildIssueSummary Document::getNanoVdbBuildIssueSummary() const
+    {
+        NanoVdbBuildIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr ||
+                spatialMesh->evaluationConfig().method != MeshSdfMethod::NanoVDB ||
+                !spatialMesh->hasNanoVdbBuildIssue())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+            auto const & buildInfo = spatialMesh->getNanoVdbBuildInfo();
+            summary.suggestedVoxelSize_mm = std::max(summary.suggestedVoxelSize_mm,
+                                                     buildInfo.suggestedVoxelSize_mm);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "NanoVDB is unavailable for {} mesh resources. First issue: {}",
+          summary.affectedMeshCount,
+          firstMessage);
+        return summary;
+    }
+
     events::SharedLogger Document::getSharedLogger() const
     {
         if (!m_core)
@@ -955,10 +1515,11 @@ namespace gladius
         model.createBeginEnd();
         model.setDisplayName(name);
 
-        // Add pos vector input to begin node
-        model.getBeginNode()->addOutputPort(nodes::FieldNames::Pos,
-                                            nodes::ParameterTypeIndex::Float3);
-        model.registerOutputs(*model.getBeginNode());
+        // Add pos vector input to begin node using addArgument so that both
+        // the output port and parameter entry are created (consistent with
+        // createBeginEndWithDefaultInAndOuts).
+        model.addArgument(nodes::FieldNames::Pos,
+                          nodes::VariantParameter(nodes::float3{0.0f, 0.0f, 0.0f}));
 
         // Add color vector output and shape scalar output to end node
         model.getEndNode()->parameter()[nodes::FieldNames::Color] =
@@ -1168,6 +1729,10 @@ namespace gladius
             {
                 io::loadFrom3mfFile(filename, *this);
             }
+            catch (NanoVdbBuildRejectedError const &)
+            {
+                throw;
+            }
             catch (std::exception const & e)
             {
                 auto logger = getSharedLogger();
@@ -1187,6 +1752,96 @@ namespace gladius
             io::mergeFrom3mfFile(filename, *this);
         }
         m_primitiveDateNeedsUpdate = true;
+    }
+
+    std::size_t Document::queueMeshSdfEvaluationConfigUpdate(MeshSdfEvaluationConfig const & cfg)
+    {
+        m_meshSdfEvaluationConfig = cfg;
+
+        std::size_t affectedResources = 0u;
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh != nullptr && needsMeshSdfResourceUpdate(*spatialMesh, cfg))
+            {
+                ++affectedResources;
+            }
+        }
+
+        if (affectedResources == 0u)
+        {
+            return 0u;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_pendingMeshSdfEvaluationConfigMutex);
+            m_pendingMeshSdfEvaluationConfig = cfg;
+        }
+        m_primitiveDateNeedsUpdate = true;
+
+        // Defer the heavy resource rebuild/upload to the existing structural-refresh debounce.
+        // This gives the interactive preview at least one UI frame before voxel/FWN preparation
+        // can compete for the compute device.
+        signalStructuralEdit();
+        return affectedResources;
+    }
+
+    std::optional<MeshSdfEvaluationConfig> Document::takePendingMeshSdfEvaluationConfig()
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMeshSdfEvaluationConfigMutex);
+        auto pending = m_pendingMeshSdfEvaluationConfig;
+        m_pendingMeshSdfEvaluationConfig.reset();
+        return pending;
+    }
+
+    std::size_t Document::applyMeshSdfEvaluationConfigToResources(
+      MeshSdfEvaluationConfig const & cfg)
+    {
+        auto const nanovdbBuildPolicy = getNanoVdbBuildPolicy();
+        std::size_t changedResources = 0u;
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
+            if (spatialMesh != nullptr)
+            {
+                spatialMesh->setNanoVdbBuildPolicy(nanovdbBuildPolicy);
+                bool const changed = spatialMesh->setEvaluationConfig(cfg);
+                if (changed)
+                {
+                    ++changedResources;
+                }
+
+                if (changed && spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasNanoVdbBuildIssue())
+                {
+                    auto const message = spatialMesh->formatNanoVdbBuildMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
+                }
+            }
+        }
+        return changedResources;
     }
 
     void Document::injectSmoothingKernel(std::string const & kernel)
@@ -1266,7 +1921,29 @@ namespace gladius
 
         ResourceKey key = ResourceKey(new3mfMesh->GetModelResourceID(), ResourceType::Mesh);
         key.setDisplayName(name);
-        resourceManager.addResource(key, std::move(mesh));
+
+        // Build spatial mesh data using BVH for fast SDF queries
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        vertices.reserve(mesh.vertices.size());
+        indices.reserve(mesh.indices.size());
+
+        for (auto const & v : mesh.vertices)
+        {
+            vertices.push_back(float4{static_cast<float>(v.x()), static_cast<float>(v.y()), 
+                                      static_cast<float>(v.z()), 0.0f});
+        }
+
+        for (auto const & tri : mesh.indices)
+        {
+            indices.push_back(TriangleIndices{static_cast<int>(tri[0]), 
+                                              static_cast<int>(tri[1]), 
+                                              static_cast<int>(tri[2])});
+        }
+
+        MeshBVHBuilder builder;
+        auto spatialData = builder.build(vertices, indices);
+        resourceManager.addResource(key, std::move(spatialData));
 
         resourceManager.loadResources();
 
@@ -1334,6 +2011,11 @@ namespace gladius
     ResourceManager & Document::getResourceManager()
     {
         return getGeneratorContext().resourceManager;
+    }
+
+    ResourceManager const & Document::getResourceManager() const
+    {
+        return m_generatorContext->resourceManager;
     }
 
     void Document::addBoundingBoxAsMesh()
@@ -1588,30 +2270,58 @@ namespace gladius
 
     ResourceKey Document::addImageStackResource(std::filesystem::path const & path)
     {
-        io::ImageStackCreator creator;
-        auto stack = creator.addImageStackFromDirectory(get3mfModel(), path);
+        auto result = addImageStackResourceWithPadding(path);
+        return result.imageStack
+                   ? ResourceKey{result.imageStack->GetModelResourceID(), ResourceType::ImageStack}
+                   : ResourceKey{0, ResourceType::Unknown};
+    }
 
-        if (!stack)
+    io::ImportResult Document::addImageStackResourceWithPadding(std::filesystem::path const & path)
+    {
+        io::ImageStackCreator creator;
+        auto importResult = creator.importDirectoryWithPadding(get3mfModel(), path);
+
+        if (!importResult.imageStack)
         {
             auto logger = getSharedLogger();
             if (logger)
             {
                 logger->addEvent(
-                  {fmt::format("Failed to import image stack from directory: {}", path.string()),
-                   events::Severity::Error});
+                    {fmt::format("Failed to import image stack from directory: {}", path.string()),
+                     events::Severity::Error});
             }
-
-            return ResourceKey{0, ResourceType::Unknown};
+            return importResult;
         }
+
         auto & resourceManager = getGeneratorContext().resourceManager;
-        auto const key = ResourceKey{stack->GetModelResourceID(), ResourceType::ImageStack};
+        auto const key =
+            ResourceKey{importResult.imageStack->GetModelResourceID(), ResourceType::ImageStack};
 
         io::ImageExtractor extractor;
+        auto const files = creator.getFiles(path);
 
-        auto grid = extractor.loadAsVdbGrid(creator.getFiles(path), io::FileLoaderType::Filesystem);
-        resourceManager.addResource(key, std::move(grid));
+        // Detect pixel format from first file to choose import method
+        io::PixelFormat pixelFormat = io::PixelFormat::GRAYSCALE_8BIT;
+        if (!files.empty())
+        {
+            pixelFormat = extractor.determinePixelFormatFromFile(files.front());
+        }
+
+        if (pixelFormat == io::PixelFormat::GRAYSCALE_8BIT)
+        {
+            // Use VDB grid for grayscale 8-bit images
+            auto grid = extractor.loadAsVdbGrid(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(grid));
+        }
+        else
+        {
+            // Use 3D texture for other formats (RGBA, RGB, etc.)
+            auto stack = extractor.loadImageStack(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(stack));
+        }
+
         resourceManager.loadResources();
-        return key;
+        return importResult;
     }
 
     void Document::update3mfModel()
@@ -1628,6 +2338,9 @@ namespace gladius
         }
 
         io::Importer3mf importer{getSharedLogger()};
+        importer.setMeshRepairConfig(m_meshRepairConfig);
+        importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         // Load build items from the 3MF model
         clearBuildItems();
@@ -1721,6 +2434,10 @@ namespace gladius
             }
             return 0;
         }
+
+        // Sync internal node graph → 3MF model so the dependency graph reflects
+        // any recent edits (e.g. new FunctionCall nodes created via MCP tools).
+        update3mfModel();
 
         // Ensure the resource dependency graph is up-to-date
         rebuildResourceDependencyGraph();
@@ -1837,27 +2554,58 @@ namespace gladius
         return m_resourceDependencyGraph.get();
     }
 
-    bool Document::validateAssembly() const
+    void Document::markValidationDirty()
+    {
+        m_validationDirty = true;
+    }
+
+    bool Document::validateAssemblyIfDirty(nodes::ValidationContext context)
+    {
+        if (!m_validationDirty)
+        {
+            return !m_issueList.hasErrors();
+        }
+        ZoneScopedN("ValidateAssemblyIfDirty");
+        m_validationDirty = false;
+        return validateAssembly(context);
+    }
+
+    bool Document::validateAssembly(nodes::ValidationContext context)
     {
         nodes::Validator validator;
         auto logger = getSharedLogger();
 
-        if (!validator.validate(*m_assembly))
+        m_issueList.clear();
+
+        if (!validator.validate(*m_assembly, m_issueList))
         {
-            for (auto const & error : validator.getErrors())
+            // Only log events for non-interactive contexts (API usage, file loading)
+            if (context != nodes::ValidationContext::Interactive && logger)
             {
-                if (logger)
+                for (auto const & issue : m_issueList.getAll())
+                {
                     logger->addEvent({fmt::format("{}: Review parameter {} of node {} in model {}",
-                                                  error.message,
-                                                  error.parameter,
-                                                  error.node,
-                                                  error.model),
+                                                  issue.message,
+                                                  issue.parameter,
+                                                  issue.node,
+                                                  issue.model),
                                       events::Severity::Error});
+                }
             }
             return false;
         }
 
         return true;
+    }
+
+    nodes::IssueList& Document::getIssueList()
+    {
+        return m_issueList;
+    }
+
+    nodes::IssueList const& Document::getIssueList() const
+    {
+        return m_issueList;
     }
 
     BackupManager & Document::getBackupManager()
@@ -1878,5 +2626,53 @@ namespace gladius
     bool Document::isUiMode() const
     {
         return m_uiMode;
+    }
+
+    void Document::signalStructuralEdit()
+    {
+        m_structuralEditEpoch.fetch_add(1, std::memory_order_release);
+        m_structuralDebouncer.pending.store(true, std::memory_order_relaxed);
+        m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
+    }
+
+    bool Document::hasStructuralEditPending() const
+    {
+        return m_structuralDebouncer.pending.load(std::memory_order_relaxed);
+    }
+
+    uint64_t Document::structuralEditEpoch() const
+    {
+        return m_structuralEditEpoch.load(std::memory_order_acquire);
+    }
+
+    bool Document::dispatchStructuralUpdateIfReady()
+    {
+        if (!m_structuralDebouncer.pending.load(std::memory_order_relaxed))
+        {
+            return false;
+        }
+
+        auto const now = std::chrono::steady_clock::now();
+        auto const elapsed = now - m_structuralDebouncer.lastEditTime;
+        if (elapsed < m_structuralDebouncer.debounceDelay)
+        {
+            return false;
+        }
+
+        m_structuralDebouncer.pending.store(false, std::memory_order_relaxed);
+        return dispatchStructuralUpdate();
+    }
+
+    bool Document::dispatchStructuralUpdate()
+    {
+        if (refreshModelIfNoCompilationIsRunning())
+        {
+            return true;
+        }
+        // A compilation is already in progress — re-arm the debouncer so we
+        // retry on the next frame once the current run finishes.
+        m_structuralDebouncer.pending.store(true, std::memory_order_relaxed);
+        m_structuralDebouncer.lastEditTime = std::chrono::steady_clock::now();
+        return false;
     }
 }

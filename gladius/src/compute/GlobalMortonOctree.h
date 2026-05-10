@@ -78,6 +78,20 @@ namespace gladius::compute
         /// When set, the caller must ensure the precomputed SDF buffer corresponds
         /// to the same bounding box, otherwise sampling will be incorrect.
         std::optional<BoundingBox> boundingBoxOverride{std::nullopt};
+
+        // ---- Thickness Field Support ----
+        /// Enable shell SDF mode using thickness fields
+        bool useThicknessField{false};
+        /// 3D outer thickness field buffer (flattened, size = resolution^3)
+        std::vector<float> outerThicknessField;
+        /// 3D inner thickness field buffer (empty for innermost layer)
+        std::vector<float> innerThicknessField;
+        /// Resolution of the thickness field grid
+        int thicknessFieldResolution{128};
+        /// World-to-grid transformation matrix for thickness field sampling
+        Eigen::Matrix4f worldToThicknessField = Eigen::Matrix4f::Identity();
+        /// True if this is the innermost layer (no inner boundary)
+        bool isInnermostLayer{false};
     };
 
     /**
@@ -89,6 +103,14 @@ namespace gladius::compute
         Eigen::Vector3f gradient;   ///< Surface gradient (unnormalized normal)
         float value{0.0F};          ///< SDF value (should be ~0)
         std::uint8_t edgeIndex{0U}; ///< Which edge (0-11)
+    };
+
+    /// Intermediate QEF solution stored per-node for deferred vertex registration.
+    struct ComputedVertex
+    {
+        Eigen::Vector3f position;
+        Eigen::Vector3f normal;
+        std::uint8_t component{0U};
     };
 
     /**
@@ -127,6 +149,9 @@ namespace gladius::compute
 
         /// Hermite samples for QEF solving
         std::vector<HermiteSample> hermiteSamples;
+
+        /// QEF-solved vertex data awaiting registration (used during parallel vertex generation).
+        std::vector<ComputedVertex> computedVertices;
 
         /**
          * @brief Compute bounding box from Morton code and depth.
@@ -245,6 +270,22 @@ namespace gladius::compute
             return m_vertexRegistry;
         }
 
+        /// Cancellation check callback
+        /// @return true if the operation should be cancelled
+        using CancellationCheckCallback = std::function<bool()>;
+
+        /**
+         * @brief Set cancellation check callback.
+         * @param callback Function that returns true if the operation should be cancelled
+         */
+        void setCancellationCheckCallback(CancellationCheckCallback callback);
+
+        /**
+         * @brief Check if the operation was cancelled.
+         * @return true if cancelled
+         */
+        [[nodiscard]] bool wasCancelled() const { return m_wasCancelled; }
+
       private:
         ComputeCore& m_core;
         ManifoldDualContouringProgram* m_program{nullptr};
@@ -252,9 +293,9 @@ namespace gladius::compute
         OctreeStats m_stats;
 
         // Global bounding box
-        Eigen::Vector3f m_globalBboxMin{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxMax{Eigen::Vector3f::Zero()};
-        Eigen::Vector3f m_globalBboxSize{Eigen::Vector3f::Zero()};
+        Eigen::Vector3f m_globalBboxMin = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxMax = Eigen::Vector3f::Zero();
+        Eigen::Vector3f m_globalBboxSize = Eigen::Vector3f::Zero();
 
         // Octree structure
         std::vector<GlobalOctreeNode> m_nodes;
@@ -277,10 +318,17 @@ namespace gladius::compute
         void ensureNeighborsExist(std::size_t nodeIndex);
         [[nodiscard]] std::size_t createNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
                                                            std::uint32_t z, std::uint8_t depth);
+        /// Allocate a node without evaluating its corners (for deferred batch evaluation).
+        [[nodiscard]] std::size_t allocateNodeAtCoordinates(std::uint32_t x, std::uint32_t y,
+                                                             std::uint32_t z, std::uint8_t depth);
+        /// Batch-evaluate corners and classify (intersecting/edge mask) for a set of nodes.
+        void evaluateAndClassifyNodes(std::vector<std::size_t> const& nodeIndices);
 
         // Phase 3b: Halo vertex generation (neighbors that must exist for quad closure)
         void generateHaloVerticesForWatertightness();
         void ensureProjectedVertex(GlobalOctreeNode& node);
+        /// Batch Newton-project halo vertices onto the surface using GPU analytical SDF.
+        void projectVerticesBatchGpu(std::vector<std::size_t> const& nodeIndices);
 
         // Phase 2: Adaptive refinement
         void refineAdaptively();
@@ -299,6 +347,9 @@ namespace gladius::compute
 
         // Phase 4: Mesh extraction
         void generateQuads(std::vector<std::uint32_t>& indices);
+        void splitNonManifoldEdges(std::vector<Eigen::Vector3f>& positions,
+                                   std::vector<Eigen::Vector3f>& normals,
+                                   std::vector<std::uint32_t>& indices);
         void fillBoundaryHoles(std::vector<std::uint32_t>& indices,
                                std::vector<Eigen::Vector3f> const& positions);
         void fixTriangleOrientation(std::vector<std::uint32_t>& indices);
@@ -326,5 +377,37 @@ namespace gladius::compute
         [[nodiscard]] float sampleSdf(Eigen::Vector3f const& position) const;
         [[nodiscard]] Eigen::Vector3f sampleGradient(Eigen::Vector3f const& position,
                                                       float epsilon) const;
+
+        // Analytical GPU SDF evaluation (bypasses precomputed voxel grid)
+        [[nodiscard]] float sampleSdfAnalytical(Eigen::Vector3f const& position) const;
+        [[nodiscard]] Eigen::Vector3f sampleGradientAnalytical(Eigen::Vector3f const& position,
+                                                                float epsilon) const;
+
+        /// Batch-evaluate analytical SDF at all corner positions for a set of nodes.
+        void evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices);
+
+        /// Batch gather Hermite samples for all intersecting leaves using GPU SDF.
+        void gatherHermiteSamplesBatchGpu();
+
+
+        // Thickness field support
+        [[nodiscard]] float sampleThicknessField(std::vector<float> const& field,
+                                                  Eigen::Vector3f const& position) const;
+        [[nodiscard]] float sampleShellSdf(Eigen::Vector3f const& position) const;
+        [[nodiscard]] Eigen::Vector3f sampleShellGradient(Eigen::Vector3f const& position,
+                                                           float epsilon) const;
+
+        /// Sample the effective SDF (shell SDF if thickness field enabled, base SDF otherwise)
+        [[nodiscard]] float sampleEffectiveSdf(Eigen::Vector3f const& position) const;
+        /// Sample the effective gradient (shell gradient if thickness field enabled, base gradient otherwise)
+        [[nodiscard]] Eigen::Vector3f sampleEffectiveGradient(Eigen::Vector3f const& position,
+                                                               float epsilon) const;
+        
+        // Cancellation support
+        CancellationCheckCallback m_cancellationCheckCallback{nullptr};
+        bool m_wasCancelled{false};
+        
+        /// Check if the operation should be cancelled
+        [[nodiscard]] bool isCancelled();
     };
 }

@@ -166,13 +166,17 @@ namespace gladius
 
     AcceleratorList queryAccelerators(std::ostream & logStream)
     {
+        LOG_SCOPE_DURATION_NAMED("queryAccelerators()");
         AcceleratorList candidates;
         AcceleratorList fallbackCandidates;
 
         try
         {
             std::vector<cl::Platform> allPlatforms;
-            cl::Platform::get(&allPlatforms);
+            {
+                LOG_SCOPE_DURATION_NAMED("queryAccelerators() - cl::Platform::get()");
+                cl::Platform::get(&allPlatforms);
+            }
 
             if (allPlatforms.empty())
             {
@@ -226,7 +230,7 @@ namespace gladius
 
                                                         if (!accelerator.capabilities.fp64)
                                                         {
-                                                                logStream << "\tDevice lacks fp64 support (required for NanoVDB); "
+                                                                logStream << "\tDevice lacks fp64 support (preferred but not required); "
                                                                                          "marking as fallback candidate.\n";
                                                                 fallbackCandidates.push_back(std::move(accelerator));
                                                                 continue;
@@ -267,8 +271,8 @@ namespace gladius
 
         if (candidates.empty() && !fallbackCandidates.empty())
         {
-            logStream << "\nNo fp64-capable OpenCL devices found. Falling back to devices without "
-                         "fp64 support; NanoVDB features will be disabled.\n";
+            logStream << "\nNo fp64-capable OpenCL devices found. Using devices without fp64 "
+                         "hardware support (NanoVDB will use emulated double precision).\n";
             candidates = std::move(fallbackCandidates);
         }
 
@@ -373,6 +377,12 @@ namespace gladius
         : m_outputGL(enableOutput)
     {
         initContext();
+    }
+
+    ComputeContext::ComputeContext(EnableGLOutput enableOutput, Accelerator const & accelerator)
+        : m_outputGL(enableOutput)
+    {
+        initContextWithAccelerator(accelerator);
     }
 
     const cl::Context & ComputeContext::GetContext() const
@@ -526,6 +536,14 @@ namespace gladius
     bool ComputeContext::validateQueue(const cl::CommandQueue & queue) const
     {
         if (!m_isValid)
+        {
+            return false;
+        }
+
+        // Guard against a null native handle before entering the driver.
+        // A non-null handle from a crashed/detached driver can still cause an
+        // SEH access-violation that bypasses catch(...) on MSVC.
+        if (queue() == nullptr)
         {
             return false;
         }
@@ -901,7 +919,7 @@ namespace gladius
 
             // Use a null stream to suppress output during initialization
             std::ostringstream nullStream;
-            auto accelerators = queryAccelerators(std::cout);
+            auto accelerators = queryAccelerators(nullStream);
 
             if (accelerators.empty())
             {
@@ -1023,6 +1041,116 @@ namespace gladius
         catch (std::exception const & /* e */)
         {
             // Handle any initialization errors
+            m_isValid = false;
+            throw;
+        }
+    }
+
+    void ComputeContext::initContextWithAccelerator(Accelerator const & accelerator)
+    {
+        LOG_SCOPE_DURATION_NAMED("ComputeContext::initContextWithAccelerator()");
+        try
+        {
+            m_device = accelerator.device;
+            m_capabilities = accelerator.capabilities;
+            cl::Platform defaultPlatform = accelerator.platform;
+
+            if (m_outputGL == EnableGLOutput::disabled)
+            {
+                try
+                {
+                    m_context = std::make_unique<cl::Context>(cl::Context({m_device}));
+                    m_outputMethod = OutputMethod::disabled;
+                    queryDeviceMemoryCaps();
+                }
+                catch (std::exception const & e)
+                {
+                    throw OpenCLContextCreationError("Failed to create basic OpenCL context: " +
+                                                     std::string(e.what()));
+                }
+            }
+            else
+            {
+                cl_int err = CL_INVALID_CONTEXT;
+                if (m_outputMethod == OutputMethod::interop)
+                {
+                    try
+                    {
+#ifdef WIN32
+                        auto const currentContext = wglGetCurrentContext();
+                        auto const currentDC = wglGetCurrentDC();
+
+                        if (m_outputGL == EnableGLOutput::disabled)
+                        {
+                            throw OpenGLInteropError(
+                              "No active OpenGL context found for Windows interop");
+                        }
+                        else
+                        {
+                            cl_context_properties configuration[] = {
+                              CL_GL_CONTEXT_KHR,
+                              reinterpret_cast<cl_context_properties>(currentContext),
+                              CL_WGL_HDC_KHR,
+                              reinterpret_cast<cl_context_properties>(currentDC),
+                              CL_CONTEXT_PLATFORM,
+                              reinterpret_cast<cl_context_properties>(defaultPlatform()),
+                              0};
+
+                            m_context = std::make_unique<cl::Context>(
+                              cl::Context({m_device}, configuration, nullptr, nullptr, &err));
+                        }
+#endif
+#ifdef __linux__
+                        auto const currentContext = glXGetCurrentContext();
+                        auto const currentDisplay = glXGetCurrentDisplay();
+
+                        if (currentContext == nullptr || currentDisplay == nullptr)
+                        {
+                            throw OpenGLInteropError(
+                              "No active OpenGL context found for Linux interop");
+                        }
+                        else
+                        {
+                            cl_context_properties configuration[] = {
+                              CL_GL_CONTEXT_KHR,
+                              (cl_context_properties) currentContext,
+                              CL_GLX_DISPLAY_KHR,
+                              (cl_context_properties) currentDisplay,
+                              CL_CONTEXT_PLATFORM,
+                              (cl_context_properties) defaultPlatform(),
+                              0};
+
+                            m_context = std::make_unique<cl::Context>(
+                              cl::Context({m_device}, configuration, nullptr, nullptr, &err));
+                        }
+#endif
+                    }
+                    catch (OpenGLInteropError const &)
+                    {
+                        throw;
+                    }
+                    catch (std::exception const & e)
+                    {
+                        throw OpenGLInteropError("Failed to initialize interop mode: " +
+                                                 std::string(e.what()));
+                    }
+                }
+                if (err == CL_SUCCESS)
+                {
+                    queryDeviceMemoryCaps();
+                }
+                else
+                {
+                    m_context = std::make_unique<cl::Context>(cl::Context({m_device}));
+                    m_outputMethod = OutputMethod::readpixel;
+                    queryDeviceMemoryCaps();
+                }
+            }
+
+            m_isValid = true;
+        }
+        catch (std::exception const & /* e */)
+        {
             m_isValid = false;
             throw;
         }

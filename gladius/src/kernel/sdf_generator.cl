@@ -364,8 +364,8 @@ void kernel preComputeSdf(__write_only image3d_t target, struct BoundingBox bbox
 
     float3 const pos = normalizedPosToBuildVolume(normalizedPos, bbox);
     renderingSettings.approximation = AM_FULL_MODEL;
-    float const sdf = modelInternal(pos, PASS_PAYLOAD_ARGS).w;
-    write_imagef(target, coord, sdf);
+    float4 const sdfWithColor = modelInternal(pos, PASS_PAYLOAD_ARGS);
+    write_imagef(target, coord, (float4)(sdfWithColor.xyz, sdfWithColor.w));
 }
 #endif
 

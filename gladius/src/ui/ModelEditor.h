@@ -3,20 +3,34 @@
 #include "../ExpressionToGraphConverter.h"
 #include "../nodes/History.h"
 #include "BeamLatticeView.h"
+#include "CodeView.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
+#include "FunctionFromImage3DView.h"
+#include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
+#include "LibraryDragPayload.h"
+#include "GamepadActionDispatcher.h"
+#include "GamepadHintBar.h"
+#include "GamepadState.h"
+#include "GamepadVisualFeedback.h"
+#include "LinkDragState.h"
+#include "NodeClipboard.h"
+#include "ValidationOverlay.h"
 #include "NodeLayoutEngine.h"
 #include "NodeView.h"
 #include "imguinodeeditor.h"
 
 #include <filesystem>
+#include <future>
+#include <optional>
 #include <string>
 #include <typeindex>
 #include <vector>
 
 #include "Outline.h"
 #include "ResourceView.h"
+#include "io/VdbImporter.h"
 #include "Style.h"
 #include "compute/ComputeCore.h"
 #include "nodes/Assembly.h"
@@ -46,6 +60,9 @@ namespace gladius::ui
 
         void triggerNodePositionUpdate();
 
+        /// Replace the current popup callback. Popup callbacks may close or
+        /// replace themselves while being invoked, so callers must not keep
+        /// references into the stored function object across frames.
         void showPopupMenu(PopupMenuFunction popupMenuFunction);
         void closePopupMenu();
 
@@ -53,12 +70,27 @@ namespace gladius::ui
 
         void setDocument(std::shared_ptr<Document> document);
 
+        /**
+         * @brief Get the current document
+         * @return Shared pointer to the current document
+         */
+        [[nodiscard]] std::shared_ptr<Document> getDocument() const
+        {
+            return m_doc;
+        }
+
         /// @brief Set the export state for blocking UI modifications during export
         void setExportState(ExportState * state);
 
         [[nodiscard]] bool modelWasModified() const;
 
         [[nodiscard]] bool isCompileRequested() const;
+
+        /// Access the current link drag state for port compatibility rendering.
+        [[nodiscard]] LinkDragState const & linkDragState() const { return m_linkDragState; }
+
+        /// Non-const access so NodeView can record the drag source pin when the mouse is pressed.
+        [[nodiscard]] LinkDragState & mutableLinkDragState() { return m_linkDragState; }
 
         void markModelAsModified();
         void markModelAsUpToDate();
@@ -77,9 +109,12 @@ namespace gladius::ui
         void setLibraryVisibility(bool visible);
         [[nodiscard]] bool isLibraryVisible() const;
         void refreshLibraryDirectories();
+        void renderLibraryBrowser();
 
         /// Focus management for keyboard-driven workflow
         void requestNodeFocus(nodes::NodeId nodeId);
+        /// Focus node and switch to its function if different from current
+        void requestNodeFocus(nodes::NodeId nodeId, nodes::ResourceId modelId);
         [[nodiscard]] bool shouldFocusNode(nodes::NodeId nodeId) const;
         void clearNodeFocus();
 
@@ -109,8 +144,10 @@ namespace gladius::ui
         /**
          * @brief Navigate to a function and record the navigation in history.
          *        Use this instead of switchToFunction() for user-triggered navigation.
+         * @param functionId The ResourceId of the function to navigate to
+         * @param sourceNodeId Optional: the node that triggered navigation (for view restoration)
          */
-        bool navigateToFunction(nodes::ResourceId functionId);
+        bool navigateToFunction(nodes::ResourceId functionId, nodes::NodeId sourceNodeId = 0);
 
         // Navigation history controls
         bool canGoBack() const;
@@ -124,18 +161,59 @@ namespace gladius::ui
          */
         bool isHovered() const;
 
+        /**
+         * @brief Check if the current model is a FunctionFromImage3D
+         * @return true if the model contains an ImageSampler node
+         */
+        bool isFunctionFromImage3D() const;
+
+        /**
+         * @brief Refresh the assembly from the current document.
+         *        Call this after external modifications to the assembly (e.g., creating functions
+         *        via ResourceView).
+         */
+        void refreshAssembly();
+
+        /// Tab mode for FunctionFromImage3D functions
+        enum class TabMode
+        {
+            Graph = 0,      ///< Normal graph view
+            Properties = 1, ///< FunctionFromImage3D properties panel
+            Code = 2        ///< Code view (GLSL-like snippet editor)
+        };
+
       private:
         // Extraction helper
         void extractSelectedNodesToFunction(const std::string & functionName);
 
-        // Copy/Paste helpers
+      public:
+        // Gamepad dispatcher helpers (public for GamepadActionDispatcher)
+        void undo();
+        void redo();
+        void processGamepadInput();
+
+        /// @brief Request the gamepad quick reference overlay to open.
+        void requestGamepadQuickReference();
+
+        /// @brief Check and consume a pending quick reference request.
+        [[nodiscard]] bool consumeGamepadQuickRefRequest();
+        
+        /// @brief Get currently selected nodes from the editor.
+        std::vector<ed::NodeId> getSelectedNodes();
+        
+        /// @brief Copy selected nodes to clipboard.
         void copySelectionToClipboard();
+        
+        /// @brief Paste clipboard content at mouse position.
         void pasteClipboardAtMouse();
+        
+        /// @brief Check if clipboard has content.
         bool hasClipboard() const;
 
         void readBackNodePositions();
         void autoLayout();
         void applyNodePositions();
+        bool updateInitialAutoLayoutReadiness();
         void placeTransformation(nodes::NodeBase & createdNode,
                                  std::vector<ed::NodeId> & selection) const;
         void placeBoolOp(nodes::NodeBase & createdNode, std::vector<ed::NodeId> & selection) const;
@@ -168,8 +246,21 @@ namespace gladius::ui
         void showDeleteUnusedResourcesDialog();
         void validate();
 
-        void undo();
-        void redo();
+        /// @brief Handle drag-and-drop from the library browser onto the node editor canvas.
+        void handleLibraryDrop();
+
+        /// @brief Import an STL file dropped onto the node editor canvas.
+        ///        The mesh is loaded on a background thread; once ready the Resource +
+        ///        SignedDistanceToMesh node pair is created at the given screen position.
+        /// @param path       Path to the dropped STL file.
+        /// @param screenPos  Drop position in ImGui screen coordinates.
+        void importStlDrop(std::filesystem::path const & path, ImVec2 screenPos);
+
+        /// @brief Create a FunctionCall node at the current cursor position.
+        /// @param functionId The resource ID of the function to call.
+        /// @param sourceModel The model providing inputs/outputs for the FunctionCall.
+        void createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
+                                            nodes::SharedModel const & sourceModel);
 
         // Helper method to check if a string matches the current filter
         bool matchesNodeFilter(const std::string & text) const;
@@ -177,21 +268,33 @@ namespace gladius::ui
         void pushNodeColor(nodes::NodeBase & node);
         void popNodeColor(nodes::NodeBase & node);
 
+        /// Returns the editor context for the given function, creating one if needed.
+        ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
+
+        /// Returns the editor context for the current model, creating it if needed.
+        /// Returns nullptr if no model is set.
+        ed::EditorContext * getCurrentEditorContext();
+
+        /// @brief Poll m_pendingStlImports; for each finished future add the mesh resource
+        ///        and spawn the node pair.  Must be called inside an active ed::Begin/End block.
+        void processPendingStlImports();
+
+        /// @brief Create a Resource node linked to a SignedDistanceToMesh node at the given
+        ///        canvas position (matching the pattern used in meshResourceToolBox).
+        void createMeshSdfNodesAtCanvasPos(ResourceKey const & key, ImVec2 canvasPos);
+
         bool m_visible = false;
-        ed::EditorContext * m_editorContext{};
+        std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
+        std::set<nodes::ResourceId> m_visitedFunctions;  ///< Track first-time visits for NavigateToContent
+        int m_pendingCenterViewFrames = 0;  ///< Frame countdown before requesting center view
+        bool m_pendingCenterViewRequest = false; ///< Execute via same path as toolbar Center View
         bool m_dirty{true};
         bool m_parameterDirty{false};
         bool m_primitiveDataDirty{false};
         bool m_nodePositionsNeedUpdate{false};
         bool m_pendingPasteRequest{false};
-        // Paste UX helpers
-        bool m_hadLastPastePos{false};
-        ImVec2 m_lastPasteCanvasPos{0.f, 0.f};
-        int m_consecutivePasteCount{0};
-        float m_pasteOffsetStep{20.f};
-        float m_nodeDistance = 180.f; // Increased from 50.f to prevent overlaps (matches test config)
+        float m_nodeDistance = 50.f;
         float m_scale = 0.5f;
-        bool m_nodeWidthsInitialized = false;
         std::string m_newModelName{"New_Part"};
         bool m_showAddModel{false};
 
@@ -237,11 +340,13 @@ namespace gladius::ui
         static void noOp() {};
         PopupMenuFunction m_popupMenuFunction = noOp;
         NodeView m_nodeViewVisitor;
+        LinkDragState m_linkDragState;
 
         bool m_modelWasModified{false};
         bool m_outlineRenaming{true};
         bool m_showCreateNodePopUp{false};
         bool m_showExtractDialog{false};
+        bool m_extractDialogInitialized{false};  // Track extract dialog initialization state
         std::string m_extractFunctionName{"ExtractedFunction"};
 
         // Extraction name editing state
@@ -260,7 +365,7 @@ namespace gladius::ui
 
         bool m_autoCompile = true;
         bool m_isManualCompileRequested = false;
-        bool m_outlineNodeColorLines = true;
+        bool m_outlineNodeColorLines = false;
 
         std::shared_ptr<Document> m_doc;
 
@@ -268,6 +373,7 @@ namespace gladius::ui
         BeamLatticeView m_beamLatticeView;
 
         Outline m_outline;
+        ValidationOverlay m_validationOverlay;
 
         NodeTypeToColor m_nodeTypeToColor;
         float m_uiScale = 1.0f;
@@ -292,24 +398,52 @@ namespace gladius::ui
         /// Group assignment dialog state
         bool m_showGroupAssignmentDialog{false};
 
-        // Clipboard buffer for copy/paste of nodes
-        nodes::UniqueModel m_clipboardModel;
+        // Clipboard for copy/paste of nodes
+        NodeClipboard m_clipboard;
 
-        // --- Navigation history ---
-        std::vector<nodes::ResourceId> m_navHistory; // sequence of visited function ids
-        std::size_t m_navIndex{0};                   // current index in history
-        bool m_inHistoryNav{false};                  // guard to avoid recording during back/forward
+        // Navigation history for back/forward through functions
+        FunctionNavigationHistory m_navHistory;
 
         // Defer selection clearing to when an editor context is active
         bool m_pendingClearSelection{false};
 
-        // One-time auto layout helper state
-        bool m_pendingAutoLayout{false};
+        // One-time initial auto layout helper state.
+        // The first auto layout for a function is executed only after node
+        // sizes have been measured and remained stable across consecutive frames.
+        // A max-wait frame limit ensures the layout always runs, even if
+        // measured sizes never fully converge.
+        bool m_pendingInitialAutoLayout{false};
+        int m_initialAutoLayoutStableFrames{0};
+        int m_initialAutoLayoutWaitFrames{0};
+        std::unordered_map<nodes::NodeId, ImVec2> m_initialAutoLayoutSizeSnapshot;
 
         // Export state for blocking UI modifications during export
         ExportState * m_exportState{nullptr};
 
-        void initNavigationHistory();
+        // FunctionFromImage3D UI
+        FunctionFromImage3DView m_functionFromImage3DView;
+        TabMode m_currentTabMode{TabMode::Graph};
+        bool m_forceCodeTab{false}; ///< Force-select Code tab on next frame ("Stay in Code")
+
+        // Code view for snippet editing
+        CodeView m_codeView;
+
+        // Gamepad system
+        GamepadActionDispatcher m_gamepadDispatcher;
+        GamepadVisualFeedback m_gamepadVisualFeedback;
+        GamepadHintBar m_gamepadHintBar;
+        bool m_gamepadWasConnected{false}; ///< Tracks connection state for on-connect toast
+        bool m_gamepadQuickRefRequested{false}; ///< Set by dispatcher, consumed by MainWindow
+
+        // Async STL import
+        struct PendingStlImport
+        {
+            std::future<vdb::TriangleMesh> geometryFuture;
+            std::optional<ResourceKey> existingResourceKey;
+            std::string displayName;
+            ImVec2 dropScreenPos;
+        };
+        std::vector<PendingStlImport> m_pendingStlImports;
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

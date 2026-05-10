@@ -1,38 +1,26 @@
 #pragma once
 
 #include "../Document.h"
-#include "../io/3mf/ImageExtractor.h"
+#include "AsyncThumbnailLoader.h"
+#include "ThreemfThumbnailExtractor.h"
 #include <filesystem>
-#include <lib3mf_implicit.hpp>
+#include <functional>
+#include <list>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <vector>
+
+// Forward declare ImVec2 from imgui
+struct ImVec2;
 
 namespace gladius::ui
 {
-    /**
-     * @struct ThreemfFileInfo
-     * @brief Stores information about a 3MF file including its thumbnail
-     */
-    struct ThreemfFileInfo
-    {
-        std::filesystem::path filePath;           ///< Path to the 3MF file
-        std::string fileName;                     ///< File name (without path)
-        unsigned int thumbnailTextureId = 0;      ///< OpenGL texture ID for the thumbnail
-        std::vector<unsigned char> thumbnailData; ///< Raw thumbnail data
-        unsigned int thumbnailWidth = 0;          ///< Thumbnail width
-        unsigned int thumbnailHeight = 0;         ///< Thumbnail height
-        bool hasThumbnail = false;                ///< Whether the file has a thumbnail
-        bool thumbnailLoaded = false;             ///< Whether the thumbnail has been loaded
-    };
-
     /**
      * @class ThreemfFileViewer
      * @brief Widget that shows 3MF files in a given directory with their thumbnails
      *
      * This is a pure widget that can be embedded in any container. It does not create
      * its own window and should be placed inside another widget or window.
+     * Thumbnails are loaded asynchronously using the same infrastructure as the welcome screen.
      */
     class ThreemfFileViewer
     {
@@ -74,38 +62,84 @@ namespace gladius::ui
          */
         void render(SharedDocument doc);
 
+        /// @brief Callback signature: receives file path of the entry to delete.
+        /// Return true if the entry was successfully handled.
+        using DeleteCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user deletes an entry via context menu.
+        void setOnDeleteCallback(DeleteCallback callback)
+        {
+            m_onDelete = std::move(callback);
+        }
+
+        /// @brief Callback for restoring an entry (used in bin mode).
+        using RestoreCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user restores a bin entry.
+        void setOnRestoreCallback(RestoreCallback callback)
+        {
+            m_onRestore = std::move(callback);
+        }
+
+        /// @brief Callback for permanent deletion (used in bin mode).
+        using PermanentDeleteCallback = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the callback invoked when the user permanently deletes a bin entry.
+        void setOnPermanentDeleteCallback(PermanentDeleteCallback callback)
+        {
+            m_onPermanentDelete = std::move(callback);
+        }
+
+        /// @brief Predicate to check if an entry is shipped (non-deletable).
+        using IsShippedPredicate = std::function<bool(std::filesystem::path const &)>;
+
+        /// @brief Set the predicate used to determine if an entry is shipped.
+        void setIsShippedPredicate(IsShippedPredicate predicate)
+        {
+            m_isShipped = std::move(predicate);
+        }
+
       private:
         /**
-         * @brief Scan the directory for 3MF files
+         * @brief Scan the directory for 3MF files and queue thumbnails for async loading
          */
         void scanDirectory();
 
         /**
-         * @brief Load thumbnail for a 3MF file
-         * @param fileInfo The file info to load the thumbnail for
+         * @brief Render a single thumbnail item in the grid
          */
-        void loadThumbnail(ThreemfFileInfo & fileInfo);
+        void renderThumbnailItem(ThreemfThumbnailExtractor::ThumbnailInfo & info,
+                                 SharedDocument doc,
+                                 float cellWidth,
+                                 float cellHeight,
+                                 const ImVec2 & itemPos);
 
         /**
-         * @brief Create OpenGL texture from thumbnail data
-         * @param fileInfo The file info containing the thumbnail data
+         * @brief Render the file name below a thumbnail, truncating if necessary
          */
-        void createThumbnailTexture(ThreemfFileInfo & fileInfo);
+        void renderFileName(const std::string & fileName,
+                            float cellWidth,
+                            const ImVec2 & itemPos);
 
-        /**
-         * @brief Extract thumbnail from a 3MF file using lib3mf
-         * @param filePath Path to the 3MF file
-         * @return Vector of bytes containing the PNG data, or empty vector if no thumbnail
-         */
-        std::vector<unsigned char> extractThumbnail(const std::filesystem::path & filePath);
+        std::filesystem::path m_directory; ///< Directory to scan
 
-        std::filesystem::path m_directory;    ///< Directory to scan
-        std::vector<ThreemfFileInfo> m_files; ///< Found 3MF files
-        bool m_needsRefresh = true;           ///< Whether the directory needs to be rescanned
-        events::SharedLogger m_logger;        ///< Logger for events
-        Lib3MF::PWrapper m_wrapper;           ///< lib3mf wrapper
-        float m_thumbnailSize = 150.0f;       ///< Size of thumbnails in the UI
-        int m_columns = 3;                    ///< Number of columns in the grid
+        /// List of thumbnail infos for 3MF files.
+        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
+        /// to ThumbnailInfo objects that must remain valid during async loading.
+        std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_files;
+
+        bool m_needsRefresh = true;     ///< Whether the directory needs to be rescanned
+        events::SharedLogger m_logger;  ///< Logger for events
+        float m_thumbnailSize = 150.0f; ///< Size of thumbnails in the UI
+        int m_columns = 3;             ///< Number of columns in the grid
+
+        std::unique_ptr<ThreemfThumbnailExtractor> m_thumbnailExtractor; ///< Thumbnail extractor
+        std::unique_ptr<AsyncThumbnailLoader> m_asyncLoader;             ///< Async loader
+
+        DeleteCallback m_onDelete;                     ///< Delete callback
+        RestoreCallback m_onRestore;                   ///< Restore callback (bin mode)
+        PermanentDeleteCallback m_onPermanentDelete;   ///< Permanent delete callback (bin mode)
+        IsShippedPredicate m_isShipped;                ///< Shipped entry predicate
     };
 
 } // namespace gladius::ui

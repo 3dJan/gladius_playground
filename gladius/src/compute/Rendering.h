@@ -15,6 +15,7 @@
 #include <ui/OrbitalCamera.h>
 
 #include <compute/types.h>
+#include <kernel/types.h>
 
 namespace gladius
 {
@@ -68,6 +69,16 @@ namespace gladius
 
         bool isBusy() const;
 
+        /// Read back metrics from GPU buffer after frame completion
+        [[nodiscard]] RayMarchMetrics readMetricsBuffer() const;
+
+        /// Clear metrics buffer to zero at start of frame
+        void clearMetricsBuffer();
+
+        /// Get the metrics buffer for use with renderSceneWithMetricsAsync (T033)
+        /// @note Allocates buffer lazily on first call
+        [[nodiscard]] cl::Buffer & getMetricsBuffer();
+
       private:
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
@@ -81,6 +92,10 @@ namespace gladius
         void renderResultImageReadPixel(DistanceMap & sourceImage,
                                         GLImageBuffer & targetImage) const;
         void renderImage(DistanceMap & sourceImage) const;
+
+        /// Allocate metrics buffer for debug instrumentation (single RayMarchMetrics struct)
+        void allocateMetricsBuffer();
+
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
 
         events::SharedLogger m_eventLogger;
@@ -104,5 +119,11 @@ namespace gladius
         cl_float m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
+
+        /// GPU buffer for ray marching metrics collection (dev/debug builds)
+        cl::Buffer m_metricsBuffer;
+
+        /// Tracks if metrics buffer is allocated
+        bool m_metricsBufferAllocated{false};
     };
 }

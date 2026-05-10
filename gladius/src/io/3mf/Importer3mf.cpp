@@ -16,8 +16,10 @@
 #include "Document.h"
 #include "FunctionComparator.h"
 #include "ImageExtractor.h"
+#include "MeshBVH.h"
 #include "Parameter.h"
 #include "Profiling.h"
+#include "SpatialMeshResource.h"
 #include "VdbImporter.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/utils.h"
@@ -388,6 +390,11 @@ namespace gladius::io
             auto res = resourceIterator->GetCurrent();
             Lib3MF_uint32 resourceId = res->GetUniqueResourceID();
 
+            auto implicitFuncCheck = dynamic_cast<Lib3MF::CImplicitFunction *>(res.get());
+            if (implicitFuncCheck)
+            {
+            }
+
             // Skip if this resource is in our duplicates list
             if (duplicateIds.find(resourceId) != duplicateIds.end())
             {
@@ -487,7 +494,9 @@ namespace gladius::io
 
         auto & assembly = *doc.getAssembly();
 
-        if (assembly.findModel(func->GetModelResourceID()))
+        auto const modelResId = func->GetModelResourceID();
+        auto existingModel = assembly.findModel(modelResId);
+        if (existingModel)
         {
             return;
         }
@@ -597,9 +606,9 @@ namespace gladius::io
 
         connectOutputs(*model, *model->getEndNode(), *func);
 
-        model->setLogger(doc.getSharedLogger());
-
-        model->updateTypes();
+        // Don't set logger or call updateTypes() during import - validation runs after loading
+        // completes and will update types properly. Setting the logger here causes validation
+        // errors to be logged for the temporarily incomplete graph.
     }
 
     void Importer3mf::connectNode(Lib3MF::CImplicitNode & node3mf,
@@ -632,12 +641,24 @@ namespace gladius::io
 
             if (!parameter)
             {
+                // Skip silently - validation will catch missing parameters after load
+                continue;
+            }
+
+            // Skip internal parameters (e.g. start/end memory offsets on mesh distance
+            // nodes). They are runtime-only and must never be loaded from a 3MF file.
+            // Warn so the user knows the file was malformed and will be fixed on next save.
+            if (parameter->isInternal())
+            {
                 if (m_eventLogger)
                 {
-                    m_eventLogger->addEvent({fmt::format("Failed to find parameter {} in node {}",
-                                                         parameterName,
-                                                         node3mf.GetIdentifier()),
-                                             events::Severity::Error});
+                    m_eventLogger->addEvent(
+                      {fmt::format("Ignoring internal parameter '{}' on node '{}'. "
+                                   "This parameter is for internal use only and will be removed "
+                                   "from the file when saved.",
+                                   parameterName,
+                                   node->getUniqueName()),
+                       events::Severity::Warning});
                 }
                 continue;
             }
@@ -776,6 +797,13 @@ namespace gladius::io
             }
             auto resourceId = resource->GetModelResourceID();
             resourceNode->setResourceId(resourceId);
+            
+            // Mark resourceid parameter as not requiring input connection - value is set directly
+            auto * param = resourceNode->getParameter(nodes::FieldNames::ResourceId);
+            if (param)
+            {
+                param->setInputSourceRequired(false);
+            }
         }
 
         if (node3mf.GetNodeType() == Lib3MF::eImplicitNodeType::FunctionGradient)
@@ -831,40 +859,17 @@ namespace gladius::io
                 auto parameter = endNode.getParameter(parameterName);
                 if (!parameter)
                 {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not find parameter {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
+                    // Skip silently - validation will catch missing parameters after load
                     continue;
                 }
 
                 auto sourcePort = resolveInput(model, output);
                 if (sourcePort)
                 {
-                    if (!model.addLink(sourcePort->getId(), parameter->getId()))
-                    {
-                        if (m_eventLogger)
-                        {
-                            m_eventLogger->addEvent({fmt::format("Could not add link from {} to {}",
-                                                                 sourcePort->getUniqueName(),
-                                                                 parameterName),
-                                                     events::Severity::Warning});
-                        }
-                    }
+                    // Silently ignore link failures - validation will catch these after load
+                    (void) model.addLink(sourcePort->getId(), parameter->getId());
                 }
-                else
-                {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Could not resolve input for {} of function output",
-                                       output->GetIdentifier()),
-                           events::Severity::Warning});
-                    }
-                }
+                // Skip silently if source port not found - validation will catch these after load
             }
         }
     }
@@ -891,11 +896,7 @@ namespace gladius::io
             auto sourceNodeIter = idToNode.find(sourceNodeName);
             if (sourceNodeIter == idToNode.end())
             {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent({fmt::format("Node not found: {}\n", sourceNodeName),
-                                             events::Severity::Error});
-                }
+                // Skip silently - validation will catch missing nodes after load
                 return nullptr;
             }
             sourceNode = sourceNodeIter->second;
@@ -939,23 +940,7 @@ namespace gladius::io
                 }
             }
 
-            if (m_eventLogger)
-            {
-                std::string suggestion;
-                if (!outputs.empty())
-                {
-                    suggestion = outputs.begin()->first;
-                }
-                m_eventLogger->addEvent(
-                  {fmt::format("Resolving {} failed. Port of node {} not found: {}{}",
-                               refName,
-                               sourceNodeName,
-                               sourcePortName,
-                               suggestion.empty() ? std::string{}
-                                                  : fmt::format(". Did you mean {}?", suggestion)),
-                   events::Severity::Error});
-            }
-
+            // Skip silently - validation will catch missing ports after load
             return nullptr;
         }
         return &sourcePortIter->second;
@@ -1185,15 +1170,71 @@ namespace gladius::io
         }
     }
 
+    std::set<Lib3MF_uint32> Importer3mf::collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const
+    {
+        std::set<Lib3MF_uint32> bboxOnlyIds;
+        std::set<Lib3MF_uint32> regularIds;
+
+        auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+            auto const object = objectIterator->GetCurrentObject();
+            if (!object->IsLevelSetObject())
+            {
+                continue;
+            }
+            auto levelSet = model->GetLevelSetByID(object->GetUniqueResourceID());
+            if (!levelSet)
+            {
+                continue;
+            }
+            auto mesh = levelSet->GetMesh();
+            if (!mesh)
+            {
+                continue;
+            }
+            auto const meshId = mesh->GetModelResourceID();
+            if (levelSet->GetMeshBBoxOnly())
+            {
+                bboxOnlyIds.insert(meshId);
+            }
+            else
+            {
+                regularIds.insert(meshId);
+            }
+        }
+
+        // Return only IDs that are exclusively used as bounding boxes (not also as real geometry)
+        std::set<Lib3MF_uint32> result;
+        for (auto const id : bboxOnlyIds)
+        {
+            if (regularIds.find(id) == regularIds.end())
+            {
+                result.insert(id);
+            }
+        }
+        return result;
+    }
+
     void Importer3mf::loadMeshes(Lib3MF::PModel model, Document & doc)
     {
-        ProfileFunction auto objectIterator = model->GetObjects();
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
 
             if (object->IsMeshObject())
             {
+                if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+                {
+                    // Skip meshes referenced only as bounding boxes in level sets;
+                    // loading them would waste memory and trigger expensive NanoVDB builds.
+                    continue;
+                }
                 auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
                 loadMeshIfNecessary(model, meshObj, doc);
             }
@@ -1201,6 +1242,42 @@ namespace gladius::io
             {
                 // Skip non-mesh objects
             }
+        }
+    }
+
+    void Importer3mf::loadMeshes(Lib3MF::PModel model,
+                                 Document & doc,
+                                 std::set<Lib3MF_uint32> const & resourceIds)
+    {
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+            auto const object = objectIterator->GetCurrentObject();
+
+            if (!object->IsMeshObject())
+            {
+                continue;
+            }
+
+            if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+            {
+                // Skip meshes referenced only as bounding boxes in level sets;
+                // they are needed only for domain AABBs and must never be
+                // instantiated as SpatialMeshResources.
+                continue;
+            }
+
+            if (resourceIds.find(object->GetResourceID()) == resourceIds.end())
+            {
+                continue;
+            }
+
+            auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
+            loadMeshIfNecessary(model, meshObj, doc);
         }
     }
 
@@ -1243,26 +1320,96 @@ namespace gladius::io
             return;
         }
 
-        vdb::TriangleMesh mesh;
-
+        auto const numVertices = meshObject->GetVertexCount();
         auto const numFaces = meshObject->GetTriangleCount();
 
-        for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
-        {
-            auto const & triangle = meshObject->GetTriangle(faceIndex);
-            auto const a = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[0]));
-            auto const b = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[1]));
-            auto const c = toOpenVdbVector(meshObject->GetVertex(triangle.m_Indices[2]));
-            mesh.addTriangle(a, b, c);
-        }
-
-        if (mesh.indices.size() == 0u)
+        if (numFaces == 0u)
         {
             // Still check for beam lattice even if mesh has no triangles
             loadBeamLatticeIfNecessary(model, meshObject, doc);
             return;
         }
-        doc.getGeneratorContext().resourceManager.addResource(key, std::move(mesh));
+
+        // Build spatial mesh data using BVH for fast SDF queries
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        vertices.reserve(numVertices);
+        indices.reserve(numFaces);
+
+        {
+            ZoneScopedN("Importer3mf::extractMeshBuffers");
+            for (auto vertexIndex = 0u; vertexIndex < numVertices; ++vertexIndex)
+            {
+                auto const v = meshObject->GetVertex(vertexIndex);
+                vertices.push_back(float4{v.m_Coordinates[0], v.m_Coordinates[1], v.m_Coordinates[2], 0.0f});
+            }
+
+            for (auto faceIndex = 0u; faceIndex < numFaces; ++faceIndex)
+            {
+                auto const & triangle = meshObject->GetTriangle(faceIndex);
+                indices.push_back(TriangleIndices{
+                    static_cast<int>(triangle.m_Indices[0]),
+                    static_cast<int>(triangle.m_Indices[1]),
+                    static_cast<int>(triangle.m_Indices[2])
+                });
+            }
+        }
+
+        // Optional mesh repair pre-pass (welding, degenerate removal, orientation,
+        // small-hole filling). All steps default to disabled — when nothing is
+        // enabled this call is a no-op.
+        mesh_repair::MeshRepairResult repairResult{};
+        {
+            ZoneScopedN("Importer3mf::repairMesh");
+            repairResult = mesh_repair::repairMesh(vertices, indices, m_meshRepairConfig);
+        }
+        if (m_eventLogger &&
+            (repairResult.weldedVertices != 0u || repairResult.removedTriangles != 0u ||
+             repairResult.flippedTriangles != 0u || repairResult.filledHoles != 0u))
+        {
+            m_eventLogger->addEvent({fmt::format(
+                                       "Mesh repair on resource {}: welded {} vertices, removed {} "
+                                       "degenerate triangles, flipped {}, filled {} holes "
+                                       "({} triangles added)",
+                                       meshObject->GetModelResourceID(),
+                                       repairResult.weldedVertices,
+                                       repairResult.removedTriangles,
+                                       repairResult.flippedTriangles,
+                                       repairResult.filledHoles,
+                                       repairResult.addedTriangles),
+                                     gladius::events::Severity::Info});
+        }
+
+        SpatialMeshData spatialData;
+        {
+            ZoneScopedN("Importer3mf::buildSpatialMeshData");
+            MeshBVHBuilder builder;
+            spatialData = builder.build(vertices, indices);
+        }
+        auto & resourceManager = doc.getGeneratorContext().resourceManager;
+        resourceManager.addResource(
+          key, std::move(spatialData), m_meshSdfEvaluationConfig, m_nanovdbBuildPolicy);
+
+        auto * resource = resourceManager.getResourcePtr(key);
+        auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+        if (spatialMesh != nullptr && spatialMesh->hasNanoVdbBuildIssue())
+        {
+            auto const message = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({message,
+                                         m_nanovdbBuildPolicy.failurePolicy ==
+                                             NanoVdbFailurePolicy::Fail
+                                           ? gladius::events::Severity::Error
+                                           : gladius::events::Severity::Warning});
+            }
+
+            if (m_nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+            {
+                resourceManager.deleteResource(key);
+                throw NanoVdbBuildRejectedError(message);
+            }
+        }
 
         // Also load beam lattice if present
         loadBeamLatticeIfNecessary(model, meshObject, doc);
@@ -1980,6 +2127,40 @@ namespace gladius::io
         loadBuildItems(model, doc);
     }
 
+    /// Remove attachments from sourceModel whose paths already exist in targetModel.
+    /// This prevents "Duplicate Attachment Path" errors from MergeFromModel when
+    /// the same library file is imported more than once.
+    static void removeDuplicateAttachments(Lib3MF::PModel const & sourceModel,
+                                           Lib3MF::PModel const & targetModel)
+    {
+        // Collect existing attachment paths from the target model
+        std::set<std::string> targetPaths;
+        auto const targetCount = targetModel->GetAttachmentCount();
+        for (Lib3MF_uint32 i = 0; i < targetCount; ++i)
+        {
+            targetPaths.insert(targetModel->GetAttachment(i)->GetPath());
+        }
+
+        // Remove source attachments whose path already exists in the target.
+        // Iterate in reverse because RemoveAttachment can shift indices.
+        auto sourceCount = sourceModel->GetAttachmentCount();
+        for (auto i = static_cast<int64_t>(sourceCount) - 1; i >= 0; --i)
+        {
+            auto attachment = sourceModel->GetAttachment(static_cast<Lib3MF_uint32>(i));
+            if (targetPaths.count(attachment->GetPath()) > 0)
+            {
+                sourceModel->RemoveAttachment(attachment.get());
+            }
+        }
+
+        // Also remove the source's package thumbnail if the target already has one
+        if (sourceModel->HasPackageThumbnailAttachment() &&
+            targetModel->HasPackageThumbnailAttachment())
+        {
+            sourceModel->RemovePackageThumbnailAttachment();
+        }
+    }
+
     void Importer3mf::merge(std::filesystem::path const & filename, Document & doc)
     {
         ProfileFunction auto targetModel = doc.get3mfModel();
@@ -1988,9 +2169,6 @@ namespace gladius::io
             load(filename, doc);
             return;
         }
-
-        auto core = doc.getCore();
-        auto computenToken = core->waitForComputeToken();
 
         auto const modelToMergeFrom = m_wrapper->CreateModel();
         auto const reader = modelToMergeFrom->QueryReader("3mf");
@@ -2015,16 +2193,48 @@ namespace gladius::io
         }
 
         logWarnings(filename, reader);
+        merge(modelToMergeFrom, filename, doc);
+    }
+
+    void Importer3mf::merge(Lib3MF::PModel const & modelToMergeFrom,
+                             std::filesystem::path const & sourceFilename,
+                             Document & doc)
+    {
+        ProfileFunction auto targetModel = doc.get3mfModel();
+        if (!targetModel)
+        {
+            return;
+        }
+
+        auto core = doc.getCore();
+        auto computeToken = core->waitForComputeToken();
 
         try
         {
             // backup the list of function ids
-
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions
             auto implicitFunctions = collectImplicitFunctions(targetModel);
 
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: {} existing functions, {} existing implicit functions",
+                               functionResourceIds.size(),
+                               implicitFunctions.size()),
+                   events::Severity::Info});
+            }
+
+            removeDuplicateAttachments(modelToMergeFrom, targetModel);
             targetModel->MergeFromModel(modelToMergeFrom.get());
+
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: MergeFromModel succeeded for {}",
+                               sourceFilename.string()),
+                   events::Severity::Info});
+            }
 
             // now find all duplicated functions
             size_t numDuplicatesPrevious = 0;
@@ -2042,32 +2252,31 @@ namespace gladius::io
 
             } while (numDuplicatesPrevious != numDuplicatesCurrent);
 
-            // remove the duplicates from the model
-            for (auto const & duplicate : duplicates)
+            // NOTE: We intentionally do NOT call RemoveResource on duplicate functions
+            // in the live target model. lib3mf's RemoveResource corrupts internal state
+            // on models with cross-function ResourceIdNode references. The duplicates
+            // are harmless: references have been redirected by
+            // replaceDuplicatedFunctionReferences, and loadImplicitFunctionsFiltered
+            // skips loading them into the Document.
+
+            if (m_eventLogger)
             {
-                // log
-                m_eventLogger->addEvent({fmt::format("Removed resource from model3mf: {}",
-                                                     duplicate.duplicateFunction->GetResourceID()),
-                                         events::Severity::Info});
-                // targetModel->RemoveResource(duplicate.duplicateFunction.get());
-                auto const & resource =
-                  targetModel->GetResourceByID(duplicate.duplicateFunction->GetUniqueResourceID());
-                if (!resource)
-                {
-                    if (m_eventLogger)
-                    {
-                        m_eventLogger->addEvent(
-                          {fmt::format("Resource {} not found in model3mf",
-                                       duplicate.duplicateFunction->GetUniqueResourceID()),
-                           events::Severity::Error});
-                    }
-                    continue;
-                }
-                targetModel->RemoveResource(resource);
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: {} duplicates found, loading functions...",
+                               duplicates.size()),
+                   events::Severity::Info});
             }
 
-            loadImageStacks(filename, targetModel, doc);
+            loadImageStacks(sourceFilename, targetModel, doc);
             loadImplicitFunctionsFiltered(targetModel, doc, duplicates);
+
+            if (m_eventLogger)
+            {
+                auto const funcCount = doc.getAssembly()->getFunctions().size();
+                m_eventLogger->addEvent(
+                  {fmt::format("Merge: complete, assembly now has {} functions", funcCount),
+                   events::Severity::Info});
+            }
 
             doc.rebuildResourceDependencyGraph();
         }
@@ -2075,11 +2284,12 @@ namespace gladius::io
         {
             if (m_eventLogger)
             {
-                m_eventLogger->addEvent({fmt::format("Error #{} while merging 3mf file {}: {}",
-                                                     filename.string(),
-                                                     e.getErrorCode(),
-                                                     e.what()),
-                                         events::Severity::Error});
+                m_eventLogger->addEvent(
+                  {fmt::format("Error #{} while merging 3mf file {}: {}",
+                               e.getErrorCode(),
+                               sourceFilename.string(),
+                               e.what()),
+                   events::Severity::Error});
             }
         }
         catch (std::exception const & e)
@@ -2087,7 +2297,9 @@ namespace gladius::io
             if (m_eventLogger)
             {
                 m_eventLogger->addEvent(
-                  {fmt::format("Error while merging 3mf file {}: {}", filename.string(), e.what()),
+                  {fmt::format("Error while merging 3mf file {}: {}",
+                               sourceFilename.string(),
+                               e.what()),
                    events::Severity::Error});
             }
         }
@@ -2101,12 +2313,29 @@ namespace gladius::io
     void loadFrom3mfFile(std::filesystem::path const filename, Document & doc)
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
         importer.load(filename, doc);
     }
 
     void mergeFrom3mfFile(std::filesystem::path filename, Document & doc)
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
         importer.merge(filename, doc);
+    }
+
+    void mergeModelInto3mfDoc(Lib3MF::PModel const & sourceModel,
+                              std::filesystem::path const & sourceFilename,
+                              Document & doc)
+    {
+        ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
+        importer.merge(sourceModel, sourceFilename, doc);
     }
 } // namespace gladius::io

@@ -62,6 +62,143 @@ float3 getCellExtent(float3 bboxMin, float3 bboxMax, uint depth)
     return extent * scale;
 }
 
+// ============================================================================
+// Thickness Field Sampling for Surface-Aligned Shell Generation
+// ============================================================================
+// These helpers sample from a precomputed 3D thickness field to compute
+// variable shell offsets based on surface colors.
+
+/// Transform world position to field grid coordinates and sample thickness
+inline float sampleThicknessFieldMDC(
+    __global const float* thicknessField,  // 3D grid of precomputed thickness values
+    const int fieldResolution,              // Resolution of the 3D grid (e.g., 128)
+    const float16 worldToGrid,              // 4x4 transform: world → grid coordinates
+    const float3 worldPos)
+{
+    // Transform to grid coordinates using 4x4 matrix
+    float3 gridPos;
+    gridPos.x = worldToGrid.s0 * worldPos.x + worldToGrid.s1 * worldPos.y + 
+                worldToGrid.s2 * worldPos.z + worldToGrid.s3;
+    gridPos.y = worldToGrid.s4 * worldPos.x + worldToGrid.s5 * worldPos.y + 
+                worldToGrid.s6 * worldPos.z + worldToGrid.s7;
+    gridPos.z = worldToGrid.s8 * worldPos.x + worldToGrid.s9 * worldPos.y + 
+                worldToGrid.sa * worldPos.z + worldToGrid.sb;
+    
+    // Trilinear interpolation in grid space
+    float3 uvw = gridPos;
+    int3 idx = convert_int3(floor(uvw));
+    float3 f = uvw - convert_float3(idx);
+    
+    // Clamp to valid range
+    idx = clamp(idx, 0, fieldResolution - 2);
+    f = clamp(f, 0.0f, 1.0f);
+    
+    // 3D grid access (z-major order)
+    #define TF_IDX(x, y, z) (((z) * fieldResolution + (y)) * fieldResolution + (x))
+    
+    float c000 = thicknessField[TF_IDX(idx.x, idx.y, idx.z)];
+    float c001 = thicknessField[TF_IDX(idx.x, idx.y, idx.z + 1)];
+    float c010 = thicknessField[TF_IDX(idx.x, idx.y + 1, idx.z)];
+    float c011 = thicknessField[TF_IDX(idx.x, idx.y + 1, idx.z + 1)];
+    float c100 = thicknessField[TF_IDX(idx.x + 1, idx.y, idx.z)];
+    float c101 = thicknessField[TF_IDX(idx.x + 1, idx.y, idx.z + 1)];
+    float c110 = thicknessField[TF_IDX(idx.x + 1, idx.y + 1, idx.z)];
+    float c111 = thicknessField[TF_IDX(idx.x + 1, idx.y + 1, idx.z + 1)];
+    
+    float c00 = mix(c000, c001, f.z);
+    float c01 = mix(c010, c011, f.z);
+    float c10 = mix(c100, c101, f.z);
+    float c11 = mix(c110, c111, f.z);
+    
+    float c0 = mix(c00, c01, f.y);
+    float c1 = mix(c10, c11, f.y);
+    
+    #undef TF_IDX
+    
+    return mix(c0, c1, f.x);
+}
+
+/// Compute shell SDF value using thickness fields
+/// For non-innermost layers: max(SDF + outer, -(SDF + inner))
+/// For innermost layer: SDF + outer
+inline float computeShellSdfMDC(
+    const float baseSdf,
+    __global const float* outerField,
+    __global const float* innerField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const float3 worldPos,
+    const int isInnermostLayer)
+{
+    float outerThickness = sampleThicknessFieldMDC(outerField, fieldResolution, worldToGrid, worldPos);
+    
+    if (isInnermostLayer)
+    {
+        // Innermost layer: solid core from outer boundary inward
+        // The isosurface is at baseSdf = -outerThickness
+        return baseSdf + outerThickness;
+    }
+    else
+    {
+        float innerThickness = sampleThicknessFieldMDC(innerField, fieldResolution, worldToGrid, worldPos);
+        float outerSDF = baseSdf + outerThickness;
+        float innerSDF = baseSdf + innerThickness;
+        return max(outerSDF, -innerSDF);
+    }
+}
+
+/// Compute gradient of shell SDF using central differences
+/// This must be used for thickness field mode instead of computeGradientWithEps,
+/// because the shell SDF is a function of both the base SDF and the thickness field.
+inline float3 computeShellGradientMDC(
+    const float3 pos,
+    const float epsilon,
+    __global const float* outerField,
+    __global const float* innerField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const int isInnermostLayer,
+    PAYLOAD_ARGS)
+{
+    const float h = epsilon;
+    const float h2 = 2.0f * h;
+    
+    const float3 posXp = pos + (float3)(h, 0.0f, 0.0f);
+    const float3 posXn = pos - (float3)(h, 0.0f, 0.0f);
+    const float3 posYp = pos + (float3)(0.0f, h, 0.0f);
+    const float3 posYn = pos - (float3)(0.0f, h, 0.0f);
+    const float3 posZp = pos + (float3)(0.0f, 0.0f, h);
+    const float3 posZn = pos - (float3)(0.0f, 0.0f, h);
+    
+    // Compute shell SDF at each offset position
+    const float sdfXp = computeShellSdfMDC(model(posXp, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posXp, isInnermostLayer);
+    const float sdfXn = computeShellSdfMDC(model(posXn, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posXn, isInnermostLayer);
+    const float sdfYp = computeShellSdfMDC(model(posYp, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posYp, isInnermostLayer);
+    const float sdfYn = computeShellSdfMDC(model(posYn, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posYn, isInnermostLayer);
+    const float sdfZp = computeShellSdfMDC(model(posZp, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posZp, isInnermostLayer);
+    const float sdfZn = computeShellSdfMDC(model(posZn, PASS_PAYLOAD_ARGS).w, outerField, innerField,
+                                           fieldResolution, worldToGrid, posZn, isInnermostLayer);
+    
+    float3 gradient;
+    gradient.x = (sdfXp - sdfXn) / h2;
+    gradient.y = (sdfYp - sdfYn) / h2;
+    gradient.z = (sdfZp - sdfZn) / h2;
+    
+    const float gradLengthSq = dot(gradient, gradient);
+    if (gradLengthSq > 1e-8f) {
+        gradient /= sqrt(gradLengthSq);
+    } else {
+        gradient = (float3)(0.0f, 1.0f, 0.0f);
+    }
+    
+    return gradient;
+}
+
 // Forward declaration for gradient computation
 float3 computeGradientWithEps(float3 pos, float epsilon, PAYLOAD_ARGS);
 
@@ -314,6 +451,98 @@ __kernel void count_vertices(
     DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
     
     // Store component count in padding[1] for use by emit_vertices
+    int componentCount = discResult.componentCount;
+    if (componentCount < 1) componentCount = 1;
+    if (componentCount > 4) componentCount = 4;
+    
+    nodes[id].padding[1] = (uchar)componentCount;
+    countBuffer[id] = componentCount;
+}
+
+/// Count vertices with thickness field variant
+__kernel void count_vertices_with_thickness(
+    __global OctreeNode* nodes,
+    __global int* countBuffer,
+    const int numNodes,
+    const float3 bboxMin,
+    const float3 bboxMax,
+    PAYLOAD_ARGS,
+    __global const float* outerThicknessField,
+    __global const float* innerThicknessField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const int isInnermostLayer,
+    const float gradientEpsilon)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+    
+    OctreeNode node = nodes[id];
+    
+    if (node.padding[0] == 1)
+    {
+        countBuffer[id] = 1;
+        nodes[id].padding[1] = 1;
+        return;
+    }
+    
+    if (node.edgeMask == 0)
+    {
+        countBuffer[id] = 0;
+        nodes[id].padding[1] = 0;
+        return;
+    }
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    
+    float cornerValues[8];
+    for (int corner = 0; corner < 8; corner++)
+    {
+        int cx = (corner >> 0) & 1;
+        int cy = (corner >> 1) & 1;
+        int cz = (corner >> 2) & 1;
+        
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
+        float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+        cornerValues[corner] = computeShellSdfMDC(sdfResult.w, outerThicknessField, innerThicknessField,
+                                                   fieldResolution, worldToGrid, cornerPos, isInnermostLayer);
+    }
+    
+    const int edgeCorners[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},
+        {4,5}, {5,7}, {7,6}, {6,4},
+        {0,4}, {1,5}, {3,7}, {2,6}
+    };
+    
+    float3 normals[12];
+    int intersectionCount = 0;
+    
+    for (int e = 0; e < 12; e++)
+    {
+        if ((node.edgeMask & (1 << e)) == 0) continue;
+        
+        int c0 = edgeCorners[e][0];
+        int c1 = edgeCorners[e][1];
+        
+        int cx0 = (c0 >> 0) & 1, cy0 = (c0 >> 1) & 1, cz0 = (c0 >> 2) & 1;
+        int cx1 = (c1 >> 0) & 1, cy1 = (c1 >> 1) & 1, cz1 = (c1 >> 2) & 1;
+        
+        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellExtent;
+        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellExtent;
+        
+        float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
+        normals[intersectionCount] = computeShellGradientMDC(intersection, gradientEpsilon,
+                                                              outerThicknessField, innerThicknessField,
+                                                              fieldResolution, worldToGrid, isInnermostLayer,
+                                                              PASS_PAYLOAD_ARGS);
+        intersectionCount++;
+    }
+    
+    DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
+    
     int componentCount = discResult.componentCount;
     if (componentCount < 1) componentCount = 1;
     if (componentCount > 4) componentCount = 4;
@@ -992,6 +1221,221 @@ __kernel void emit_vertices(
     }
 }
 
+/// Generate vertices with thickness field variant
+__kernel void emit_vertices_with_thickness(
+    __global OctreeNode* nodes,
+    __global int const* offsets,
+    __global Vertex* outputVertices,
+    __global uchar* edgeComponents,
+    const int numNodes,
+    const float3 bboxMin,
+    const float3 bboxMax,
+    PAYLOAD_ARGS,
+    __global const float* outerThicknessField,
+    __global const float* innerThicknessField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const int isInnermostLayer,
+    const float gradientEpsilon)
+{
+    int id = get_global_id(0);
+    if (id >= numNodes) return;
+
+    OctreeNode node = nodes[id];
+    int vertexIndex = offsets[id];
+
+    int edgeBase = id * 12;
+    for (int e = 0; e < 12; ++e)
+    {
+        edgeComponents[edgeBase + e] = (uchar)0;
+    }
+    
+    ulong3 coords = decodeMorton3(node.mortonCode);
+    uint depth = node.depth;
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, depth);
+    float3 cellMin = bboxMin + (float3)((float)coords.x, (float)coords.y, (float)coords.z) * cellExtent;
+    float3 cellMax = cellMin + cellExtent;
+    float3 cellCenter = (cellMin + cellMax) * 0.5f;
+    
+    // Handle halo nodes
+    if (node.padding[0] == 1)
+    {
+        float3 pos = cellCenter;
+        
+        float4 sdfResult = model(pos, PASS_PAYLOAD_ARGS);
+        float dist = computeShellSdfMDC(sdfResult.w, outerThicknessField, innerThicknessField,
+                                        fieldResolution, worldToGrid, pos, isInnermostLayer);
+        
+        for (int iter = 0; iter < 16; iter++)
+        {
+            if (fabs(dist) < 1e-6f) break;
+            
+            float3 gradient = computeShellGradientMDC(pos, gradientEpsilon,
+                                                       outerThicknessField, innerThicknessField,
+                                                       fieldResolution, worldToGrid, isInnermostLayer,
+                                                       PASS_PAYLOAD_ARGS);
+            float gradLen = length(gradient);
+            if (gradLen < 1e-8f) break;
+            
+            gradient = gradient / gradLen;
+            pos = pos - gradient * dist;
+            
+            sdfResult = model(pos, PASS_PAYLOAD_ARGS);
+            dist = computeShellSdfMDC(sdfResult.w, outerThicknessField, innerThicknessField,
+                                      fieldResolution, worldToGrid, pos, isInnermostLayer);
+        }
+        
+        float3 gradient = computeShellGradientMDC(pos, gradientEpsilon,
+                                                   outerThicknessField, innerThicknessField,
+                                                   fieldResolution, worldToGrid, isInnermostLayer,
+                                                   PASS_PAYLOAD_ARGS);
+        float gradLen = length(gradient);
+        if (gradLen > 1e-6f)
+        {
+            gradient = gradient / gradLen;
+        }
+        else
+        {
+            gradient = (float3)(0.0f, 0.0f, 1.0f);
+        }
+        
+        Vertex v;
+        v.position = (float4)(pos.x, pos.y, pos.z, 1.0f);
+        v.normal = (float4)(gradient.x, gradient.y, gradient.z, 0.0f);
+        outputVertices[vertexIndex] = v;
+        return;
+    }
+    
+    if (node.edgeMask == 0) return;
+    
+    // Sample SDF at 8 corners with thickness field
+    float cornerValues[8];
+    for (int corner = 0; corner < 8; corner++)
+    {
+        int cx = (corner >> 0) & 1;
+        int cy = (corner >> 1) & 1;
+        int cz = (corner >> 2) & 1;
+        
+        float3 cornerPos = cellMin + (float3)((float)cx, (float)cy, (float)cz) * cellExtent;
+        float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+        cornerValues[corner] = computeShellSdfMDC(sdfResult.w, outerThicknessField, innerThicknessField,
+                                                   fieldResolution, worldToGrid, cornerPos, isInnermostLayer);
+    }
+    
+    const int edgeCorners[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},
+        {4,5}, {5,7}, {7,6}, {6,4},
+        {0,4}, {1,5}, {3,7}, {2,6}
+    };
+    
+    float3 intersections[12];
+    float3 normals[12];
+    int edgeIndices[12];
+    int intersectionCount = 0;
+    
+    for (int e = 0; e < 12; e++)
+    {
+        if ((node.edgeMask & (1 << e)) == 0) continue;
+        
+        int c0 = edgeCorners[e][0];
+        int c1 = edgeCorners[e][1];
+        
+        int cx0 = (c0 >> 0) & 1, cy0 = (c0 >> 1) & 1, cz0 = (c0 >> 2) & 1;
+        int cx1 = (c1 >> 0) & 1, cy1 = (c1 >> 1) & 1, cz1 = (c1 >> 2) & 1;
+        
+        float3 p0 = cellMin + (float3)((float)cx0, (float)cy0, (float)cz0) * cellExtent;
+        float3 p1 = cellMin + (float3)((float)cx1, (float)cy1, (float)cz1) * cellExtent;
+        
+        float3 intersection = findEdgeIntersection(p0, p1, cornerValues[c0], cornerValues[c1]);
+        intersections[intersectionCount] = intersection;
+        normals[intersectionCount] = computeShellGradientMDC(intersection, gradientEpsilon,
+                                                              outerThicknessField, innerThicknessField,
+                                                              fieldResolution, worldToGrid, isInnermostLayer,
+                                                              PASS_PAYLOAD_ARGS);
+        edgeIndices[intersectionCount] = e;
+        intersectionCount++;
+    }
+    
+    int componentCount = (int)node.padding[1];
+    if (componentCount < 1) componentCount = 1;
+    if (componentCount > 4) componentCount = 4;
+    
+    if (componentCount == 1)
+    {
+        QefResult qef = solveQefSvd(intersections, normals, intersectionCount, cellMin, cellMax);
+        
+        Vertex v;
+        v.position = (float4)(qef.position.x, qef.position.y, qef.position.z, 1.0f);
+        v.normal = (float4)(qef.normal.x, qef.normal.y, qef.normal.z, 0.0f);
+        outputVertices[vertexIndex] = v;
+    }
+    else
+    {
+        DiscontinuityResult discResult = detectGradientDiscontinuity(normals, intersectionCount, MDC_DISCONTINUITY_ANGLE_THRESHOLD);
+        
+        for (int comp = 0; comp < componentCount; comp++)
+        {
+            float3 compIntersections[12];
+            float3 compNormals[12];
+            int compCount = 0;
+            
+            for (int i = 0; i < intersectionCount; i++)
+            {
+                if (discResult.componentIndices[i] == comp)
+                {
+                    compIntersections[compCount] = intersections[i];
+                    compNormals[compCount] = normals[i];
+                    compCount++;
+                }
+            }
+            
+            if (compCount == 0)
+            {
+                float3 massPoint = (float3)(0.0f, 0.0f, 0.0f);
+                for (int i = 0; i < intersectionCount; i++)
+                {
+                    massPoint += intersections[i];
+                }
+                if (intersectionCount > 0)
+                {
+                    massPoint /= (float)intersectionCount;
+                }
+                else
+                {
+                    massPoint = cellCenter;
+                }
+                
+                Vertex v;
+                v.position = (float4)(massPoint.x, massPoint.y, massPoint.z, 1.0f);
+                v.normal = (float4)(0.0f, 1.0f, 0.0f, 0.0f);
+                outputVertices[vertexIndex + comp] = v;
+            }
+            else
+            {
+                QefResult qef = solveQefSvd(compIntersections, compNormals, compCount, cellMin, cellMax);
+                
+                Vertex v;
+                v.position = (float4)(qef.position.x, qef.position.y, qef.position.z, 1.0f);
+                v.normal = (float4)(qef.normal.x, qef.normal.y, qef.normal.z, 0.0f);
+                outputVertices[vertexIndex + comp] = v;
+            }
+        }
+        
+        for (int i = 0; i < intersectionCount; i++)
+        {
+            int edgeIdx = edgeIndices[i];
+            if (edgeIdx >= 0 && edgeIdx < 12)
+            {
+                edgeComponents[edgeBase + edgeIdx] = (uchar)discResult.componentIndices[i];
+            }
+        }
+
+        nodes[id].padding[2] = edgeComponents[edgeBase + 5];
+        nodes[id].padding[3] = edgeComponents[edgeBase + 6];
+        nodes[id].padding[4] = edgeComponents[edgeBase + 10];
+    }
+}
+
 // Octree construction kernel
 // Build octree by subdividing cells that contain the surface
 __kernel void construct_octree_level(
@@ -1089,6 +1533,119 @@ __kernel void construct_octree_level(
                     
                     // Check for sign change
                     if ((cornerValues[c0] < 0.0f) != (cornerValues[c1] < 0.0f)) {
+                        child.edgeMask |= (1 << e);
+                    }
+                }
+            }
+            
+            outputNodes[outputIdx] = child;
+        }
+    }
+}
+
+// ============================================================================
+// Thickness Field Variant of Octree Construction
+// Uses precomputed thickness fields instead of constant isoValue
+// ============================================================================
+__kernel void construct_octree_level_with_thickness(
+    __global OctreeNode* inputNodes,
+    __global OctreeNode* outputNodes,
+    __global int* outputCount,
+    const int numInputNodes,
+    const float3 bboxMin,
+    const float3 bboxMax,
+    const uint currentDepth,
+    const uint maxDepth,
+    const uint initialDepth,
+    PAYLOAD_ARGS,
+    __global const float* outerThicknessField,
+    __global const float* innerThicknessField,
+    const int fieldResolution,
+    const float16 worldToGrid,
+    const int isInnermostLayer)
+{
+    int id = get_global_id(0);
+    if (id >= numInputNodes) return;
+    
+    OctreeNode parent = inputNodes[id];
+    
+    if (currentDepth >= maxDepth) return;
+    
+    ulong3 parentCoords = decodeMorton3(parent.mortonCode);
+    float3 cellExtent = getCellExtent(bboxMin, bboxMax, currentDepth);
+    float3 parentMin = bboxMin + (float3)((float)parentCoords.x, (float)parentCoords.y, (float)parentCoords.z) * cellExtent;
+    
+    float3 childExtent = cellExtent * 0.5f;
+    
+    for (int childIdx = 0; childIdx < 8; childIdx++)
+    {
+        int dx = (childIdx >> 0) & 1;
+        int dy = (childIdx >> 1) & 1;
+        int dz = (childIdx >> 2) & 1;
+        
+        ulong childX = (parentCoords.x << 1) | dx;
+        ulong childY = (parentCoords.y << 1) | dy;
+        ulong childZ = (parentCoords.z << 1) | dz;
+        
+        ulong childMorton = encodeMorton3(childX, childY, childZ);
+        
+        float3 childMin = parentMin + (float3)((float)dx, (float)dy, (float)dz) * childExtent;
+        
+        float cornerValues[8];
+        uint signMask = 0;
+        
+        for (int corner = 0; corner < 8; corner++)
+        {
+            int cx = (corner >> 0) & 1;
+            int cy = (corner >> 1) & 1;
+            int cz = (corner >> 2) & 1;
+            
+            float3 cornerPos = childMin + (float3)((float)cx, (float)cy, (float)cz) * childExtent;
+            
+            // Evaluate base SDF
+            float4 sdfResult = model(cornerPos, PASS_PAYLOAD_ARGS);
+            float baseSdf = sdfResult.w;
+            
+            // Compute shell SDF using thickness fields
+            float sdfValue = computeShellSdfMDC(baseSdf, outerThicknessField, innerThicknessField,
+                                                fieldResolution, worldToGrid, cornerPos, isInnermostLayer);
+            cornerValues[corner] = sdfValue;
+            
+            if (sdfValue < 0.0f)
+            {
+                signMask |= (1 << corner);
+            }
+        }
+        
+        bool const containsSurface = (signMask != 0) && (signMask != 0xFF);
+        bool const forceSubdivision = currentDepth < initialDepth;
+
+        if (forceSubdivision || containsSurface)
+        {
+            int outputIdx = atomic_inc(outputCount);
+            
+            OctreeNode child;
+            child.mortonCode = childMorton;
+            child.edgeMask = 0;
+            child.internalMask = signMask;
+            child.depth = (uchar)min((uint)255, currentDepth + 1U);
+            for (int p = 0; p < 7; p++) child.padding[p] = 0;
+            
+            const int edgeCorners[12][2] = {
+                {0,1}, {1,3}, {3,2}, {2,0},
+                {4,5}, {5,7}, {7,6}, {6,4},
+                {0,4}, {1,5}, {3,7}, {2,6}
+            };
+            
+            if (containsSurface)
+            {
+                for (int e = 0; e < 12; e++)
+                {
+                    int c0 = edgeCorners[e][0];
+                    int c1 = edgeCorners[e][1];
+                    
+                    if ((cornerValues[c0] < 0.0f) != (cornerValues[c1] < 0.0f))
+                    {
                         child.edgeMask |= (1 << e);
                     }
                 }
@@ -2606,5 +3163,235 @@ __kernel void count_discontinuities_diagnostic(
     {
         atomic_inc(&discontinuityCounters[6]);
     }
+}
+
+// ============================================================================
+// Batch SDF evaluation kernels for analytical (non-voxelized) SDF sampling
+// ============================================================================
+
+/// Evaluate analytical SDF at multiple positions in parallel.
+/// Used by GlobalMortonOctree for corner evaluation and zero-crossing refinement
+/// to avoid sampling from the low-resolution precomputed voxel grid.
+__kernel void evaluate_sdf_batch(
+    __global const float* positions,  // 3 floats per position (x, y, z)
+    __global float* sdfValues,        // 1 float per position (output)
+    const uint positionCount,
+    const float isoValue,
+    PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= positionCount)
+    {
+        return;
+    }
+
+    float3 const pos = vload3(id, positions);
+    float4 const result = model(pos, PASS_PAYLOAD_ARGS);
+    sdfValues[id] = result.w - isoValue;
+}
+
+/// Evaluate analytical SDF and gradient at multiple positions in parallel.
+/// The gradient is computed via central finite differences on the analytical model.
+__kernel void evaluate_sdf_gradient_batch(
+    __global const float* positions,  // 3 floats per position
+    __global float* sdfValues,        // 1 float per position (output)
+    __global float* gradients,        // 3 floats per position (output, unnormalized)
+    const uint positionCount,
+    const float isoValue,
+    const float epsilon,
+    PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= positionCount)
+    {
+        return;
+    }
+
+    float3 const pos = vload3(id, positions);
+
+    float4 const result = model(pos, PASS_PAYLOAD_ARGS);
+    sdfValues[id] = result.w - isoValue;
+
+    float const h = epsilon;
+    float const h2 = 2.0f * h;
+
+    float const sdfXp = model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfXn = model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfYp = model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfYn = model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w;
+    float const sdfZp = model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w;
+    float const sdfZn = model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w;
+
+    float3 grad;
+    grad.x = (sdfXp - sdfXn) / h2;
+    grad.y = (sdfYp - sdfYn) / h2;
+    grad.z = (sdfZp - sdfZn) / h2;
+
+    vstore3(grad, id, gradients);
+}
+
+/// Fused bisection + gradient kernel: each work item runs the full bisection loop
+/// for one edge, then computes the gradient at the zero-crossing position.
+/// This replaces 10 bisection dispatches + 1 gradient dispatch with a single dispatch.
+///
+/// Input:  starts[i*3..], ends[i*3..] = edge endpoint positions
+///         startValues[i], endValues[i] = SDF at endpoints (sign must differ)
+/// Output: outPositions[i*3..] = zero-crossing position
+///         outGradients[i*3..] = unnormalized gradient at zero-crossing
+__kernel void hermite_bisect_and_gradient(
+    __global const float* starts,       // 3 floats per edge
+    __global const float* ends,         // 3 floats per edge
+    __global const float* startValues,  // 1 float per edge
+    __global const float* endValues,    // 1 float per edge
+    __global float* outPositions,       // 3 floats per edge (output)
+    __global float* outGradients,       // 3 floats per edge (output)
+    const uint edgeCount,
+    const float isoValue,
+    const float epsilon
+    , PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= edgeCount)
+    {
+        return;
+    }
+
+    float3 lo = vload3(id, starts);
+    float3 hi = vload3(id, ends);
+    float vLo = startValues[id];
+    float vHi = endValues[id];
+
+    float const TOLERANCE = 1e-5f;
+
+    // Quick convergence: endpoint already at surface
+    if (fabs(vLo) <= TOLERANCE)
+    {
+        float3 grad = (float3)(0.0f);
+        vstore3(lo, id, outPositions);
+        vstore3(grad, id, outGradients);
+        return;
+    }
+    if (fabs(vHi) <= TOLERANCE)
+    {
+        float3 grad = (float3)(0.0f);
+        vstore3(hi, id, outPositions);
+        vstore3(grad, id, outGradients);
+        return;
+    }
+
+    // 10 bisection iterations
+    for (uint iter = 0; iter < 10; ++iter)
+    {
+        float3 mid = (lo + hi) * 0.5f;
+        float vMid = model(mid, PASS_PAYLOAD_ARGS).w - isoValue;
+
+        if (fabs(vMid) < TOLERANCE)
+        {
+            lo = mid;
+            hi = mid;
+            break;
+        }
+
+        if (vMid * vLo < 0.0f)
+        {
+            hi = mid;
+            vHi = vMid;
+        }
+        else
+        {
+            lo = mid;
+            vLo = vMid;
+        }
+    }
+
+    float3 pos = (lo + hi) * 0.5f;
+    vstore3(pos, id, outPositions);
+
+    // Central-difference gradient (unnormalized)
+    float h = epsilon;
+    float h2 = 2.0f * h;
+    float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+              - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+    vstore3((float3)(gx, gy, gz), id, outGradients);
+}
+
+/// Fused Newton projection kernel: each work item iteratively projects a point onto the
+/// surface using Newton steps (SDF / |grad|² * grad), then outputs the final position
+/// and unnormalized gradient (for normals). Replaces up to 17 dispatches with 1.
+///
+/// Input:  positions[i*3..] = initial position (e.g. cell center)
+///         bboxMins[i*3..], bboxMaxs[i*3..] = clamping bounds
+/// Output: outPositions[i*3..] = projected position on surface
+///         outGradients[i*3..] = unnormalized gradient at final position
+__kernel void newton_project_to_surface(
+    __global float* positions,       // 3 floats per point (input, overwritten)
+    __global const float* bboxMins,  // 3 floats per point
+    __global const float* bboxMaxs,  // 3 floats per point
+    __global float* outGradients,    // 3 floats per point (output)
+    const uint pointCount,
+    const float isoValue,
+    const float epsilon
+    , PAYLOAD_ARGS)
+{
+    uint const id = get_global_id(0);
+    if (id >= pointCount)
+    {
+        return;
+    }
+
+    float3 pos = vload3(id, positions);
+    float3 bMin = vload3(id, bboxMins);
+    float3 bMax = vload3(id, bboxMaxs);
+
+    float const TOLERANCE = 1e-5f;
+    float const h = epsilon;
+    float const h2 = 2.0f * h;
+
+    // Up to 16 Newton iterations
+    for (uint iter = 0; iter < 16; ++iter)
+    {
+        float value = model(pos, PASS_PAYLOAD_ARGS).w - isoValue;
+        if (fabs(value) < TOLERANCE)
+        {
+            break;
+        }
+
+        // Central-difference gradient
+        float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+        float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+        float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+                   - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+        float g2 = gx * gx + gy * gy + gz * gz;
+        if (g2 < 1e-20f)
+        {
+            break;
+        }
+
+        float step = value / g2;
+        pos -= step * (float3)(gx, gy, gz);
+
+        // Clamp to bounding box
+        pos = clamp(pos, bMin, bMax);
+    }
+
+    vstore3(pos, id, positions);
+
+    // Final gradient for normal computation
+    float gx = (model(pos + (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(h, 0.0f, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gy = (model(pos + (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(0.0f, h, 0.0f), PASS_PAYLOAD_ARGS).w) / h2;
+    float gz = (model(pos + (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w
+               - model(pos - (float3)(0.0f, 0.0f, h), PASS_PAYLOAD_ARGS).w) / h2;
+
+    vstore3((float3)(gx, gy, gz), id, outGradients);
 }
 

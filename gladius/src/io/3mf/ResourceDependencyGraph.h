@@ -6,6 +6,7 @@
 #include <lib3mf_abi.hpp>
 #include <lib3mf_implicit.hpp>
 #include <memory>
+#include <set>
 #include <vector> // Added for std::vector
 
 namespace gladius::io
@@ -66,6 +67,16 @@ namespace gladius::io
          */
         [[nodiscard]] std::vector<Lib3MF::PResource>
         getAllRequiredResources(Lib3MF::PResource resource) const;
+
+        /**
+         * @brief Get all resource IDs reachable from build items.
+         *
+         * Includes each build item's root object resource and all transitive
+         * dependencies from the resource graph. Useful for lazily loading only
+         * resources that can affect the first rendered frame.
+         * @return Set of lib3mf resource IDs referenced by build items.
+         */
+        [[nodiscard]] std::set<Lib3MF_uint32> getAllRequiredResourceIdsForBuildItems() const;
 
         /**
          * @brief Get all 3MF build items that reference the specified resource.

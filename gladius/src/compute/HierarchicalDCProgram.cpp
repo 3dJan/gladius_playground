@@ -12,13 +12,13 @@ namespace gladius
 {
 
 #define PAYLOAD_ARGUMENTS                                                                          \
-    m_resoures->getBuildArea(), primitives.primitives.getBuffer(),                                 \
+    m_resources->getBuildArea(), primitives.primitives.getBuffer(),                                 \
       static_cast<cl_uint>(primitives.primitives.getSize()), primitives.data.getBuffer(),          \
-      static_cast<cl_uint>(primitives.data.getSize()), m_resoures->getRenderingSettings(),         \
-      m_resoures->getPrecompSdfBuffer().getBuffer(), m_resoures->getParameterBuffer().getBuffer(), \
-      m_resoures->getCommandBuffer().getBuffer(),                                                  \
-      static_cast<cl_int>(m_resoures->getCommandBuffer().getData().size()),                        \
-      m_resoures->getPreCompSdfBBox()
+      static_cast<cl_uint>(primitives.data.getSize()), m_resources->getRenderingSettings(),         \
+      m_resources->getPrecompSdfBuffer().getBuffer(), m_resources->getParameterBuffer().getBuffer(), \
+      m_resources->getCommandBuffer().getBuffer(),                                                  \
+      static_cast<cl_int>(m_resources->getCommandBuffer().getData().size()),                        \
+      m_resources->getPreCompSdfBBox()
     HierarchicalDCProgram::HierarchicalDCProgram(SharedComputeContext context,
                                                  SharedResources const & resources)
         : ProgramBase(std::move(context), resources)

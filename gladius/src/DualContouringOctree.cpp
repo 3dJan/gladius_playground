@@ -157,7 +157,13 @@ namespace gladius::dual_contouring
         m_grid.width = std::max<size_t>(sdfBuffer.getWidth(), 1U);
         m_grid.height = std::max<size_t>(sdfBuffer.getHeight(), 1U);
         m_grid.depth = std::max<size_t>(sdfBuffer.getDepth(), 1U);
-        m_grid.values = sdfBuffer.getData();
+        auto const & raw = sdfBuffer.getData();
+        m_grid.values.clear();
+        m_grid.values.reserve(raw.size());
+        for (auto const & sample : raw)
+        {
+            m_grid.values.push_back(sample.s[3]);
+        }
         auto const & sdfBounds = resources->getPreCompSdfBBox();
         m_grid.min = Eigen::Vector3f{sdfBounds.min.x, sdfBounds.min.y, sdfBounds.min.z};
         m_grid.max = Eigen::Vector3f{sdfBounds.max.x, sdfBounds.max.y, sdfBounds.max.z};

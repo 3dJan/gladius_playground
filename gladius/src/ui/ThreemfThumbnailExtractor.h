@@ -7,10 +7,44 @@
 #include <filesystem>
 #include <lib3mf_implicit.hpp>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace gladius::ui
 {
+    /**
+     * @brief Enumeration for thumbnail loading states (async loading support)
+     */
+    enum class ThumbnailLoadState
+    {
+        NotStarted,     ///< Load not yet initiated
+        Loading,        ///< Background load in progress
+        DecodedPending, ///< Decoded pixels ready, waiting for texture creation on main thread
+        Ready,          ///< Texture created, ready to display
+        Failed          ///< Load failed (show placeholder)
+    };
+
+    /**
+     * @brief Result of a background thumbnail load operation
+     */
+    struct ThumbnailLoadResult
+    {
+        bool success = false;                       ///< Whether extraction succeeded
+        std::vector<unsigned char> decodedPixels;   ///< Decoded RGBA pixel data
+        unsigned int width = 0;                     ///< Image width
+        unsigned int height = 0;                    ///< Image height
+        std::uintmax_t fileSize = 0;                ///< File size in bytes
+        std::vector<std::pair<std::string, std::string>> metadata; ///< Extracted metadata key-value pairs
+        std::string errorMessage;                   ///< Error description if failed
+
+        /// @brief Library description from gladius:library-description metadata
+        std::string description;
+        /// @brief Display names of importable functions from gladius:library-functions metadata
+        std::vector<std::string> libraryFunctionNames;
+        /// @brief Whether gladius library metadata was present in this file
+        bool hasLibraryMetadata = false;
+    };
+
     /**
      * @brief Class for extracting and handling thumbnails from 3MF files
      */
@@ -75,13 +109,23 @@ namespace gladius::ui
             std::filesystem::path filePath;           ///< Path to the 3MF file
             std::string fileName;                     ///< Name of the file (without extension)
             std::vector<unsigned char> thumbnailData; ///< Raw PNG data
+            std::vector<unsigned char> decodedPixels; ///< Decoded RGBA pixels (for async loading)
             bool hasThumbnail = false;                ///< Whether the file has a thumbnail
             bool thumbnailLoaded = false;             ///< Whether the thumbnail has been loaded
+            bool textureCreated = false;              ///< Whether the GL texture has been created
             GLuint thumbnailTextureId = 0;            ///< OpenGL texture ID
             unsigned int thumbnailWidth = 0;          ///< Width of the thumbnail
             unsigned int thumbnailHeight = 0;         ///< Height of the thumbnail
             std::time_t timestamp = 0;                ///< Last modified timestamp
             ThreemfFileInfo fileInfo;                 ///< Additional file metadata
+            ThumbnailLoadState loadState = ThumbnailLoadState::NotStarted; ///< Current loading state
+
+            /// @brief Library description from gladius:library-description metadata
+            std::string description;
+            /// @brief Display names of importable functions from gladius:library-functions metadata
+            std::vector<std::string> libraryFunctionNames;
+            /// @brief Whether gladius library metadata was present in this file
+            bool hasLibraryMetadata = false;
         };
 
         /**
@@ -134,6 +178,39 @@ namespace gladius::ui
          */
         ThumbnailInfo createThumbnailInfo(const std::filesystem::path & filePath,
                                           std::time_t timestamp = 0);
+
+        /**
+         * @brief Extract thumbnail PNG data without creating a texture (thread-safe)
+         *
+         * This method creates its own lib3mf wrapper instance, making it safe to call
+         * from a background thread. Use this for async thumbnail loading.
+         *
+         * @param filePath Path to the 3MF file
+         * @return ThumbnailLoadResult Result containing decoded pixels or error
+         */
+        [[nodiscard]] static ThumbnailLoadResult extractThumbnailDataOnly(std::filesystem::path const & filePath);
+
+        /**
+         * @brief Decode PNG data to RGBA pixels (thread-safe, static)
+         *
+         * @param pngData Raw PNG data
+         * @param outWidth Output: image width
+         * @param outHeight Output: image height
+         * @return std::vector<unsigned char> Decoded RGBA pixel data (empty on error)
+         */
+        static std::vector<unsigned char> decodePngToPixels(const std::vector<unsigned char> & pngData,
+                                                            unsigned int & outWidth,
+                                                            unsigned int & outHeight);
+
+        /**
+         * @brief Create OpenGL texture from pre-decoded RGBA pixels
+         *
+         * @warning This method MUST be called on the main thread where the OpenGL
+         *          context is current. NOT thread-safe.
+         *
+         * @param info Thumbnail info with decodedPixels populated
+         */
+        void createTextureFromPixels(ThumbnailInfo & info);
 
       private:
         events::SharedLogger m_logger; ///< Logger for error reporting

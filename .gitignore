@@ -47,3 +47,21 @@ gladius/.serena/*
 gladius/debug.cl
 Testing/Temporary/*
 gladius/test_output.log
+
+# Cross-platform editor and temp files
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+
+# Common logs and local environment files
+*.log
+.env*
+
+# Common native build outputs not listed above
+bin/
+obj/
+*.a
+*.dll
+*.exe

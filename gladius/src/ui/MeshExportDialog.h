@@ -4,10 +4,12 @@
 #include "FileDialogService.h"
 #include "io/3mf/FaceColorSampler.h"
 #include "ColorToThicknessDialog.h"
+#include "io/CancellationToken.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #include "io/MeshExporter3mf.h"
+#include "io/ShellExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 
 #include <cstddef>
@@ -78,17 +80,21 @@ namespace gladius::ui
         void resetState();
         void resetExportState();
 
+        template <typename Exporter>
+        void applyColorSettings(Exporter& exporter, bool exportColors);
+
         std::filesystem::path m_targetFile;
         vdb::MeshExporter m_layeredExporter;
         vdb::MeshExporter3mf m_layeredExporter3mf;
         io::DualContouringStlExporter m_dualExporter;
         io::ManifoldDualContouringStlExporter m_manifoldExporter;
+        io::ShellExporter m_shellExporter;
         io::IExporter * m_activeExporter = nullptr;
         ComputeCore * m_computeCore = nullptr;
         Document const * m_document = nullptr;
         MeshOutputFormat m_outputFormat = MeshOutputFormat::ThreeMF;
         io::SurfaceExtractionMethod m_selectedMethod =
-          io::SurfaceExtractionMethod::LayeredMarchingCubes;
+          io::SurfaceExtractionMethod::ManifoldDualContouring;
         std::size_t m_marchingCubesQuality = 1U;
         io::DualContouringQuality m_dualQualityPreset = io::DualContouringQuality::Balanced;
         bool m_dualForceUniform = false;
@@ -97,24 +103,18 @@ namespace gladius::ui
         bool m_manifoldEnableGpu = true;
         bool m_manifoldAllowCpuFallback = true;
         bool m_manifoldEnableCaching = true;
-        float m_manifoldIsoValue = 0.0F;
-        std::size_t m_manifoldMaxDepth = 9U;  // Sync with UltraFine preset
-        // Minimum feature size and chunking
+        // Minimum feature size
         float m_manifoldMinFeatureSize = 0.0F;
-        bool m_manifoldEnableChunking = true;
-        // Hierarchical octree (watertight mesh generation)
+        // Hierarchical octree (watertight mesh generation) — always enabled
         bool m_manifoldEnableHierarchicalOctree = true;
-        // Sharp feature post-processing
+        // Sharp feature post-processing — disabled (QEF handles sharp features)
         bool m_manifoldEnableSharpFeaturePostProcess = false;
         float m_manifoldSharpFeatureAngleThreshold = 0.5F;
         std::size_t m_manifoldSubdivisionIterations = 1U;
         bool m_manifoldProjectToSurface = true;
-        // Mesh simplification
-        bool m_manifoldEnableSimplification = false;
-        int m_manifoldSimplificationMethod = 0;  ///< 0=None, 1=QemSdfAware
-        float m_manifoldSimplificationMaxSdfError = 0.01F;
-        float m_manifoldSimplificationSdfWeight = 0.5F;
-        float m_manifoldSimplificationNormalWeight = 0.3F;
+        // Mesh simplification (fast geometric QEM)
+        bool m_manifoldEnableSimplification = true;
+        float m_manifoldSimplificationTolerance = 0.05F;  ///< Tolerance in mm (world units)
         bool m_exportInProgress = false;
         std::string m_errorMessage;
         
@@ -135,6 +135,13 @@ namespace gladius::ui
         io::ColorMode m_colorMode = io::ColorMode::PerFace; ///< Color export mode
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
+        bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
+
+        // Compatibility tuning options
+        io::QuantizationMode m_quantizationMode = io::QuantizationMode::Adaptive;
+        bool m_overridePaletteSize = false;  ///< Whether user has overridden palette size
+        int m_maxPaletteSize = 16;           ///< Maximum palette colors (when overridden)
+        io::TargetApplication m_targetApplication = io::TargetApplication::None;
 
         ColorToThicknessDialog m_colorToThicknessDialog;
 
@@ -148,5 +155,8 @@ namespace gladius::ui
         std::future<PaletteDeriveResult> m_paletteFuture;
         std::atomic<bool> m_paletteDeriveInProgress{false};
         bool m_paletteHandlerBound{false};
+
+        // Cooperative cancellation token for async export
+        io::CancellationToken m_cancellationToken;
     };
 } // namespace gladius::ui

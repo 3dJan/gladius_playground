@@ -6,6 +6,7 @@
 #include <GLImageBuffer.h>
 #include <ImageRGBA.h>
 #include <kernel/types.h>
+#include <MeshVoxelGridManager.h>
 #include <ModelState.h>
 #include <RenderProgram.h>
 #include <ResourceContext.h>
@@ -20,6 +21,8 @@
 #include <compute/ProgramManager.h>
 
 #include <array>
+#include <atomic>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -37,6 +40,13 @@ namespace gladius
     using SharedSlicerProgram = std::shared_ptr<SlicerProgram>;
     using SharedRenderProgram = std::shared_ptr<RenderProgram>;
     using SharedPrimitives = std::shared_ptr<Primitives>;
+
+    enum class LowResPreviewRenderStatus
+    {
+        Rendered,
+        Skipped,
+        Failed
+    };
 
     /**
      * @brief Wrapper class for ContourExtractor to maintain backward compatibility
@@ -424,7 +434,109 @@ namespace gladius
                                                   ImageRGBA & targetImage,
                                                   cl::Event * completionEvent = nullptr);
 
-        void renderLowResPreview() const;
+        /// @brief Render the current low-resolution preview when the precomputed SDF is ready.
+        /// @return Rendered when a preview frame was produced, Skipped when the SDF is not ready, or Failed on an execution/precondition error.
+        [[nodiscard]] LowResPreviewRenderStatus renderLowResPreview() const;
+
+        /**
+         * @brief Starts asynchronous low-resolution preview render (non-blocking).
+         * 
+         * Unlike renderLowResPreview(), this method does not call glFinish() and returns
+         * an OpenCL event for async completion tracking. The caller is responsible for
+         * synchronization and texture binding.
+         * 
+         * @param queue OpenCL command queue to use for async execution
+         * @param targetImage Pure CL image buffer to render into (no GL texture)
+         * @return OpenCL event that signals when rendering is complete
+         * 
+         * @thread Any thread with compute context access
+         * @note Does not call bind() on result image - caller must handle GL texture update
+         */
+        [[nodiscard]] cl::Event renderLowResPreviewAsync(cl::CommandQueue const & queue,
+                                                         ImageRGBA & targetImage) const;
+
+        /**
+         * @brief Renders low-res preview and outputs distance traveled to distance init buffer.
+         *
+         * This variant writes the ray-marched distance to the internal distance init buffer
+         * which can be used to accelerate subsequent HQ renders via distance initialization.
+         *
+         * @param queue OpenCL command queue to use for async execution
+         * @param targetImage Pure CL image buffer to render into
+         * @return OpenCL event that signals when rendering is complete
+         *
+         * @thread Any thread with compute context access
+         * @see renderSceneWithDistanceInit for using the distance buffer
+         */
+        [[nodiscard]] cl::Event renderLowResPreviewWithDistanceOutputAsync(
+            cl::CommandQueue const & queue,
+            ImageRGBA & targetImage) const;
+
+        /**
+         * @brief Renders scene using distance initialization from a previous low-res pass.
+         *
+         * Uses the internal distance init buffer to skip early ray marching steps,
+         * improving HQ render performance by 20-30%.
+         *
+         * @param commandQueue OpenCL command queue used for dispatch
+         * @param startLine Starting line for rendering
+         * @param endLine Ending line for rendering
+         * @param targetImage Pure CL image buffer to render into
+         * @param completionEvent Optional event for async completion tracking
+         * @return true if rendering succeeded, false otherwise
+         *
+         * @pre Distance init buffer must be populated via renderLowResPreviewWithDistanceOutputAsync
+         * @thread Any thread with compute context access
+         */
+        [[nodiscard]] bool renderSceneWithDistanceInit(
+            cl::CommandQueue const & commandQueue,
+            size_t startLine,
+            size_t endLine,
+            ImageRGBA & targetImage,
+            cl::Event * completionEvent = nullptr);
+
+        /**
+         * @brief Returns true if the distance init buffer is valid and can be used for HQ rendering.
+         * @return true if distance buffer has been populated and matches current parameters
+         */
+        [[nodiscard]] bool isDistanceInitBufferValid() const;
+
+        /**
+         * @brief Invalidates the distance init buffer, forcing next HQ render to use standard path.
+         */
+        void invalidateDistanceInitBuffer();
+
+        /**
+         * @brief Marks the distance init buffer as valid after successful population.
+         * @note Call this after renderLowResPreviewWithDistanceOutputAsync completes
+         */
+        void setDistanceInitBufferValid();
+
+        /**
+         * @brief Render scene with metrics collection for performance analysis (T033/SC-002).
+         * 
+         * Renders the scene while collecting ray marching metrics (total rays, total steps,
+         * cache hits, non-converged rays). Use readMetricsBuffer() after completion to retrieve.
+         *
+         * @param commandQueue OpenCL command queue used for dispatch
+         * @param startLine Starting line for rendering
+         * @param endLine Ending line for rendering
+         * @param targetImage Pure CL image buffer to render into
+         * @param completionEvent Optional event for async completion tracking
+         * @return true if rendering succeeded, false otherwise
+         */
+        [[nodiscard]] bool renderSceneWithMetrics(
+            cl::CommandQueue const & commandQueue,
+            size_t startLine,
+            size_t endLine,
+            ImageRGBA & targetImage,
+            cl::Event * completionEvent = nullptr);
+
+        /// @brief Clear metrics buffer before starting a metrics collection pass
+        void clearMetricsBuffer();
+
+        /// @brief Read ray marching metrics after a renderSceneWithMetrics pass completes
+        [[nodiscard]] RayMarchMetrics readMetricsBuffer() const;
 
         bool precomputeSdfForWholeBuildPlatform();
         void precomputeSdfForBBox(const BoundingBox & boundingBox);
@@ -440,6 +552,11 @@ namespace gladius
         /// @return true if preparation succeeded, false otherwise
         bool prepareImageRendering();
         [[nodiscard]] SharedGLImageBuffer getResultImage() const;
+        
+        /// @brief Returns the low-resolution preview image buffer.
+        /// @return Shared pointer to the low-res preview image, may be null if not initialized.
+        [[nodiscard]] SharedGLImageBuffer getLowResPreviewImage() const;
+        
         [[nodiscard]] SharedContourExtractor getContour() const;
 
         [[nodiscard]] cl_float getSliceHeight() const;
@@ -448,6 +565,9 @@ namespace gladius
 
         [[nodiscard]] SharedSlicerProgram getSlicerProgram() const;
         [[nodiscard]] SharedRenderProgram getBestRenderProgram() const;
+        [[nodiscard]] std::optional<SharedRenderProgram> tryGetBestRenderProgram() const;
+        [[nodiscard]] RenderBackend getSelectedRenderBackend() const;
+        [[nodiscard]] std::optional<RenderBackend> tryGetSelectedRenderBackend() const;
         [[nodiscard]] SharedRenderProgram getPreviewRenderProgram() const;
         [[nodiscard]] SharedRenderProgram getOptimzedRenderProgram() const;
 
@@ -466,11 +586,24 @@ namespace gladius
 
         [[nodiscard]] bool isAnyCompilationInProgress() const;
 
+        /// Non-blocking check for compilation progress using atomic flags only.
+        /// Safe to call from any thread without risk of blocking on mutex.
+        [[nodiscard]] bool isAnyCompilationInProgressNonBlocking() const noexcept;
+
         bool updateBBox();
         void updateBBoxOrThrow();
 
         void refreshProgram(nodes::SharedAssembly assembly);
         void tryRefreshProgramProtected(nodes::SharedAssembly assembly);
+
+        /// Return whether the currently selected render program can produce frames.
+        /// Unlike isRendererReady(), this intentionally ignores broader model/SDF refresh state
+        /// so the UI can keep using the command-stream preview while background work continues.
+        [[nodiscard]] bool isRenderProgramReady() const;
+
+        /// Non-blocking variant of isRenderProgramReady(). Returns std::nullopt if background
+        /// loading/compilation currently owns the program-manager locks.
+        [[nodiscard]] std::optional<bool> tryIsRenderProgramReady() const;
 
         [[nodiscard]] bool isRendererReady() const;
 
@@ -491,12 +624,25 @@ namespace gladius
 
         void resetBoundingBox();
 
+        /// Mark the bounding box as stale (parameter changed) without clearing it.
+        /// The cached bbox will be reused with extra margin until recomputed.
+        void markBoundingBoxStale();
+
+        /// Check if the bounding box is stale (parameter changed since last bbox computation)
+        [[nodiscard]] bool isBoundingBoxStale() const;
+
+        /// Clear the stale flag and reset the bounding box so it will be fully recomputed
+        void recomputeStaleBoundingBox();
+
         BitmapLayer generateDownSkinMap(float z_mm, Vector2 pixelSize_mm);
         BitmapLayer generateUpSkinMap(float z_mm, Vector2 pixelSize_mm);
 
         void setComputeContext(std::shared_ptr<ComputeContext> context);
 
         bool requestContourUpdate(nodes::SliceParameter sliceParameter);
+
+        /// Invalidate cached contour height so the next requestContourUpdate triggers a recomputation.
+        void invalidateContourCache();
 
         bool isSlicingInProgress() const;
 
@@ -505,11 +651,19 @@ namespace gladius
         void invalidatePreCompSdf(std::string_view reason = {});
         void setSdfValid(bool valid);
         [[nodiscard]] bool isSdfValid() const;
+        [[nodiscard]] ApproximationMode getLastUsedApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedPreviewApproximation() const;
+        [[nodiscard]] ApproximationMode getLastUsedHQApproximation() const;
         [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
         [[nodiscard]] CodeGenerator getCodeGenerator() const;
 
         void setCodeGenerator(CodeGenerator generator);
+
+        void setOptimizedRenderCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isOptimizedRenderCompilationDeferred() const;
+        void setSlicerCompilationDeferred(bool deferred);
+        [[nodiscard]] bool isSlicerCompilationDeferred() const;
 
         [[nodiscard]] std::shared_ptr<ModelState> getMeshResourceState() const;
 
@@ -533,11 +687,38 @@ namespace gladius
         [[nodiscard]] ParameterSignature const & getCompiledParameterSignature() const;
 
         void setPreCompSdfSize(size_t size);
+        
+        /// Build voxel acceleration grids for spatial mesh resources
+        /// @param buildParams Vector of build parameters from ResourceManager::collectVoxelGridBuildParams()
+        /// @return Number of grids successfully built
+        size_t buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams);
+
+        /// Build Fast-Winding-Number aggregate buffers for spatial mesh resources.
+        /// This is a prerequisite for FWN rendering and sign-cache construction.
+        /// @param buildParams Vector of build parameters from ResourceManager::collectFwnAggregateBuildParams()
+        /// @return Number of aggregate buffers successfully built
+        size_t buildMeshFwnAggregates(std::vector<MeshFwnAggregateBuildParams> const & buildParams);
+
+        /// Queue bounded coarse FWN sign-cache build steps for spatial mesh resources.
+        /// The kernels and final ready-offset patch are queued without waiting;
+        /// until the ready patch executes, the render kernel sees offset 0 and
+        /// falls back to full FWN.
+        /// @param buildParams Vector of build parameters from ResourceManager::collectSignCacheBuildParams()
+        /// @return Number of sign-cache build steps successfully queued
+        size_t buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams);
 
         void adoptVertexOfMeshToSurface(VertexBuffer & vertices);
 
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;
+
+        /// @brief Check if SDF precomputation is currently in progress
+        /// @return True if SDF computation is running asynchronously
+        [[nodiscard]] bool isSdfComputationInProgress() const noexcept;
+
+        /// @brief Check if bounding box computation is currently in progress
+        /// @return True if bounding box calculation is running
+        [[nodiscard]] bool isBoundingBoxComputationInProgress() const noexcept;
 
         /// Get the program manager for direct access to specialized programs
         [[nodiscard]] ProgramManager & getProgramManager();
@@ -547,6 +728,7 @@ namespace gladius
         bool updateBoundingBoxFast();
                 [[nodiscard]] static bool isBoundingBoxMeaningful(BoundingBox const & box);
                 [[nodiscard]] std::optional<BoundingBox> computeBoundingBoxFromPrimitives() const;
+        [[nodiscard]] bool ensureSlicerProgramReady();
         void throwIfNoOpenGL() const;
         [[nodiscard]] events::Logger & getLogger() const;
 
@@ -563,11 +745,12 @@ namespace gladius
         void generateContours(nodes::SliceParameter sliceParameter);
         void generateContourInternal(nodes::SliceParameter const & sliceParameter);
         void generateContourMarchingSquare(nodes::SliceParameter const & sliceParameter);
+        void generateContourQuadtree(nodes::SliceParameter const & sliceParameter);
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
         SharedContourExtractor m_contour;
-        SharedGLImageBuffer m_resultImage;
-        SharedGLImageBuffer m_lowResPreviewImage;
+        mutable std::atomic<SharedGLImageBuffer> m_resultImage;
+        mutable std::atomic<SharedGLImageBuffer> m_lowResPreviewImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImageHighRes;
 
@@ -578,9 +761,10 @@ namespace gladius
         double layerThickness_mm = 0.05;
         cl_float m_sliceHeight_mm{0.0f};
 
-        cl_float m_lastContourSliceHeight_mm{0.0f};
+        std::atomic<cl_float> m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
+        std::atomic<bool> m_boundingBoxStale{false};
         bool m_isComputationTimeLoggingEnabled = false;
 
         RequiredCapabilities m_capabilities = RequiredCapabilities::OpenGLInterop;
@@ -588,15 +772,35 @@ namespace gladius
 
         std::shared_ptr<ModelState> m_meshResourceState;
 
-        std::future<void> m_sliceFuture;
+        mutable std::future<void> m_sliceFuture;
+        mutable std::mutex m_sliceFutureMutex;
         std::mutex m_contourExtractorMutex;
+        std::atomic_bool m_slicingInProgress{false};
 
-        bool m_precompSdfIsValid = false;
-        size_t m_preCompSdfSize = 256u;
+        std::atomic_bool m_precompSdfIsValid{false};
+        size_t m_preCompSdfSize = 128u;
 
         bool m_autoUpdateBoundingBox = true;
 
-        CodeGenerator m_codeGenerator = CodeGenerator::Code;
+        /// @brief Tracks whether SDF precomputation is currently running
+        std::atomic<bool> m_sdfComputationInProgress{false};
+
+        /// @brief Tracks whether bounding box computation is currently running
+        std::atomic<bool> m_boundingBoxComputationInProgress{false};
+
+        /// @brief Tracks whether the distance init buffer contains valid data
+        /// @note Invalidated on parameter changes, camera changes, or resolution changes
+        std::atomic_bool m_distanceInitBufferValid{false};
+
+        /// @brief Tracks last used approximation modes for UI status display only
+        /// @note Mutable because these are purely diagnostic and set during const render methods
+        /// @{
+        mutable ApproximationMode m_lastUsedApproximation = AM_FULL_MODEL;
+        mutable ApproximationMode m_lastUsedPreviewApproximation = AM_FULL_MODEL;
+        mutable ApproximationMode m_lastUsedHQApproximation = AM_FULL_MODEL;
+        /// @}
+
+        CodeGenerator m_codeGenerator = CodeGenerator::Automatic;
 
         SharedKernelReplacements m_kernelReplacements;
 

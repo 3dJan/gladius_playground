@@ -29,4 +29,11 @@ namespace gladius
         Automatic
     };
 
+    enum class RenderBackend
+    {
+        Unavailable,
+        CommandStream,
+        Optimized
+    };
+
 }

@@ -5,6 +5,7 @@
 
 #include "FunctionOperationsTool.h"
 #include "../../Application.h"
+#include "../../EventLogger.h"
 #include "../../Document.h"
 #include "../../ExpressionParser.h"
 #include "../../ExpressionToGraphConverter.h"
@@ -19,6 +20,7 @@
 #include "../FunctionGraphSerializer.h"
 #include <array>
 #include <filesystem>
+#include <fmt/format.h>
 #include <nlohmann/json.hpp>
 #include <queue>
 #include <set>
@@ -319,6 +321,7 @@ namespace gladius
                 try
                 {
                     document->update3mfModel();
+                    document->rebuildResourceDependencyGraph();
                 }
                 catch (...)
                 {
@@ -338,19 +341,9 @@ namespace gladius
                 // Get the resource ID from the created model (now synchronized to ModelResourceID)
                 uint32_t resourceId = model.getResourceId();
 
-                // Success!
-                m_lastErrorMessage = std::string("Function '") + name +
-                                     "' created successfully with expression '" +
-                                     transformedExpression + "' and arguments [";
-                for (size_t i = 0; i < arguments.size(); ++i)
-                {
-                    if (i > 0)
-                        m_lastErrorMessage += ", ";
-                    m_lastErrorMessage +=
-                      arguments[i].name + ":" +
-                      (arguments[i].type == ArgumentType::Vector ? "vec3" : "float");
-                }
-                m_lastErrorMessage += "]";
+                // Success — clear the error field so callers don't mistake a stale message
+                // from a prior failure as belonging to this call.
+                m_lastErrorMessage.clear();
                 return {true, resourceId};
             }
             catch (const std::exception & e)
@@ -374,6 +367,139 @@ namespace gladius
 
                 m_lastErrorMessage =
                   "Exception during expression validation: " + std::string(e.what());
+                return {false, 0};
+            }
+        }
+
+        std::pair<bool, uint32_t> FunctionOperationsTool::createFunctionFromSnippet(
+          const std::string & name,
+          const std::string & snippet,
+          const std::string & outputType,
+          const std::vector<FunctionArgument> & arguments,
+          const std::string & outputName)
+        {
+            if (!validateApplication())
+            {
+                return {false, 0};
+            }
+
+            if (name.empty())
+            {
+                m_lastErrorMessage = "Function name cannot be empty";
+                return {false, 0};
+            }
+
+            if (snippet.empty())
+            {
+                m_lastErrorMessage = "Snippet cannot be empty";
+                return {false, 0};
+            }
+
+            if (outputType != "float" && outputType != "vec3")
+            {
+                m_lastErrorMessage =
+                  "Invalid output type '" + outputType + "'. Must be 'float' or 'vec3'";
+                return {false, 0};
+            }
+
+            // Validate argument names against reserved keywords
+            for (auto const & arg : arguments)
+            {
+                if (ArgumentUtils::isReservedKeyword(arg.name))
+                {
+                    m_lastErrorMessage =
+                      "Invalid argument name '" + arg.name + "': reserved keyword";
+                    return {false, 0};
+                }
+            }
+
+            try
+            {
+                auto document = m_application->getCurrentDocument();
+                if (!document)
+                {
+                    m_lastErrorMessage =
+                      "No active document available. Please create or open a document first.";
+                    return {false, 0};
+                }
+
+                ExpressionParser parser;
+
+                FunctionOutput output;
+                output.name = outputName.empty() ? "shape" : outputName;
+                output.type =
+                  (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                    ? ArgumentType::Vector
+                    : ArgumentType::Scalar;
+
+                auto assembly = document->getAssembly();
+
+                auto & model = document->createNewFunction();
+                uint32_t const newFunctionId = model.getResourceId();
+                model.setDisplayName(name);
+
+                uint32_t resultNodeId = 0;
+                try
+                {
+                    resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                      snippet, model, parser, arguments, output, assembly.get());
+                }
+                catch (const std::exception & e)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      std::string("Exception while converting snippet to node graph: ") + e.what() +
+                      ". The partial function was removed.";
+                    return {false, 0};
+                }
+
+                if (resultNodeId == 0)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      "Failed to convert snippet to node graph. The partial function was removed.";
+                    return {false, 0};
+                }
+
+                try
+                {
+                    document->update3mfModel();
+                    document->rebuildResourceDependencyGraph();
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        document->deleteFunction(newFunctionId);
+                    }
+                    catch (...)
+                    {
+                    }
+                    m_lastErrorMessage =
+                      "Failed to persist function to 3MF model. The partial function was removed.";
+                    return {false, 0};
+                }
+
+                uint32_t resourceId = model.getResourceId();
+                m_lastErrorMessage.clear(); // Clear on success; meaningful only on failure.
+                return {true, resourceId};
+            }
+            catch (const std::exception & e)
+            {
+                m_lastErrorMessage =
+                  "Exception during snippet conversion: " + std::string(e.what());
                 return {false, 0};
             }
         }
@@ -675,347 +801,6 @@ namespace gladius
             return functions;
         }
 
-        nlohmann::json FunctionOperationsTool::getFunctionGraph(uint32_t functionId) const
-        {
-            nlohmann::json out;
-            out["requested_function_id"] = functionId;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                // Ensure parameters and graph are up-to-date
-                const_cast<nodes::Model &>(*model).updateGraphAndOrderIfNeeded();
-
-                auto j = FunctionGraphSerializer::serializeMinimal(*model);
-                j["success"] = true;
-                return j;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] =
-                  std::string("Exception while serializing function graph: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::getNodeInfo(uint32_t functionId,
-                                                           uint32_t nodeId) const
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-            out["requested_node_id"] = nodeId;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                auto nodeOpt = model->getNode(nodeId);
-                if (!nodeOpt.has_value() || nodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Node not found for id";
-                    return out;
-                }
-
-                json jn;
-                auto * node = nodeOpt.value();
-                jn["id"] = node->getId();
-                jn["order"] = node->getOrder();
-                jn["name"] = node->name();
-                jn["unique_name"] = node->getUniqueName();
-                jn["display_name"] = node->getDisplayName();
-                jn["category"] = static_cast<int>(node->getCategory());
-                auto pos = const_cast<nodes::NodeBase *>(node)->screenPos();
-                jn["position"] = {pos.x, pos.y};
-
-                // Parameters (inputs) - simplified for MCP
-                json jparams = json::array();
-                for (auto const & [pname, param] : node->constParameter())
-                {
-                    jparams.push_back(createSimplifiedInputInfo(param, pname));
-                }
-                jn["parameters"] = jparams;
-
-                // Outputs (ports) - simplified for MCP
-                json jouts = json::array();
-                for (auto const & [oname, port] : node->outputs())
-                {
-                    jouts.push_back(createSimplifiedOutputInfo(port, oname));
-                }
-                jn["outputs"] = jouts;
-
-                out["node"] = jn;
-                out["success"] = true;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while getting node info: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::createNode(uint32_t functionId,
-                                                          const std::string & nodeType,
-                                                          const std::string & displayName,
-                                                          uint32_t /*nodeId*/)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-            out["requested_node_type"] = nodeType;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                // Create the node via factory
-                auto newNode = nodes::NodeFactory::createNode(nodeType);
-                if (!newNode)
-                {
-                    out["success"] = false;
-                    std::string errorMsg =
-                      std::string("Unknown node type: ") + nodeType + ". Valid node types are: ";
-                    auto validTypes = nodes::NodeFactory::getValidNodeTypes();
-                    for (size_t i = 0; i < validTypes.size(); ++i)
-                    {
-                        if (i > 0)
-                            errorMsg += ", ";
-                        errorMsg += validTypes[i];
-                    }
-                    out["error"] = errorMsg;
-                    out["valid_node_types"] = validTypes;
-                    return out;
-                }
-
-                if (!displayName.empty())
-                {
-                    newNode->setDisplayName(displayName);
-                }
-
-                // Insert into the model (assigns a new id and registers ports/params)
-                auto * created = model->insert(std::move(newNode));
-                model->updateGraphAndOrderIfNeeded();
-
-                json jn;
-                jn["id"] = created->getId();
-                jn["unique_name"] = created->getUniqueName();
-                jn["display_name"] = created->getDisplayName();
-                jn["category"] = static_cast<int>(created->getCategory());
-                out["node"] = jn;
-                out["success"] = true;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while creating node: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::setFunctionGraph(uint32_t functionId,
-                                                                const nlohmann::json & graph,
-                                                                bool replace)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-
-            if (!validateApplication())
-            {
-                return json{{"success", false}, {"error", "No application instance available"}};
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                return json{{"success", false}, {"error", "No active document available"}};
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    return json{{"success", false}, {"error", "No assembly available"}};
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    return json{{"success", false}, {"error", "Function (model) not found for id"}};
-                }
-
-                // Delegate to deserializer
-                json result = mcp::FunctionGraphDeserializer::applyToModel(*model, graph, replace);
-                // Preserve request context
-                result["requested_function_id"] = functionId;
-                return result;
-            }
-            catch (const std::exception & e)
-            {
-                return json{
-                  {"success", false},
-                  {"error", std::string("Exception while setting function graph: ") + e.what()}};
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::deleteNode(uint32_t functionId, uint32_t nodeId)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-            out["requested_node_id"] = nodeId;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                // Ensure node exists prior to removal
-                auto nodeOpt = model->getNode(nodeId);
-                if (!nodeOpt.has_value() || nodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Node not found for id";
-                    return out;
-                }
-
-                model->remove(nodeId);
-                model->updateGraphAndOrderIfNeeded();
-                out["success"] = true;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while deleting node: ") + e.what();
-                return out;
-            }
-        }
 
         nlohmann::json FunctionOperationsTool::setParameterValue(uint32_t functionId,
                                                                  uint32_t nodeId,
@@ -1070,6 +855,35 @@ namespace gladius
                 }
 
                 auto * node = nodeOpt.value();
+
+                // Virtual "matrix" parameter for ConstantMatrix batch-set.
+                // Delegates to FunctionGraphDeserializer::applyNodeValues to avoid
+                // duplicating the matrix distribution logic.
+                if (parameterName == "matrix" && node->name() == "ConstantMatrix")
+                {
+                    bool const isFlat16 = value.is_array() && value.size() == 16;
+                    bool const is4x4 = value.is_array() && value.size() == 4 && value[0].is_array();
+                    if (!isFlat16 && !is4x4)
+                    {
+                        out["success"] = false;
+                        out["error"] = "Expected flat 16-element array or 4x4 nested array for matrix";
+                        return out;
+                    }
+                    try
+                    {
+                        mcp::FunctionGraphDeserializer::applyNodeValues(*node, {{"matrix", value}});
+                        out["success"] = true;
+                        out["message"] = "Set all 16 matrix elements (m00..m33)";
+                        return out;
+                    }
+                    catch (std::exception const & e)
+                    {
+                        out["success"] = false;
+                        out["error"] = std::string("Failed to set matrix value: ") + e.what();
+                        return out;
+                    }
+                }
+
                 auto * param = node->getParameter(parameterName);
                 if (!param)
                 {
@@ -1209,695 +1023,6 @@ namespace gladius
             }
         }
 
-        nlohmann::json FunctionOperationsTool::createLink(uint32_t functionId,
-                                                          uint32_t sourceNodeId,
-                                                          const std::string & sourcePortName,
-                                                          uint32_t targetNodeId,
-                                                          const std::string & targetParameterName)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-            out["source_node_id"] = sourceNodeId;
-            out["source_port_name"] = sourcePortName;
-            out["target_node_id"] = targetNodeId;
-            out["target_parameter_name"] = targetParameterName;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                auto srcNodeOpt = model->getNode(sourceNodeId);
-                auto dstNodeOpt = model->getNode(targetNodeId);
-                if (!srcNodeOpt.has_value() || srcNodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Source node not found";
-                    return out;
-                }
-                if (!dstNodeOpt.has_value() || dstNodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Target node not found";
-
-                    // Provide information about all nodes with unconnected inputs
-                    json nodesWithUnconnectedInputs = json::array();
-                    for (auto const & [nodeId, nodePtr] : *model)
-                    {
-                        if (nodePtr)
-                        {
-                            json nodeInfo;
-                            nodeInfo["id"] = nodePtr->getId();
-                            nodeInfo["name"] = nodePtr->name();
-                            nodeInfo["display_name"] = nodePtr->getDisplayName();
-
-                            json unconnectedParams = json::array();
-                            for (auto const & [pname, parameter] : nodePtr->constParameter())
-                            {
-                                if (!parameter.getConstSource().has_value())
-                                {
-                                    unconnectedParams.push_back(
-                                      createSimplifiedInputInfo(parameter, pname));
-                                }
-                            }
-
-                            if (!unconnectedParams.empty())
-                            {
-                                nodeInfo["unconnected_parameters"] = unconnectedParams;
-                                nodesWithUnconnectedInputs.push_back(nodeInfo);
-                            }
-                        }
-                    }
-                    out["nodes_with_unconnected_inputs"] = nodesWithUnconnectedInputs;
-
-                    return out;
-                }
-
-                auto * srcNode = srcNodeOpt.value();
-                auto * dstNode = dstNodeOpt.value();
-                auto * port = srcNode->findOutputPort(sourcePortName);
-                if (!port)
-                {
-                    out["success"] = false;
-                    out["error"] = "Source port not found on source node";
-                    return out;
-                }
-
-                auto * param = dstNode->getParameter(targetParameterName);
-                if (!param)
-                {
-                    out["success"] = false;
-                    out["error"] = "Target parameter not found on target node";
-
-                    // Provide detailed information about the target node's available parameters -
-                    // simplified for MCP
-                    json targetNodeParams = json::array();
-                    for (auto const & [pname, parameter] : dstNode->constParameter())
-                    {
-                        targetNodeParams.push_back(createSimplifiedInputInfo(parameter, pname));
-                    }
-                    out["target_node_available_parameters"] = targetNodeParams;
-
-                    return out;
-                }
-
-                bool ok = model->addLink(port->getId(), param->getId());
-                if (!ok)
-                {
-                    out["success"] = false;
-                    out["error"] = "Link not valid or failed to add";
-                    return out;
-                }
-                model->updateGraphAndOrderIfNeeded();
-                out["success"] = true;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while creating link: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::deleteLink(uint32_t functionId,
-                                                          uint32_t targetNodeId,
-                                                          const std::string & targetParameterName)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["requested_function_id"] = functionId;
-            out["target_node_id"] = targetNodeId;
-            out["target_parameter_name"] = targetParameterName;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                auto dstNodeOpt = model->getNode(targetNodeId);
-                if (!dstNodeOpt.has_value() || dstNodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Target node not found";
-                    return out;
-                }
-                auto * dstNode = dstNodeOpt.value();
-                auto * param = dstNode->getParameter(targetParameterName);
-                if (!param)
-                {
-                    out["success"] = false;
-                    out["error"] = "Target parameter not found";
-                    return out;
-                }
-
-                auto const & srcOpt = param->getConstSource();
-                if (!srcOpt.has_value())
-                {
-                    out["success"] = false;
-                    out["error"] = "Parameter has no source link";
-                    return out;
-                }
-
-                bool ok = model->removeLink(srcOpt->portId, param->getId());
-                if (!ok)
-                {
-                    out["success"] = false;
-                    out["error"] = "Failed to remove link";
-                    return out;
-                }
-                model->updateGraphAndOrderIfNeeded();
-                out["success"] = true;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while deleting link: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json
-        FunctionOperationsTool::createFunctionCallNode(uint32_t targetFunctionId,
-                                                       uint32_t referencedFunctionId,
-                                                       const std::string & displayName)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["target_function_id"] = targetFunctionId;
-            out["referenced_function_id"] = referencedFunctionId;
-            out["display_name"] = displayName;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                // Find the target model (where we're adding the function call)
-                auto targetModel = assembly->findModel(targetFunctionId);
-                if (!targetModel)
-                {
-                    out["success"] = false;
-                    out["error"] = "Target function (model) not found for id";
-                    return out;
-                }
-
-                // Verify the referenced function exists
-                auto referencedModel = assembly->findModel(referencedFunctionId);
-                if (!referencedModel)
-                {
-                    out["success"] = false;
-                    out["error"] = "Referenced function (model) not found for id";
-                    return out;
-                }
-
-                // Create a Resource node for the function ID
-                auto resourceNode = targetModel->create<nodes::Resource>();
-                resourceNode->parameter().at(nodes::FieldNames::ResourceId) =
-                  nodes::VariantParameter(referencedFunctionId);
-
-                if (!displayName.empty())
-                {
-                    std::string resourceDisplayName = displayName + "_Resource";
-                    resourceNode->setDisplayName(resourceDisplayName);
-                }
-
-                // Create the FunctionCall node
-                auto functionCallNode = targetModel->create<nodes::FunctionCall>();
-
-                // Connect the Resource node's output to the FunctionCall's FunctionId input
-                functionCallNode->parameter()
-                  .at(nodes::FieldNames::FunctionId)
-                  .setInputFromPort(resourceNode->getOutputs().at(nodes::FieldNames::Value));
-
-                // Update inputs and outputs based on the referenced function
-                functionCallNode->updateInputsAndOutputs(*referencedModel);
-
-                // Register the function call node's parameters and outputs with the model
-                targetModel->registerInputs(*functionCallNode);
-                targetModel->registerOutputs(*functionCallNode);
-
-                // Set display name if provided
-                if (!displayName.empty())
-                {
-                    functionCallNode->setDisplayName(displayName);
-                }
-                else if (referencedModel->getDisplayName().has_value())
-                {
-                    functionCallNode->setDisplayName(referencedModel->getDisplayName().value());
-                }
-
-                // Update the graph to ensure everything is properly connected
-                targetModel->updateGraphAndOrderIfNeeded();
-
-                // Prepare response with node information
-                json resourceNodeInfo;
-                resourceNodeInfo["id"] = resourceNode->getId();
-                resourceNodeInfo["unique_name"] = resourceNode->getUniqueName();
-                resourceNodeInfo["display_name"] = resourceNode->getDisplayName();
-                resourceNodeInfo["type"] = "Resource";
-
-                json functionCallNodeInfo;
-                functionCallNodeInfo["id"] = functionCallNode->getId();
-                functionCallNodeInfo["unique_name"] = functionCallNode->getUniqueName();
-                functionCallNodeInfo["display_name"] = functionCallNode->getDisplayName();
-                functionCallNodeInfo["type"] = "FunctionCall";
-
-                // Collect unconnected inputs (parameters without sources) - simplified for MCP
-                json unconnectedInputs = json::array();
-                for (auto const & [paramName, param] : functionCallNode->constParameter())
-                {
-                    if (!param.getConstSource().has_value() && param.isInputSourceRequired())
-                    {
-                        unconnectedInputs.push_back(createSimplifiedInputInfo(param, paramName));
-                    }
-                }
-
-                // Collect all outputs - simplified for MCP
-                json outputs = json::array();
-                for (auto const & [portName, port] : functionCallNode->getOutputs())
-                {
-                    outputs.push_back(createSimplifiedOutputInfo(port, portName));
-                }
-
-                out["success"] = true;
-                out["resource_node"] = resourceNodeInfo;
-                out["function_call_node"] = functionCallNodeInfo;
-                out["unconnected_inputs"] = unconnectedInputs;
-                out["outputs"] = outputs;
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] =
-                  std::string("Exception while creating function call node: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json
-        FunctionOperationsTool::createConstantNodesForMissingParameters(uint32_t functionId,
-                                                                        uint32_t nodeId,
-                                                                        bool autoConnect)
-        {
-            using json = nlohmann::json;
-            json out;
-            out["function_id"] = functionId;
-            out["node_id"] = nodeId;
-            out["auto_connect"] = autoConnect;
-
-            if (!validateApplication())
-            {
-                out["success"] = false;
-                out["error"] = "No application instance available";
-                return out;
-            }
-
-            auto document = m_application->getCurrentDocument();
-            if (!document)
-            {
-                out["success"] = false;
-                out["error"] = "No active document available";
-                return out;
-            }
-
-            try
-            {
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function (model) not found for id";
-                    return out;
-                }
-
-                auto nodeOpt = model->getNode(nodeId);
-                if (!nodeOpt.has_value() || nodeOpt.value() == nullptr)
-                {
-                    out["success"] = false;
-                    out["error"] = "Node not found for id";
-                    return out;
-                }
-
-                auto * node = nodeOpt.value();
-
-                // Find all unconnected required parameters
-                json unconnectedParams = json::array();
-                json createdNodes = json::array();
-                json createdLinks = json::array();
-
-                for (auto const & [paramName, param] : node->constParameter())
-                {
-                    // Check if parameter needs an input source and doesn't have one
-                    if (!param.getConstSource().has_value() && param.isInputSourceRequired())
-                    {
-                        json paramInfo = createSimplifiedInputInfo(param, paramName);
-                        unconnectedParams.push_back(paramInfo);
-
-                        // Create appropriate constant node based on parameter type
-                        nodes::NodeBase * createdConstantNode = nullptr;
-                        nodes::Port const * outputPort = nullptr;
-
-                        auto typeIdx = param.getTypeIndex();
-                        if (typeIdx == nodes::ParameterTypeIndex::Float)
-                        {
-                            auto * constantNode = model->create<nodes::ConstantScalar>();
-                            constantNode->setDisplayName(paramName);
-
-                            createdConstantNode = constantNode;
-                            outputPort = &constantNode->getValueOutputPort();
-                        }
-                        else if (typeIdx == nodes::ParameterTypeIndex::Float3)
-                        {
-                            auto * constantNode = model->create<nodes::ConstantVector>();
-                            constantNode->setDisplayName(paramName);
-
-                            createdConstantNode = constantNode;
-                            outputPort = &constantNode->getVectorOutputPort();
-                        }
-                        else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
-                        {
-                            auto * constantNode = model->create<nodes::ConstantMatrix>();
-                            constantNode->setDisplayName(paramName);
-
-                            createdConstantNode = constantNode;
-                            outputPort = &constantNode->getMatrixOutputPort();
-                        }
-                        else if (typeIdx == nodes::ParameterTypeIndex::ResourceId)
-                        {
-                            auto * constantNode = model->create<nodes::Resource>();
-                            constantNode->setDisplayName(paramName);
-
-                            createdConstantNode = constantNode;
-                            outputPort = &constantNode->getOutputs().at(nodes::FieldNames::Value);
-                        }
-                        else
-                        {
-                            // For unsupported types, just record the parameter
-                            json unsupportedParam;
-                            unsupportedParam["parameter_name"] = paramName;
-                            unsupportedParam["type"] =
-                              FunctionGraphSerializer::typeIndexToString(typeIdx);
-                            unsupportedParam["error"] =
-                              "Unsupported parameter type for constant node creation";
-                            unconnectedParams.push_back(unsupportedParam);
-                            continue;
-                        }
-
-                        if (createdConstantNode)
-                        {
-                            json nodeInfo;
-                            nodeInfo["id"] = createdConstantNode->getId();
-                            nodeInfo["unique_name"] = createdConstantNode->getUniqueName();
-                            nodeInfo["display_name"] = createdConstantNode->getDisplayName();
-                            nodeInfo["type"] = createdConstantNode->name();
-                            nodeInfo["parameter_name"] = paramName;
-                            nodeInfo["parameter_type"] =
-                              FunctionGraphSerializer::typeIndexToString(typeIdx);
-
-                            createdNodes.push_back(nodeInfo);
-
-                            // Auto-connect if requested and possible
-                            if (autoConnect && outputPort)
-                            {
-                                bool linkCreated =
-                                  model->addLink(outputPort->getId(), param.getId());
-                                if (linkCreated)
-                                {
-                                    json linkInfo;
-                                    linkInfo["source_node_id"] = createdConstantNode->getId();
-                                    linkInfo["source_port_name"] = outputPort->getShortName();
-                                    linkInfo["target_node_id"] = nodeId;
-                                    linkInfo["target_parameter_name"] = paramName;
-
-                                    createdLinks.push_back(linkInfo);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Update the graph to ensure everything is properly connected
-                model->updateGraphAndOrderIfNeeded();
-
-                out["success"] = true;
-                out["unconnected_parameters"] = unconnectedParams;
-                out["created_constant_nodes"] = createdNodes;
-                out["created_links"] = createdLinks;
-                out["total_created_nodes"] = createdNodes.size();
-                out["total_created_links"] = createdLinks.size();
-
-                if (createdNodes.empty())
-                {
-                    out["message"] = "No missing parameters found that require constant nodes";
-                }
-                else
-                {
-                    out["message"] = "Created " + std::to_string(createdNodes.size()) +
-                                     " constant node(s) for missing parameters";
-                }
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while creating constant nodes: ") + e.what();
-                return out;
-            }
-        }
-
-        nlohmann::json FunctionOperationsTool::removeUnusedNodes(uint32_t functionId)
-        {
-            nlohmann::json out;
-
-            try
-            {
-                auto document = m_application->getCurrentDocument();
-                if (!document)
-                {
-                    out["success"] = false;
-                    out["error"] = "No active document";
-                    return out;
-                }
-
-                auto assembly = document->getAssembly();
-                if (!assembly)
-                {
-                    out["success"] = false;
-                    out["error"] = "No assembly available";
-                    return out;
-                }
-
-                auto model = assembly->findModel(functionId);
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function with id " + std::to_string(functionId) + " not found";
-                    return out;
-                }
-
-                // Model is already mutable through shared_ptr
-
-                // Find all nodes in the function
-                std::vector<nodes::NodeBase *> allNodes;
-                for (auto const & [nodeId, nodePtr] : *model)
-                {
-                    allNodes.push_back(nodePtr.get());
-                }
-
-                // Find nodes that are connected to the function output or have dependencies
-                std::set<uint32_t> usedNodeIds;
-                std::queue<nodes::NodeBase *> nodeQueue;
-
-                // Start with nodes connected to function outputs
-                for (auto const & [outputName, outputParam] : model->getOutputs())
-                {
-                    if (outputParam.getConstSource().has_value())
-                    {
-                        auto const & source = outputParam.getConstSource().value();
-                        auto const * sourcePort = model->getPort(source.portId);
-                        if (sourcePort)
-                        {
-                            auto * sourceNode = sourcePort->getParent();
-                            if (sourceNode)
-                            {
-                                usedNodeIds.insert(sourceNode->getId());
-                                nodeQueue.push(sourceNode);
-                            }
-                        }
-                    }
-                }
-
-                // Traverse backwards to find all nodes that contribute to the outputs
-                while (!nodeQueue.empty())
-                {
-                    auto * currentNode = nodeQueue.front();
-                    nodeQueue.pop();
-
-                    // Check all parameters of this node to find source nodes
-                    for (auto const & [paramName, param] : currentNode->constParameter())
-                    {
-                        if (param.getConstSource().has_value())
-                        {
-                            auto const & source = param.getConstSource().value();
-                            auto const * sourcePort = model->getPort(source.portId);
-                            if (sourcePort)
-                            {
-                                auto * sourceNode = sourcePort->getParent();
-                                if (sourceNode && usedNodeIds.count(sourceNode->getId()) == 0)
-                                {
-                                    usedNodeIds.insert(sourceNode->getId());
-                                    nodeQueue.push(sourceNode);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Find unused nodes (nodes not in the usedNodeIds set)
-                std::vector<nodes::NodeBase *> unusedNodes;
-                for (auto * node : allNodes)
-                {
-                    if (usedNodeIds.count(node->getId()) == 0)
-                    {
-                        unusedNodes.push_back(node);
-                    }
-                }
-
-                // Remove unused nodes and collect information
-                nlohmann::json removedNodes = nlohmann::json::array();
-                for (auto * unusedNode : unusedNodes)
-                {
-                    nlohmann::json nodeInfo;
-                    nodeInfo["id"] = unusedNode->getId();
-                    nodeInfo["unique_name"] = unusedNode->getUniqueName();
-                    nodeInfo["display_name"] = unusedNode->getDisplayName();
-                    nodeInfo["type"] = unusedNode->name();
-
-                    removedNodes.push_back(nodeInfo);
-
-                    // Remove the node from the model
-                    model->remove(unusedNode->getId());
-                }
-
-                // Update the graph to ensure everything is properly cleaned up
-                model->updateGraphAndOrderIfNeeded();
-
-                out["success"] = true;
-                out["removed_nodes"] = removedNodes;
-                out["total_removed_nodes"] = removedNodes.size();
-
-                if (removedNodes.empty())
-                {
-                    out["message"] = "No unused nodes found to remove";
-                }
-                else
-                {
-                    out["message"] =
-                      "Removed " + std::to_string(removedNodes.size()) + " unused node(s)";
-                }
-
-                return out;
-            }
-            catch (const std::exception & e)
-            {
-                out["success"] = false;
-                out["error"] = std::string("Exception while removing unused nodes: ") + e.what();
-                return out;
-            }
-        }
-
         nlohmann::json FunctionOperationsTool::listChangeableParameters() const
         {
             using json = nlohmann::json;
@@ -2014,7 +1139,21 @@ namespace gladius
                                         if (auto const * val = std::get_if<uint32_t>(&paramValue))
                                             paramInfo["current_value"] = *val;
                                     }
-                                    // For Matrix4x4, we could add support later if needed
+                                    else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
+                                    {
+                                        if (auto const * val =
+                                              std::get_if<nodes::Matrix4x4>(&paramValue))
+                                        {
+                                            json rows = json::array();
+                                            for (int i = 0; i < 4; ++i)
+                                            {
+                                                rows.push_back(
+                                                  {(*val)[i][0], (*val)[i][1],
+                                                   (*val)[i][2], (*val)[i][3]});
+                                            }
+                                            paramInfo["current_value"] = rows;
+                                        }
+                                    }
                                 }
                                 catch (const std::exception &)
                                 {
@@ -2052,6 +1191,509 @@ namespace gladius
                   std::string("Exception while listing changeable parameters: ") + e.what();
                 return out;
             }
+        }
+
+        nlohmann::json FunctionOperationsTool::getFunctionSnippet(uint32_t functionId) const
+        {
+            nlohmann::json out;
+            out["function_id"] = functionId;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto model = assembly->findModel(functionId);
+                if (!model)
+                {
+                    out["success"] = false;
+                    out["error"] = "Function not found: " + std::to_string(functionId);
+                    return out;
+                }
+
+                // Extract actual arguments from Begin node (sorted by definition order)
+                std::vector<FunctionArgument> args;
+                auto * beginNode = model->getBeginNode();
+                if (beginNode != nullptr)
+                {
+                    for (auto const & [name, paramPtr] : beginNode->getArguments())
+                    {
+                        if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                        {
+                            args.emplace_back(name, ArgumentType::Vector);
+                        }
+                        else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                        {
+                            args.emplace_back(name, ArgumentType::Scalar);
+                        }
+                    }
+                }
+
+                // Extract actual connected outputs from End node
+                std::vector<FunctionOutput> outputs;
+                auto * endNode = model->getEndNode();
+                if (endNode != nullptr)
+                {
+                    for (auto const & [name, param] : endNode->constParameter())
+                    {
+                        if (param.getConstSource().has_value())
+                        {
+                            auto typeIdx = param.getConstSource()->type;
+                            if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                            {
+                                outputs.emplace_back(name, ArgumentType::Vector);
+                            }
+                            else
+                            {
+                                outputs.emplace_back(name, ArgumentType::Scalar);
+                            }
+                        }
+                    }
+                }
+                if (outputs.empty())
+                {
+                    outputs.push_back(FunctionOutput::defaultOutput());
+                }
+
+                auto snippet = ExpressionToGraphConverter::convertGraphToSnippet(
+                  *model, args, outputs, assembly.get());
+
+                if (snippet.empty())
+                {
+                    snippet = "return 0;";
+                }
+
+                out["success"] = true;
+                out["snippet"] = snippet;
+                if (model->getDisplayName().has_value())
+                {
+                    out["display_name"] = model->getDisplayName().value();
+                }
+
+                // Report function arguments
+                {
+                    nlohmann::json argsJson = nlohmann::json::array();
+                    for (auto const & arg : args)
+                    {
+                        std::string typeName =
+                          (arg.type == ArgumentType::Vector) ? "vec3" : "float";
+                        argsJson.push_back({{"name", arg.name}, {"type", typeName}});
+                    }
+                    out["arguments"] = argsJson;
+                }
+
+                // Report all connected outputs
+                {
+                    nlohmann::json outputsJson = nlohmann::json::array();
+                    for (auto const & output : outputs)
+                    {
+                        std::string typeName =
+                          (output.type == ArgumentType::Vector) ? "vec3" : "float";
+                        outputsJson.push_back({{"name", output.name}, {"type", typeName}});
+                    }
+                    out["outputs"] = outputsJson;
+                    // Backward compatibility: report first output type
+                    if (!outputs.empty())
+                    {
+                        out["output_type"] =
+                          (outputs.front().type == ArgumentType::Vector) ? "vec3" : "float";
+                    }
+                }
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while getting function snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::setFunctionSnippet(
+          uint32_t functionId,
+          std::string const & snippet,
+          std::string const & outputType,
+          std::vector<FunctionArgument> const & arguments)
+        {
+            nlohmann::json out;
+            out["function_id"] = functionId;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            if (snippet.empty())
+            {
+                out["success"] = false;
+                out["error"] = "Snippet cannot be empty";
+                return out;
+            }
+
+            // Reject unsupported-node comments
+            if (snippet.find(ExpressionToGraphConverter::UNSUPPORTED_NODE_MARKER) != std::string::npos)
+            {
+                out["success"] = false;
+                out["error"] = "Snippet contains unsupported node placeholders";
+                return out;
+            }
+
+            // Validate argument names against reserved keywords
+            for (auto const & arg : arguments)
+            {
+                if (ArgumentUtils::isReservedKeyword(arg.name))
+                {
+                    out["success"] = false;
+                    out["error"] = "Invalid argument name '" + arg.name + "': reserved keyword";
+                    return out;
+                }
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto model = assembly->findModel(functionId);
+                if (!model && functionId == assembly->getAssemblyModelId())
+                {
+                    model = assembly->assemblyModel();
+                }
+                if (!model)
+                {
+                    out["success"] = false;
+                    out["error"] = "Function not found: " + std::to_string(functionId);
+                    return out;
+                }
+
+                // Extract existing connected outputs from the model's End node so we
+                // preserve arbitrary output names (e.g. "shape", "color", custom names).
+                std::vector<FunctionOutput> outputs;
+                auto * existingEnd = model->getEndNode();
+                if (existingEnd)
+                {
+                    for (auto const & [name, param] : existingEnd->constParameter())
+                    {
+                        if (param.getConstSource().has_value())
+                        {
+                            auto typeIdx = param.getConstSource()->type;
+                            ArgumentType argType = ArgumentType::Scalar;
+                            if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                                argType = ArgumentType::Vector;
+                            else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
+                                argType = ArgumentType::Matrix;
+                            outputs.emplace_back(name, argType);
+                        }
+                    }
+                }
+                if (outputs.empty())
+                {
+                    FunctionOutput output;
+                    output.name = "shape";
+                    output.type =
+                      (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                        ? ArgumentType::Vector
+                        : ArgumentType::Scalar;
+                    outputs.push_back(output);
+                }
+
+                // Extract existing arguments from the model's Begin node if none provided
+                std::vector<FunctionArgument> effectiveArgs = arguments;
+                if (effectiveArgs.empty())
+                {
+                    auto * existingBegin = model->getBeginNode();
+                    if (existingBegin)
+                    {
+                        for (auto const & [name, paramPtr] : existingBegin->getArguments())
+                        {
+                            if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                            {
+                                effectiveArgs.emplace_back(name, ArgumentType::Vector);
+                            }
+                            else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                            {
+                                effectiveArgs.emplace_back(name, ArgumentType::Scalar);
+                            }
+                        }
+
+                        // Fallback: if getArguments() returned nothing (e.g. legacy model
+                        // with output ports but no parameter entries), infer from outputs
+                        if (effectiveArgs.empty())
+                        {
+                            for (auto const & [name, port] : existingBegin->getOutputs())
+                            {
+                                if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                                {
+                                    effectiveArgs.emplace_back(name, ArgumentType::Vector);
+                                }
+                                else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                                {
+                                    effectiveArgs.emplace_back(name, ArgumentType::Scalar);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Validate by parsing into a temporary model first
+                ExpressionParser parser;
+                nodes::Model tempModel;
+                tempModel.createBeginEnd();
+
+                auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                  snippet, tempModel, parser, effectiveArgs, outputs, assembly.get());
+                if (nodeId == 0)
+                {
+                    out["success"] = false;
+                    out["error"] = "Failed to parse snippet. Graph unchanged.";
+                    return out;
+                }
+
+                // Success: move validated graph into the real model, preserving identity
+                auto savedName = model->getModelName();
+                auto savedDisplayName = model->getDisplayName();
+                auto savedResourceId = model->getResourceId();
+                auto savedManaged = model->isManaged();
+
+                *model = std::move(tempModel);
+
+                model->setModelName(savedName);
+                if (savedDisplayName.has_value())
+                {
+                    model->setDisplayName(*savedDisplayName);
+                }
+                model->setResourceId(savedResourceId);
+                model->setManaged(savedManaged);
+                model->updateGraphAndOrderIfNeeded();
+
+                // Sync changes to 3MF model so flattening/compilation works
+                document->update3mfModel();
+
+                // Rebuild resource dependency graph to reflect any changed function references
+                document->rebuildResourceDependencyGraph();
+
+                // Return the normalized snippet
+                auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
+                  *model, effectiveArgs, outputs, assembly.get());
+                out["success"] = true;
+                out["snippet"] = normalized.empty() ? snippet : normalized;
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while setting function snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::getProgramSnippet() const
+        {
+            nlohmann::json out;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                auto snippet =
+                  ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+
+                auto const & functions = assembly->getFunctions();
+
+                // Resolve build items → function resource IDs (root functions)
+                std::set<nodes::ResourceId> rootFunctionIds;
+                auto model3mf = document->get3mfModel();
+                if (model3mf)
+                {
+                    try
+                    {
+                        auto buildIt = model3mf->GetBuildItems();
+                        while (buildIt->MoveNext())
+                        {
+                            auto item = buildIt->GetCurrent();
+                            if (!item)
+                            {
+                                continue;
+                            }
+                            auto obj = item->GetObjectResource();
+                            if (!obj)
+                            {
+                                continue;
+                            }
+                            if (auto * levelSet =
+                                  dynamic_cast<Lib3MF::CLevelSet *>(obj.get()))
+                            {
+                                auto func = levelSet->GetFunction();
+                                if (func)
+                                {
+                                    rootFunctionIds.insert(
+                                      func->GetModelResourceID());
+                                }
+                            }
+                        }
+                    }
+                    catch (std::exception const & e)
+                    {
+                        m_application->getGlobalLogger()->logWarning(
+                          std::string("getProgramSnippet: build item resolution error: ") +
+                          e.what());
+                    }
+                }
+
+                // Post-process snippet to add [root] annotations
+                snippet = ExpressionToGraphConverter::annotateRootFunctions(
+                  snippet, rootFunctionIds);
+
+                nlohmann::json rootArray = nlohmann::json::array();
+                for (auto id : rootFunctionIds)
+                {
+                    rootArray.push_back(id);
+                }
+
+                out["success"] = true;
+                out["snippet"] = snippet;
+                out["function_count"] = functions.size();
+                out["root_functions"] = rootArray;
+            }
+            catch (std::runtime_error const & e)
+            {
+                out["success"] = false;
+                out["error"] = e.what();
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while getting program snippet: ") + e.what();
+            }
+
+            return out;
+        }
+
+        nlohmann::json FunctionOperationsTool::setProgramSnippet(std::string const & snippet)
+        {
+            nlohmann::json out;
+
+            if (!validateApplication())
+            {
+                out["success"] = false;
+                out["error"] = "No application instance available";
+                return out;
+            }
+
+            if (snippet.empty())
+            {
+                out["success"] = false;
+                out["error"] = "Program snippet cannot be empty";
+                return out;
+            }
+
+            auto document = m_application->getCurrentDocument();
+            if (!document)
+            {
+                out["success"] = false;
+                out["error"] = "No active document";
+                return out;
+            }
+
+            try
+            {
+                auto assembly = document->getAssembly();
+                if (!assembly)
+                {
+                    out["success"] = false;
+                    out["error"] = "No assembly available";
+                    return out;
+                }
+
+                ExpressionParser parser;
+                ExpressionToGraphConverter::setProgramSnippet(snippet, *assembly, parser);
+
+                // Sync changes to 3MF model so flattening/compilation works
+                document->update3mfModel();
+
+                // Rebuild resource dependency graph to reflect any changed function references
+                document->rebuildResourceDependencyGraph();
+
+                // Return the normalized program
+                auto normalized =
+                  ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+                auto const & functions = assembly->getFunctions();
+                out["success"] = true;
+                out["snippet"] = normalized;
+                out["function_count"] = functions.size();
+            }
+            catch (std::runtime_error const & e)
+            {
+                out["success"] = false;
+                out["error"] = e.what();
+            }
+            catch (std::exception const & e)
+            {
+                out["success"] = false;
+                out["error"] =
+                  std::string("Exception while setting program snippet: ") + e.what();
+            }
+
+            return out;
         }
     }
 }

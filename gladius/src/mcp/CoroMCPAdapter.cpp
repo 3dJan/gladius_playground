@@ -96,7 +96,7 @@ namespace gladius::mcp
                     try
                     {
                         document->updateFlatAssembly();
-                        computeCore->tryRefreshProgramProtected(document->getAssembly());
+                        computeCore->tryRefreshProgramProtected(document->getFlatAssembly());
                     }
                     catch (const std::exception & e)
                     {

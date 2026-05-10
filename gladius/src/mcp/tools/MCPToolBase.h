@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace gladius
@@ -52,6 +53,23 @@ namespace gladius
                 {
                     return m_lastErrorMessage;
                 }
+
+                /**
+                 * @brief Create a structured error response with optional usage example.
+                 *
+                 * Generates a JSON object suitable for returning from MCP tool handlers
+                 * that includes the error message and optionally a usage example and
+                 * additional contextual information (e.g. available items).
+                 *
+                 * @param error Human-readable error description.
+                 * @param usageExample Optional JSON object showing correct invocation.
+                 * @param additionalInfo Optional JSON object merged into the response.
+                 * @return JSON object with success=false, error, and optional extras.
+                 */
+                static nlohmann::json createToolError(
+                    std::string const & error,
+                    nlohmann::json const & usageExample = {},
+                    nlohmann::json const & additionalInfo = {});
             };
         } // namespace tools
     } // namespace mcp

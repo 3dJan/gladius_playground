@@ -20,7 +20,10 @@ namespace gladius
         {
         }
 
-        std::pair<bool, uint32_t> ResourceManagementTool::createLevelSet(uint32_t functionId)
+        std::pair<bool, uint32_t> ResourceManagementTool::createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> minPoint,
+          std::array<float, 3> maxPoint)
         {
             if (!validateActiveDocument())
             {
@@ -73,15 +76,14 @@ namespace gladius
 
                 // Create a bounding box mesh for the levelset
                 auto mesh = model3mf->AddMeshObject();
-                // Create a simple bounding box from -10 to 10 in all dimensions
-                auto v0 = mesh->AddVertex({-10.0f, -10.0f, -10.0f});
-                auto v1 = mesh->AddVertex({10.0f, -10.0f, -10.0f});
-                auto v2 = mesh->AddVertex({10.0f, 10.0f, -10.0f});
-                auto v3 = mesh->AddVertex({-10.0f, 10.0f, -10.0f});
-                auto v4 = mesh->AddVertex({-10.0f, -10.0f, 10.0f});
-                auto v5 = mesh->AddVertex({10.0f, -10.0f, 10.0f});
-                auto v6 = mesh->AddVertex({10.0f, 10.0f, 10.0f});
-                auto v7 = mesh->AddVertex({-10.0f, 10.0f, 10.0f});
+                auto v0 = mesh->AddVertex({minPoint[0], minPoint[1], minPoint[2]});
+                auto v1 = mesh->AddVertex({maxPoint[0], minPoint[1], minPoint[2]});
+                auto v2 = mesh->AddVertex({maxPoint[0], maxPoint[1], minPoint[2]});
+                auto v3 = mesh->AddVertex({minPoint[0], maxPoint[1], minPoint[2]});
+                auto v4 = mesh->AddVertex({minPoint[0], minPoint[1], maxPoint[2]});
+                auto v5 = mesh->AddVertex({maxPoint[0], minPoint[1], maxPoint[2]});
+                auto v6 = mesh->AddVertex({maxPoint[0], maxPoint[1], maxPoint[2]});
+                auto v7 = mesh->AddVertex({minPoint[0], maxPoint[1], maxPoint[2]});
 
                 mesh->AddTriangle({v0, v1, v2});
                 mesh->AddTriangle({v0, v2, v3});

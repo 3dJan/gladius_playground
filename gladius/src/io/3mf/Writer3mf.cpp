@@ -393,6 +393,13 @@ namespace gladius::io
         {
             for (auto & [portName, input] : node.parameter())
             {
+                // Skip internal parameters (e.g. start/end memory offsets on mesh distance
+                // nodes) — they are runtime-only and must not appear in the 3MF file.
+                if (input.isInternal())
+                {
+                    continue;
+                }
+
                 auto input3mf = node3mf->FindInput(portName);
                 if (!input3mf)
                 {
@@ -771,10 +778,20 @@ namespace gladius::io
                   fmt::format("Set display name: {}", model.getDisplayName().value()));
             }
 
-            auto inputs = model.getInputs();
+            auto const & inputs = model.getInputs();
             m_logger->logInfo(fmt::format("Adding {} input ports", inputs.size()));
-            for (auto & [portName, input] : inputs)
+            // Sort inputs by definition order (sort index) so the 3MF file preserves
+            // the user-defined argument order rather than alphabetical map order.
+            std::vector<std::pair<int, std::string>> sortedInputNames;
+            sortedInputNames.reserve(inputs.size());
+            for (auto const & [portName, input] : inputs)
             {
+                sortedInputNames.emplace_back(input.getSortIndex(), portName);
+            }
+            std::sort(sortedInputNames.begin(), sortedInputNames.end());
+            for (auto const & [sortIdx, portName] : sortedInputNames)
+            {
+                auto const & input = inputs.at(portName);
                 function->AddInput(
                   portName, input.getShortName(), convertPortType(input.getTypeIndex()));
                 m_logger->logInfo(fmt::format("Added input port: {}", portName));
@@ -834,7 +851,7 @@ namespace gladius::io
     void saveFunctionTo3mfFile(std::filesystem::path const & filename,
                                gladius::nodes::Model & function)
     {
-        Writer3mf writer{{}};
+        Writer3mf writer{std::make_shared<events::Logger>()};
         writer.saveFunction(filename, function);
     }
 

@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "../EnvUtils.h"
+
 namespace gladius::compute
 {
     namespace
@@ -192,8 +194,8 @@ namespace gladius::compute
                 // Keep this opt-in / strict-mode only: building an edge incidence map over
                 // millions of triangles is expensive. Tests enable strict enforcement via
                 // GLADIUS_REQUIRE_WATERTIGHT=1.
-                return (std::getenv("GLADIUS_REQUIRE_WATERTIGHT") != nullptr) ||
-                       (std::getenv("GLADIUS_MDC_REPAIR_NONMANIFOLD_EDGES") != nullptr);
+                return isEnvVarSet("GLADIUS_REQUIRE_WATERTIGHT") ||
+                       isEnvVarSet("GLADIUS_MDC_REPAIR_NONMANIFOLD_EDGES");
             }
 
             struct EdgeIncidence
@@ -325,7 +327,9 @@ namespace gladius::compute
                         continue;
                     }
 
-                    auto const [a, b] = unpackEdgeKey(key);
+                    auto const ab = unpackEdgeKey(key);
+                    std::uint32_t const a = ab.first;
+                    std::uint32_t const b = ab.second;
                     std::array<std::uint32_t, 4> triIds = it->second.triIds;
 
                     // Skip if any triangle already changed in this pass.
@@ -528,7 +532,13 @@ namespace gladius::compute
 
             [[nodiscard]] bool debugMdcTopologyStagesEnabled()
             {
-                return std::getenv("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES") != nullptr;
+                return isEnvVarSet("GLADIUS_DEBUG_MDC_TOPOLOGY_STAGES");
+            }
+
+            [[nodiscard]] bool debugMdcDiagnosticsEnabled()
+            {
+                return isEnvVarSet("GLADIUS_DEBUG_MDC_DIAGNOSTICS") ||
+                       isEnvVarSet("GLADIUS_REQUIRE_WATERTIGHT");
             }
 
             [[nodiscard]] TopologyStats computeTopologyStats(ManifoldDualContouringMesh const & mesh)
@@ -631,13 +641,60 @@ namespace gladius::compute
         loadKernels();
     }
 
-    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig config)
+    ManifoldDualContouringGpu::~ManifoldDualContouringGpu() = default;
+
+    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig const& config)
+    {
+        m_config = config;
+        if (m_config.initialDepth > m_config.maxDepth)
+        {
+            m_config.initialDepth = m_config.maxDepth;
+        }
+    }
+
+    void ManifoldDualContouringGpu::setConfig(ManifoldDualContouringConfig&& config)
     {
         if (config.initialDepth > config.maxDepth)
         {
             config.initialDepth = config.maxDepth;
         }
-        m_config = config;
+        m_config = std::move(config);
+    }
+
+    void ManifoldDualContouringGpu::setMeshGenerationProgressCallback(MeshGenerationProgressCallback callback)
+    {
+        m_meshGenerationProgressCallback = std::move(callback);
+    }
+
+    void ManifoldDualContouringGpu::setCancellationCheckCallback(CancellationCheckCallback callback)
+    {
+        m_cancellationCheckCallback = std::move(callback);
+    }
+
+    bool ManifoldDualContouringGpu::isCancelled() const
+    {
+        return m_cancellationCheckCallback && m_cancellationCheckCallback();
+    }
+
+    void ManifoldDualContouringGpu::reportProgress(float progress, std::string_view phaseName)
+    {
+        if (m_meshGenerationProgressCallback)
+        {
+            m_meshGenerationProgressCallback(progress, phaseName);
+        }
+    }
+
+    void ManifoldDualContouringGpu::releaseExtractionBuffers()
+    {
+        m_octreeBuffer.reset();
+        m_vertexBuffer.reset();
+        m_indexBuffer.reset();
+        m_countBuffer.reset();
+        m_offsetBuffer.reset();
+        m_edgeComponentBuffer.reset();
+        m_outerThicknessFieldBuffer.reset();
+        m_innerThicknessFieldBuffer.reset();
+        m_octreeNodeCount = 0U;
     }
 
     void ManifoldDualContouringGpu::loadKernels()
@@ -645,6 +702,7 @@ namespace gladius::compute
         // Get the shared program instance from ProgramManager
         // This ensures the program has the correct model source set
         auto & programManager = m_core.getProgramManager();
+        programManager.ensureManifoldDcProgramCompiled();
 
         auto * program = programManager.getManifoldDualContouringProgram();
         if (!program)
@@ -664,15 +722,17 @@ namespace gladius::compute
         m_mesh.indices.clear();
         m_lastVertexCount = 0U;
 
+        reportProgress(0.0F, "Initializing");
+
         if (!m_program)
         {
             std::cerr << "Program not initialized, cannot generate mesh" << std::endl;
             return;
         }
 
-        // Ensure the program is compiled with the current model's SDF
-        // This is important when switching between different models
-        m_core.getProgramManager().recompileBlockingForManifoldDC();
+        // Ensure the program is compiled with the current model's SDF. This is
+        // intentionally lazy so first preview rendering does not compile MDC.
+        m_core.getProgramManager().ensureManifoldDcProgramCompiled();
 
         // Pre-fetch bounding box for chunking decision
         auto bbox = m_core.getBoundingBox();
@@ -699,13 +759,21 @@ namespace gladius::compute
         m_cachedBboxMax = originalBboxMax + Eigen::Vector3f(margin, margin, margin);
         m_cachedBboxSize = m_cachedBboxMax - m_cachedBboxMin;
 
-        if (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr)
+        if (isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG"))
         {
             std::cout << "MDC generateMesh config: initialDepth=" << m_config.initialDepth
                       << ", maxDepth=" << m_config.maxDepth
                       << ", hierarchical=" << (m_config.enableHierarchicalOctree ? "true" : "false")
                       << ", chunking=" << (m_config.enableChunking ? "true" : "false")
                       << ", minFeatureSize=" << m_config.minFeatureSize << std::endl;
+        }
+
+        reportProgress(0.05F, "Building octree");
+
+        // Check for cancellation before expensive operations
+        if (isCancelled())
+        {
+            return;
         }
 
         // Use hierarchical octree approach if enabled.
@@ -718,11 +786,33 @@ namespace gladius::compute
             generateMeshNonHierarchical();
         } // End of else block for non-hierarchical processing
 
+        // Check for cancellation after mesh generation
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
+
+        reportProgress(0.65F, "Post-processing");
+
         // Post-processing for sharp features
         if (m_config.enableSharpFeaturePostProcess && !m_mesh.indices.empty())
         {
             postProcessSharpFeatures();
         }
+
+        // Check for cancellation after post-processing
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
+
+        reportProgress(0.70F, "Simplifying mesh");
 
         // Mesh simplification (after sharp feature processing)
         // Support both legacy enableSimplification flag and new simplificationMethod enum
@@ -732,20 +822,54 @@ namespace gladius::compute
         if (shouldSimplify && !m_mesh.indices.empty())
         {
             simplifyMesh();
+            
+            // Check for cancellation after simplification
+            if (isCancelled())
+            {
+                m_mesh.positions.clear();
+                m_mesh.normals.clear();
+                m_mesh.indices.clear();
+                return;
+            }
         }
+
+        reportProgress(0.75F, "Improving mesh quality");
 
         // Mesh quality improvement (edge flipping to improve triangle aspect ratios)
         if (m_config.enableQualityImprovement && !m_mesh.indices.empty())
         {
             improveMeshQuality();
+            
+            // Check for cancellation after quality improvement
+            if (isCancelled())
+            {
+                m_mesh.positions.clear();
+                m_mesh.normals.clear();
+                m_mesh.indices.clear();
+                return;
+            }
         }
+
+        reportProgress(0.78F, "Projecting to surface");
 
         // Project vertices to SDF surface AFTER simplification and quality improvement
         // This snaps simplified vertices back onto the iso-surface, fixing off-surface artifacts
-        if (m_config.projectToSurface && !m_mesh.indices.empty())
+        // Note: Skip projection for thickness field mode - the shell surface is not SDF=0
+        if (m_config.projectToSurface && !m_mesh.indices.empty() && !m_config.useThicknessField)
         {
             projectVerticesToSurface();
         }
+
+        // Final cancellation check
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
+
+        reportProgress(0.80F, "Mesh generation complete");
     }
 
     void ManifoldDualContouringGpu::generateMeshNonHierarchical()
@@ -783,6 +907,7 @@ namespace gladius::compute
             std::vector<ChunkInfo> chunks = generateChunkGrid();
             std::size_t processedChunks = 0U;
             std::size_t emptyChunks = 0U;
+            std::size_t const totalChunks = chunks.size();
 
             ManifoldDualContouringMesh combinedMesh;
 
@@ -794,6 +919,11 @@ namespace gladius::compute
                 }
 
                 ++processedChunks;
+                
+                // Report per-chunk progress (5% to 55% range for chunked mesh generation)
+                float const chunkProgress = 0.05F + 0.50F * (static_cast<float>(processedChunks) / static_cast<float>(totalChunks));
+                reportProgress(chunkProgress, "Processing chunk");
+                
                 if (processedChunks <= 5U || processedChunks % 50U == 0U)
                 {
                     std::cout << "  Processing chunk " << processedChunks << "/"
@@ -836,6 +966,8 @@ namespace gladius::compute
             // Weld boundary vertices to make mesh watertight
             if (!m_mesh.positions.empty())
             {
+                reportProgress(0.55F, "Welding boundary vertices");
+                
                 // Calculate appropriate weld tolerance if not specified
                 // Use a fraction of the voxel size at maxDepth as tolerance
                 float weldTolerance = m_config.chunkWeldTolerance;
@@ -857,6 +989,8 @@ namespace gladius::compute
 
                 dumpTopologyStats("chunked after weldBoundaryVertices", m_mesh);
 
+                reportProgress(0.58F, "Filling boundary gaps");
+                
                 // Fill gaps between unconnected boundary edges
                 // Use voxel size as search radius - edges from neighboring chunks
                 // should be within this distance
@@ -870,10 +1004,12 @@ namespace gladius::compute
             // downstream analysis/export.
             if (!m_mesh.indices.empty())
             {
+                reportProgress(0.60F, "Repairing non-manifold edges");
                 repairNonManifoldDegree4Edges(m_mesh);
 
                 dumpTopologyStats("chunked after non-manifold repair", m_mesh);
 
+                reportProgress(0.62F, "Removing degenerate triangles");
                 removeDegenerateAndDuplicateTriangles(m_mesh);
 
                 dumpTopologyStats("chunked after triangle cleanup", m_mesh);
@@ -886,8 +1022,14 @@ namespace gladius::compute
         {
             // Original single-pass processing (not chunked)
             m_isChunkedMode = false;
+            
+            reportProgress(0.08F, "Constructing octree");
             constructOctree();
+            
+            reportProgress(0.25F, "Generating vertices");
             generateVertices();
+            
+            reportProgress(0.45F, "Generating indices");
             generateIndices();
 
             dumpTopologyStats("after generateIndices", m_mesh);
@@ -914,13 +1056,17 @@ namespace gladius::compute
                 dumpTopologyStats("after triangle cleanup", m_mesh);
             }
         }
+
+        // Ensure all GPU operations complete before returning
+        auto context = m_core.getComputeContext();
+        if (context)
+        {
+            context->GetQueue().finish();
+        }
     }
 
     void ManifoldDualContouringGpu::constructOctree()
     {
-        m_cpuOctreeNodes.clear();
-        m_mortonToIndex.clear();
-
         // Get bounding box from compute core
         auto bbox = m_core.getBoundingBox();
         if (!bbox.has_value())
@@ -981,14 +1127,58 @@ namespace gladius::compute
 
         try
         {
-            m_program->constructOctree(m_octreeBuffer,
-                                       m_octreeNodeCount,
-                                       bboxMin,
-                                       bboxMax,
-                                       static_cast<std::uint32_t>(m_config.initialDepth),
-                                       static_cast<std::uint32_t>(m_config.maxDepth),
-                                       *primitives,
-                                       m_config.isoValue);
+            if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+            {
+                // Upload thickness field buffers
+                auto context = m_core.getComputeContext();
+                m_outerThicknessFieldBuffer = context->createBufferChecked(
+                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                    m_config.outerThicknessField.size() * sizeof(float),
+                    const_cast<float *>(m_config.outerThicknessField.data()));
+                
+                // Inner field may be empty for innermost layer - create a dummy buffer
+                if (!m_config.innerThicknessField.empty())
+                {
+                    m_innerThicknessFieldBuffer = context->createBufferChecked(
+                        CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                        m_config.innerThicknessField.size() * sizeof(float),
+                        const_cast<float *>(m_config.innerThicknessField.data()));
+                }
+                else
+                {
+                    // Create a small dummy buffer for innermost layer
+                    float dummy = 0.0F;
+                    m_innerThicknessFieldBuffer = context->createBufferChecked(
+                        CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                        sizeof(float),
+                        &dummy);
+                }
+
+                m_program->constructOctreeWithThicknessField(
+                    m_octreeBuffer,
+                    m_octreeNodeCount,
+                    bboxMin,
+                    bboxMax,
+                    static_cast<std::uint32_t>(m_config.initialDepth),
+                    static_cast<std::uint32_t>(m_config.maxDepth),
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer);
+            }
+            else
+            {
+                m_program->constructOctree(m_octreeBuffer,
+                                           m_octreeNodeCount,
+                                           bboxMin,
+                                           bboxMax,
+                                           static_cast<std::uint32_t>(m_config.initialDepth),
+                                           static_cast<std::uint32_t>(m_config.maxDepth),
+                                           *primitives,
+                                           m_config.isoValue);
+            }
 
             std::cout << "Octree construction complete. Nodes before halo: " << m_octreeNodeCount
                       << std::endl;
@@ -996,22 +1186,41 @@ namespace gladius::compute
             // Add halo nodes around surface-crossing cells to ensure all neighbors exist for quad
             // generation. This fixes holes in thin structures where boundary cells lack neighbors.
             std::uint32_t const maxCoord = m_gridResolution - 1;
-            m_program->addHaloNodes(m_octreeBuffer,
-                                    m_octreeNodeCount,
-                                    maxCoord,
-                                    static_cast<std::uint8_t>(m_config.maxDepth),
-                                    bboxMin,
-                                    bboxMax,
-                                    *primitives,
-                                    m_config.isoValue);
+            if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+            {
+                m_program->addHaloNodesWithThicknessField(
+                    m_octreeBuffer,
+                    m_octreeNodeCount,
+                    maxCoord,
+                    static_cast<std::uint8_t>(m_config.maxDepth),
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer);
+            }
+            else
+            {
+                m_program->addHaloNodes(m_octreeBuffer,
+                                        m_octreeNodeCount,
+                                        maxCoord,
+                                        static_cast<std::uint8_t>(m_config.maxDepth),
+                                        bboxMin,
+                                        bboxMax,
+                                        *primitives,
+                                        m_config.isoValue);
+            }
 
             std::cout << "Octree construction complete. Total nodes after halo: "
                       << m_octreeNodeCount << std::endl;
-            refreshCpuOctreeCache();
         }
         catch (std::exception & e)
         {
             std::cerr << "Error in octree construction: " << e.what() << std::endl;
+            releaseExtractionBuffers();
         }
     }
 
@@ -1056,18 +1265,38 @@ namespace gladius::compute
 
         try
         {
-            m_program->countVertices(*m_octreeBuffer,
-                                     *m_countBuffer,
-                                     numNodes,
-                                     bboxMin,
-                                     bboxMax,
-                                     *primitives,
-                                     m_config.isoValue,
-                                     gradientEpsilon);
+            if (m_config.useThicknessField && m_outerThicknessFieldBuffer)
+            {
+                m_program->countVerticesWithThicknessField(
+                    *m_octreeBuffer,
+                    *m_countBuffer,
+                    numNodes,
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer,
+                    gradientEpsilon);
+            }
+            else
+            {
+                m_program->countVertices(*m_octreeBuffer,
+                                         *m_countBuffer,
+                                         numNodes,
+                                         bboxMin,
+                                         bboxMax,
+                                         *primitives,
+                                         m_config.isoValue,
+                                         gradientEpsilon);
+            }
         }
         catch (std::exception & e)
         {
             std::cerr << "Error running count_vertices: " << e.what() << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1080,10 +1309,12 @@ namespace gladius::compute
         {
             queue.enqueueReadBuffer(
               *m_countBuffer, CL_TRUE, 0, numNodes * sizeof(int), counts.data());
+            m_countBuffer.reset();
         }
         catch (std::exception & e)
         {
             std::cerr << "Error reading count buffer: " << e.what() << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1095,14 +1326,13 @@ namespace gladius::compute
             totalVertices += counts[i];
         }
 
-        m_cpuVertexOffsets = offsets;
-
         std::cout << "Generating " << totalVertices << " vertices from " << numNodes
                   << " octree nodes" << std::endl;
 
         if (totalVertices == 0)
         {
             std::cout << "No vertices to generate" << std::endl;
+            releaseExtractionBuffers();
             return;
         }
 
@@ -1122,16 +1352,37 @@ namespace gladius::compute
 
         try
         {
-            m_program->generateVertices(*m_octreeBuffer,
-                                        *m_offsetBuffer,
-                                        *m_vertexBuffer,
-                                        *m_edgeComponentBuffer,
-                                        numNodes,
-                                        bboxMin,
-                                        bboxMax,
-                                        *primitives,
-                                        m_config.isoValue,
-                                        gradientEpsilon);
+            if (m_config.useThicknessField && m_outerThicknessFieldBuffer)
+            {
+                m_program->generateVerticesWithThicknessField(
+                    *m_octreeBuffer,
+                    *m_offsetBuffer,
+                    *m_vertexBuffer,
+                    *m_edgeComponentBuffer,
+                    numNodes,
+                    bboxMin,
+                    bboxMax,
+                    *primitives,
+                    *m_outerThicknessFieldBuffer,
+                    *m_innerThicknessFieldBuffer,
+                    m_config.thicknessFieldResolution,
+                    m_config.worldToThicknessField,
+                    m_config.isInnermostLayer,
+                    gradientEpsilon);
+            }
+            else
+            {
+                m_program->generateVertices(*m_octreeBuffer,
+                                            *m_offsetBuffer,
+                                            *m_vertexBuffer,
+                                            *m_edgeComponentBuffer,
+                                            numNodes,
+                                            bboxMin,
+                                            bboxMax,
+                                            *primitives,
+                                            m_config.isoValue,
+                                            gradientEpsilon);
+            }
 
             std::vector<GpuVertex> hostVertices(static_cast<std::size_t>(totalVertices));
             queue.enqueueReadBuffer(*m_vertexBuffer,
@@ -1139,6 +1390,7 @@ namespace gladius::compute
                                     0,
                                     hostVertices.size() * sizeof(GpuVertex),
                                     hostVertices.data());
+            m_vertexBuffer.reset();
 
             m_mesh.positions.clear();
             m_mesh.normals.clear();
@@ -1169,6 +1421,7 @@ namespace gladius::compute
             m_mesh.positions.clear();
             m_mesh.normals.clear();
             m_lastVertexCount = 0U;
+            releaseExtractionBuffers();
         }
     }
 
@@ -1219,6 +1472,7 @@ namespace gladius::compute
             std::vector<int> quadCounts(numNodes);
             queue.enqueueReadBuffer(
               *quadCountBuffer, CL_TRUE, 0, numNodes * sizeof(int), quadCounts.data());
+            quadCountBuffer.reset();
 
             // Debug: Count total quads and cells with quads
             int totalQuads = 0;
@@ -1233,89 +1487,92 @@ namespace gladius::compute
                       << " cells (of " << numNodes << " total nodes)" << std::endl;
 
             // Run diagnostic analysis to understand boundary hole causes
-            auto diagnostics = m_program->runQuadDiagnostics(*m_octreeBuffer, numNodes, maxCoord);
-            std::cout << "\n=== Boundary Hole Diagnostics (All 12 Edges) ===" << std::endl;
-
-            // Edge axis names for better readability
-            static char const * edgeNames[] = {
-              "Edge  0 (X at y=0,z=0)", // corners 0-1
-              "Edge  1 (Y at x=1,z=0)", // corners 1-3
-              "Edge  2 (X at y=1,z=0)", // corners 2-3
-              "Edge  3 (Y at x=0,z=0)", // corners 0-2
-              "Edge  4 (X at y=0,z=1)", // corners 4-5
-              "Edge  5 (Y at x=1,z=1)", // corners 5-7, owner
-              "Edge  6 (X at y=1,z=1)", // corners 6-7, owner
-              "Edge  7 (Y at x=0,z=1)", // corners 4-6
-              "Edge  8 (Z at x=0,y=0)", // corners 0-4
-              "Edge  9 (Z at x=1,y=0)", // corners 1-5
-              "Edge 10 (Z at x=1,y=1)", // corners 3-7, owner
-              "Edge 11 (Z at x=0,y=1)"  // corners 2-6
-            };
-
-            int totalEmitted = 0;
-            int totalSkipped = 0;
-            for (int e = 0; e < 12; ++e)
+            if (debugMdcDiagnosticsEnabled())
             {
-                int emitted = diagnostics.edgeEmitted[static_cast<std::size_t>(e)];
-                int skipped = diagnostics.edgeSkipped[static_cast<std::size_t>(e)];
-                if (emitted > 0 || skipped > 0)
+                auto diagnostics = m_program->runQuadDiagnostics(*m_octreeBuffer, numNodes, maxCoord);
+                std::cout << "\n=== Boundary Hole Diagnostics (All 12 Edges) ===" << std::endl;
+
+                // Edge axis names for better readability
+                static char const * edgeNames[] = {
+                  "Edge  0 (X at y=0,z=0)", // corners 0-1
+                  "Edge  1 (Y at x=1,z=0)", // corners 1-3
+                  "Edge  2 (X at y=1,z=0)", // corners 2-3
+                  "Edge  3 (Y at x=0,z=0)", // corners 0-2
+                  "Edge  4 (X at y=0,z=1)", // corners 4-5
+                  "Edge  5 (Y at x=1,z=1)", // corners 5-7, owner
+                  "Edge  6 (X at y=1,z=1)", // corners 6-7, owner
+                  "Edge  7 (Y at x=0,z=1)", // corners 4-6
+                  "Edge  8 (Z at x=0,y=0)", // corners 0-4
+                  "Edge  9 (Z at x=1,y=0)", // corners 1-5
+                  "Edge 10 (Z at x=1,y=1)", // corners 3-7, owner
+                  "Edge 11 (Z at x=0,y=1)"  // corners 2-6
+                };
+
+                int totalEmitted = 0;
+                int totalSkipped = 0;
+                for (int e = 0; e < 12; ++e)
                 {
-                    std::cout << edgeNames[e] << ": emitted=" << emitted << ", skipped=" << skipped
-                              << std::endl;
+                    int emitted = diagnostics.edgeEmitted[static_cast<std::size_t>(e)];
+                    int skipped = diagnostics.edgeSkipped[static_cast<std::size_t>(e)];
+                    if (emitted > 0 || skipped > 0)
+                    {
+                        std::cout << edgeNames[e] << ": emitted=" << emitted << ", skipped=" << skipped
+                                  << std::endl;
+                    }
+                    totalEmitted += emitted;
+                    totalSkipped += skipped;
                 }
-                totalEmitted += emitted;
-                totalSkipped += skipped;
-            }
-            std::cout << "Summary: " << totalEmitted << " edges emitted, " << totalSkipped
-                      << " edges skipped" << std::endl;
-            std::cout << "=================================================\n" << std::endl;
+                std::cout << "Summary: " << totalEmitted << " edges emitted, " << totalSkipped
+                          << " edges skipped" << std::endl;
+                std::cout << "=================================================\n" << std::endl;
 
-            // Run discontinuity diagnostic to detect CSG-related gradient issues
-            BBox paddedBbox;
-            paddedBbox.extend(m_cachedBboxMin);
-            paddedBbox.extend(m_cachedBboxMax);
-            Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
-            float const maxExtent = bboxSize.maxCoeff();
-            float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
-            float const gradientEpsilon = voxelSize * 0.1F;
+                // Run discontinuity diagnostic to detect CSG-related gradient issues
+                BBox paddedBbox;
+                paddedBbox.extend(m_cachedBboxMin);
+                paddedBbox.extend(m_cachedBboxMax);
+                Eigen::Vector3f const bboxSize = m_cachedBboxMax - m_cachedBboxMin;
+                float const maxExtent = bboxSize.maxCoeff();
+                float const voxelSize = maxExtent / static_cast<float>(1U << m_config.maxDepth);
+                float const gradientEpsilon = voxelSize * 0.1F;
 
-            // Get primitives for discontinuity diagnostic
-            auto primitives = m_core.getPrimitives();
-            if (primitives)
-            {
-                auto discDiag = m_program->runDiscontinuityDiagnostics(*m_octreeBuffer,
-                                                                       numNodes,
-                                                                       paddedBbox,
-                                                                       *primitives,
-                                                                       m_config.isoValue,
-                                                                       gradientEpsilon);
-
-                if (discDiag.cells2Components > 0 || discDiag.cells3Components > 0 ||
-                    discDiag.cells4Components > 0)
+                // Get primitives for discontinuity diagnostic
+                auto primitives = m_core.getPrimitives();
+                if (primitives)
                 {
-                    std::cout << "\n=== Gradient Discontinuity Analysis ===" << std::endl;
-                    std::cout << "Cells analyzed: " << discDiag.totalCells << std::endl;
-                    std::cout << "  1 component (smooth): " << discDiag.cells1Component << " ("
-                              << (100.0F * static_cast<float>(discDiag.cells1Component) /
-                                  static_cast<float>(discDiag.totalCells))
-                              << "%)" << std::endl;
-                    std::cout << "  2 components: " << discDiag.cells2Components << " ("
-                              << (100.0F * static_cast<float>(discDiag.cells2Components) /
-                                  static_cast<float>(discDiag.totalCells))
-                              << "%)" << std::endl;
-                    if (discDiag.cells3Components > 0)
+                    auto discDiag = m_program->runDiscontinuityDiagnostics(*m_octreeBuffer,
+                                                                           numNodes,
+                                                                           paddedBbox,
+                                                                           *primitives,
+                                                                           m_config.isoValue,
+                                                                           gradientEpsilon);
+
+                    if (discDiag.cells2Components > 0 || discDiag.cells3Components > 0 ||
+                        discDiag.cells4Components > 0)
                     {
-                        std::cout << "  3 components: " << discDiag.cells3Components << std::endl;
+                        std::cout << "\n=== Gradient Discontinuity Analysis ===" << std::endl;
+                        std::cout << "Cells analyzed: " << discDiag.totalCells << std::endl;
+                        std::cout << "  1 component (smooth): " << discDiag.cells1Component << " ("
+                                  << (100.0F * static_cast<float>(discDiag.cells1Component) /
+                                      static_cast<float>(discDiag.totalCells))
+                                  << "%)" << std::endl;
+                        std::cout << "  2 components: " << discDiag.cells2Components << " ("
+                                  << (100.0F * static_cast<float>(discDiag.cells2Components) /
+                                      static_cast<float>(discDiag.totalCells))
+                                  << "%)" << std::endl;
+                        if (discDiag.cells3Components > 0)
+                        {
+                            std::cout << "  3 components: " << discDiag.cells3Components << std::endl;
+                        }
+                        if (discDiag.cells4Components > 0)
+                        {
+                            std::cout << "  4 components: " << discDiag.cells4Components << std::endl;
+                        }
+                        std::cout << "Average discontinuity score: " << discDiag.avgDiscontinuityScore
+                                  << std::endl;
+                        std::cout << "Severe discontinuities (>0.5): " << discDiag.severeDiscontinuities
+                                  << std::endl;
+                        std::cout << "========================================\n" << std::endl;
                     }
-                    if (discDiag.cells4Components > 0)
-                    {
-                        std::cout << "  4 components: " << discDiag.cells4Components << std::endl;
-                    }
-                    std::cout << "Average discontinuity score: " << discDiag.avgDiscontinuityScore
-                              << std::endl;
-                    std::cout << "Severe discontinuities (>0.5): " << discDiag.severeDiscontinuities
-                              << std::endl;
-                    std::cout << "========================================\n" << std::endl;
                 }
             }
 
@@ -1329,6 +1586,7 @@ namespace gladius::compute
 
             if (totalIndices == 0)
             {
+                releaseExtractionBuffers();
                 return;
             }
 
@@ -1366,6 +1624,7 @@ namespace gladius::compute
                                     0,
                                     totalIndices * sizeof(std::uint32_t),
                                     m_mesh.indices.data());
+            releaseExtractionBuffers();
 
             std::cout << "Generated " << (m_mesh.indices.size() / 3U) << " triangles via GPU"
                       << std::endl;
@@ -1374,46 +1633,7 @@ namespace gladius::compute
         {
             std::cerr << "GPU index generation failed: " << e.what() << std::endl;
             m_mesh.indices.clear();
-        }
-    }
-
-    void ManifoldDualContouringGpu::refreshCpuOctreeCache()
-    {
-        m_cpuOctreeNodes.clear();
-        m_mortonToIndex.clear();
-
-        if (m_octreeNodeCount == 0U || !m_octreeBuffer)
-        {
-            return;
-        }
-
-        auto context = m_core.getComputeContext();
-        if (!context)
-        {
-            std::cerr << "Compute context unavailable; cannot read octree buffer" << std::endl;
-            return;
-        }
-
-        try
-        {
-            m_cpuOctreeNodes.resize(m_octreeNodeCount);
-            context->GetQueue().enqueueReadBuffer(*m_octreeBuffer,
-                                                  CL_TRUE,
-                                                  0,
-                                                  m_cpuOctreeNodes.size() * sizeof(OctreeNode),
-                                                  m_cpuOctreeNodes.data());
-        }
-        catch (std::exception const & e)
-        {
-            std::cerr << "Failed to read octree buffer: " << e.what() << std::endl;
-            m_cpuOctreeNodes.clear();
-            return;
-        }
-
-        m_mortonToIndex.reserve(m_cpuOctreeNodes.size());
-        for (std::size_t i = 0; i < m_cpuOctreeNodes.size(); ++i)
-        {
-            m_mortonToIndex[m_cpuOctreeNodes[i].mortonCode] = i;
+            releaseExtractionBuffers();
         }
     }
 
@@ -1867,14 +2087,14 @@ namespace gladius::compute
         auto index = [&](std::size_t x, std::size_t y, std::size_t z) -> std::size_t
         { return z * width * height + y * width + x; };
 
-        float const v000 = data[index(x0, y0, z0)];
-        float const v100 = data[index(x1, y0, z0)];
-        float const v010 = data[index(x0, y1, z0)];
-        float const v110 = data[index(x1, y1, z0)];
-        float const v001 = data[index(x0, y0, z1)];
-        float const v101 = data[index(x1, y0, z1)];
-        float const v011 = data[index(x0, y1, z1)];
-        float const v111 = data[index(x1, y1, z1)];
+        float const v000 = data[index(x0, y0, z0)].s[3];
+        float const v100 = data[index(x1, y0, z0)].s[3];
+        float const v010 = data[index(x0, y1, z0)].s[3];
+        float const v110 = data[index(x1, y1, z0)].s[3];
+        float const v001 = data[index(x0, y0, z1)].s[3];
+        float const v101 = data[index(x1, y0, z1)].s[3];
+        float const v011 = data[index(x0, y1, z1)].s[3];
+        float const v111 = data[index(x1, y1, z1)].s[3];
 
         float const c00 = v000 * (1.0F - fx) + v100 * fx;
         float const c10 = v010 * (1.0F - fx) + v110 * fx;
@@ -1908,13 +2128,29 @@ namespace gladius::compute
 
         switch (method)
         {
+        case SimplificationMethod::QemFast:
+        {
+            FastQemConfig fastConfig;
+            fastConfig.terminationMode = m_config.simplificationTerminationMode;
+            fastConfig.maxError = m_config.simplificationMaxGeometricError;
+            if (m_config.simplificationTargetTriangles.has_value())
+            {
+                fastConfig.targetTriangleCount = *m_config.simplificationTargetTriangles;
+            }
+            if (m_config.simplificationTargetReduction.has_value())
+            {
+                fastConfig.targetReductionPercent = *m_config.simplificationTargetReduction;
+            }
+            fastQemSimplify(m_mesh.positions, m_mesh.indices, fastConfig);
+            break;
+        }
+
         case SimplificationMethod::QemSdfAware:
             simplifyMeshQemSdfAware();
             break;
 
         case SimplificationMethod::None:
         default:
-            // Should not reach here due to caller check, but handle gracefully
             break;
         }
     }
@@ -2285,7 +2521,6 @@ namespace gladius::compute
 
             if (m_octreeNodeCount > 0)
             {
-                refreshCpuOctreeCache();
                 generateVertices();
                 generateIndices();
             }
@@ -2580,7 +2815,7 @@ namespace gladius::compute
             return;
         }
 
-        bool const debugEnabled = (std::getenv("GLADIUS_DEBUG_MDC_CONFIG") != nullptr);
+        bool const debugEnabled = isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG");
 
         // ----------------------------------------------------------------
         // Pre-pass: weld near-coincident boundary vertices (index remap only)
@@ -4572,6 +4807,14 @@ namespace gladius::compute
         std::cout << "Using hierarchical octree approach for watertight mesh generation"
                   << std::endl;
 
+        reportProgress(0.08F, "Precomputing SDF");
+
+        // Early cancellation check
+        if (isCancelled())
+        {
+            return;
+        }
+
         // Ensure SDF is precomputed for the SAME bounding box the octree will use.
         // Use the padded bbox computed in generateMesh() (2 voxels at maxDepth) to
         // avoid clipping the surface at the domain boundary.
@@ -4587,10 +4830,24 @@ namespace gladius::compute
 
         m_core.precomputeSdfForBBox(paddedBbox);
 
+        // Check for cancellation after SDF precomputation
+        if (isCancelled())
+        {
+            return;
+        }
+
+        reportProgress(0.15F, "Building hierarchical octree");
+
         // Create or reuse the hierarchical octree
         if (!m_hierarchicalOctree)
         {
             m_hierarchicalOctree = std::make_unique<GlobalMortonOctree>(m_core);
+        }
+
+        // Wire cancellation callback to the octree
+        if (m_cancellationCheckCallback)
+        {
+            m_hierarchicalOctree->setCancellationCheckCallback(m_cancellationCheckCallback);
         }
 
         // Configure the octree
@@ -4604,11 +4861,36 @@ namespace gladius::compute
         octreeConfig.refinementPasses = m_config.refinementPasses;
         octreeConfig.boundingBoxOverride = paddedBbox;
 
+        // Pass thickness field parameters for shell mesh generation
+        octreeConfig.useThicknessField = m_config.useThicknessField;
+        octreeConfig.outerThicknessField = m_config.outerThicknessField;
+        octreeConfig.innerThicknessField = m_config.innerThicknessField;
+        octreeConfig.thicknessFieldResolution = m_config.thicknessFieldResolution;
+        octreeConfig.worldToThicknessField = m_config.worldToThicknessField;
+        octreeConfig.isInnermostLayer = m_config.isInnermostLayer;
+
         // Build the octree
         m_hierarchicalOctree->build(octreeConfig);
 
+        // Check for cancellation after octree build (including if cancelled during balancing)
+        if (isCancelled() || m_hierarchicalOctree->wasCancelled())
+        {
+            return;
+        }
+
+        reportProgress(0.35F, "Extracting mesh");
+
         // Extract mesh
         m_hierarchicalOctree->extractMesh(m_mesh.positions, m_mesh.normals, m_mesh.indices);
+
+        // Check for cancellation after mesh extraction
+        if (isCancelled())
+        {
+            m_mesh.positions.clear();
+            m_mesh.normals.clear();
+            m_mesh.indices.clear();
+            return;
+        }
 
         // Report statistics
         auto const & stats = m_hierarchicalOctree->getStats();

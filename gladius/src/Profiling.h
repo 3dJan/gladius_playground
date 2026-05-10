@@ -3,8 +3,18 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <syncstream>
 #include <thread>
 #include <tracy/Tracy.hpp>
+#include <utility>
+
+// Optional detailed FWN preparation timings. These logs intentionally
+// use std::clog (stderr) instead of std::cout so MCP stdio framing on stdout
+// remains untouched. Disabled by default; opt in locally with
+// -DGLADIUS_ENABLE_FWN_PREP_TIMING_LOGS=1 while diagnosing.
+#ifndef GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS
+#define GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS 0
+#endif
 
 // Enable debug output for async rendering diagnostics
 //#define ASYNC_DEBUG_OUTPUT
@@ -56,9 +66,9 @@ namespace gladius
         {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - m_start);
-            constexpr int64_t threshold = 1;
+            constexpr int64_t threshold = 100; // Only log if > 100ms
 
-            //if (duration.count() > threshold)
+            if (duration.count() > threshold)
             {
                 std::cout << m_name << " took " << duration.count() << "ms" << std::endl;
             }
@@ -68,6 +78,65 @@ namespace gladius
         std::string m_name;
         std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
     };
+
+    class ScopedFwnPrepTimingLogger
+    {
+      public:
+        explicit ScopedFwnPrepTimingLogger(std::string name, bool enabled = true)
+            : m_name(std::move(name))
+            , m_enabled(enabled)
+            , m_start(std::chrono::high_resolution_clock::now())
+        {
+        }
+
+        ~ScopedFwnPrepTimingLogger()
+        {
+            if (!m_enabled)
+            {
+                return;
+            }
+
+            auto const end = std::chrono::high_resolution_clock::now();
+            auto const duration = std::chrono::duration<double, std::milli>(end - m_start);
+            std::osyncstream(std::clog)
+              << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
+        }
+
+      private:
+        std::string m_name;
+        bool m_enabled = true;
+        std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
+    };
+
+    inline void logFwnPrepTiming(std::string const & message)
+    {
+        std::osyncstream(std::clog) << "[FWN prep] " << message << std::endl;
+    }
+
+#define GLADIUS_FWN_PREP_JOIN_INNER(left, right) left##right
+#define GLADIUS_FWN_PREP_JOIN(left, right) GLADIUS_FWN_PREP_JOIN_INNER(left, right)
+
+#if GLADIUS_ENABLE_FWN_PREP_TIMING_LOGS
+#define GLADIUS_FWN_PREP_SCOPE(name)                                                              \
+    ::gladius::ScopedFwnPrepTimingLogger GLADIUS_FWN_PREP_JOIN(fwnPrepTimer_, __LINE__)(name)
+#define GLADIUS_FWN_PREP_SCOPE_IF(name, enabled)                                                  \
+    ::gladius::ScopedFwnPrepTimingLogger GLADIUS_FWN_PREP_JOIN(fwnPrepTimer_, __LINE__)(name, enabled)
+#define GLADIUS_FWN_PREP_LOG(message) ::gladius::logFwnPrepTiming(message)
+#define GLADIUS_FWN_PREP_LOG_IF(condition, message)                                               \
+    do                                                                                             \
+    {                                                                                              \
+        if (condition)                                                                             \
+        {                                                                                          \
+            ::gladius::logFwnPrepTiming(message);                                                  \
+        }                                                                                          \
+    } while (false)
+#else
+#define GLADIUS_FWN_PREP_SCOPE(name) ((void) 0)
+#define GLADIUS_FWN_PREP_SCOPE_IF(name, enabled) ((void) 0)
+#define GLADIUS_FWN_PREP_LOG(message) ((void) 0)
+#define GLADIUS_FWN_PREP_LOG_IF(condition, message) ((void) 0)
+#endif
+
 #define LOG_SCOPE_DURATION ScopedTimeLogger scopedTimeLogger(__FUNCTION__);
 #define LOG_SCOPE_DURATION_NAMED(name) ScopedTimeLogger scopedTimeLogger(name);
 // #define ProfileFunction LOG_SCOPE_DURATION

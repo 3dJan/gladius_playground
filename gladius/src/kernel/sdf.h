@@ -10,6 +10,8 @@ float4 matrixVectorMul4f(float16 matrix, float4 vector);
 float3 matrixVectorMul3f(float16 matrix, float3 vector);
 
 float glsl_mod1f(float a, float b);
+float3 glsl_mod3f(float3 a, float3 b);
+float16 glsl_mod16f(float16 a, float16 b);
 
 float2 matrixVectorMul2f(float4 matrix, float2 vector);
 

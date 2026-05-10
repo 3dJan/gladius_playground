@@ -237,6 +237,11 @@ float intersection(float sdfA, float sdfB)
 
 float uniteSmooth(float sdfA, float sdfB, float smoothingIntensity)
 {
+    if (smoothingIntensity <= 0.0f)
+    {
+        return min(sdfA, sdfB);
+    }
+
     float const ratio = clamp(0.5f + 0.5f * (sdfB - sdfA) / smoothingIntensity, 0.0f, 1.0f);
     return mix(sdfB, sdfA, ratio) - smoothingIntensity * ratio * (1.0f - ratio);
 }
@@ -1514,6 +1519,202 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             if (primitiveIndicesIndex >= 0) i = primitiveIndicesIndex;
             if (beamIndex >= 0) i = beamIndex;
             if (ballIndex >= 0) i = ballIndex;
+        }
+
+        if (primitive.primitiveType == SDF_SPATIAL_MESH_ROOT)
+        {
+            // Spatial mesh SDF using BVH traversal with optional voxel acceleration
+            // ====================================================================
+            // Header Layout (34 floats total):
+            // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
+            // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
+            // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
+            // [16-25]: Voxel grid header (10 floats: origin.xyz, dims.xyz, voxelSize, invVoxelSize, threshold, padding)
+            // [26-27]: Voxel grid info (2 floats: voxelDataOffset, voxelCount)
+            // [28]:    Edge-neighbour face normals offset (per-edge adjacent face normals)
+            // [29]:    Fast-winding-number aggregate offset
+            // [30]:    FWN coarse sign-cache data offset (0 = not ready)
+            // [31]:    FWN coarse sign-cache resolution per axis
+            // [32]:    FWN beta used to build the ready sign cache
+            // [33]:    NanoVDB grid local float offset (0 = not built)
+            // ====================================================================
+
+            int const headerStart = primitive.start;
+            
+            // Read counts from header (offset 8 = after bounding box)
+            int const nodeCount = (int)data[headerStart + 8];
+            int const triCount = (int)data[headerStart + 9];
+            int const vertexNormalCount = (int)data[headerStart + 10];
+            
+            // Read BVH offsets (offset 12)
+            int const nodesOffset = (int)data[headerStart + 12];
+            int const trianglesOffset = (int)data[headerStart + 13];
+            int const normalsOffset = (int)data[headerStart + 14];
+            int const indicesOffset = (int)data[headerStart + 15];
+            
+            // Read voxel grid info (offset 26)
+            int const voxelDataOffset = (int)data[headerStart + 26];
+            int const voxelCount = (int)data[headerStart + 27];
+
+            // Read edge-neighbour face normals offset (offset 28)
+            int const edgeNeighborsOffset = (int)data[headerStart + 28];
+            // Read FWN aggregates offset (offset 29)
+            int const fwnAggregatesOffset = (int)data[headerStart + 29];
+            // Read FWN coarse sign-cache info (offsets 30-31)
+            int const fwnSignCacheDataOffset = (int)data[headerStart + 30];
+            int const fwnSignCacheResolution = (int)data[headerStart + 31];
+            float const fwnSignCacheBeta = data[headerStart + 32];
+            
+            // Use voxel-accelerated path if voxel grid is available and populated
+            // The grid is considered populated if voxelCount > 0 and first voxel has non-zero data
+            bool const hasVoxelGrid = (voxelCount > 0) && (voxelDataOffset > 0);
+            bool const useFwn = ((renderingSettings.flags & RF_USE_MESH_FWN) != 0)
+                                && (fwnAggregatesOffset > 0);
+            
+            float meshDist;
+#ifdef ENABLE_VDB
+            // NanoVDB 4-companion path: SDF_MESH_TRIANGLES (i+1) + SDF_VDB (i+2) +
+            // SDF_VDB_FACE_INDICES far (i+3) + SDF_VDB_FACE_INDICES near (i+4).
+            // Mirrors the SDF_MESH_TRIANGLES VDB evaluation logic (lines ~1431).
+            if (i + 4 < endIndex &&
+                primitives[i + 1].primitiveType == SDF_MESH_TRIANGLES &&
+                primitives[i + 2].primitiveType == SDF_VDB &&
+                primitives[i + 3].primitiveType == SDF_VDB_FACE_INDICES &&
+                primitives[i + 4].primitiveType == SDF_VDB_FACE_INDICES)
+            {
+                int const meshIndex          = i + 1;
+                int const sdfIndex           = i + 2;
+                int const faceIndexFarIndex  = i + 3;
+                int const faceIndexNearIndex = i + 4;
+
+                int faceIndicesFar[27];
+                float const distFar =
+                    closestFaceDist(pos, meshIndex, faceIndexFarIndex, faceIndicesFar,
+                                    PASS_PAYLOAD_ARGS);
+
+                if (renderingSettings.approximation & AM_DISABLE_INTERPOLATION)
+                {
+                    meshDist = vdbModelSimple(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+                else
+                {
+                    meshDist = vdbModel(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+
+                float const signess = sign(meshDist);
+
+                if (distFar > 20.0f)
+                {
+                    meshDist = distFar * signess;
+                }
+                else if (fabs(distFar) > 0.5f)
+                {
+                    int faceIndicesNear[27];
+                    float const distNear =
+                        closestFaceDist(pos, meshIndex, faceIndexNearIndex, faceIndicesNear,
+                                        PASS_PAYLOAD_ARGS);
+                    meshDist = min(distNear, distFar) * signess;
+                }
+
+                i += 4; // consume all 4 companions
+            }
+            else
+#endif // ENABLE_VDB
+            if (useFwn)
+            {
+                // NOTE: voxel-magnitude reuse is disabled here even when a
+                // voxel grid is allocated. The grid is zero-initialised at
+                // load time and only populated by the async
+                // `buildMeshVoxelGrid` kernel afterwards; reading from it
+                // before that completes returns garbage and forces FWN into a
+                // double full-BVH walk per pixel, which can TDR the GPU
+                // driver on the bbox-precompute pass. Until we expose a
+                // "voxel grid populated" flag readable from the kernel, FWN
+                // uses `spatialMeshSDF_Core` for the magnitude pass (safe).
+                int const fwnVoxelHeaderOffset = 0;
+                int const fwnVoxelDataOffset = 0;
+                // Far-field threshold: when the unsigned distance exceeds
+                // `meshFwnFarFieldFactor * 0.5 * bbox_diagonal` the query is
+                // outside any feature of the mesh and the cheap pseudo-normal
+                // sign from the magnitude path is reliable. Skip the
+                // expensive winding traversal in that case. A factor of 0
+                // disables the skip (always run winding — exact). Bbox lives
+                // at header offsets [0..7].
+                float3 const bboxMin = (float3)(data[headerStart + 0],
+                                                data[headerStart + 1],
+                                                data[headerStart + 2]);
+                float3 const bboxMax = (float3)(data[headerStart + 4],
+                                                data[headerStart + 5],
+                                                data[headerStart + 6]);
+                float const fwnFarFieldDistance =
+                    renderingSettings.meshFwnFarFieldFactor * 0.5f * length(bboxMax - bboxMin);
+                meshDist = spatialMeshSDF_FastWindingNumber((float3)(pos),
+                                                            nodesOffset,
+                                                            trianglesOffset,
+                                                            normalsOffset,
+                                                            indicesOffset,
+                                                            edgeNeighborsOffset,
+                                                            fwnAggregatesOffset,
+                                                            fwnVoxelHeaderOffset,
+                                                            fwnVoxelDataOffset,
+                                                            fwnSignCacheDataOffset,
+                                                            fwnSignCacheResolution,
+                                                            fwnSignCacheBeta,
+                                                            nodeCount,
+                                                            triCount,
+                                                            vertexNormalCount,
+                                                            data,
+                                                            renderingSettings.meshFwnBeta,
+                                                            fwnFarFieldDistance);
+            }
+            else if (hasVoxelGrid)
+            {
+                // Voxel grid header starts at offset 16
+                int const voxelHeaderOffset = headerStart + 16;
+                meshDist = spatialMeshSDF_VoxelAccelerated((float3)(pos),
+                                                           voxelHeaderOffset,
+                                                           voxelDataOffset,
+                                                           nodesOffset,
+                                                           trianglesOffset,
+                                                           normalsOffset,
+                                                           indicesOffset,
+                                                           edgeNeighborsOffset,
+                                                           nodeCount,
+                                                           triCount,
+                                                           vertexNormalCount,
+                                                           data);
+            }
+            else
+            {
+                // Fall back to pure BVH traversal.
+                // Pass the raymarcher's early-exit hint: when > 0, BVH traversal can stop
+                // as soon as it finds a triangle within sqrt(earlyExitDistanceSq). The
+                // returned distance is a safe lower bound on the true distance, so the
+                // raymarcher will not overshoot. The hint is suppressed when the
+                // RF_DISABLE_MESH_EARLY_EXIT flag is set (exact-distance mode).
+                float const earlyExitHint =
+                    ((renderingSettings.flags & RF_DISABLE_MESH_EARLY_EXIT) != 0)
+                        ? 0.0f
+                        : renderingSettings.earlyExitDistanceSq;
+                meshDist = spatialMeshSDFWithEarlyExit((float3)(pos),
+                                                       nodesOffset,
+                                                       trianglesOffset,
+                                                       normalsOffset,
+                                                       indicesOffset,
+                                                       edgeNeighborsOffset,
+                                                       nodeCount,
+                                                       triCount,
+                                                       vertexNormalCount,
+                                                       data,
+                                                       earlyExitHint);
+            }
+
+            // Optional morphological inflation: subtract a constant distance from
+            // the mesh SDF, which closes small holes / pinholes at the cost of
+            // rounding sharp convex features.
+            meshDist -= renderingSettings.meshInflationDistance;
+
+            sdf = uniteSmooth(sdf, meshDist, 0.0f);
         }
     }
     return sdf;

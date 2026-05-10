@@ -1,7 +1,7 @@
 #include "LevelSetView.h"
 
 #include "Document.h"
-#include "MeshResource.h"
+#include "MeshResourceBase.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
 #include "imgui.h"
@@ -64,7 +64,7 @@ namespace gladius::ui
                 ImGui::TextUnformatted("Min Feature Size");
                 ImGui::TableNextColumn();
                 {
-                    float minFeatureSize = levelSet->GetMinFeatureSize();
+                    float minFeatureSize = static_cast<float>(levelSet->GetMinFeatureSize());
                     if (ImGui::InputFloat("##MinFeatureSize", &minFeatureSize))
                     {
                         levelSet->SetMinFeatureSize(minFeatureSize);
@@ -88,7 +88,7 @@ namespace gladius::ui
                 ImGui::TextUnformatted("Fallback Value");
                 ImGui::TableNextColumn();
                 {
-                    float fallbackValue = levelSet->GetFallBackValue();
+                    float fallbackValue = static_cast<float>(levelSet->GetFallBackValue());
                     if (ImGui::InputFloat("##FallbackValue", &fallbackValue))
                     {
                         levelSet->SetFallBackValue(fallbackValue);
@@ -390,7 +390,8 @@ namespace gladius::ui
             auto & resourceManager = document->getResourceManager();
             for (auto const & [key, resource] : resourceManager.getResourceMap())
             {
-                auto const * meshResource = dynamic_cast<MeshResource const *>(resource.get());
+                // Check for any mesh resource type (base class covers all)
+                auto const * meshResource = dynamic_cast<MeshResourceBase const *>(resource.get());
                 if (!meshResource)
                 {
                     continue;

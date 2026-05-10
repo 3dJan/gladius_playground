@@ -83,4 +83,28 @@ namespace gladius
         return reservedNames.find(name) == reservedNames.end();
     }
 
+    bool ArgumentUtils::isReservedKeyword(std::string const & name)
+    {
+        static std::set<std::string> const reservedKeywords = {
+          // Types
+          "float", "vec2", "vec3", "vec4", "mat3", "mat4", "int", "void", "bool",
+          // Control flow
+          "return", "if", "else", "for", "while", "do", "break", "continue",
+          // Trigonometric functions
+          "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+          // Hyperbolic functions
+          "sinh", "cosh", "tanh",
+          // Exponential / logarithmic
+          "exp", "log", "log2", "log10", "sqrt",
+          // Common math
+          "abs", "sign", "floor", "ceil", "round", "fract",
+          "length", "dot", "cross", "normalize",
+          "pow", "min", "max", "clamp", "mod", "fmod",
+          "select", "mix", "step", "smoothstep",
+          // Constants
+          "pi", "e",
+        };
+        return reservedKeywords.find(name) != reservedKeywords.end();
+    }
+
 } // namespace gladius

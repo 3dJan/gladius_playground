@@ -32,6 +32,16 @@ namespace gladius
             return m_numChannels;
         }
 
+        io::ImageStack const * getImageStack() const
+        {
+            return &m_stack;
+        }
+
+        io::ImageStack * getImageStack()
+        {
+            return &m_stack;
+        }
+
       private:
         size_t m_width{};
         size_t m_height{};

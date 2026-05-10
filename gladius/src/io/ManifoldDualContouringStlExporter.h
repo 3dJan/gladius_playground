@@ -2,6 +2,7 @@
 
 #include "IExporter.h"
 #include "SurfaceExtractionOptions.h"
+#include "3mf/ColorCompatibilityPlanner.h"
 #include "3mf/MeshWriter3mf.h"
 
 #include "../EventLogger.h"
@@ -57,6 +58,15 @@ namespace gladius::io
         /// @param mode The color mode to use
         void setColorMode(ColorMode mode);
 
+        /// @brief Set the quantization behavior for printable-region compatibility
+        void setQuantizationMode(QuantizationMode mode);
+
+        /// @brief Set the maximum palette size (nullopt = automatic)
+        void setMaxPaletteSize(std::optional<std::uint32_t> maxPaletteSize);
+
+        /// @brief Set the target application for optional proprietary optimization
+        void setTargetApplication(TargetApplication targetApplication);
+
         void beginExport(std::filesystem::path const & fileName, ComputeCore & generator) override;
         bool advanceExport(ComputeCore & generator) override;
         void finalize() override;
@@ -78,7 +88,7 @@ namespace gladius::io
         void writeMeshToFile(ComputeCore & generator,
                              std::vector<Eigen::Vector3f> const & positions,
                              std::vector<std::uint32_t> const & indices,
-                             std::vector<Eigen::Vector3f> const & normals) const;
+                             std::vector<Eigen::Vector3f> const & normals);
 
         events::SharedLogger m_logger;
         ManifoldDualContouringOptions m_options{};
@@ -94,6 +104,9 @@ namespace gladius::io
         bool m_exportWithColors{false};  ///< Whether to sample and export volumetric colors
         bool m_convertToSrgb{true};  ///< Whether to convert linear RGB to sRGB
         ColorMode m_colorMode{ColorMode::PerFace}; ///< The color mode to use
+        QuantizationMode m_quantizationMode{QuantizationMode::Adaptive};
+        std::optional<std::uint32_t> m_maxPaletteSize;
+        TargetApplication m_targetApplication{TargetApplication::None};
         
         // Background thread for non-blocking export
         std::future<void> m_exportFuture;

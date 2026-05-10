@@ -184,7 +184,6 @@ int main(int argc, char ** argv)
 
             // Restore stdout for MCP protocol
             std::cout.rdbuf(orig_cout);
-            gladius::Application app(headless);
             if (!success)
             {
                 // Use stderr for error since stdout is reserved for MCP protocol
@@ -228,7 +227,7 @@ int main(int argc, char ** argv)
                     logger->logInfo("Opening file: " + filename->string());
                 }
             }
-            app.getMainWindow().open(*filename);
+            app.getMainWindow().setStartupFile(*filename);
         }
         else
         {

@@ -48,11 +48,22 @@ namespace gladius::ui
 
         constexpr ImGuiWindowFlags windowFlags = ImGuiWindowFlags_AlwaysAutoResize;
 
-        if (!ImGui::Begin("Keyboard Shortcuts", &m_visible, windowFlags))
+        if (!ImGui::Begin("Input Settings", &m_visible, windowFlags))
         {
             ImGui::End();
             return;
-        } // Search filter
+        }
+
+        if (!ImGui::BeginTabBar("InputSettingsTabs"))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // ---- Keyboard tab ----
+        if (ImGui::BeginTabItem("Keyboard"))
+        {
+        // Search filter
         ImGui::Text("Filter:");
         ImGui::SameLine();
 
@@ -155,6 +166,17 @@ namespace gladius::ui
             }
         }
 
+        ImGui::EndTabItem(); // Keyboard
+        } // end BeginTabItem("Keyboard")
+
+        // ---- Gamepad tab ----
+        if (ImGui::BeginTabItem("Gamepad"))
+        {
+            renderGamepadBindingsPanel(m_gamepadSearchFilter, m_gamepadCapturing, m_gamepadCapturingAction);
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
         ImGui::End();
     }
 

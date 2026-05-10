@@ -219,7 +219,7 @@ namespace gladius::mcp::tools
                     try
                     {
                         document->updateFlatAssembly();
-                        core->tryRefreshProgramProtected(document->getAssembly());
+                        core->tryRefreshProgramProtected(document->getFlatAssembly());
                     }
                     catch (...)
                     {

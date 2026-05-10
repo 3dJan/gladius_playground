@@ -3,6 +3,7 @@
 #include "Profiling.h"
 #include <fmt/format.h>
 #include <string>
+#include <utility>
 
 #include "exceptions.h"
 
@@ -11,7 +12,7 @@ namespace gladius
     ProgramBase::ProgramBase(SharedComputeContext context, const SharedResources resources)
         : m_ComputeContext(context)
         , m_programFront(std::make_unique<CLProgram>(context))
-        , m_resoures(resources)
+        , m_resources(resources)
     {
         if (m_logger)
         {
@@ -27,6 +28,7 @@ namespace gladius
                          "rendering.h",
                          "sdf_generator.h",
                          //"PNanoVDB_OpenCL.h",
+                         "mesh_sdf.cl",
                          "sdf.cl",
                          "rendering.cl",
                          "sdf_generator.cl"};
@@ -49,6 +51,14 @@ namespace gladius
             return;
         }
         m_programFront->finishCompilation();
+    }
+
+    void ProgramBase::requestShutdown()
+    {
+        if (m_programFront)
+        {
+            m_programFront->requestShutdown();
+        }
     }
 
     void ProgramBase::dumpSource(std::filesystem::path const & path) const
@@ -363,6 +373,22 @@ namespace gladius
         {
             m_logger->logWarning(
               "ProgramBase: m_programFront is null, cannot set cache enabled state!");
+        }
+    }
+
+    void ProgramBase::setEnableTwoLevelPipeline(bool enabled)
+    {
+        if (m_programFront)
+        {
+            m_programFront->setEnableTwoLevelPipeline(enabled);
+        }
+    }
+
+    void ProgramBase::setDebugLabel(std::string label)
+    {
+        if (m_programFront)
+        {
+            m_programFront->setDebugLabel(std::move(label));
         }
     }
 

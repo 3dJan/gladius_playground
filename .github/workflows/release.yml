@@ -1,5 +1,8 @@
 name: Create Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     tags:
@@ -24,16 +27,16 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       
     - name: Download Windows Installer
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: gladius_win64
         path: ./artifacts/windows/
         
     - name: Download Linux Package
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: gladius_deb
         path: ./artifacts/linux/
@@ -101,7 +104,7 @@ jobs:
         echo "EOF" >> $GITHUB_OUTPUT
         
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref_name }}
         name: Gladius ${{ steps.version.outputs.version }}

@@ -197,6 +197,9 @@ namespace gladius
             m_parser.DefineFun("min", [](double a, double b) -> double { return std::min(a, b); });
             m_parser.DefineFun("max", [](double a, double b) -> double { return std::max(a, b); });
 
+            // Add length function (vector magnitude; scalar fallback for validation)
+            m_parser.DefineFun("length", [](double x) -> double { return std::abs(x); });
+
             // Define common mathematical constants
             // Ensure tokens like 'pi' and 'e' are recognized as constants by muParser
             try
@@ -351,7 +354,7 @@ namespace gladius
                     var != "sqrt" && var != "abs" && var != "pi" && var != "e" && var != "pow" &&
                     var != "min" && var != "max" && var != "atan2" && var != "fmod" &&
                     var != "acos" && var != "asin" && var != "atan" && var != "mod" &&
-                    var != "clamp")
+                    var != "clamp" && var != "length")
                 {
                     // Check if this variable is part of a component access
                     bool isPartOfComponentAccess = false;
@@ -414,7 +417,7 @@ namespace gladius
                     var != "sqrt" && var != "abs" && var != "pi" && var != "e" && var != "clamp" &&
                     var != "pow" && var != "min" && var != "max" && var != "atan2" &&
                     var != "fmod" && var != "acos" && var != "asin" && var != "atan" &&
-                    var != "mod")
+                    var != "mod" && var != "length")
                 {
                     // Check if variable is already in the list
                     if (std::find(variables.begin(), variables.end(), var) == variables.end())

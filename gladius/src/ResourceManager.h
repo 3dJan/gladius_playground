@@ -1,5 +1,6 @@
 #pragma once
 #include "ImageRGBA.h"
+#include "MeshVoxelGridManager.h"
 #include "Primitives.h"
 #include "ResourceKey.h"
 #include "types.h"
@@ -25,6 +26,9 @@ namespace gladius
         class ImageStack;
     }
 
+    struct SpatialMeshData;
+    struct MeshSdfEvaluationConfig;
+    struct NanoVdbBuildPolicy;
     class Mesh;
     class ResourceContext;
     class ImageStackOCLBuffer;
@@ -97,6 +101,15 @@ namespace gladius
             return true;
         }
 
+        /// Force a re-load: clears the "already loaded" flag and re-runs
+        /// loadImpl(). Use after configuration changes that require the
+        /// payload to be regenerated.
+        bool reload()
+        {
+            m_alreadyLoaded = false;
+            return load();
+        }
+
         void write(Primitives & primitives) override
         {
             m_startIndex = static_cast<int>(primitives.primitives.getSize());
@@ -138,6 +151,11 @@ namespace gladius
         void addResource(ResourceKey key, openvdb::GridBase::Ptr && grid);
         void addResource(ResourceKey key, io::ImageStack && stack);
         void addResource(ResourceKey key, std::unique_ptr<BeamLatticeResource> && resource);
+        void addResource(ResourceKey key, SpatialMeshData && spatialData);
+        void addResource(ResourceKey key,
+                         SpatialMeshData && spatialData,
+                         MeshSdfEvaluationConfig const & evaluationConfig,
+                         NanoVdbBuildPolicy const & nanovdbBuildPolicy);
 
         /**
          * \brief Loads all resources that have not been load yet
@@ -161,6 +179,29 @@ namespace gladius
         bool hasResource(ResourceKey const & key) const;
 
         void deleteResource(ResourceKey const & key);
+        
+        /// Collect voxel grid build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need voxel grid builds
+        [[nodiscard]] std::vector<MeshVoxelGridBuildParams> collectVoxelGridBuildParams() const;
+
+        /// Collect FWN aggregate build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need FWN aggregate builds
+        [[nodiscard]] std::vector<MeshFwnAggregateBuildParams> collectFwnAggregateBuildParams() const;
+
+        /// Collect FWN sign-cache build parameters from all SpatialMeshResource instances
+        /// @return Vector of build parameters for resources that need sign-cache builds
+        [[nodiscard]] std::vector<MeshSignCacheBuildParams> collectSignCacheBuildParams() const;
+        
+        /// Mark all SpatialMeshResource instances as having their voxel grids built
+        void markVoxelGridsBuilt();
+
+        /// Mark SpatialMeshResource FWN aggregates as built for successfully queued builds
+        void markFwnAggregatesBuilt(std::vector<MeshFwnAggregateBuildParams> const & buildParams,
+                                    size_t builtCount);
+
+        /// Advance SpatialMeshResource sign-cache progress for successfully queued build steps
+        void markSignCacheBuildProgress(std::vector<MeshSignCacheBuildParams> const & buildParams,
+                                        size_t queuedCount);
 
       private:
         void increaseImageNumber();

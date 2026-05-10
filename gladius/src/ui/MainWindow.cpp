@@ -1,10 +1,12 @@
 #include "MainWindow.h"
+#include "Theme.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <sstream>
 
 #ifdef _WIN32
 #include <shellapi.h>
@@ -34,14 +36,46 @@
 
 namespace gladius::ui
 {
-    using namespace std;
-
-    bool bigMenuItem(const char * label)
+    bool bigMenuItem(char const * label)
     {
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
         const bool result = ImGui::Button(label);
         ImGui::PopStyleColor();
         return result;
+    }
+
+    char const * getRenderBackendStatusLabel(RenderBackend backend)
+    {
+        switch (backend)
+        {
+        case RenderBackend::CommandStream:
+            return "Interactive";
+        case RenderBackend::Optimized:
+            return "Optimized";
+        case RenderBackend::Unavailable:
+        default:
+            return "N/A";
+        }
+    }
+
+    char const * getRenderBackendStatusTooltip(RenderBackend backend, bool isCompiling)
+    {
+        if (isCompiling)
+        {
+            return "Compiling: no renderable model kernel is ready yet.";
+        }
+
+        switch (backend)
+        {
+        case RenderBackend::CommandStream:
+            return "Interactive: command-stream preview kernel for immediate feedback while the "
+                   "optimized kernel is compiling.";
+        case RenderBackend::Optimized:
+            return "Optimized: fully compiled OpenCL kernel for fastest steady-state rendering.";
+        case RenderBackend::Unavailable:
+        default:
+            return "Render backend is not available.";
+        }
     }
 
     MainWindow::MainWindow()
@@ -64,8 +98,11 @@ namespace gladius::ui
         m_doc->setUiMode(true);
 
         m_modelEditor.setDocument(m_doc);
-        // Set the library root directory
-        m_modelEditor.setLibraryRootDirectory(getAppDir() / "library");
+
+        // Sync shipped library items into the user's persistent library directory.
+        // This copies new files without overwriting existing user customizations.
+        (void) syncShippedLibrary();
+        m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
 
         using namespace gladius;
 
@@ -74,6 +111,7 @@ namespace gladius::ui
 
         m_renderWindow.initialize(m_core.get(), &m_mainView, m_shortcutManager, m_configManager);
         m_renderWindow.setDocument(m_doc.get());
+        m_renderWindow.setExportState(&m_exportState);
         LOG_LOCATION
         m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack([&]()
                                                                     { onPreviewProgramSwap(); });
@@ -89,8 +127,21 @@ namespace gladius::ui
 
         m_mainView.clearViewCallback();
         m_mainView.addViewCallBack([&]() { render(); });
+        nodeEditor();
 
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
 
         // Set up welcome screen callbacks
         m_welcomeScreen.setNewModelCallback(
@@ -134,17 +185,23 @@ namespace gladius::ui
         m_meshExporterDialog.setExportState(&m_exportState);
         m_modelEditor.setExportState(&m_exportState);
 
-        nodeEditor();
-        newModel();
+        // Defer the initial template load while the welcome screen is visible.
+        // Starting it now would set isLoadingInProgress(), causing a click on a
+        // thumbnail to be silently dropped by open().  The template is loaded
+        // later when the welcome screen closes without a file selection.
+        if (!m_welcomeScreen.isVisible())
+        {
+            newModel();
+        }
         loadRenderSettings();
     }
 
-    void MainWindow::dragParameter(const std::string & label,
+    void MainWindow::dragParameter(std::string const & label,
                                    float * valuePtr,
                                    float minVal,
                                    float maxVal)
     {
-        const bool changed = ImGui::DragFloat(label.c_str(), valuePtr, 0.001f, minVal, maxVal);
+        bool const changed = ImGui::DragFloat(label.c_str(), valuePtr, 0.001f, minVal, maxVal);
         m_contoursDirty = changed || m_contoursDirty;
         m_parameterDirty = changed || m_parameterDirty;
     }
@@ -203,6 +260,16 @@ namespace gladius::ui
             }
         }
 
+        if (ImGui::CollapsingHeader("Appearance"))
+        {
+            auto & names = themeNames();
+            int currentIdx = static_cast<int>(m_mainView.getCurrentTheme());
+            if (ImGui::Combo("Theme", &currentIdx, names.data(), THEME_COUNT))
+            {
+                m_mainView.setCurrentTheme(static_cast<ThemeId>(currentIdx));
+            }
+        }
+
         if (ImGui::CollapsingHeader("Keyboard Shortcuts"))
         {
             if (ImGui::Button("Configure Shortcuts"))
@@ -235,10 +302,22 @@ namespace gladius::ui
             }
         }
 
-        auto z = m_core->getSliceHeight();
-        ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.);
+        if (ImGui::CollapsingHeader("Gamepad"))
+        {
+            if (ImGui::Button("Configure Gamepad"))
+            {
+                showGamepadSettings();
+            }
+            ImGui::Separator();
+            ImGui::Text("Use a gamepad to navigate the model editor");
+            ImGui::Separator();
+        }
 
-        m_core->setSliceHeight(z);
+        auto z = m_core->getSliceHeight();
+        if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
+        {
+            m_core->setSliceHeight(z);
+        }
         bool tmp_m_dirty = m_dirty.load();
 
         ImGui::Checkbox("m_dirty", &tmp_m_dirty);
@@ -253,44 +332,186 @@ namespace gladius::ui
 
     void MainWindow::setup()
     {
-        ProfileFunction;
+        //ProfileFunction;
+        LOG_SCOPE_DURATION_NAMED("MainWindow::setup()");
         m_initialized = true;
 
         // Create the GL context up-front so any GL-backed resources can be created safely
-        m_mainView.ensureInitialized();
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - ensureInitialized");
+            m_mainView.ensureInitialized();
+        }
 
-        // Try to initialize compute stack; if it fails, keep UI running in limited mode.
+        // Set up minimal UI immediately so window appears responsive
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - setLogger");
+            m_welcomeScreen.setLogger(m_logger);
+        }
+        {
+            LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - getRecentFiles");
+            m_welcomeScreen.setRecentFiles(getRecentFiles(100));
+        }
+
+        // Set up minimal callbacks - will be replaced after compute init completes
+        m_mainView.clearViewCallback();
+        m_renderCallback = [&]() { /* no-op until compute ready */ };
+        m_mainView.setRenderCallback(m_renderCallback);
+        m_mainView.addViewCallBack([&]() { render(); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
+
+        // Start async OpenCL initialization
+        startAsyncComputeInit();
+    }
+
+    void MainWindow::startAsyncComputeInit()
+    {
+        LOG_SCOPE_DURATION_NAMED("MainWindow::startAsyncComputeInit()");
+
+        if (m_computeInitState != ComputeInitState::NotStarted)
+        {
+            return; // Already started or completed
+        }
+
+        m_computeInitState = ComputeInitState::InProgress;
+
+        // Phase 1: Run the slow device enumeration on a background thread
+        // The GL context is NOT required for this phase
+        m_computeInitFuture = std::async(
+          std::launch::async,
+          []() -> ComputeEnumResult
+          {
+              ComputeEnumResult result;
+              try
+              {
+                  // This is the slow part - OpenCL platform/device enumeration
+                  std::ostringstream logStream;
+                  auto accelerators = queryAccelerators(logStream);
+
+                  if (accelerators.empty())
+                  {
+                      result.success = false;
+                      result.errorMessage = "No suitable OpenCL devices found";
+                      return result;
+                  }
+
+                  // Sort by performance estimation (best first)
+                  std::stable_sort(std::begin(accelerators),
+                                   std::end(accelerators),
+                                   [](Accelerator const & lhs, Accelerator const & rhs)
+                                   {
+                                       return lhs.capabilities.performanceEstimation >
+                                              rhs.capabilities.performanceEstimation;
+                                   });
+
+                  result.accelerators = std::move(accelerators);
+                  result.success = true;
+              }
+              catch (GladiusException const & e)
+              {
+                  result.success = false;
+                  result.errorMessage = e.what();
+              }
+              catch (std::exception const & e)
+              {
+                  result.success = false;
+                  result.errorMessage = e.what();
+              }
+              return result;
+          });
+    }
+
+    void MainWindow::pollComputeInit()
+    {
+        if (m_computeInitState != ComputeInitState::InProgress)
+        {
+            return;
+        }
+
+        // Check if future is ready (non-blocking)
+        if (!m_computeInitFuture.valid())
+        {
+            return;
+        }
+
+        if (m_computeInitFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        {
+            return; // Still in progress
+        }
+
+        // Future is ready - get the result and finalize on main thread
+        m_computeInitState = ComputeInitState::Completed;
+
         try
         {
-            auto context = std::make_shared<ComputeContext>(EnableGLOutput::enabled);
-            context->setLogger(m_logger);
-            gladius::setGlobalLogger(m_logger);
-            context->setDebugOutputEnabled(m_openclDebugEnabled);
-            if (!context->isValid())
+            auto result = m_computeInitFuture.get();
+
+            if (result.success && !result.accelerators.empty())
             {
-                throw OpenCLContextCreationError("Context invalid after initialization");
+                // Phase 2: Create the OpenCL context on the main thread (GL context is current)
+                auto const & selectedAccelerator = result.accelerators.front();
+
+                auto context = std::make_shared<ComputeContext>(
+                  EnableGLOutput::enabled, selectedAccelerator);
+                context->setLogger(m_logger);
+                context->setDebugOutputEnabled(m_openclDebugEnabled);
+                gladius::setGlobalLogger(m_logger);
+
+                if (!context->isValid())
+                {
+                    throw OpenCLContextCreationError("Context invalid after initialization");
+                }
+
+                m_core = std::make_shared<ComputeCore>(
+                  context, RequiredCapabilities::OpenGLInterop, m_logger);
+                m_doc = std::make_shared<Document>(m_core);
+                m_computeAvailable = true;
+                m_computeErrorMessage.clear();
+
+                // Load render settings now that compute is available
+                if (m_configManager)
+                {
+                    loadRenderSettings();
+                }
+
+                // Complete full setup with compute
+                setup(m_core, m_doc, m_logger);
+
+                // Open the startup file now that compute is available
+                if (m_startupFile)
+                {
+                    loadFileDeferred(*m_startupFile);
+                    m_startupFile.reset();
+                }
+
+                if (m_logger)
+                {
+                    m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
+                }
             }
-
-            m_core =
-              std::make_shared<ComputeCore>(context, RequiredCapabilities::OpenGLInterop, m_logger);
-            m_doc = std::make_shared<Document>(m_core);
-            m_computeAvailable = true;
-            m_computeErrorMessage.clear();
-        }
-        catch (const GladiusException & e)
-        {
-            // Handle any OpenCL-related errors gracefully
-            m_computeAvailable = false;
-            m_computeErrorMessage = e.what();
-            m_showComputeErrorModal = true;
-
-            // Hide welcome screen so error is immediately visible
-            m_welcomeScreen.hide();
-
-            if (m_logger)
+            else
             {
-                m_logger->addEvent(
-                  {std::string("Compute disabled: ") + e.what(), events::Severity::Warning});
+                m_computeAvailable = false;
+                m_computeErrorMessage = result.errorMessage;
+                m_showComputeErrorModal = true;
+                m_welcomeScreen.hide();
+
+                if (m_logger)
+                {
+                    m_logger->addEvent({std::string("Compute disabled: ") + result.errorMessage,
+                                        events::Severity::Warning});
+                }
             }
         }
         catch (const std::exception & e)
@@ -298,41 +519,20 @@ namespace gladius::ui
             m_computeAvailable = false;
             m_computeErrorMessage = e.what();
             m_showComputeErrorModal = true;
-
-            // Hide welcome screen so error is immediately visible
             m_welcomeScreen.hide();
 
             if (m_logger)
             {
                 m_logger->addEvent(
-                  {std::string("Compute disabled: ") + e.what(), events::Severity::Warning});
+                  {std::string("Compute init error: ") + e.what(), events::Severity::Warning});
             }
         }
 
-        // Load render settings only when compute is available
-        if (m_configManager && m_computeAvailable)
-        {
-            loadRenderSettings();
-        }
+        m_computeInitState = ComputeInitState::Finalized;
 
-        // If compute is available, continue normal setup. Otherwise, keep UI minimal.
-        if (m_computeAvailable)
+        if (m_onComputeReadyCallback)
         {
-            setup(m_core, m_doc, m_logger);
-            // Note: setup() already sets up all callbacks including nodeEditor()
-        }
-        else
-        {
-            // Minimal UI: welcome screen, menus, status bar
-            m_welcomeScreen.setLogger(m_logger);
-            m_welcomeScreen.setRecentFiles(getRecentFiles(100));
-
-            // Set up minimal callbacks when compute is disabled
-            m_mainView.clearViewCallback();
-            m_renderCallback = [&]() { /* no-op when compute disabled */ };
-            m_mainView.setRenderCallback(m_renderCallback);
-            m_mainView.addViewCallBack([&]() { render(); });
-            m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+            m_onComputeReadyCallback();
         }
     }
 
@@ -397,6 +597,34 @@ namespace gladius::ui
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
+        // Poll for async compute initialization completion
+        pollComputeInit();
+
+        // Detect completion of async file load and refresh editors to the new Assembly.
+        // (MainWindow::open() starts the async load; we defer resetEditorState() until loading finishes.)
+        if (m_computeAvailable && m_doc)
+        {
+            bool const loadingNow = m_doc->isLoadingInProgress();
+            if (m_asyncLoadState != AsyncLoadState::Idle && !loadingNow)
+            {
+                if (m_asyncLoadState == AsyncLoadState::LoadingWithReset)
+                {
+                    resetEditorState();
+                    m_renderWindow.invalidateViewDuetoModelUpdate();
+                    m_renderWindow.centerView();
+                }
+                m_asyncLoadState = AsyncLoadState::Idle;
+                // Push persisted mesh-SDF settings (method, β, etc.) into the
+                // freshly loaded document. Without this the renderer would
+                // ignore the saved method and silently fall back to its
+                // default until the user opens the settings dialog.
+                if (m_meshSdfApplyCallback)
+                {
+                    m_meshSdfApplyCallback();
+                }
+            }
+        }
+
         // Check if welcome screen is visible first
         bool welcomeScreenVisible = m_welcomeScreen.isVisible();
 
@@ -405,12 +633,47 @@ namespace gladius::ui
         {
             m_overlayFadeoutActive = true;
             m_mainView.startAnimationMode();
+
+            // Process any pending file open from the welcome screen
+            if (auto pendingPath = m_welcomeScreen.processFileOpen())
+            {
+                if (std::filesystem::exists(*pendingPath))
+                {
+                    open(*pendingPath);
+                }
+                else
+                {
+                    m_logger->addEvent(
+                      {fmt::format("File not found: {}", pendingPath->string()),
+                       events::Severity::Error});
+                }
+            }
+            else if (m_asyncLoadState == AsyncLoadState::Idle &&
+                     !m_asyncFileDialog.isActive())
+            {
+                // Welcome screen closed without selecting a file and no other
+                // operation was already started (e.g. "New Project" or "Open
+                // Existing").  Load the default template so the user has a
+                // blank model to work with.
+                newModel();
+            }
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
 
         // Check for keyboard shortcuts
         ImGuiIO & io = ImGui::GetIO();
         processShortcuts(ShortcutContext::Global);
+
+        // Process gamepad input (only active when Model Editor is visible)
+        if (m_modelEditor.isVisible())
+        {
+            m_modelEditor.processGamepadInput();
+
+            if (m_modelEditor.consumeGamepadQuickRefRequest())
+            {
+                showGamepadQuickReference();
+            }
+        }
 
         // If compute is available, validate context
         if (m_computeAvailable && m_core)
@@ -504,6 +767,10 @@ namespace gladius::ui
                 ImGui::PopStyleVar();
             }
 
+            // Always render the docking area to preserve layout (even behind welcome screen)
+            // This ensures the dock space state is maintained across welcome screen transitions
+            mainWindowDockingArea();
+
             // Only render the normal UI if welcome screen is not visible and fadeout is complete
             if (!welcomeScreenVisible)
             {
@@ -522,7 +789,7 @@ namespace gladius::ui
                 }
 
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                                    {20.f * m_uiScale, 12.f * m_uiScale});
+                                    {12.f * m_uiScale, 8.f * m_uiScale});
                 if (ImGui::BeginMainMenuBar())
                 {
                     if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_BARS)))
@@ -645,6 +912,11 @@ namespace gladius::ui
                     {
                         if (m_fileChanged)
                         {
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave")))
+                            {
+                                save();
+                            }
                             ImGui::TextUnformatted(
                               fmt::format("*{}", m_currentAssemblyFileName.value().string())
                                 .c_str());
@@ -661,22 +933,56 @@ namespace gladius::ui
                 }
                 ImGui::PopStyleVar();
 
-                mainWindowDockingArea();
                 if (m_computeAvailable)
                 {
                     sliceWindow();
                     renderWindow();
+
+                    // Render export overlay BEFORE dialogs so they appear on top
+                    renderExportOverlay();
+
                     meshExportDialog();
                     cliExportDialog();
                 }
+
+                // Library export dialog (modal, renders independently of compute)
+                m_libraryExportDialog.render();
+                if (m_libraryExportDialog.wasExportCompleted())
+                {
+                    m_modelEditor.refreshLibraryDirectories();
+                }
+                if (m_libraryExportDialog.hadError())
+                {
+                    m_logView.show();
+                }
+
                 mainMenu();
                 showExitPopUp();
+                showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
+
+                // Render library browser only when the model editor is visible.
+                if (m_modelEditor.isVisible())
+                {
+                    m_modelEditor.renderLibraryBrowser();
+                }
 
                 if (m_shortcutSettingsDialog.isVisible())
                 {
                     m_shortcutSettingsDialog.render();
                 }
+
+                if (m_meshSdfSettingsDialog.isVisible())
+                {
+                    m_meshSdfSettingsDialog.render();
+                }
+
+                if (m_gamepadSettingsDialog.isVisible())
+                {
+                    m_gamepadSettingsDialog.render();
+                }
+
+                m_gamepadQuickRef.render();
             }
 
             m_welcomeScreen.render();
@@ -699,7 +1005,7 @@ namespace gladius::ui
                 renderStatusBar();
             }
 
-            // Library browser is now rendered by the ModelEditor
+            // Library browser is rendered from the main UI loop.
         }
         catch (OpenCLError & e)
         {
@@ -792,9 +1098,7 @@ namespace gladius::ui
         }
         case AsyncDialogOperation::Import:
         {
-            // Note: Import is not fully implemented in the original code
             throw std::runtime_error("Import not implemented");
-            break;
         }
         case AsyncDialogOperation::Open:
         {
@@ -810,13 +1114,9 @@ namespace gladius::ui
         {
             auto savePath = filename;
             savePath.replace_extension(".3mf");
-            bool writeThumbnail = false;
-            if (m_computeAvailable && m_core)
-            {
-                writeThumbnail = m_core->isRendererReady();
-            }
+            bool writeThumbnail = m_computeAvailable && m_core;
             m_doc->saveAs(savePath, writeThumbnail);
-            m_renderWindow.invalidateViewDuetoModelUpdate();
+            // No invalidation needed — saving doesn't change the model.
             m_fileChanged = false;
             m_currentAssemblyFileName = savePath;
             addToRecentFiles(savePath);
@@ -836,17 +1136,41 @@ namespace gladius::ui
         case AsyncDialogOperation::ImportImageStack:
         {
             io::ImageStackCreator creator;
-            creator.importDirectoryAsFunctionFromImage3D(m_doc->get3mfModel(), filename);
+            auto result = creator.importDirectoryWithPadding(m_doc->get3mfModel(), filename);
+
+            // T052: Show notification if any images were padded
+            if (result.hasPaddedFiles() && m_logger)
+            {
+                std::string message = fmt::format(
+                    "ImageStack imported with padding to {}x{}. Padded {} file(s): ",
+                    result.maxWidth,
+                    result.maxHeight,
+                    result.paddedFiles.size());
+
+                // List first few padded files
+                size_t const maxFilesToShow = 5;
+                for (size_t i = 0; i < std::min(result.paddedFiles.size(), maxFilesToShow); ++i)
+                {
+                    if (i > 0)
+                    {
+                        message += ", ";
+                    }
+                    message += result.paddedFiles[i];
+                }
+                if (result.paddedFiles.size() > maxFilesToShow)
+                {
+                    message += fmt::format(
+                        " and {} more", result.paddedFiles.size() - maxFilesToShow);
+                }
+
+                m_logger->addEvent({message, events::Severity::Info});
+            }
             break;
         }
         case AsyncDialogOperation::OpenAfterSavePrompt:
         {
-            m_currentAssemblyFileName = filename;
-            m_welcomeScreen.hide();
-            m_doc->loadNonBlocking(filename);
-            resetEditorState();
-            m_renderWindow.centerView();
-            addToRecentFiles(filename);
+            loadFileDeferred(filename);
+
             // Close the save-before-file-operation popup
             m_showSaveBeforeFileOperation = false;
             m_pendingFileOperation = PendingFileOperation::None;
@@ -865,10 +1189,17 @@ namespace gladius::ui
             // Clear errors and warnings from events list when compilation is successful
             m_logger->clear();
 
+            // invalidateViewDuetoModelUpdate() already calls invalidateView() internally —
+            // no separate invalidateView() needed (that would cause a redundant epoch bump).
             m_renderWindow.invalidateViewDuetoModelUpdate();
             m_modelEditor.markModelAsUpToDate();
         }
-        m_renderWindow.invalidateView();
+        else
+        {
+            // Compilation is still running — just mark dirty for visual feedback
+            // without bumping the epoch (which would cancel in-flight work).
+            m_renderWindow.invalidateView();
+        }
     }
 
     void MainWindow::nodeEditor()
@@ -888,33 +1219,44 @@ namespace gladius::ui
               }
 
               const auto parameterModifiedByModelEditor = m_modelEditor.showAndEdit();
+              // T047: Route parameter changes through throttle
+              if (parameterModifiedByModelEditor)
+              {
+                  m_parameterThrottle.onParameterChanged();
+              }
               m_parameterDirty = parameterModifiedByModelEditor || m_parameterDirty;
               m_dirty = m_parameterDirty || m_dirty;
-              m_contoursDirty = m_parameterDirty || m_contoursDirty;
               bool const modelWasModified = m_modelEditor.modelWasModified();
               bool const compileRequested = m_modelEditor.isCompileRequested();
 
+              // updateInputsAndOutputs() and updateParameterRegistration() are called at the
+              // start of refreshWorker() on the background thread. Running them here on the
+              // UI thread was a redundant O(N·models) stall per structural edit. Nodes
+              // self-register in create()/insert(); the lazy updateGraphAndOrderIfNeeded()
+              // in visitNodes() keeps the render path consistent for the current frame.
+
               if (modelWasModified || parameterModifiedByModelEditor)
               {
-                  try
-                  {
-                      m_doc->getAssembly()->updateInputsAndOutputs();
-                      m_doc->updateParameterRegistration();
-                      markFileAsChanged();
-                  }
-                  catch (const std::exception & e)
-                  {
-                      m_logger->addEvent({fmt::format("Error updating model: {}", e.what()),
-                                          events::Severity::Error});
-                  }
+                  markFileAsChanged();
               }
 
+              // Refresh model when compile is explicitly requested (structural changes)
+              // Instead of triggering immediately, signal a structural edit so the
+              // debouncer can coalesce rapid sequential edits (e.g. paste, multi-link).
               if (compileRequested)
               {
-                  refreshModel();
+                  m_doc->signalStructuralEdit();
+                  m_parameterThrottle.reset(); // Full compile resets throttle state
+                  m_contoursDirty = true;
               }
+              // For parameter-only changes, m_parameterDirty is already set above.
+              // updateModel() will handle it using the fast updateParameter() path
+              // and call invalidateViewDueToParameterChange() which bumps the epoch.
 
-              // Mark model as up to date after compilation check
+              // Clear modified flags after signaling. The debouncer in
+              // Document::dispatchStructuralUpdateIfReady() handles retry
+              // when a compilation is already in-progress — the UI-side
+              // flags no longer need to survive across frames.
               if (modelWasModified || parameterModifiedByModelEditor)
               {
                   m_modelEditor.markModelAsUpToDate();
@@ -931,9 +1273,15 @@ namespace gladius::ui
 #ifdef IMGUI_HAS_DOCK
         window_flags |= ImGuiWindowFlags_NoDocking;
 #endif
+
+        // Measure the menu bar height using the SAME padding as the actual menu bar in render()
+        // The actual menu bar uses: ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {12.f * m_uiScale, 8.f * m_uiScale});
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {12.f * m_uiScale, 8.f * m_uiScale});
         ImGui::BeginMainMenuBar();
-        const auto menuBarHeight = ImGui::GetWindowHeight();
+        float const menuBarHeight = ImGui::GetWindowHeight();
         ImGui::EndMainMenuBar();
+        ImGui::PopStyleVar();
+
         const auto & io = ImGui::GetIO();
 
         ImGui::SetNextWindowBgAlpha(0.0f);
@@ -984,9 +1332,13 @@ namespace gladius::ui
             return;
         }
 
+        // Cancel all in-flight async GPU work before loading (same reason as loadFileDeferred).
+        m_renderWindow.cancelAllAsyncWork();
+
+        // Defer editor reset until the async load inside newFromTemplate() completes.
+        // (Same deferred pattern used by loadFileDeferred().)
+        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->newFromTemplate();
-        resetEditorState();
-        m_renderWindow.centerView();
     }
 
     void MainWindow::renderWindow()
@@ -1090,6 +1442,13 @@ namespace gladius::ui
             {
                 closeMenu();
                 saveCurrentFunction();
+            }
+
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>(ICON_FA_BOOK "\tExport to Library...")))
+            {
+                closeMenu();
+                m_libraryExportDialog.open(m_doc, getUserLibraryDir());
             }
 
             if (m_currentAssemblyFileName)
@@ -1205,7 +1564,11 @@ namespace gladius::ui
               reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tLibrary Browser")))
         {
             closeMenu();
-            m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+            if (!m_modelEditor.isVisible())
+            {
+                m_modelEditor.setVisibility(true);
+            }
+            m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
             m_modelEditor.setLibraryVisibility(true);
             m_isLibraryBrowserVisible = true;
         }
@@ -1223,6 +1586,32 @@ namespace gladius::ui
             {
                 closeMenu();
                 showShortcutSettings();
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_GAMEPAD "\tGamepad Bindings...")))
+            {
+                closeMenu();
+                showGamepadSettings();
+            }
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_QUESTION_CIRCLE "\tGamepad Quick Reference")))
+            {
+                closeMenu();
+                showGamepadQuickReference();
+            }
+
+            {
+                bool const gpConnected = GamepadState::instance().isAnyConnected();
+                ImGui::TextDisabled("%s", gpConnected ? "\xe2\x97\x8f Gamepad connected" : "\xe2\x97\x8b No gamepad");
+            }
+
+            ImGui::Separator();
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CUBE "\tMesh SDF Settings")))
+            {
+                closeMenu();
+                showMeshSdfSettings();
             }
 
             if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_LIST "\tShow Log")))
@@ -1259,9 +1648,13 @@ namespace gladius::ui
         const auto deltaTime = ImGui::GetIO().DeltaTime;
         m_mainMenuPosX -= m_mainMenuPosX * 20.f * deltaTime;
         m_mainMenuPosX = std::min(m_mainMenuPosX, 0.f);
-        if (m_mainMenuPosX < 0.f)
+        if (m_mainMenuPosX < -0.5f)
         {
             m_mainView.startAnimationMode();
+        }
+        else
+        {
+            m_mainMenuPosX = 0.f;
         }
         const auto window_pos = ImVec2(m_mainMenuPosX, menuBarHeight);
         ImGui::SetWindowPos("Menu", window_pos, ImGuiCond_Always);
@@ -1284,7 +1677,6 @@ namespace gladius::ui
         if (m_meshExporterDialog.isVisible())
         {
             m_mainView.startAnimationMode();
-            m_renderWindow.invalidateView();
         }
         m_meshExporterDialog.render(*m_core);
     }
@@ -1294,7 +1686,6 @@ namespace gladius::ui
         if (m_cliExportDialog.isVisible())
         {
             m_mainView.startAnimationMode();
-            m_renderWindow.invalidateView();
         }
         m_cliExportDialog.render(*m_core);
     }
@@ -1315,7 +1706,7 @@ namespace gladius::ui
         {
             return;
         }
-        m_core->requestContourUpdate({});
+        m_core->invalidateContourCache();
         m_contoursDirty = false;
     }
 
@@ -1409,11 +1800,28 @@ namespace gladius::ui
             return;
         }
 
+        loadFileDeferred(filename);
+    }
+
+    void MainWindow::setStartupFile(std::filesystem::path filename)
+    {
+        m_startupFile = std::move(filename);
+    }
+
+    void MainWindow::loadFileDeferred(const std::filesystem::path & filename)
+    {
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
+
+        // Cancel all in-flight async GPU work before loading.
+        // refreshWorker() (on the loading thread) rebuilds CL programs and
+        // resources.  Any async job still running on the worker thread would
+        // access those resources concurrently, causing a segfault.
+        m_renderWindow.cancelAllAsyncWork();
+
+        // Defer editor reset until the new Assembly has been loaded.
+        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->loadNonBlocking(filename);
-        resetEditorState();
-        m_renderWindow.centerView();
 
         // Add to recent files list
         addToRecentFiles(filename);
@@ -1436,11 +1844,7 @@ namespace gladius::ui
             saveAs();
             return;
         }
-        bool writeThumbnail = false;
-        if (m_computeAvailable && m_core)
-        {
-            writeThumbnail = m_core->isRendererReady();
-        }
+        bool writeThumbnail = m_computeAvailable && m_core;
         m_doc->saveAs(m_currentAssemblyFileName.value(), writeThumbnail);
         m_renderWindow.invalidateViewDuetoModelUpdate();
         m_fileChanged = false;
@@ -1513,6 +1917,22 @@ namespace gladius::ui
     void MainWindow::close()
     {
         saveRenderSettings();
+
+        // Block close if export is in progress
+        if (m_exportState.isExportInProgress())
+        {
+            m_showExportInProgressWarning = true;
+            return;
+        }
+
+        // Gracefully stop any ongoing compilations before exit
+        auto & programManager = m_core->getProgramManager();
+        if (programManager.isAnyCompilationInProgressNonBlocking())
+        {
+            programManager.requestShutdownAll();
+            programManager.waitForAllCompilations();
+        }
+
         if (m_fileChanged)
         {
             m_showSaveBeforeExit = true;
@@ -1616,6 +2036,91 @@ namespace gladius::ui
         }
     }
 
+    void MainWindow::showExportInProgressWarning()
+    {
+        if (!m_showExportInProgressWarning)
+        {
+            return;
+        }
+
+        auto constexpr windowTitle = "Export in Progress";
+        if (!ImGui::IsPopupOpen(windowTitle))
+        {
+            ImGui::OpenPopup(windowTitle);
+        }
+        ImGuiWindowFlags const windowFlags =
+          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+        if (ImGui::BeginPopupModal(windowTitle, nullptr, windowFlags))
+        {
+            ImGui::NewLine();
+            ImGui::TextUnformatted("An export operation is currently in progress.");
+            ImGui::TextUnformatted("Please wait for it to complete before closing the application.");
+            ImGui::NewLine();
+
+            if (ImGui::Button("OK"))
+            {
+                m_showExportInProgressWarning = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    void MainWindow::renderExportOverlay()
+    {
+        if (!m_exportState.isExportInProgress())
+        {
+            return;
+        }
+
+        // Get the entire viewport size
+        ImGuiViewport const * viewport = ImGui::GetMainViewport();
+        ImVec2 const viewportPos = viewport->Pos;
+        ImVec2 const viewportSize = viewport->Size;
+
+        // Create a fullscreen overlay window
+        ImGui::SetNextWindowPos(viewportPos);
+        ImGui::SetNextWindowSize(viewportSize);
+
+        ImGuiWindowFlags const overlayFlags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.6f));
+
+        if (ImGui::Begin("##ExportOverlay", nullptr, overlayFlags))
+        {
+            // Centered message using window draw list
+            ImDrawList * drawList = ImGui::GetWindowDrawList();
+            char const * message = "Export in progress...";
+            ImVec2 const textSize = ImGui::CalcTextSize(message);
+            ImVec2 const textPos(viewportPos.x + (viewportSize.x - textSize.x) / 2.0f,
+                                 viewportPos.y + (viewportSize.y - textSize.y) / 2.0f);
+            drawList->AddText(textPos, IM_COL32(255, 255, 255, 255), message);
+
+            // Invisible button to capture clicks and redirect focus to export dialog
+            ImGui::SetCursorPos(ImVec2(0, 0));
+            if (ImGui::InvisibleButton("##ExportOverlayBlocker", viewportSize))
+            {
+                // When clicked, refocus the visible export dialog
+                // Try all known export dialog window titles - SetWindowFocus is a no-op
+                // if the window doesn't exist
+                ImGui::SetWindowFocus("Exporting STL");
+                ImGui::SetWindowFocus("Exporting 3MF");
+                ImGui::SetWindowFocus("Export Mesh");
+                ImGui::SetWindowFocus("Export in progress");
+            }
+        }
+        ImGui::End();
+
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
+
     void MainWindow::renderStatusBar()
     {
         if (!m_logger)
@@ -1703,13 +2208,82 @@ namespace gladius::ui
             }
             ImGui::PopStyleColor(4);
 
-            // Show UI scale and compute status on the right
+            // Show UI scale, FPS, rendering mode, and compute status on the right
             ImGui::SameLine();
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 220.0f);
-            ImGui::Text("UI %.2f (%.2f x %.2f)",
-                        m_mainView.getUiScale(),
-                        m_mainView.getBaseScale(),
-                        m_mainView.getUserScale());
+            
+            // Get rendering mode info from ComputeCore
+            // Show preview mode while camera is moving, HQ mode when still
+            char const * renderModeStr = "N/A";
+            char const * sdfStatusStr = "";
+            char const * renderBackendStr = "N/A";
+            auto selectedRenderBackend = RenderBackend::Unavailable;
+            auto isRenderBackendCompiling = false;
+            if (m_core)
+            {
+                bool const cameraMoving = m_renderWindow.isCameraMoving();
+                auto const approx = cameraMoving 
+                    ? m_core->getLastUsedPreviewApproximation()
+                    : m_core->getLastUsedHQApproximation();
+                bool const sdfValid = m_core->isSdfValid();
+                
+                if (approx & AM_FULL_MODEL)
+                {
+                    renderModeStr = "FULL";
+                }
+                else if (approx & AM_ONLY_PRECOMPSDF)
+                {
+                    renderModeStr = "TEX3D";
+                }
+                else if (approx & AM_HYBRID)
+                {
+                    renderModeStr = "HYB";
+                }
+                else
+                {
+                    renderModeStr = "?";
+                }
+                
+                // Show SDF status when moving: indicates SDF is still computing
+                sdfStatusStr = (cameraMoving && !sdfValid) ? " (SDF...)" : "";
+
+                selectedRenderBackend =
+                  m_core->tryGetSelectedRenderBackend().value_or(selectedRenderBackend);
+                isRenderBackendCompiling = !m_core->tryIsRenderProgramReady().value_or(false);
+                renderBackendStr = isRenderBackendCompiling
+                                     ? "Compiling"
+                                     : getRenderBackendStatusLabel(selectedRenderBackend);
+            }
+            
+            // Bounding box dimensions
+            if (m_core)
+            {
+                auto const bb = m_core->getBoundingBox();
+                if (bb.has_value())
+                {
+                    ImGui::Text("%s %.3f x %.3f x %.3f mm",
+                                ICON_FA_CUBE,
+                                bb->max.x - bb->min.x,
+                                bb->max.y - bb->min.y,
+                                bb->max.z - bb->min.z);
+                    ImGui::SameLine();
+                }
+            }
+
+            auto const statusText = fmt::format("{:.0f} FPS | {}{} | Render: {}",
+                                                ImGui::GetIO().Framerate,
+                                                renderModeStr,
+                                                sdfStatusStr,
+                                                renderBackendStr);
+            auto const statusTextWidth = ImGui::CalcTextSize(statusText.c_str()).x;
+            auto const rightAlignedStatusX = ImGui::GetWindowWidth() - statusTextWidth - 8.0f;
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), rightAlignedStatusX));
+            ImGui::TextUnformatted(statusText.c_str());
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s",
+                                  getRenderBackendStatusTooltip(selectedRenderBackend,
+                                                                isRenderBackendCompiling));
+            }
 
             if (!m_computeAvailable)
             {
@@ -1790,7 +2364,7 @@ namespace gladius::ui
                 {
                     try
                     {
-                        const auto context =
+                        auto const context =
                           std::make_shared<ComputeContext>(EnableGLOutput::enabled);
                         context->setLogger(m_logger);
                         gladius::setGlobalLogger(m_logger);
@@ -1899,12 +2473,7 @@ namespace gladius::ui
                     if (m_pendingOpenFilename.has_value())
                     {
                         // Direct file open (e.g., from recent files)
-                        m_currentAssemblyFileName = m_pendingOpenFilename.value();
-                        m_welcomeScreen.hide();
-                        m_doc->loadNonBlocking(m_pendingOpenFilename.value());
-                        resetEditorState();
-                        m_renderWindow.centerView();
-                        addToRecentFiles(m_pendingOpenFilename.value());
+                        loadFileDeferred(m_pendingOpenFilename.value());
                         return true;
                     }
                     else if (!dialogActive)
@@ -2067,18 +2636,58 @@ namespace gladius::ui
 
     void MainWindow::updateModel()
     {
-        auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
+        // Avoid touching document/compute state while a file is being loaded on a background thread.
+        if (m_doc && m_doc->isLoadingInProgress())
+        {
+            return;
+        }
 
-        if (timeSinceLastUpdate <
-            std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f)))
+        // Dispatch debounced structural edits to the background worker.
+        if (m_doc && m_doc->dispatchStructuralUpdateIfReady())
+        {
+            // A compilation was launched — mirror the side-effects of refreshModel().
+            if (m_logger)
+            {
+                m_logger->clear();
+            }
+            // invalidateViewDuetoModelUpdate() already calls invalidateView() internally —
+            // no separate invalidateView() needed (that would cause a redundant epoch bump).
+            m_renderWindow.invalidateViewDuetoModelUpdate();
+        }
+
+        // Suppress HQ front-buffer display when a parameter change is pending.
+        // This runs before renderWindow() (in displayUI()) so the stale HQ image
+        // (with shadows) is not shown while the parameter push is in progress.
+        // Unlike invalidateView(), this does not bump the epoch or disrupt
+        // in-flight SDF/preview work.
+        if (m_parameterDirty)
+        {
+            m_renderWindow.suppressHQDisplay();
+        }
+
+        auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
+        auto const rateLimit = std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f));
+        
+        // For parameter changes, use a shorter rate limit for more responsive updates
+        bool const hasParameterChange = m_parameterDirty;
+        auto const effectiveRateLimit = hasParameterChange ? std::chrono::milliseconds(16) : rateLimit;
+
+        if (timeSinceLastUpdate < effectiveRateLimit)
         {
             return;
         }
 
         m_lastUpateTime = std::chrono::steady_clock::now();
 
-        if (!(m_dirty || m_contoursDirty) || m_renderWindow.isRenderingInProgress() ||
-            !m_core->isRendererReady())
+        // Skip if nothing to do, but allow parameter updates even during rendering
+        if (!hasParameterChange && (!(m_dirty || m_contoursDirty) || m_renderWindow.isRenderingInProgress() ||
+            !m_core->isRendererReady()))
+        {
+            return;
+        }
+        
+        // For non-parameter updates, still check rendering state
+        if (!hasParameterChange && !m_core->isRendererReady())
         {
             return;
         }
@@ -2091,7 +2700,11 @@ namespace gladius::ui
 
         if (m_modelEditor.isCompileRequested() && m_core->isRendererReady())
         {
-            refreshModel();
+            // Route manual compile requests through the debouncer instead of
+            // calling refreshModel() directly, which would bypass the async
+            // structural-edit pipeline and block the UI thread.
+            m_doc->signalStructuralEdit();
+            m_modelEditor.markModelAsUpToDate();
         }
 
         if (m_core->getSlicerProgram()->isCompilationInProgress() ||
@@ -2102,9 +2715,24 @@ namespace gladius::ui
 
         if (m_parameterDirty)
         {
-            m_doc->updateParameter();
-            m_renderWindow.invalidateViewDuetoModelUpdate();
-            m_parameterDirty = false;
+            // T047: Only update parameters when throttle allows (debounce interval expired).
+            // When the throttle has no pending recompile it means it already fired but the
+            // previous push failed (compute lock held by background worker).  In that case
+            // bypass the throttle — the debounce already elapsed, we just need to retry.
+            if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
+            {
+                // Streaming preview mode: the worker coroutine becomes the sole GPU
+                // writer, reading the latest Assembly values and pushing them to the
+                // parameter buffer in a tight loop.  This eliminates the UI-frame
+                // round-trip latency that limits one-shot preview scheduling.
+                if (!m_renderWindow.isStreamingPreviewActive())
+                {
+                    m_renderWindow.invalidateViewDueToParameterChange();
+                    m_renderWindow.startStreamingPreview();
+                }
+                m_parameterDirty = false;
+                m_contoursDirty = true;
+            }
         }
         updateContours();
     }
@@ -2115,58 +2743,10 @@ namespace gladius::ui
      */
     void MainWindow::addToRecentFiles(const std::filesystem::path & filePath)
     {
-        // If ConfigManager is not available, we can't store recent files
-        if (!m_configManager)
-            return;
-
-        // Get current time as Unix timestamp
-        auto now = std::chrono::system_clock::now();
-        std::time_t timestamp = std::chrono::system_clock::to_time_t(now);
-
-        // Get existing recent files list
-        nlohmann::json recentFiles = m_configManager->getValue<nlohmann::json>(
-          "recentFiles", "files", nlohmann::json::array());
-
-        // Check if this file is already in the list
-        bool fileFound = false;
-        std::string filePathStr = filePath.string();
-
-        // Create updated list of recent files
-        nlohmann::json updatedList = nlohmann::json::array();
-
-        // Add the current file with updated timestamp
-        nlohmann::json newEntry;
-        newEntry["path"] = filePathStr;
-        newEntry["timestamp"] = timestamp;
-        updatedList.push_back(newEntry);
-
-        // Add other existing files, skipping the current one (it's already added)
-        size_t count = 1; // Start at 1 since we already added the current file
-        const size_t MAX_RECENT_FILES = 100;
-
-        for (auto & entry : recentFiles)
+        if (m_recentFilesManager)
         {
-            if (count >= MAX_RECENT_FILES)
-                break;
-
-            if (entry.is_object() && entry.contains("path") && entry["path"].is_string())
-            {
-                std::string path = entry["path"].get<std::string>();
-
-                // Skip the current file (we already added it with a new timestamp)
-                if (path != filePathStr)
-                {
-                    updatedList.push_back(entry);
-                    count++;
-                }
-            }
+            m_recentFilesManager->addFile(filePath);
         }
-
-        // Store updated list back to config
-        m_configManager->setValue("recentFiles", "files", updatedList);
-
-        // Save the configuration to disk
-        m_configManager->save();
     }
 
     /**
@@ -2177,36 +2757,11 @@ namespace gladius::ui
     std::vector<std::pair<std::filesystem::path, std::time_t>>
     MainWindow::getRecentFiles(size_t maxCount) const
     {
-        std::vector<std::pair<std::filesystem::path, std::time_t>> result;
-
-        if (!m_configManager)
-            return result;
-
-        // Get recent files list from config
-        nlohmann::json recentFiles = m_configManager->getValue<nlohmann::json>(
-          "recentFiles", "files", nlohmann::json::array());
-        //
-        // Process each entry
-        for (auto & entry : recentFiles)
+        if (m_recentFilesManager)
         {
-            if (result.size() >= maxCount)
-                break;
-
-            if (entry.is_object() && entry.contains("path") && entry["path"].is_string() &&
-                entry.contains("timestamp") && entry["timestamp"].is_number())
-            {
-                std::string path = entry["path"].get<std::string>();
-                std::time_t timestamp = entry["timestamp"].get<std::time_t>();
-
-                // Only add if the file still exists
-                if (std::filesystem::exists(path))
-                {
-                    result.emplace_back(std::filesystem::path(path), timestamp);
-                }
-            }
+            return m_recentFilesManager->getFiles(maxCount);
         }
-
-        return result;
+        return {};
     }
 
     void MainWindow::initializeShortcuts()
@@ -2259,7 +2814,11 @@ namespace gladius::ui
           ShortcutCombo(ImGuiKey_B, true), // Ctrl+B
           [this]()
           {
-              m_modelEditor.setLibraryRootDirectory(getAppDir() / "examples");
+              if (!m_modelEditor.isVisible())
+              {
+                  m_modelEditor.setVisibility(true);
+              }
+              m_modelEditor.setLibraryRootDirectory(getUserLibraryDir());
               m_modelEditor.toggleLibraryVisibility();
               m_isLibraryBrowserVisible = m_modelEditor.isLibraryVisible();
           });
@@ -2851,6 +3410,48 @@ namespace gladius::ui
         m_shortcutSettingsDialog.show();
     }
 
+    void MainWindow::showMeshSdfSettings()
+    {
+        m_meshSdfSettingsDialog.show();
+    }
+
+    void MainWindow::showGamepadSettings()
+    {
+        m_gamepadSettingsDialog.show();
+    }
+
+    void MainWindow::showGamepadQuickReference()
+    {
+        m_gamepadQuickRef.show();
+    }
+
+    void MainWindow::setMeshSdfSettings(MeshSdfSettings * settings,
+                                        MeshSdfSettingsDialog::ApplyCallback applyCallback)
+    {
+        m_meshSdfSettingsDialog.setSettings(settings);
+        m_meshSdfApplyCallback = applyCallback;
+        m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
+        m_meshSdfSettingsDialog.setNanoVdbIssueProvider(
+          [this]() -> NanoVdbBuildIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getNanoVdbBuildIssueSummary();
+          });
+    }
+
+    void MainWindow::setVdbSupported(bool supported, std::string const & reason)
+    {
+        m_meshSdfSettingsDialog.setVdbSupported(supported, reason);
+    }
+
+    void MainWindow::setOnComputeReadyCallback(ViewCallBack callback)
+    {
+        m_onComputeReadyCallback = std::move(callback);
+    }
+
     void MainWindow::showWelcomeScreen()
     {
         m_overlayOpacity = 1.0f;
@@ -2864,24 +3465,27 @@ namespace gladius::ui
 
     void MainWindow::saveRenderSettings()
     {
-        if (!m_configManager || !m_computeAvailable || !m_core)
+        if (!m_configManager)
         {
             return;
         }
 
-        // Get current rendering settings
-        auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+        // Save rendering settings if compute is available
+        if (m_computeAvailable && m_core)
+        {
+            auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
 
-        // Create JSON object for render settings
-        nlohmann::json renderJson;
-        renderJson["quality"] = renderSettings.quality;
-        renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+            nlohmann::json renderJson;
+            renderJson["quality"] = renderSettings.quality;
+            renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
 
-        // Save to config
-        m_configManager->setValue("rendering", "settings", renderJson);
+            m_configManager->setValue("rendering", "settings", renderJson);
+        }
 
-        // Save UI settings (user scale factor)
+        // Save UI settings (always available)
         m_configManager->setValue("ui", "userScale", m_mainView.getUserScale());
+        m_configManager->setValue(
+          "ui", "theme", std::string(themeIdToString(m_mainView.getCurrentTheme())));
 
         // Save shortcuts too
         if (m_shortcutManager)
@@ -2893,12 +3497,25 @@ namespace gladius::ui
         m_configManager->save();
 
         // Log success
-        m_logger->addEvent({"Rendering settings saved", events::Severity::Info});
+        m_logger->addEvent({"Settings saved", events::Severity::Info});
     }
 
     void MainWindow::loadRenderSettings()
     {
-        if (!m_configManager || !m_computeAvailable || !m_core)
+        if (!m_configManager)
+        {
+            return;
+        }
+
+        // Load UI settings that don't require compute
+        float const userScale = m_configManager->getValue<float>("ui", "userScale", 1.0f);
+        m_mainView.setUserScale(userScale);
+
+        std::string const themeName =
+          m_configManager->getValue<std::string>("ui", "theme", "Modern");
+        m_mainView.setCurrentTheme(themeIdFromString(themeName));
+
+        if (!m_computeAvailable || !m_core)
         {
             return;
         }
@@ -2930,12 +3547,6 @@ namespace gladius::ui
             else
                 renderSettings.flags &= ~RF_SHOW_FIELD;
         }
-
-        // Load shortcuts too (this happens automatically when m_shortcutManager is created)
-
-        // Load UI settings (user scale factor)
-        float const userScale = m_configManager->getValue<float>("ui", "userScale", 1.0f);
-        m_mainView.setUserScale(userScale);
 
         // Log success
         m_logger->addEvent({"Rendering settings loaded", events::Severity::Info});

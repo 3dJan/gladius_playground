@@ -9,10 +9,13 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "ImageStackOCL.h"
@@ -67,6 +70,11 @@ namespace gladius
             m_logger = std::move(logger);
         }
 
+        void setDebugLabel(std::string label)
+        {
+            m_debugLabel = std::move(label);
+        }
+
         /// Get the shared event logger
         [[nodiscard]] events::SharedLogger getSharedLogger() const
         {
@@ -93,6 +101,13 @@ namespace gladius
         /// blocks until an ongoing compilation has finished
         void finishCompilation();
 
+        /// Request shutdown of any ongoing compilation.
+        /// This sets a flag that will cause compile() to abort early.
+        void requestShutdown();
+
+        /// Check if shutdown was requested
+        [[nodiscard]] bool isShutdownRequested() const noexcept;
+
         template <typename... ArgumentTypes>
         [[nodiscard]] cl::Event runNonBlocking(cl::CommandQueue const & queue,
                                                const std::string & methodName,
@@ -118,15 +133,13 @@ namespace gladius
                 }
                 if (m_ComputeContext)
                 {
-                    // Validate the queue before including diagnostics
-                    if (m_ComputeContext->validateQueue(queue))
-                    {
-                        msg += ", QueueValid=true";
-                    }
-                    else
-                    {
-                        msg += ", QueueValid=false";
-                    }
+                    // NOTE: Do NOT call validateQueue here. This lambda may be invoked from a
+                    // catch block after a driver-level failure (e.g. enqueueNDRangeKernel threw).
+                    // In that state the driver may have crashed and calling back into it (via
+                    // clGetCommandQueueInfo) causes a secondary access-violation that is an SEH
+                    // exception — not caught by catch(...) — which masks the original error.
+                    // A null-handle check is safe (no driver call) and preserves triage value.
+                    msg += queue() == nullptr ? ", QueueHandle=null" : ", QueueHandle=non-null";
                     msg += "\n" + m_ComputeContext->getDiagnosticInfo();
                 }
                 if (m_logger)
@@ -378,6 +391,8 @@ namespace gladius
                                            const std::string & dynamicSource,
                                            BuildCallBack & callBack);
 
+        void buildCompleteProgram(const FileNames & filenames, BuildCallBack & callBack);
+
         void loadAndCompileLib(const FileNames & filenames);
 
         [[nodiscard]] bool isValid() const;
@@ -448,6 +463,7 @@ namespace gladius
         std::map<std::string, cl::Kernel> m_kernels;
         std::atomic<bool> m_valid{false};
         std::atomic<bool> m_isCompilationInProgress{false};
+        std::atomic<bool> m_shutdownRequested{false};
 
         CallBackUserData m_callBackUserData;
 
@@ -463,10 +479,14 @@ namespace gladius
         SharedKernelReplacements m_kernelReplacements;
 
         bool m_enableTwoLevelPipeline = false;
+        std::string m_debugLabel = "CLProgram";
 
         // Binary caching support
         std::filesystem::path m_cacheDirectory;
         bool m_cacheEnabled = true; // Cache enabled by default
+        mutable bool m_binaryCacheDisabledLogged = false;
+        mutable std::mutex m_binaryCacheCapabilityMutex;
+        mutable std::optional<bool> m_canUseBinaryCache;
 
         // Static vs Dynamic source tracking
         cl::Program::Sources m_staticSources;  // Static kernel files (.cl files from resources)
@@ -478,6 +498,8 @@ namespace gladius
         // Cache management helpers
         bool loadProgramFromCache(size_t hash);
         void saveProgramToCache(size_t hash);
+        [[nodiscard]] bool canUseBinaryCache() const;
+        void logBinaryCacheDisabledOnce(std::string_view reason) const;
         std::string getDeviceSignature() const;
         [[nodiscard]] std::string makeSingleLevelBuildSignature(size_t programHash) const;
         [[nodiscard]] std::string makeStaticLibrarySignature(size_t staticHash) const;

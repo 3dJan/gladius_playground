@@ -2,6 +2,7 @@
 
 #include "../nodes/Model.h"
 #include "FileDialogService.h"
+#include "LinkColors.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -21,6 +22,7 @@ namespace gladius::nodes
 
 namespace gladius::ui
 {
+    class ExportState;
     class ModelEditor;
 
     std::string typeToString(std::type_index typeIndex);
@@ -55,8 +57,13 @@ namespace gladius::ui
 
         void setModelEditor(ModelEditor * editor);
 
+        /// @brief Set the export state for blocking input during export
+        /// @param state Pointer to ExportState (may be nullptr)
+        void setExportState(ExportState * state);
+
         [[nodiscard]] auto haveParameterChanged() const -> bool;
         [[nodiscard]] auto hasModelChanged() const -> bool;
+        void clearPerFrameFlags();
 
         void setAssembly(nodes::SharedAssembly assembly);
         void reset();
@@ -70,6 +77,9 @@ namespace gladius::ui
         [[nodiscard]] float getUiScale() const;
 
         bool columnWidthsAreInitialized() const;
+
+        /// @brief Clear cached column widths (call after graph rebuild from code sync)
+        void clearColumnWidths();
 
         /**
          * @brief Updates the node group mapping based on current model
@@ -115,13 +125,6 @@ namespace gladius::ui
          * @return Vector of node IDs in the same group, or empty vector if not in a group
          */
         std::vector<nodes::NodeId> getNodesInSameGroup(nodes::NodeId nodeId) const;
-
-        /**
-         * @brief Handles group movement when a group node is moved
-         * Called during the editor update loop to detect group node movement and synchronize all
-         * nodes in the group
-         */
-        void handleGroupMovement();
 
         /**
          * @brief Handles group dragging via header/border areas
@@ -181,11 +184,29 @@ namespace gladius::ui
         void inputControls(nodes::NodeBase & node, nodes::ParameterMap::reference parameter);
         void showLinkAssignmentMenu(nodes::ParameterMap::reference parameter);
         void showInputAndOutputs(nodes::NodeBase & node);
-        void inputPins(nodes::NodeBase & node);
         void outputPins(nodes::NodeBase & node);
         void viewInputNode(nodes::NodeBase & node);
 
-        ImVec4 typeToColor(std::type_index tyepIndex);
+        ImVec4 typeToColor(std::type_index tyepIndex) const;
+
+        /// Compute the visual color for a pin, applying drag-state
+        /// highlighting/dimming when a link is being dragged.
+        ImVec4 pinColorForDragState(nodes::PortId pinId,
+                                    bool isInput,
+                                    std::type_index typeIndex) const;
+
+        /// Return the visual state of a pin during a link drag.
+        PinVisualState pinVisualState(nodes::PortId pinId, bool isInput) const;
+
+        /// Push ImGui button style colors for a pin's drag visual state.
+        /// Returns the number of style colors pushed (call PopStyleColor with this count).
+        int pushPinButtonStyle(PinVisualState state, ImVec4 baseColor) const;
+
+        /// Show a tooltip with port name and type when hovering a compatible pin during drag.
+        void showPinDragTooltip(std::string const & name, std::type_index typeIndex, PinVisualState state) const;
+
+        /// Register the last rendered ImGui item as the hitbox for the active pin.
+        void registerCurrentItemAsPinHitbox(bool isInput) const;
 
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
@@ -198,6 +219,9 @@ namespace gladius::ui
         void viewFloat3(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
                         nodes::VariantType & val);
+
+        /// Renders a ConstantVector node's X/Y/Z parameters as a grouped vector/color widget.
+        void viewConstantVector(nodes::ConstantVector & node);
 
         void viewMatrix(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,
@@ -214,6 +238,17 @@ namespace gladius::ui
         void functionGradientControls(nodes::FunctionGradient & node);
         void functionCallControls(nodes::FunctionCall & node);
         void normalizeDistanceFieldControls(nodes::NormalizeDistanceField & node);
+
+        /// Helper to create a FunctionGradient node from a FunctionCall node
+        void createFunctionGradientFromCall(nodes::FunctionCall & node);
+        /// Helper to create a NormalizeDistanceField node from a FunctionCall node
+        void createNormalizeFromCall(nodes::FunctionCall & node);
+
+        /**
+         * @brief Log an error message to the document logger or stderr
+         * @param message The error message to log
+         */
+        void logError(const std::string & message);
 
         bool typeControl(std::string const & label, std::type_index & typeIndex);
 
@@ -247,6 +282,7 @@ namespace gladius::ui
         nodes::SharedModel m_currentModel;
 
         ModelEditor * m_modelEditor{nullptr};
+        ExportState * m_exportState{nullptr};
         bool m_showContextMenu{false};
 
         bool m_showLinkAssignmentMenu{false};
@@ -258,6 +294,7 @@ namespace gladius::ui
         {
             nodes::ParameterName name = {"new"};
             std::type_index typeIndex = typeid(float);
+            bool expanded = false;
         };
 
         std::unordered_map<nodes::NodeId, NewChannelProperties>
@@ -274,6 +311,7 @@ namespace gladius::ui
 
         /// Storage for node groups organized by tag
         std::unordered_map<std::string, NodeGroup> m_nodeGroups;
+        bool m_nodeGroupsDirty{true}; ///< Rebuild groups on next updateNodeGroups() call
 
         /// Tag editing state
         std::string m_editingTag;

@@ -3,6 +3,7 @@
 #include "mcp/ApplicationMCPAdapter.h"
 #include "mcp/MCPServer.h"
 #endif
+#include "Document.h"
 #include "ui/MainWindow.h"
 
 #include <filesystem>
@@ -20,9 +21,11 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        wireMeshSdfSettings();
         if (!m_headlessMode)
         {
             // Let MainWindow perform compute initialization and gracefully fall back on failure
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
     }
@@ -38,14 +41,17 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
+        wireMeshSdfSettings();
         if (!m_headlessMode)
         {
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
         else
         {
             // Prepare minimal compute/document so MCP document ops work in headless mode
             m_mainWindow.setupHeadless(m_globalLogger);
+            propagateComputeCapabilities();
         }
     }
 
@@ -60,14 +66,17 @@ namespace gladius
     {
         m_headlessMode = headlessMode;
         m_mainWindow.setConfigManager(m_configManager);
+        wireMeshSdfSettings();
         m_mainWindow.setOpenCLDebugEnabled(openclDebugEnabled);
         if (!m_headlessMode)
         {
+            m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
             m_mainWindow.setup();
         }
         else
         {
             m_mainWindow.setupHeadless(m_globalLogger);
+            propagateComputeCapabilities();
         }
     }
 
@@ -81,6 +90,8 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        wireMeshSdfSettings();
+        m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
         m_mainWindow.setup();
 
         // the first argument is the executable name
@@ -115,6 +126,8 @@ namespace gladius
 #endif
     {
         m_mainWindow.setConfigManager(m_configManager);
+        wireMeshSdfSettings();
+        m_mainWindow.setOnComputeReadyCallback([this]() { propagateComputeCapabilities(); });
         m_mainWindow.setup();
 
         if (std::filesystem::exists(filename))
@@ -270,6 +283,75 @@ namespace gladius
     std::shared_ptr<Document> Application::getCurrentDocument() const
     {
         return m_mainWindow.getCurrentDocument();
+    }
+
+    void Application::wireMeshSdfSettings()
+    {
+        m_meshSdfSettings.attachConfigManager(&m_configManager);
+        m_mainWindow.setMeshSdfSettings(&m_meshSdfSettings,
+                                        [this]() { applyMeshSdfSettingsToCurrentDocument(); });
+    }
+
+    void Application::propagateComputeCapabilities()
+    {
+        if (auto document = getCurrentDocument())
+        {
+            if (auto core = document->getCore())
+            {
+                auto const & pm = core->getProgramManager();
+                m_mainWindow.setVdbSupported(pm.isVdbSupported(), pm.getVdbSupportFailureReason());
+                return;
+            }
+        }
+        // No compute available; leave NanoVDB grayed out with a generic message.
+        m_mainWindow.setVdbSupported(false, "No OpenCL compute context available.");
+    }
+
+    std::size_t Application::applyMeshSdfSettingsToCurrentDocument()
+    {
+        auto document = getCurrentDocument();
+        if (!document)
+        {
+            return 0;
+        }
+
+        // 1) Mesh import configs: apply on the next 3MF import.
+        document->setMeshRepairConfig(m_meshSdfSettings.repairConfig());
+        document->setMeshSdfEvaluationConfig(m_meshSdfSettings.evaluationConfig());
+
+        // 2) Evaluation config: push to existing SpatialMeshResource instances.
+        auto const evalCfg = m_meshSdfSettings.evaluationConfig();
+
+        // 2a) Forward runtime knobs into the active rendering settings so kernel
+        //     dispatch picks the chosen method on the next frame.
+        if (auto core = document->getCore())
+        {
+            if (auto resources = core->getResourceContext())
+            {
+                auto & settings = resources->getRenderingSettings();
+                settings.meshInflationDistance = evalCfg.inflationDistance;
+                settings.meshFwnBeta = evalCfg.fwnBeta;
+                settings.meshFwnFarFieldFactor = evalCfg.fwnFarFieldFactor;
+                if (evalCfg.method == MeshSdfMethod::FastWindingNumber)
+                {
+                    settings.flags |= RF_USE_MESH_FWN;
+                }
+                else
+                {
+                    settings.flags &= ~RF_USE_MESH_FWN;
+                }
+                if (evalCfg.useEarlyExit)
+                {
+                    settings.flags &= ~RF_DISABLE_MESH_EARLY_EXIT;
+                }
+                else
+                {
+                    settings.flags |= RF_DISABLE_MESH_EARLY_EXIT;
+                }
+            }
+        }
+
+        return document->queueMeshSdfEvaluationConfigUpdate(evalCfg);
     }
 
     bool Application::showUI()

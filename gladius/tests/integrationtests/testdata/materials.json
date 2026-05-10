@@ -1,0 +1,42 @@
+{
+  "backgroundIndex": 0,
+  "illuminationMode": "frontlit",
+  "materials": [
+    {
+      "name": "PLA Blue",
+      "reflectanceColor": [
+        0.04501046612858772,
+        0.0537056066095829,
+        0.9744189381599426
+      ],
+      "transmissionDistance": 4.149997711181641
+    },
+    {
+      "name": "PLA Red",
+      "reflectanceColor": [
+        1.0,
+        0.04619210958480835,
+        0.04619210958480835
+      ],
+      "transmissionDistance": 6.150005340576172
+    },
+    {
+      "name": "PLA Green",
+      "reflectanceColor": [
+        0.2897237539291382,
+        1.0,
+        0.0
+      ],
+      "transmissionDistance": 4.90000057220459
+    },
+    {
+      "name": "PLA Black",
+      "reflectanceColor": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "transmissionDistance": 3.3999977111816406
+    }
+  ]
+}

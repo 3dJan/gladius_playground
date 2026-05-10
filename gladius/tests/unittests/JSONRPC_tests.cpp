@@ -90,6 +90,16 @@ namespace gladius::tests
             return {true, 123}; // Mock resource ID
         }
 
+        std::pair<bool, uint32_t>
+        createFunctionFromSnippet(const std::string &,
+                                  const std::string &,
+                                  const std::string &,
+                                  const std::vector<FunctionArgument> & = {},
+                                  const std::string & = "") override
+        {
+            return {true, 124};
+        }
+
         std::string getLastErrorMessage() const override
         {
             return "";
@@ -124,7 +134,10 @@ namespace gladius::tests
         }
 
         // New 3MF Resource creation methods
-        std::pair<bool, uint32_t> createLevelSet(uint32_t functionId) override
+        std::pair<bool, uint32_t> createLevelSet(
+          uint32_t functionId,
+          std::array<float, 3> /*minPoint*/ = {-10.f, -10.f, -10.f},
+          std::array<float, 3> /*maxPoint*/ = {10.f, 10.f, 10.f}) override
         {
             return {true, functionId + 1000}; // Mock level set ID
         }
@@ -167,22 +180,7 @@ namespace gladius::tests
                                   {"resources", nlohmann::json::array()},
                                   {"counts", {}}};
         }
-        nlohmann::json getFunctionGraph(uint32_t functionId) const override
-        {
-            // Minimal mock: return an empty graph with the given id
-            return nlohmann::json{{"model", {{"resource_id", functionId}}},
-                                  {"nodes", nlohmann::json::array()},
-                                  {"links", nlohmann::json::array()},
-                                  {"counts", {{"nodes", 0}, {"links", 0}}}};
-        }
 
-        nlohmann::json setFunctionGraph(uint32_t /*functionId*/,
-                                        const nlohmann::json & /*graph*/,
-                                        bool /*replace*/) override
-        {
-            // Minimal success response with empty id map
-            return nlohmann::json{{"success", true}, {"id_map", nlohmann::json::object()}};
-        }
         std::vector<std::string> listAvailableFunctions() const override
         {
             return {};
@@ -247,23 +245,7 @@ namespace gladius::tests
                                   {"up_vector", {0.0, 0.0, 1.0}}};
         }
 
-        nlohmann::json getNodeInfo(uint32_t functionId, uint32_t nodeId) const override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
-        nlohmann::json createNode(uint32_t functionId,
-                                  const std::string & nodeType,
-                                  const std::string & displayName,
-                                  uint32_t nodeId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json deleteNode(uint32_t functionId, uint32_t nodeId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
         nlohmann::json setParameterValue(uint32_t functionId,
                                          uint32_t nodeId,
@@ -273,45 +255,99 @@ namespace gladius::tests
             return nlohmann::json{{"success", true}};
         }
 
-        nlohmann::json createLink(uint32_t functionId,
-                                  uint32_t sourceNodeId,
-                                  const std::string & sourcePortName,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
-        nlohmann::json deleteLink(uint32_t functionId,
-                                  uint32_t targetNodeId,
-                                  const std::string & targetParameterName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json createFunctionCallNode(uint32_t targetFunctionId,
-                                              uint32_t referencedFunctionId,
-                                              const std::string & displayName) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json createConstantNodesForMissingParameters(uint32_t functionId,
-                                                               uint32_t nodeId,
-                                                               bool autoConnect) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
-
-        nlohmann::json removeUnusedNodes(uint32_t functionId) override
-        {
-            return nlohmann::json{{"success", true}};
-        }
 
         nlohmann::json validateModel(const nlohmann::json & options) override
         {
             return nlohmann::json{{"success", true}};
         }
+
+        // Library operations
+        nlohmann::json listLibrary(std::string const & /*category*/,
+                                   std::string const & /*query*/) const override
+        {
+            return nlohmann::json{{"success", true}, {"categories", nlohmann::json::array()}};
+        }
+        nlohmann::json getLibraryEntryInfo(std::string const & /*category*/,
+                                           std::string const & /*name*/) const override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json createLibraryEntry(std::string const & /*name*/,
+                                          std::string const & /*category*/,
+                                          std::string const & /*programSnippet*/,
+                                          uint32_t /*functionId*/,
+                                          std::string const & /*description*/,
+                                          std::vector<std::string> const & /*tags*/,
+                                          bool /*overwrite*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json exportToLibrary(uint32_t /*functionId*/,
+                                       std::string const & /*category*/,
+                                       std::string const & /*name*/,
+                                       std::string const & /*description*/,
+                                       bool /*overwrite*/,
+                                       bool /*keepScaffold*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json
+        setLibraryMetadata(std::vector<uint32_t> const & /*functionIds*/,
+                           std::string const & /*description*/,
+                           std::vector<std::string> const & /*tags*/,
+                           std::string const & /*category*/,
+                           std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json importLibraryEntry(std::string const & /*category*/,
+                                          std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json deleteLibraryEntry(std::string const & /*category*/,
+                                          std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json browseBin(std::string const & /*category*/) const override
+        {
+            return nlohmann::json{{"success", true},
+                                  {"categories", nlohmann::json::array()},
+                                  {"total_entries", 0}};
+        }
+        nlohmann::json restoreBinEntry(std::string const & /*category*/,
+                                        std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json deleteBinEntry(std::string const & /*category*/,
+                                       std::string const & /*name*/) override
+        {
+            return nlohmann::json{{"success", false}, {"error", "Not implemented in mock"}};
+        }
+        nlohmann::json emptyBin() override
+        {
+            return nlohmann::json{{"success", true}, {"removed_count", 0}};
+        }
+
+#ifdef ENABLE_UI_TESTING
+        bool uiClick(std::string const & /*path*/) override
+        {
+            return false;
+        }
+
+        std::vector<std::string> uiDumpItems(std::string const & /*parentPath*/) override
+        {
+            return {};
+        }
+
+        bool captureUIScreenshot(std::string const & /*outputPath*/) override
+        {
+            return false;
+        }
+#endif
     };
 
     class JSONRPCTest : public ::testing::Test
@@ -577,71 +613,5 @@ namespace gladius::tests
         EXPECT_EQ(response["jsonrpc"], "2.0");
         EXPECT_TRUE(response["id"].is_null());
         EXPECT_TRUE(response.contains("result"));
-    }
-
-    // New tests for set_function_graph
-    TEST_F(JSONRPCTest, ToolsCall_SetFunctionGraph_MissingParams_ReturnsError)
-    {
-        // Arrange: missing function_id
-        json reqMissingFunctionId = {
-          {"jsonrpc", "2.0"},
-          {"id", 1},
-          {"method", "tools/call"},
-          {"params",
-           {{"name", "set_function_graph"},
-            {"arguments", {{"graph", {{"nodes", json::array()}, {"links", json::array()}}}}}}}};
-
-        // Act
-        json res1 = m_server->processJSONRPCRequest(reqMissingFunctionId);
-
-        // Assert: server wraps tool errors in result payload (not JSON-RPC error)
-        ASSERT_TRUE(res1.contains("result"));
-        auto content1 = res1["result"]["content"][0]["text"].get<std::string>();
-        auto payload1 = json::parse(content1);
-        ASSERT_TRUE(payload1.contains("success"));
-        EXPECT_FALSE(payload1["success"].get<bool>());
-        ASSERT_TRUE(payload1.contains("error"));
-        EXPECT_NE(payload1["error"].get<std::string>().find("Missing required"), std::string::npos);
-
-        // Arrange: missing graph
-        json reqMissingGraph = {
-          {"jsonrpc", "2.0"},
-          {"id", 2},
-          {"method", "tools/call"},
-          {"params", {{"name", "set_function_graph"}, {"arguments", {{"function_id", 123}}}}}};
-
-        // Act
-        json res2 = m_server->processJSONRPCRequest(reqMissingGraph);
-
-        // Assert: server wraps tool errors in result payload (not JSON-RPC error)
-        ASSERT_TRUE(res2.contains("result"));
-        auto content2 = res2["result"]["content"][0]["text"].get<std::string>();
-        auto payload2 = json::parse(content2);
-        ASSERT_TRUE(payload2.contains("success"));
-        EXPECT_FALSE(payload2["success"].get<bool>());
-        ASSERT_TRUE(payload2.contains("error"));
-        EXPECT_NE(payload2["error"].get<std::string>().find("Missing required"), std::string::npos);
-    }
-
-    TEST_F(JSONRPCTest, ToolsCall_SetFunctionGraph_MinimalGraph_Succeeds)
-    {
-        // Arrange
-        json minimalGraph = {{"nodes", json::array()}, {"links", json::array()}};
-        json request = {{"jsonrpc", "2.0"},
-                        {"id", 3},
-                        {"method", "tools/call"},
-                        {"params",
-                         {{"name", "set_function_graph"},
-                          {"arguments", {{"function_id", 42}, {"graph", minimalGraph}}}}}};
-
-        // Act
-        json response = m_server->processJSONRPCRequest(request);
-
-        // Assert
-        ASSERT_TRUE(response.contains("result"));
-        auto content = response["result"]["content"][0]["text"].get<std::string>();
-        auto payload = json::parse(content);
-        EXPECT_TRUE(payload.contains("success"));
-        EXPECT_TRUE(payload["success"].get<bool>());
     }
 }

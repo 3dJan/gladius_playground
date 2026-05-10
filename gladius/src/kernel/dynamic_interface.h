@@ -7,6 +7,8 @@
 // Essential function prototypes that the generated model code needs
 float3 matrixVectorMul3f(float16 matrix, float3 vector);
 float glsl_mod1f(float a, float b);
+float3 glsl_mod3f(float3 a, float3 b);
+float16 glsl_mod16f(float16 a, float16 b);
 float bbBox(float3 pos, float3 bbmin, float3 bbmax);
 
 // Forward declarations for types used in function signatures
@@ -26,5 +28,14 @@ enum PrimitiveType;
 #define PASS_PAYLOAD_ARGS                                                                          \
     buildArea, primitives, primitivesSize, data, dataSize, renderingSettings, preCompSdf,          \
       parameter, cmds, sizeOfCmds, preCompSdfBBox
+
+// Image sampling helpers used by dynamically generated model code.
+float4 sampleImageNearest4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+float4 sampleImageLinear4f(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+
+#ifdef ENABLE_VDB
+float4 sampleImageNearest4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+float4 sampleImageLinear4fvdb(float3 uvw, float3 dimensions, int start, int3 tileStyle, PAYLOAD_ARGS);
+#endif // ENABLE_VDB
 
 #endif // GLADIUS_DYNAMIC_IFACE_GUARD

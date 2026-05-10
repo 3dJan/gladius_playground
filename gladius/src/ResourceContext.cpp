@@ -27,6 +27,13 @@ namespace gladius
         m_renderingSettings.weightDistToNb = 1000.0f;
         m_renderingSettings.weightMidPoint = 1.f;
         m_renderingSettings.normalOffset = 0.0001f;
+        m_renderingSettings.earlyExitDistanceSq = 0.0f;
+        m_renderingSettings.meshInflationDistance = 0.0f;
+        // Keep the global Barnes-Hut threshold fast by default; near-surface
+        // robustness is handled by a bounded exact-integration band in
+        // mesh_sdf.cl (capped by scene scale to avoid TDR).
+        m_renderingSettings.meshFwnBeta = 2.0f;
+        m_renderingSettings.meshFwnFarFieldFactor = 0.5f;
 
         initResolutions();
         createBuffer();
@@ -432,5 +439,44 @@ namespace gladius
     MarchingSquaresStates & ResourceContext::getMarchingSquareStates() const
     {
         return *m_marchinSquareStates;
+    }
+
+    void ResourceContext::allocateDistanceInitBuffer(size_t width, size_t height)
+    {
+        // Re-allocate if dimensions changed or not yet created
+        if (m_distanceInitBuffer &&
+            m_distanceInitBuffer->getWidth() == width &&
+            m_distanceInitBuffer->getHeight() == height)
+        {
+            return; // Already allocated at correct size
+        }
+
+        try
+        {
+            m_distanceInitBuffer = std::make_unique<DistanceInitBuffer>(*m_ComputeContext, width, height);
+            m_distanceInitBuffer->allocateOnDevice();
+        }
+        catch (std::exception const &)
+        {
+            m_distanceInitBuffer.reset(); // Ensure nullptr on failure
+        }
+    }
+
+    DistanceInitBuffer * ResourceContext::getDistanceInitBuffer() const
+    {
+        return m_distanceInitBuffer.get();
+    }
+
+    cl::Buffer & ResourceContext::getMetricsBuffer()
+    {
+        if (!m_metricsBuffer.has_value())
+        {
+            // Allocate metrics buffer: 4 x uint32 (totalRays, totalSteps, cacheHits, nonConverged)
+            m_metricsBuffer = cl::Buffer(
+                m_ComputeContext->GetContext(),
+                CL_MEM_READ_WRITE,
+                sizeof(RayMarchMetrics));
+        }
+        return m_metricsBuffer.value();
     }
 }

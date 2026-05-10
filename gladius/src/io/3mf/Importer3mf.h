@@ -2,10 +2,13 @@
 
 #include "BeamLatticeResource.h"
 #include "Mesh.h"
+#include "MeshRepair.h"
+#include "MeshSdfMethod.h"
 #include "nodes/Assembly.h"
 #include "nodes/Model.h"
 
 #include <filesystem>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -53,9 +56,35 @@ namespace gladius::io
       public:
         explicit Importer3mf(events::SharedLogger logger);
 
+        /// Configure mesh-repair operations to apply to every imported triangle
+        /// mesh before BVH construction. Defaults to all-disabled (no repair).
+        void setMeshRepairConfig(mesh_repair::MeshRepairConfig const & cfg)
+        {
+            m_meshRepairConfig = cfg;
+        }
+
+        /// Configure mesh-SDF evaluation for spatial mesh resources created by this importer.
+        void setMeshSdfEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
+        {
+            m_meshSdfEvaluationConfig = cfg;
+        }
+
+        /// Configure the runtime NanoVDB build policy for spatial meshes created by this importer.
+        void setNanoVdbBuildPolicy(NanoVdbBuildPolicy const & policy)
+        {
+            m_nanovdbBuildPolicy = policy;
+        }
+
         void load(std::filesystem::path const & filename, Document & doc);
 
         void merge(std::filesystem::path const & filename, Document & doc);
+
+        /// Merge a pre-loaded model into the document.
+        /// Use this when the source model has already been pruned (e.g. selective import).
+        void merge(Lib3MF::PModel const & sourceModel,
+                   std::filesystem::path const & sourceFilename,
+                   Document & doc);
+
         [[nodiscard]] Lib3MF::PWrapper get3mfWrapper() const;
 
         /**
@@ -65,6 +94,16 @@ namespace gladius::io
          * @param doc The document to add the loaded mesh objects to.
          */
         void loadMeshes(Lib3MF::PModel model, Document & doc);
+
+        /**
+         * @brief Loads only mesh objects whose 3MF resource IDs are in @p resourceIds.
+         *
+         * The filter is intended for first-frame reachability loading; pass the
+         * closure returned by ResourceDependencyGraph::getAllRequiredResourceIdsForBuildItems().
+         */
+        void loadMeshes(Lib3MF::PModel model,
+                Document & doc,
+                std::set<Lib3MF_uint32> const & resourceIds);
 
         /**
          * @brief Loads all build items from a 3MF model and adds them to the document.
@@ -233,6 +272,11 @@ namespace gladius::io
 
         BoundingBox computeBoundingBox(Lib3MF::PMeshObject mesh);
 
+        /// @brief Collects mesh resource IDs that are used exclusively as bounding boxes in level
+        ///        sets (meshbboxonly=true) and not also referenced as actual geometry.
+        /// @return Set of model resource IDs that should be skipped during mesh loading.
+        std::set<Lib3MF_uint32> collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const;
+
         Lib3MF::PWrapper m_wrapper{};
 
         MeshResources m_meshObjects;
@@ -240,8 +284,17 @@ namespace gladius::io
         events::SharedLogger m_eventLogger;
 
         NodeMaps m_nodeMaps;
+
+        mesh_repair::MeshRepairConfig m_meshRepairConfig{};
+        MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+        NanoVdbBuildPolicy m_nanovdbBuildPolicy{};
     };
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);
     void mergeFrom3mfFile(std::filesystem::path filename, Document & doc);
+
+    /// Merge a pre-loaded (potentially pruned) model into the document.
+    void mergeModelInto3mfDoc(Lib3MF::PModel const & sourceModel,
+                              std::filesystem::path const & sourceFilename,
+                              Document & doc);
 }
