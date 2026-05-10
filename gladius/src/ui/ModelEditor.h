@@ -439,6 +439,7 @@ namespace gladius::ui
         struct PendingStlImport
         {
             std::future<vdb::TriangleMesh> geometryFuture;
+            std::optional<ResourceKey> existingResourceKey;
             std::string displayName;
             ImVec2 dropScreenPos;
         };

@@ -25,30 +25,30 @@ namespace gladius
     class SpatialMeshResource : public MeshResourceBase
     {
       public:
-                enum class NanoVdbBuildResult : std::uint8_t
-                {
-                        NotRequested = 0,
-                        Built,
-                        PreflightRejected,
-                        BuildFailed,
-                };
+        enum class NanoVdbBuildResult : std::uint8_t
+        {
+            NotRequested = 0,
+            Built,
+            PreflightRejected,
+            BuildFailed,
+        };
 
-                struct NanoVdbBuildInfo
-                {
-                        NanoVdbBuildResult result = NanoVdbBuildResult::NotRequested;
-                        std::size_t estimatedBytes = 0u;
-                        std::size_t budgetBytes = 0u;
-                        float requestedVoxelSize_mm = 0.0f;
-                        float suggestedVoxelSize_mm = 0.0f;
-                        std::string reason;
-                };
+        struct NanoVdbBuildInfo
+        {
+            NanoVdbBuildResult result = NanoVdbBuildResult::NotRequested;
+            std::size_t estimatedBytes = 0u;
+            std::size_t budgetBytes = 0u;
+            float requestedVoxelSize_mm = 0.0f;
+            float suggestedVoxelSize_mm = 0.0f;
+            std::string reason;
+        };
 
         /// Construct from pre-built spatial data
         /// @param key Resource identifier
         /// @param data Pre-built BVH and mesh data (moved)
-                explicit SpatialMeshResource(ResourceKey key,
-                                                                         SpatialMeshData && data,
-                                                                         NanoVdbBuildPolicy const & nanovdbBuildPolicy = {});
+        explicit SpatialMeshResource(ResourceKey key,
+                                     SpatialMeshData && data,
+                                     NanoVdbBuildPolicy const & nanovdbBuildPolicy = {});
 
         /// Construct from pre-built spatial data with an explicit SDF evaluation configuration.
         /// @param key Resource identifier

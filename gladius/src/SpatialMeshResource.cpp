@@ -17,25 +17,25 @@ namespace gladius
 {
     namespace
     {
-                constexpr std::size_t MEBIBYTE = 1024u * 1024u;
-                constexpr std::size_t DEFAULT_NANOVDB_BUDGET_BYTES = 1024u * MEBIBYTE;
-                constexpr double NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL = 12.0;
-                constexpr double NANOVDB_INDEX_GRID_BYTES_PER_VOXEL = 10.0;
-                constexpr double NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR = 1.35;
-                constexpr std::size_t NANOVDB_GRID_FIXED_OVERHEAD_BYTES = 8u * MEBIBYTE;
-                constexpr float NANOVDB_MIN_VOXEL_SIZE_MM = 0.01f;
-                constexpr float NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM = 2.0f;
-                constexpr float NANOVDB_SUGGESTION_GROWTH_FACTOR = 1.25f;
-                constexpr int NANOVDB_MAX_SUGGESTION_STEPS = 32;
+        constexpr std::size_t MEBIBYTE = 1024u * 1024u;
+        constexpr std::size_t DEFAULT_NANOVDB_BUDGET_BYTES = 1024u * MEBIBYTE;
+        constexpr double NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL = 12.0;
+        constexpr double NANOVDB_INDEX_GRID_BYTES_PER_VOXEL = 10.0;
+        constexpr double NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR = 1.35;
+        constexpr std::size_t NANOVDB_GRID_FIXED_OVERHEAD_BYTES = 8u * MEBIBYTE;
+        constexpr float NANOVDB_MIN_VOXEL_SIZE_MM = 0.01f;
+        constexpr float NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM = 2.0f;
+        constexpr float NANOVDB_SUGGESTION_GROWTH_FACTOR = 1.25f;
+        constexpr int NANOVDB_MAX_SUGGESTION_STEPS = 32;
 
-                struct NanoVdbWorkingSetEstimate
-                {
-                        std::size_t totalBytes = 0u;
-                        std::size_t flatMeshBytes = 0u;
-                        std::size_t nearSdfBytes = 0u;
-                        std::size_t farFaceIndexBytes = 0u;
-                        std::size_t nearFaceIndexBytes = 0u;
-                };
+        struct NanoVdbWorkingSetEstimate
+        {
+            std::size_t totalBytes = 0u;
+            std::size_t flatMeshBytes = 0u;
+            std::size_t nearSdfBytes = 0u;
+            std::size_t farFaceIndexBytes = 0u;
+            std::size_t nearFaceIndexBytes = 0u;
+        };
 
         /// Convert int to float preserving bit pattern (for GPU interop)
         inline float intBitsToFloat(int value)
@@ -45,173 +45,173 @@ namespace gladius
             return result;
         }
 
-                inline double bytesToMiB(std::size_t const bytes)
+        inline double bytesToMiB(std::size_t const bytes)
+        {
+            return static_cast<double>(bytes) / static_cast<double>(MEBIBYTE);
+        }
+
+        inline std::size_t saturatingByteEstimate(long double const value)
+        {
+            if (!std::isfinite(value) || value <= 0.0L)
+            {
+                return 0u;
+            }
+
+            long double const clamped =
+                std::min(value,
+                         static_cast<long double>(std::numeric_limits<std::size_t>::max()));
+            return static_cast<std::size_t>(std::ceil(clamped));
+        }
+
+        inline long double bboxExtent(float const minValue, float const maxValue)
+        {
+            return std::max<long double>(static_cast<long double>(maxValue) -
+                                           static_cast<long double>(minValue),
+                                         0.0L);
+        }
+
+        inline long double bboxSurfaceAreaMm2(BoundingBox const & boundingBox)
+        {
+            auto const dx = bboxExtent(boundingBox.min.x, boundingBox.max.x);
+            auto const dy = bboxExtent(boundingBox.min.y, boundingBox.max.y);
+            auto const dz = bboxExtent(boundingBox.min.z, boundingBox.max.z);
+            return 2.0L * (dx * dy + dx * dz + dy * dz);
+        }
+
+        inline long double triangleAreaMm2(MeshTriangle const & tri)
+        {
+            long double const ax = static_cast<long double>(tri.v1.x) - tri.v0.x;
+            long double const ay = static_cast<long double>(tri.v1.y) - tri.v0.y;
+            long double const az = static_cast<long double>(tri.v1.z) - tri.v0.z;
+            long double const bx = static_cast<long double>(tri.v2.x) - tri.v0.x;
+            long double const by = static_cast<long double>(tri.v2.y) - tri.v0.y;
+            long double const bz = static_cast<long double>(tri.v2.z) - tri.v0.z;
+
+            long double const crossX = ay * bz - az * by;
+            long double const crossY = az * bx - ax * bz;
+            long double const crossZ = ax * by - ay * bx;
+
+            return 0.5L * std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+        }
+
+        inline long double estimateMeshSurfaceAreaMm2(SpatialMeshData const & data)
+        {
+            long double surfaceArea = 0.0L;
+            for (auto const & tri : data.triangles)
+            {
+                surfaceArea += triangleAreaMm2(tri);
+            }
+
+            if (surfaceArea <= 0.0L)
+            {
+                surfaceArea = bboxSurfaceAreaMm2(data.boundingBox);
+            }
+
+            return surfaceArea;
+        }
+
+        /// Estimate one NanoVDB grid's peak host-side working set.
+        std::size_t estimateNanoVdbGridWorkingSetBytes(SpatialMeshData const & data,
+                                                       long double const meshSurfaceAreaMm2,
+                                                       float const voxelSize_mm,
+                                                       float const halfBandVoxels,
+                                                       double const bytesPerVoxel)
+        {
+            long double const voxelSize = std::max<long double>(
+              static_cast<long double>(voxelSize_mm), NANOVDB_MIN_VOXEL_SIZE_MM);
+            long double const bandWorld = static_cast<long double>(halfBandVoxels) * voxelSize;
+
+            long double const dx =
+              bboxExtent(data.boundingBox.min.x, data.boundingBox.max.x) + 2.0L * bandWorld;
+            long double const dy =
+              bboxExtent(data.boundingBox.min.y, data.boundingBox.max.y) + 2.0L * bandWorld;
+            long double const dz =
+              bboxExtent(data.boundingBox.min.z, data.boundingBox.max.z) + 2.0L * bandWorld;
+
+            long double const cellsX = std::max<long double>(std::ceil(dx / voxelSize), 1.0L);
+            long double const cellsY = std::max<long double>(std::ceil(dy / voxelSize), 1.0L);
+            long double const cellsZ = std::max<long double>(std::ceil(dz / voxelSize), 1.0L);
+            long double const denseVoxelCount = cellsX * cellsY * cellsZ;
+
+            long double const voxelVolumeMm3 = voxelSize * voxelSize * voxelSize;
+            long double const shellVolumeMm3 =
+              std::max(meshSurfaceAreaMm2 * (2.0L * bandWorld + voxelSize),
+                       bboxSurfaceAreaMm2(data.boundingBox) * voxelSize);
+            long double const shellVoxelCount = std::max<long double>(
+              (shellVolumeMm3 / voxelVolumeMm3) * NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR, 1.0L);
+            long double const activeVoxelCount = std::min(denseVoxelCount, shellVoxelCount);
+
+            return saturatingByteEstimate(
+              activeVoxelCount * bytesPerVoxel +
+              static_cast<long double>(NANOVDB_GRID_FIXED_OVERHEAD_BYTES));
+        }
+
+        NanoVdbWorkingSetEstimate estimateNanoVdbWorkingSet(SpatialMeshData const & data,
+                                                            float const voxelSize_mm,
+                                                            std::size_t const existingPayloadBytes)
+        {
+            NanoVdbWorkingSetEstimate estimate{};
+            long double const meshSurfaceAreaMm2 = estimateMeshSurfaceAreaMm2(data);
+
+            estimate.flatMeshBytes = data.triangles.size() * 9u * sizeof(float);
+            estimate.nearSdfBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, voxelSize_mm, 8.0f, NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL);
+            estimate.farFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, 1.0f, 150.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
+            estimate.nearFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, 0.2f, 50.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
+            estimate.totalBytes = existingPayloadBytes + estimate.flatMeshBytes +
+                                  estimate.nearSdfBytes + estimate.farFaceIndexBytes +
+                                  estimate.nearFaceIndexBytes;
+            return estimate;
+        }
+
+        std::size_t effectiveNanoVdbBudgetBytes(NanoVdbBuildPolicy const & buildPolicy)
+        {
+            return buildPolicy.budgetBytes != 0u ? buildPolicy.budgetBytes
+                                                 : DEFAULT_NANOVDB_BUDGET_BYTES;
+        }
+
+        float suggestNanoVdbVoxelSizeMm(SpatialMeshData const & data,
+                                        float const requestedVoxelSize_mm,
+                                        std::size_t const existingPayloadBytes,
+                                        std::size_t const budgetBytes)
+        {
+            if (budgetBytes == 0u)
+            {
+                return 0.0f;
+            }
+
+            float suggestedVoxelSize = std::max(requestedVoxelSize_mm, NANOVDB_MIN_VOXEL_SIZE_MM);
+
+            for (int step = 0; step < NANOVDB_MAX_SUGGESTION_STEPS; ++step)
+            {
+                auto const estimate =
+                  estimateNanoVdbWorkingSet(data, suggestedVoxelSize, existingPayloadBytes);
+                if (estimate.totalBytes <= budgetBytes)
                 {
-                        return static_cast<double>(bytes) / static_cast<double>(MEBIBYTE);
+                    return suggestedVoxelSize;
                 }
 
-                inline std::size_t saturatingByteEstimate(long double const value)
+                if (suggestedVoxelSize >= NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM)
                 {
-                        if (!std::isfinite(value) || value <= 0.0L)
-                        {
-                                return 0u;
-                        }
-
-                        long double const clamped =
-                            std::min(value, static_cast<long double>(std::numeric_limits<std::size_t>::max()));
-                        return static_cast<std::size_t>(std::ceil(clamped));
+                    break;
                 }
 
-                inline long double bboxExtent(float const minValue, float const maxValue)
-                {
-                        return std::max<long double>(static_cast<long double>(maxValue) -
-                                                                                     static_cast<long double>(minValue),
-                                                                                 0.0L);
-                }
+                suggestedVoxelSize =
+                  std::min(NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM,
+                           suggestedVoxelSize * NANOVDB_SUGGESTION_GROWTH_FACTOR);
+            }
 
-                inline long double bboxSurfaceAreaMm2(BoundingBox const & boundingBox)
-                {
-                        auto const dx = bboxExtent(boundingBox.min.x, boundingBox.max.x);
-                        auto const dy = bboxExtent(boundingBox.min.y, boundingBox.max.y);
-                        auto const dz = bboxExtent(boundingBox.min.z, boundingBox.max.z);
-                        return 2.0L * (dx * dy + dx * dz + dy * dz);
-                }
+            auto const maxEstimate = estimateNanoVdbWorkingSet(
+              data, NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM, existingPayloadBytes);
+            if (maxEstimate.totalBytes <= budgetBytes)
+            {
+                return NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM;
+            }
 
-                inline long double triangleAreaMm2(MeshTriangle const & tri)
-                {
-                        long double const ax = static_cast<long double>(tri.v1.x) - tri.v0.x;
-                        long double const ay = static_cast<long double>(tri.v1.y) - tri.v0.y;
-                        long double const az = static_cast<long double>(tri.v1.z) - tri.v0.z;
-                        long double const bx = static_cast<long double>(tri.v2.x) - tri.v0.x;
-                        long double const by = static_cast<long double>(tri.v2.y) - tri.v0.y;
-                        long double const bz = static_cast<long double>(tri.v2.z) - tri.v0.z;
-
-                        long double const crossX = ay * bz - az * by;
-                        long double const crossY = az * bx - ax * bz;
-                        long double const crossZ = ax * by - ay * bx;
-
-                        return 0.5L * std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
-                }
-
-                inline long double estimateMeshSurfaceAreaMm2(SpatialMeshData const & data)
-                {
-                        long double surfaceArea = 0.0L;
-                        for (auto const & tri : data.triangles)
-                        {
-                                surfaceArea += triangleAreaMm2(tri);
-                        }
-
-                        if (surfaceArea <= 0.0L)
-                        {
-                                surfaceArea = bboxSurfaceAreaMm2(data.boundingBox);
-                        }
-
-                        return surfaceArea;
-                }
-
-                std::size_t estimateNanoVdbGridWorkingSetBytes(SpatialMeshData const & data,
-                                                                                                             long double const meshSurfaceAreaMm2,
-                                                                                                             float const voxelSize_mm,
-                                                                                                             float const halfBandVoxels,
-                                                                                                             double const bytesPerVoxel)
-                {
-                        long double const voxelSize =
-                            std::max<long double>(static_cast<long double>(voxelSize_mm), NANOVDB_MIN_VOXEL_SIZE_MM);
-                        long double const bandWorld = static_cast<long double>(halfBandVoxels) * voxelSize;
-
-                        long double const dx = bboxExtent(data.boundingBox.min.x, data.boundingBox.max.x) +
-                                                                     2.0L * bandWorld;
-                        long double const dy = bboxExtent(data.boundingBox.min.y, data.boundingBox.max.y) +
-                                                                     2.0L * bandWorld;
-                        long double const dz = bboxExtent(data.boundingBox.min.z, data.boundingBox.max.z) +
-                                                                     2.0L * bandWorld;
-
-                        long double const cellsX = std::max<long double>(std::ceil(dx / voxelSize), 1.0L);
-                        long double const cellsY = std::max<long double>(std::ceil(dy / voxelSize), 1.0L);
-                        long double const cellsZ = std::max<long double>(std::ceil(dz / voxelSize), 1.0L);
-                        long double const denseVoxelCount = cellsX * cellsY * cellsZ;
-
-                        long double const voxelVolumeMm3 = voxelSize * voxelSize * voxelSize;
-                        long double const shellVolumeMm3 = std::max(
-                            meshSurfaceAreaMm2 * (2.0L * bandWorld + voxelSize),
-                            bboxSurfaceAreaMm2(data.boundingBox) * voxelSize);
-                        long double const shellVoxelCount =
-                            std::max<long double>((shellVolumeMm3 / voxelVolumeMm3) *
-                                                                            NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR,
-                                                                        1.0L);
-                        long double const activeVoxelCount = std::min(denseVoxelCount, shellVoxelCount);
-
-                        return saturatingByteEstimate(activeVoxelCount * bytesPerVoxel +
-                                                                                    static_cast<long double>(
-                                                                                        NANOVDB_GRID_FIXED_OVERHEAD_BYTES));
-                }
-
-                NanoVdbWorkingSetEstimate estimateNanoVdbWorkingSet(SpatialMeshData const & data,
-                                                                                                                        float const voxelSize_mm,
-                                                                                                                        std::size_t const existingPayloadBytes)
-                {
-                        NanoVdbWorkingSetEstimate estimate{};
-                        long double const meshSurfaceAreaMm2 = estimateMeshSurfaceAreaMm2(data);
-
-                        estimate.flatMeshBytes = data.triangles.size() * 9u * sizeof(float);
-                        estimate.nearSdfBytes = estimateNanoVdbGridWorkingSetBytes(
-                            data, meshSurfaceAreaMm2, voxelSize_mm, 8.0f, NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL);
-                        estimate.farFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
-                            data, meshSurfaceAreaMm2, 1.0f, 150.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
-                        estimate.nearFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
-                            data, meshSurfaceAreaMm2, 0.2f, 50.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
-                        estimate.totalBytes = existingPayloadBytes + estimate.flatMeshBytes +
-                                                                    estimate.nearSdfBytes + estimate.farFaceIndexBytes +
-                                                                    estimate.nearFaceIndexBytes;
-                        return estimate;
-                }
-
-                std::size_t effectiveNanoVdbBudgetBytes(NanoVdbBuildPolicy const & buildPolicy)
-                {
-                        return buildPolicy.budgetBytes != 0u ? buildPolicy.budgetBytes
-                                                                                                 : DEFAULT_NANOVDB_BUDGET_BYTES;
-                }
-
-                float suggestNanoVdbVoxelSizeMm(SpatialMeshData const & data,
-                                                                                float const requestedVoxelSize_mm,
-                                                                                std::size_t const existingPayloadBytes,
-                                                                                std::size_t const budgetBytes)
-                {
-                        if (budgetBytes == 0u)
-                        {
-                                return 0.0f;
-                        }
-
-                        float suggestedVoxelSize =
-                            std::max(requestedVoxelSize_mm, NANOVDB_MIN_VOXEL_SIZE_MM);
-
-                        for (int step = 0; step < NANOVDB_MAX_SUGGESTION_STEPS; ++step)
-                        {
-                                auto const estimate =
-                                    estimateNanoVdbWorkingSet(data, suggestedVoxelSize, existingPayloadBytes);
-                                if (estimate.totalBytes <= budgetBytes)
-                                {
-                                        return suggestedVoxelSize;
-                                }
-
-                                if (suggestedVoxelSize >= NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM)
-                                {
-                                        break;
-                                }
-
-                                suggestedVoxelSize = std::min(NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM,
-                                                                                            suggestedVoxelSize * NANOVDB_SUGGESTION_GROWTH_FACTOR);
-                        }
-
-                        auto const maxEstimate = estimateNanoVdbWorkingSet(
-                            data, NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM, existingPayloadBytes);
-                        if (maxEstimate.totalBytes <= budgetBytes)
-                        {
-                                return NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM;
-                        }
-
-                        return 0.0f;
-                }
+            return 0.0f;
+        }
     }  // namespace
     // ========================================================================
     // Constructors

@@ -2342,10 +2342,8 @@ namespace gladius::ui
         std::string const displayName = path.filename().string();
 
         // Check for an already-loaded mesh with the same display name (dedup by filename).
-        // The geometry future is skipped; we create the nodes directly on the next frame
-        // by pushing a completed (degenerate) future. Instead we handle this inline: if found,
-        // create the nodes immediately (we may be outside the editor context here, so store
-        // a pending entry with an already-ready future that returns an empty mesh as sentinel).
+        // Node creation still happens on the next editor frame because it must run while the
+        // node editor context is active.
 
         auto & resourceManager = m_doc->getResourceManager();
         for (auto const & [key, res] : resourceManager.getResourceMap())
@@ -2353,23 +2351,9 @@ namespace gladius::ui
             auto const * mesh = dynamic_cast<MeshResource const *>(res.get());
             if (mesh && key.getDisplayName() == displayName)
             {
-                // Already imported – reuse existing resource, create nodes next frame.
-                // We store a sentinel future (valid but returns empty mesh) so the polling
-                // loop can distinguish "dedup path" by checking the display name.
-                // Simpler: store the ResourceKey in a small wrapper struct and create a
-                // ready future. We use std::async with deferred launch for zero overhead.
                 PendingStlImport pending;
-                ResourceKey const existingKey = key;
-                pending.geometryFuture =
-                  std::async(std::launch::deferred,
-                             [existingKey]() -> vdb::TriangleMesh
-                             {
-                                 // Return empty sentinel — the display name matches an
-                                 // existing resource so processPendingStlImports will
-                                 // reuse it without calling addMeshResource.
-                                 return vdb::TriangleMesh{};
-                             });
-                pending.displayName  = displayName;
+                pending.existingResourceKey = key;
+                pending.displayName = displayName;
                 pending.dropScreenPos = screenPos;
                 m_pendingStlImports.push_back(std::move(pending));
                 return;
@@ -2403,6 +2387,21 @@ namespace gladius::ui
         for (auto it = m_pendingStlImports.begin(); it != m_pendingStlImports.end();)
         {
             auto & pending = *it;
+            ImVec2 const canvasPos = ed::ScreenToCanvas(pending.dropScreenPos);
+
+            if (pending.existingResourceKey)
+            {
+                createMeshSdfNodesAtCanvasPos(*pending.existingResourceKey, canvasPos);
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
+            if (!pending.geometryFuture.valid())
+            {
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
             if (pending.geometryFuture.wait_for(std::chrono::milliseconds(0)) !=
                 std::future_status::ready)
             {
@@ -2410,9 +2409,24 @@ namespace gladius::ui
                 continue;
             }
 
-            vdb::TriangleMesh mesh = pending.geometryFuture.get();
+            vdb::TriangleMesh mesh;
+            try
+            {
+                mesh = pending.geometryFuture.get();
+            }
+            catch (std::exception const & e)
+            {
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                      {fmt::format("STL import failed for {}: {}", pending.displayName, e.what()),
+                       events::Severity::Error});
+                }
+                it = m_pendingStlImports.erase(it);
+                continue;
+            }
+
             std::string const & displayName = pending.displayName;
-            ImVec2 const canvasPos = ed::ScreenToCanvas(pending.dropScreenPos);
 
             // Try to find an existing mesh resource with the same display name.
             std::optional<ResourceKey> existingKey;

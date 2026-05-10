@@ -117,6 +117,44 @@ namespace gladius
                     current.fwnBeta != cfg.fwnBeta);
         }
 
+        class ScopedNanoVdbFailurePolicy
+        {
+          public:
+            ScopedNanoVdbFailurePolicy(std::atomic<NanoVdbFailurePolicy> & policy,
+                                       NanoVdbFailurePolicy const next) noexcept
+                : m_policy(policy)
+                , m_previous(policy.exchange(next, std::memory_order_relaxed))
+            {
+            }
+
+            ~ScopedNanoVdbFailurePolicy() noexcept
+            {
+                m_policy.store(m_previous, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<NanoVdbFailurePolicy> & m_policy;
+            NanoVdbFailurePolicy m_previous;
+        };
+
+        class ScopedLoadingFlag
+        {
+          public:
+            explicit ScopedLoadingFlag(std::atomic<bool> & loading) noexcept
+                : m_loading(loading)
+            {
+                m_loading.store(true, std::memory_order_relaxed);
+            }
+
+            ~ScopedLoadingFlag() noexcept
+            {
+                m_loading.store(false, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<bool> & m_loading;
+        };
+
         class ScopedOptimizedRenderCompilationDeferral
         {
           public:
@@ -1011,8 +1049,8 @@ namespace gladius
 
     void Document::load(std::filesystem::path filename)
     {
-        auto const previousFailurePolicy =
-          m_nanovdbFailurePolicy.exchange(NanoVdbFailurePolicy::Fail, std::memory_order_relaxed);
+        ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                      NanoVdbFailurePolicy::Fail};
 
         try
         {
@@ -1028,17 +1066,9 @@ namespace gladius
         }
         catch (NanoVdbBuildRejectedError const &)
         {
-            m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
             newModel();
             throw;
         }
-        catch (...)
-        {
-            m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
-            throw;
-        }
-
-        m_nanovdbFailurePolicy.store(previousFailurePolicy, std::memory_order_relaxed);
     }
 
     void Document::loadNonBlocking(std::filesystem::path filename)
@@ -1047,7 +1077,8 @@ namespace gladius
         // running load owns document/compute state; waiting here would freeze the UI thread.
         if (m_futureFileLoad.valid())
         {
-            if (m_futureFileLoad.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+            if (m_futureFileLoad.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
             {
                 auto logger = getSharedLogger();
                 if (logger)
@@ -1074,60 +1105,64 @@ namespace gladius
             m_loadingError.clear();
         }
 
-        m_isLoading = true;
-
         // Launch async file loading
-        m_futureFileLoad = std::async(std::launch::async,
-                                      [this, filename]()
-                                      {
-                                                                                    auto const previousFailurePolicy =
-                                                                                        m_nanovdbFailurePolicy.exchange(
-                                                                                            NanoVdbFailurePolicy::Degrade,
-                                                                                            std::memory_order_relaxed);
-                                          try
-                                          {
-                                              auto const refreshMode = filename.extension() == ".3mf"
-                                                                           ? RefreshMode::InteractiveFirst
-                                                                           : RefreshMode::Normal;
-                                              auto const previewMeshSdfConfig =
-                                                makeInteractivePreviewMeshSdfConfig(
-                                                  m_meshSdfEvaluationConfig);
-                                              ScopedMeshSdfEvaluationConfigOverride
-                                                previewMeshConfigOverride{
-                                                  *this,
-                                                  previewMeshSdfConfig,
-                                                  refreshMode == RefreshMode::InteractiveFirst};
+        m_isLoading.store(true, std::memory_order_relaxed);
+        try
+        {
+            m_futureFileLoad = std::async(
+              std::launch::async,
+              [this, filename]()
+              {
+                  ScopedLoadingFlag loadingScope{m_isLoading};
+                  ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                                NanoVdbFailurePolicy::Degrade};
 
-                                              loadImpl(filename);
-                                              // Initial validation with FileLoad context - logs
-                                              // errors once
-                                              validateAssembly(nodes::ValidationContext::FileLoad);
-                                              // Chain into async model refresh. 3MF loads publish
-                                              // a lightweight command-stream preview first, then
-                                              // start the optimized renderer and slicer
-                                              // compilation in the background.
-                                              refreshWorker(refreshMode);
-                                          }
-                                          catch (const std::exception & e)
-                                          {
-                                              // Store error for UI to display
-                                              {
-                                                  std::lock_guard<std::mutex> lock(
-                                                    m_loadingErrorMutex);
-                                                  m_loadingError = e.what();
-                                              }
-                                              auto logger = getSharedLogger();
-                                              if (logger)
-                                              {
-                                                  logger->addEvent(
-                                                    {fmt::format("File load error: {}", e.what()),
-                                                     events::Severity::Error});
-                                              }
-                                          }
-                                                                                    m_nanovdbFailurePolicy.store(previousFailurePolicy,
-                                                                                                                                             std::memory_order_relaxed);
-                                          m_isLoading = false;
-                                      });
+                  try
+                  {
+                      auto const refreshMode = filename.extension() == ".3mf"
+                                                 ? RefreshMode::InteractiveFirst
+                                                 : RefreshMode::Normal;
+                      auto const previewMeshSdfConfig =
+                        makeInteractivePreviewMeshSdfConfig(m_meshSdfEvaluationConfig);
+                      ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
+                        *this, previewMeshSdfConfig, refreshMode == RefreshMode::InteractiveFirst};
+
+                      loadImpl(filename);
+                      // Initial validation with FileLoad context - logs
+                      // errors once
+                      validateAssembly(nodes::ValidationContext::FileLoad);
+                      // Chain into async model refresh. 3MF loads publish
+                      // a lightweight command-stream preview first, then
+                      // start the optimized renderer and slicer
+                      // compilation in the background.
+                      refreshWorker(refreshMode);
+                  }
+                  catch (std::exception const & e)
+                  {
+                      // Store error for UI to display
+                      {
+                          std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                          m_loadingError = e.what();
+                      }
+                      auto logger = getSharedLogger();
+                      if (logger)
+                      {
+                          logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                            events::Severity::Error});
+                      }
+                  }
+                  catch (...)
+                  {
+                      std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                      m_loadingError = "Unknown file load error";
+                  }
+              });
+        }
+        catch (...)
+        {
+            m_isLoading.store(false, std::memory_order_relaxed);
+            throw;
+        }
     }
 
     bool Document::isLoadingInProgress() const

@@ -512,7 +512,7 @@ namespace gladius
         /// Mesh SDF evaluation configuration applied to newly imported spatial meshes.
         MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
 
-            std::atomic<NanoVdbFailurePolicy> m_nanovdbFailurePolicy{NanoVdbFailurePolicy::Degrade};
+        std::atomic<NanoVdbFailurePolicy> m_nanovdbFailurePolicy{NanoVdbFailurePolicy::Degrade};
 
         mutable std::mutex m_pendingMeshSdfEvaluationConfigMutex;
         std::optional<MeshSdfEvaluationConfig> m_pendingMeshSdfEvaluationConfig;

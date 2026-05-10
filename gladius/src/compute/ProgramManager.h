@@ -138,7 +138,7 @@ namespace gladius
         [[nodiscard]] bool isVdbRequired() const;
         /// Returns the human-readable reason why NanoVDB is unavailable on this device.
         /// Empty when isVdbSupported() returns true.
-        [[nodiscard]] std::string const & getVdbSupportFailureReason() const;
+        [[nodiscard]] std::string getVdbSupportFailureReason() const;
 
         /// Debug helpers for headless diagnostics
         [[nodiscard]] bool hasModelSource() const;

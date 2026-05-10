@@ -59,7 +59,7 @@ namespace gladius::ui
 
         MeshSdfSettings * m_settings = nullptr;
         ApplyCallback m_applyCallback;
-  NanoVdbIssueProvider m_nanovdbIssueProvider;
+        NanoVdbIssueProvider m_nanovdbIssueProvider;
 
         bool m_visible = false;
         bool m_dirty = false;
