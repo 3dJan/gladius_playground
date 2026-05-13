@@ -1456,6 +1456,62 @@ namespace gladius
         return summary;
     }
 
+    MeshQualityIssueSummary Document::getMeshQualityIssueSummary() const
+    {
+        MeshQualityIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr || !spatialMesh->hasMeshQualityIssues())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+
+            auto const & quality = spatialMesh->getMeshQualityDiagnostics();
+            summary.degenerateTriangleCount +=
+              static_cast<std::size_t>(quality.degenerateTriangleCount);
+            summary.boundaryEdgeCount += static_cast<std::size_t>(quality.boundaryEdgeCount);
+            summary.nonManifoldEdgeCount +=
+              static_cast<std::size_t>(quality.nonManifoldEdgeCount);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "Mesh topology diagnostics affect {} mesh resources ({} boundary edges, {} "
+          "non-manifold edges, {} degenerate triangles total). First issue: {}",
+          summary.affectedMeshCount,
+          summary.boundaryEdgeCount,
+          summary.nonManifoldEdgeCount,
+          summary.degenerateTriangleCount,
+          firstMessage);
+        return summary;
+    }
+
     events::SharedLogger Document::getSharedLogger() const
     {
         if (!m_core)
@@ -1817,6 +1873,27 @@ namespace gladius
                 if (changed)
                 {
                     ++changedResources;
+                }
+
+                if (spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasMeshQualityIssues())
+                {
+                    auto const message = spatialMesh->formatMeshQualityMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
                 }
 
                 if (changed && spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&

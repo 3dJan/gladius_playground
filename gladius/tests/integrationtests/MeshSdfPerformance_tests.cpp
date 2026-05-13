@@ -217,6 +217,32 @@ namespace gladius::tests
             return std::make_unique<SpatialMeshResource>(key, vertices, indices);
         }
 
+        /// Create a closed, consistently wound cube mesh for sharp-feature SDF tests.
+        static void createCubeMesh(std::vector<float4>& vertices,
+                                   std::vector<TriangleIndices>& indices,
+                                   float halfExtent)
+        {
+            vertices = {
+                makeFloat4(-halfExtent, -halfExtent, -halfExtent),
+                makeFloat4( halfExtent, -halfExtent, -halfExtent),
+                makeFloat4( halfExtent,  halfExtent, -halfExtent),
+                makeFloat4(-halfExtent,  halfExtent, -halfExtent),
+                makeFloat4(-halfExtent, -halfExtent,  halfExtent),
+                makeFloat4( halfExtent, -halfExtent,  halfExtent),
+                makeFloat4( halfExtent,  halfExtent,  halfExtent),
+                makeFloat4(-halfExtent,  halfExtent,  halfExtent),
+            };
+
+            indices = {
+                {4, 5, 6}, {4, 6, 7}, // +z
+                {1, 0, 3}, {1, 3, 2}, // -z
+                {5, 1, 2}, {5, 2, 6}, // +x
+                {0, 4, 7}, {0, 7, 3}, // -x
+                {7, 6, 2}, {7, 2, 3}, // +y
+                {0, 1, 5}, {0, 5, 4}, // -y
+            };
+        }
+
         /// Create an icosphere mesh for testing
         static void createIcosphere(std::vector<float4>& vertices,
                                     std::vector<TriangleIndices>& indices,
@@ -322,9 +348,12 @@ namespace gladius::tests
         auto primitives = core->getPrimitives();
         ASSERT_NE(primitives, nullptr);
 
+        bool const vdbSupported = core->getProgramManager().isVdbSupported();
+
         gladius::compute::ManifoldDualContouringProgram sampler(
             m_context, core->getResourceContext());
         sampler.setLogger(m_logger);
+        sampler.setEnableVdb(vdbSupported);
         sampler.setModelKernel(R"CLC(
     float4 model(float3 pos, PAYLOAD_ARGS)
     {
@@ -337,20 +366,31 @@ namespace gladius::tests
         {
             char const * label;
             MeshSdfMethod method;
+            bool requiresVdb;
         };
-        std::array<MethodCase, 3> const cases = {{
-            {"PureBVH", MeshSdfMethod::PureBVH},
-            {"VoxelAccelerated", MeshSdfMethod::VoxelAccelerated},
-            {"FastWindingNumber", MeshSdfMethod::FastWindingNumber},
+        std::array<MethodCase, 4> const cases = {{
+            {"PureBVH", MeshSdfMethod::PureBVH, false},
+            {"VoxelAccelerated", MeshSdfMethod::VoxelAccelerated, false},
+            {"FastWindingNumber", MeshSdfMethod::FastWindingNumber, false},
+            {"NanoVDB", MeshSdfMethod::NanoVDB, true},
         }};
 
         for (auto const & c : cases)
         {
+            if (c.requiresVdb && !vdbSupported)
+            {
+                std::cout << "Skipping " << c.label
+                          << " mesh SDF comparison because NanoVDB is unavailable: "
+                          << core->getProgramManager().getVdbSupportFailureReason() << std::endl;
+                continue;
+            }
+
             MeshSdfEvaluationConfig cfg{};
             cfg.method = c.method;
             cfg.useEarlyExit = false;
             cfg.fwnUseSignCache = false;
             cfg.fwnBeta = 4.0f;
+            cfg.nanovdbVoxelSize_mm = 0.1f;
 
             MeshBVHBuildParams params;
             params.maxPrimitivesPerLeaf = 4;
@@ -378,6 +418,14 @@ namespace gladius::tests
 
             primitives->clear();
             resource.write(*primitives);
+            if (c.method == MeshSdfMethod::NanoVDB)
+            {
+                ASSERT_FALSE(resource.hasNanoVdbBuildIssue()) << c.label << ": "
+                                                              << resource.getNanoVdbBuildInfo().reason;
+                ASSERT_EQ(resource.getNanoVdbBuildInfo().result,
+                          SpatialMeshResource::NanoVdbBuildResult::Built)
+                    << c.label;
+            }
             primitives->write();
 
             if (c.method == MeshSdfMethod::VoxelAccelerated)
@@ -398,13 +446,250 @@ namespace gladius::tests
             primitives->write();
 
             auto const distances = sampler.evaluateSdfBatch(
-                {Eigen::Vector3f{0.0f, 0.0f, 0.0f}, Eigen::Vector3f{15.0f, 0.0f, 0.0f}},
+                {Eigen::Vector3f{0.0f, 0.0f, 0.0f},
+                 Eigen::Vector3f{15.0f, 0.0f, 0.0f},
+                 Eigen::Vector3f{9.75f, 0.0f, 0.0f},
+                 Eigen::Vector3f{10.25f, 0.0f, 0.0f}},
                 *primitives,
                 0.0f);
-            ASSERT_EQ(distances.size(), 2u) << c.label;
+            ASSERT_EQ(distances.size(), 4u) << c.label;
             EXPECT_LT(distances[0], -5.0f) << c.label << " center distance=" << distances[0];
             EXPECT_GT(distances[1], 2.0f) << c.label << " outside distance=" << distances[1];
+            EXPECT_LT(distances[2], -0.05f) << c.label << " near-inside distance=" << distances[2];
+            EXPECT_GT(distances[3], 0.05f) << c.label << " near-outside distance=" << distances[3];
+            EXPECT_GT(std::fabs(distances[3]), 0.10f)
+                << c.label << " near-outside magnitude should remain in millimetres, distance="
+                << distances[3];
         }
+    }
+
+    TEST_F(MeshSdfPerformance_Test, GpuSdfEvaluation_AllMeshMethods_CubeSharpFeaturesKeepCorrectSign)
+    {
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices, 5.0f);
+
+        auto core = std::make_shared<ComputeCore>(
+            m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives, nullptr);
+
+        bool const vdbSupported = core->getProgramManager().isVdbSupported();
+
+        gladius::compute::ManifoldDualContouringProgram sampler(
+            m_context, core->getResourceContext());
+        sampler.setLogger(m_logger);
+        sampler.setEnableVdb(vdbSupported);
+        sampler.setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        float const distance = payload(pos, 0, primitivesSize, PASS_PAYLOAD_ARGS);
+        return (float4)(0.0f, 0.0f, 0.0f, distance);
+    }
+    )CLC");
+
+        struct MethodCase
+        {
+            char const * label;
+            MeshSdfMethod method;
+            bool requiresVdb;
+        };
+        std::array<MethodCase, 4> const cases = {{
+            {"PureBVH", MeshSdfMethod::PureBVH, false},
+            {"VoxelAccelerated", MeshSdfMethod::VoxelAccelerated, false},
+            {"FastWindingNumber", MeshSdfMethod::FastWindingNumber, false},
+            {"NanoVDB", MeshSdfMethod::NanoVDB, true},
+        }};
+
+        std::vector<Eigen::Vector3f> const samplePositions = {
+            {0.0f, 0.0f, 0.0f},       // deep interior
+            {8.0f, 0.0f, 0.0f},       // far exterior
+            {4.75f, 0.0f, 0.0f},      // inside near face
+            {5.25f, 0.0f, 0.0f},      // outside near face
+            {4.75f, 4.75f, 0.0f},     // inside near sharp edge
+            {5.25f, 5.25f, 0.0f},     // outside near sharp edge
+            {4.75f, 4.75f, 4.75f},    // inside near sharp corner
+            {5.25f, 5.25f, 5.25f},    // outside near sharp corner
+        };
+
+        for (auto const & c : cases)
+        {
+            if (c.requiresVdb && !vdbSupported)
+            {
+                std::cout << "Skipping " << c.label
+                          << " cube sharp-feature comparison because NanoVDB is unavailable: "
+                          << core->getProgramManager().getVdbSupportFailureReason() << std::endl;
+                continue;
+            }
+
+            MeshSdfEvaluationConfig cfg{};
+            cfg.method = c.method;
+            cfg.useEarlyExit = false;
+            cfg.fwnUseSignCache = false;
+            cfg.fwnBeta = 4.0f;
+            cfg.nanovdbVoxelSize_mm = 0.1f;
+
+            MeshBVHBuildParams params;
+            params.maxPrimitivesPerLeaf = 4;
+            params.maxDepth = 32;
+            params.traversalCost = 1.0f;
+            params.intersectionCost = 1.0f;
+            MeshBVHBuilder builder;
+
+            ResourceKey key(ResourceId{1001}, ResourceType::Mesh);
+            SpatialMeshResource resource(key, builder.build(vertices, indices, params), cfg);
+
+            auto & settings = core->getResourceContext()->getRenderingSettings();
+            settings.meshInflationDistance = 0.0f;
+            settings.meshFwnBeta = cfg.fwnBeta;
+            settings.meshFwnFarFieldFactor = 0.0f;
+            settings.flags |= RF_DISABLE_MESH_EARLY_EXIT;
+            if (c.method == MeshSdfMethod::FastWindingNumber)
+            {
+                settings.flags |= RF_USE_MESH_FWN;
+            }
+            else
+            {
+                settings.flags &= ~RF_USE_MESH_FWN;
+            }
+
+            primitives->clear();
+            resource.write(*primitives);
+            if (c.method == MeshSdfMethod::NanoVDB)
+            {
+                ASSERT_FALSE(resource.hasNanoVdbBuildIssue()) << c.label << ": "
+                                                              << resource.getNanoVdbBuildInfo().reason;
+                ASSERT_EQ(resource.getNanoVdbBuildInfo().result,
+                          SpatialMeshResource::NanoVdbBuildResult::Built)
+                    << c.label;
+            }
+            primitives->write();
+
+            if (c.method == MeshSdfMethod::VoxelAccelerated)
+            {
+                auto params = resource.getVoxelGridBuildParams();
+                ASSERT_TRUE(params.has_value()) << c.label;
+                ASSERT_EQ(core->buildMeshVoxelGrids({*params}), 1u) << c.label;
+            }
+            else if (c.method == MeshSdfMethod::FastWindingNumber)
+            {
+                auto params = resource.getFwnAggregateBuildParams();
+                ASSERT_TRUE(params.has_value()) << c.label;
+                ASSERT_EQ(core->buildMeshFwnAggregates({*params}), 1u) << c.label;
+            }
+
+            primitives->write();
+            auto const distances = sampler.evaluateSdfBatch(samplePositions, *primitives, 0.0f);
+            ASSERT_EQ(distances.size(), samplePositions.size()) << c.label;
+
+            EXPECT_LT(distances[0], -4.0f) << c.label << " center distance=" << distances[0];
+            EXPECT_GT(distances[1], 2.0f) << c.label << " exterior distance=" << distances[1];
+            EXPECT_LT(distances[2], -0.05f) << c.label << " face-inside distance=" << distances[2];
+            EXPECT_GT(distances[3], 0.05f) << c.label << " face-outside distance=" << distances[3];
+            EXPECT_LT(distances[4], -0.05f) << c.label << " edge-inside distance=" << distances[4];
+            EXPECT_GT(distances[5], 0.05f) << c.label << " edge-outside distance=" << distances[5];
+            EXPECT_LT(distances[6], -0.05f) << c.label << " corner-inside distance=" << distances[6];
+            EXPECT_GT(distances[7], 0.05f) << c.label << " corner-outside distance=" << distances[7];
+        }
+    }
+
+    TEST_F(MeshSdfPerformance_Test, GpuSdfEvaluation_NanoVdbNearestSampling_ReturnsMillimetres)
+    {
+        if (!m_context->isValid())
+        {
+            GTEST_SKIP() << "OpenCL context not available";
+        }
+
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createCubeMesh(vertices, indices, 5.0f);
+
+        auto core = std::make_shared<ComputeCore>(
+            m_context, RequiredCapabilities::ComputeOnly, m_logger);
+        auto primitives = core->getPrimitives();
+        ASSERT_NE(primitives, nullptr);
+
+        if (!core->getProgramManager().isVdbSupported())
+        {
+            GTEST_SKIP() << "NanoVDB is unavailable: "
+                         << core->getProgramManager().getVdbSupportFailureReason();
+        }
+
+        gladius::compute::ManifoldDualContouringProgram sampler(
+            m_context, core->getResourceContext());
+        sampler.setLogger(m_logger);
+        sampler.setEnableVdb(true);
+        sampler.setModelKernel(R"CLC(
+    float4 model(float3 pos, PAYLOAD_ARGS)
+    {
+        float const distance = payload(pos, 0, primitivesSize, PASS_PAYLOAD_ARGS);
+        return (float4)(0.0f, 0.0f, 0.0f, distance);
+    }
+    )CLC");
+
+        MeshSdfEvaluationConfig cfg{};
+        cfg.method = MeshSdfMethod::NanoVDB;
+        cfg.useEarlyExit = false;
+        cfg.nanovdbVoxelSize_mm = 0.1f;
+
+        MeshBVHBuildParams params;
+        params.maxPrimitivesPerLeaf = 4;
+        params.maxDepth = 32;
+        params.traversalCost = 1.0f;
+        params.intersectionCost = 1.0f;
+        MeshBVHBuilder builder;
+
+        ResourceKey key(ResourceId{1002}, ResourceType::Mesh);
+        SpatialMeshResource resource(key, builder.build(vertices, indices, params), cfg);
+
+        auto & settings = core->getResourceContext()->getRenderingSettings();
+        settings.meshInflationDistance = 0.0f;
+        settings.flags |= RF_DISABLE_MESH_EARLY_EXIT;
+        settings.flags &= ~RF_USE_MESH_FWN;
+
+        primitives->clear();
+        resource.write(*primitives);
+        ASSERT_FALSE(resource.hasNanoVdbBuildIssue()) << resource.getNanoVdbBuildInfo().reason;
+        ASSERT_EQ(resource.getNanoVdbBuildInfo().result,
+                  SpatialMeshResource::NanoVdbBuildResult::Built);
+        primitives->write();
+
+        std::vector<Eigen::Vector3f> const samplePositions = {
+            {0.0f, 0.0f, 0.0f},
+            {8.0f, 0.0f, 0.0f},
+            {4.75f, 0.0f, 0.0f},
+            {5.25f, 0.0f, 0.0f},
+            {5.25f, 5.25f, 0.0f},
+        };
+
+        settings.approximation = AM_FULL_MODEL;
+        auto const interpolated = sampler.evaluateSdfBatch(samplePositions, *primitives, 0.0f);
+
+        settings.approximation = static_cast<ApproximationMode>(AM_FULL_MODEL | AM_DISABLE_INTERPOLATION);
+        auto const nearest = sampler.evaluateSdfBatch(samplePositions, *primitives, 0.0f);
+
+        ASSERT_EQ(interpolated.size(), samplePositions.size());
+        ASSERT_EQ(nearest.size(), samplePositions.size());
+
+        for (size_t i = 0u; i < samplePositions.size(); ++i)
+        {
+            EXPECT_EQ(interpolated[i] < 0.0f, nearest[i] < 0.0f)
+                << "sample " << i << " interpolated=" << interpolated[i]
+                << " nearest=" << nearest[i];
+            EXPECT_NEAR(interpolated[i], nearest[i], 0.25f)
+                << "sample " << i << " should not change units when nearest VDB sampling is used";
+        }
+
+        EXPECT_LT(nearest[0], -4.0f) << "center distance=" << nearest[0];
+        EXPECT_GT(nearest[1], 2.0f) << "exterior distance=" << nearest[1];
+        EXPECT_LT(nearest[2], -0.05f) << "face-inside distance=" << nearest[2];
+        EXPECT_GT(nearest[3], 0.05f) << "face-outside distance=" << nearest[3];
+        EXPECT_GT(nearest[4], 0.10f) << "edge-outside magnitude should remain in millimetres";
     }
 
     /// T001-T003: Baseline performance benchmark with procedural sphere

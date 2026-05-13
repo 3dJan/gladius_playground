@@ -1392,6 +1392,24 @@ namespace gladius::io
 
         auto * resource = resourceManager.getResourcePtr(key);
         auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+        if (spatialMesh != nullptr && spatialMesh->hasMeshQualityIssues())
+        {
+            auto const message = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            bool const strictNanoVdb = m_meshSdfEvaluationConfig.method == MeshSdfMethod::NanoVDB &&
+                                       m_nanovdbBuildPolicy.failurePolicy ==
+                                           NanoVdbFailurePolicy::Fail;
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({message,
+                                         strictNanoVdb ? gladius::events::Severity::Error
+                                                       : gladius::events::Severity::Warning});
+            }
+            if (strictNanoVdb)
+            {
+                resourceManager.deleteResource(key);
+                throw NanoVdbBuildRejectedError(message);
+            }
+        }
         if (spatialMesh != nullptr && spatialMesh->hasNanoVdbBuildIssue())
         {
             auto const message = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());

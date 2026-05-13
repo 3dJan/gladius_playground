@@ -139,6 +139,24 @@ namespace gladius
         }
     };
 
+    /// Topology diagnostics that affect deterministic signed-distance evaluation.
+    struct MeshQualityDiagnostics
+    {
+        /// Number of triangles skipped during normal computation due to a degenerate
+        /// edge length or zero face-normal magnitude.
+        int degenerateTriangleCount = 0;
+        /// Number of undirected edges incident to exactly one face (open boundary).
+        int boundaryEdgeCount = 0;
+        /// Number of undirected edges incident to three or more faces (non-manifold).
+        int nonManifoldEdgeCount = 0;
+
+        [[nodiscard]] bool hasIssues() const noexcept
+        {
+            return degenerateTriangleCount != 0 || boundaryEdgeCount != 0 ||
+                   nonManifoldEdgeCount != 0;
+        }
+    };
+
     /// Host-side container for mesh BVH data before serialization
     struct SpatialMeshData
     {
@@ -150,6 +168,7 @@ namespace gladius
         std::vector<MeshBVHFwnAggregate> fwnAggregates;          ///< 1 aggregate per BVH node (same order as nodes); empty when not built
         size_t originalTriangleCount = 0;         ///< Source mesh triangle count
         BoundingBox boundingBox;                  ///< Axis-aligned bounding box
+        MeshQualityDiagnostics quality;           ///< Topology diagnostics collected during BVH construction
 
         /// Check if data is empty
         bool empty() const

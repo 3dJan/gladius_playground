@@ -459,6 +459,9 @@ namespace gladius
         /// Summarize NanoVDB build issues on currently loaded mesh resources, if any.
         [[nodiscard]] NanoVdbBuildIssueSummary getNanoVdbBuildIssueSummary() const;
 
+        /// Summarize mesh topology diagnostics on currently loaded mesh resources, if any.
+        [[nodiscard]] MeshQualityIssueSummary getMeshQualityIssueSummary() const;
+
         /// Queue applying the mesh-SDF evaluation configuration to existing mesh resources.
         /// Heavy resource rebuild/upload work is folded into the debounced background refresh so
         /// the UI can keep showing the current preview.

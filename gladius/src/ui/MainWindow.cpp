@@ -3440,6 +3440,15 @@ namespace gladius::ui
               }
               return m_doc->getNanoVdbBuildIssueSummary();
           });
+        m_meshSdfSettingsDialog.setMeshQualityIssueProvider(
+          [this]() -> MeshQualityIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getMeshQualityIssueSummary();
+          });
     }
 
     void MainWindow::setVdbSupported(bool supported, std::string const & reason)

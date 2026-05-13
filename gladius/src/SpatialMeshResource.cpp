@@ -257,6 +257,32 @@ namespace gladius
         ResourceBase::load();
     }
 
+        std::string SpatialMeshResource::formatMeshQualityMessage(
+            std::string const & displayName) const
+        {
+                if (!hasMeshQualityIssues())
+                {
+                        return {};
+                }
+
+                auto const subject = displayName.empty() ? std::string{"mesh resource"}
+                                                                                                 : fmt::format("mesh '{}'", displayName);
+                auto const & quality = m_data.quality;
+                auto message = fmt::format(
+                    "Topology diagnostics for {}: {} boundary edges, {} non-manifold edges, "
+                    "{} degenerate triangles. Signed mesh SDF methods, including NanoVDB, are "
+                    "deterministic only for watertight, consistently oriented meshes.",
+                    subject,
+                    quality.boundaryEdgeCount,
+                    quality.nonManifoldEdgeCount,
+                    quality.degenerateTriangleCount);
+
+                message += " No repair or fallback was applied silently. Enable explicit repair-on-import "
+                                     "and re-import, or select Fast Winding Number when the input is an intentional "
+                                     "triangle soup.";
+                return message;
+        }
+
     std::string SpatialMeshResource::formatNanoVdbBuildMessage(
       std::string const & displayName) const
     {
@@ -1048,16 +1074,31 @@ namespace gladius
                 flatMeshCompanion.end = static_cast<int>(m_payloadData.data.size());
 
                 // -- Companion i+2: SDF_VDB (near signed-distance field, user-configured res) --
-                auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(
-                    static_cast<double>(voxelSize_mm));
+                // Keep the legacy VdbImporter value convention: build the SDF grid in
+                // voxel-scaled coordinates with an identity transform, then store
+                // PrimitiveMeta::scaling as the world_mm -> grid coordinate scale. The OpenCL
+                // vdbModel() sampler divides sampled grid values by the same scale to return
+                // millimetres. Building this grid directly in world space with a non-identity
+                // transform would store millimetre-valued distances and the kernel would scale
+                // them down a second time.
+                float const nearSdfScaling = 1.0f / voxelSize_mm;
+                auto nearSdfVerts = verts;
+                for (auto & vertex : nearSdfVerts)
+                {
+                    vertex *= nearSdfScaling;
+                }
+                auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(1.0);
                 float constexpr kNearHalfBandVoxels = 8.0f;
                 auto nearSdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
-                    *nearSdfTransform, verts, tris, kNearHalfBandVoxels);
-                openvdb::tools::changeBackground(nearSdfGrid->tree(),
-                                                 std::numeric_limits<float>::max());
+                    *nearSdfTransform, nearSdfVerts, tris, kNearHalfBandVoxels);
+                // Preserve OpenVDB's signed inactive tiles. The hybrid NanoVDB path uses this
+                // grid as its sign source while face-index grids provide the long-range
+                // magnitude. Replacing all inactive values with +max destroys the negative
+                // interior background and makes closed solids look outside once queries leave
+                // the active narrow band.
                 nearSdfGrid->pruneGrid();
                 PrimitiveMeta sdfVdbCompanion = appendVdbGrid(
-                    openvdb::GridBase::Ptr(nearSdfGrid), 1.0f / voxelSize_mm, SDF_VDB);
+                    openvdb::GridBase::Ptr(nearSdfGrid), nearSdfScaling, SDF_VDB);
                 m_nanovdbGridOffset = static_cast<size_t>(sdfVdbCompanion.start);
 
                 // -- Companion i+3: SDF_VDB_FACE_INDICES (far face-index, fixed 1mm / 150 voxels) --
