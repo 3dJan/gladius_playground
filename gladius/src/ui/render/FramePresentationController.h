@@ -102,6 +102,33 @@ namespace gladius::ui::async_rendering
             return true;
         }
 
+        [[nodiscard]] bool tryTransitionBuffer(size_t bufferId,
+                                               FrameState expectedState,
+                                               FrameState newState) noexcept
+        {
+            auto * target = mutableBuffer(bufferId);
+            if (target == nullptr || target->state != expectedState)
+            {
+                return false;
+            }
+
+            target->state = newState;
+            if (newState == FrameState::Idle)
+            {
+                target->frameId = 0;
+            }
+            if (newState == FrameState::Front)
+            {
+                m_frontBufferId = target->id;
+            }
+            return true;
+        }
+
+        [[nodiscard]] std::optional<size_t> selectNewestReady() noexcept
+        {
+            return selectNewestReady(RenderStamp{}, RenderStampMask::none());
+        }
+
         [[nodiscard]] std::optional<size_t> selectNewestReady(RenderStamp const & required,
                                                               RenderStampMask const mask) noexcept
         {

@@ -12,6 +12,7 @@
 #include <coro/coro.hpp>
 
 #include "AsyncRenderTypes.h"
+#include "FramePresentationController.h"
 
 // Include OpenCL platform types for cl_float4
 #include <CL/cl_platform.h>
@@ -162,6 +163,12 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] static auto workerLoop(std::shared_ptr<ControllerState> state)
           -> coro::task<void>;
 
+        [[nodiscard]] std::optional<size_t>
+          frameBufferIndex(FrameBuffer const * buffer) const noexcept;
+        [[nodiscard]] bool tryTransitionBufferLocked(FrameBuffer * buffer,
+                                                     FrameState expectedState,
+                                                     FrameState newState) noexcept;
+
         std::shared_ptr<ControllerState> m_state;
         std::atomic<bool> m_running{false};
 
@@ -173,6 +180,7 @@ namespace gladius::ui::async_rendering
 
         // Triple buffer state machine (for HQ progressive rendering)
         std::array<FrameBuffer, 3> m_frameBuffers;
+        FramePresentationController m_framePresentation{m_frameBuffers.size()};
         std::atomic<size_t> m_frontBufferIndex{0};
         mutable std::mutex m_bufferMutex;
 

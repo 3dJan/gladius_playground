@@ -393,6 +393,7 @@ namespace gladius::ui::async_rendering
 
             // First buffer starts as Front
             m_frameBuffers[0].state.store(FrameState::Front, std::memory_order_release);
+            m_framePresentation.reset(m_frameBuffers.size());
             m_frontBufferIndex.store(0, std::memory_order_release);
         }
     }
@@ -447,20 +448,56 @@ namespace gladius::ui::async_rendering
         return nullptr;
     }
 
-    bool AsyncRenderController::tryTransitionBuffer(FrameBuffer * buffer,
-                                                    FrameState expectedState,
-                                                    FrameState newState) noexcept
+    std::optional<size_t>
+    AsyncRenderController::frameBufferIndex(FrameBuffer const * buffer) const noexcept
     {
-        ProfileFunction
+        if (buffer == nullptr)
+        {
+            return std::nullopt;
+        }
 
-          if (!buffer)
+        for (size_t index = 0; index < m_frameBuffers.size(); ++index)
+        {
+            if (&m_frameBuffers[index] == buffer)
+            {
+                return index;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool AsyncRenderController::tryTransitionBufferLocked(FrameBuffer * buffer,
+                                                          FrameState expectedState,
+                                                          FrameState newState) noexcept
+    {
+        if (buffer == nullptr)
         {
             return false;
         }
 
         FrameState expected = expectedState;
-        return buffer->state.compare_exchange_strong(
+        bool const transitioned = buffer->state.compare_exchange_strong(
           expected, newState, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
+        {
+            return false;
+        }
+
+        if (auto const index = frameBufferIndex(buffer); index.has_value())
+        {
+            [[maybe_unused]] bool const mirrored =
+              m_framePresentation.tryTransitionBuffer(*index, expectedState, newState);
+        }
+        return true;
+    }
+
+    bool AsyncRenderController::tryTransitionBuffer(FrameBuffer * buffer,
+                                                    FrameState expectedState,
+                                                    FrameState newState) noexcept
+    {
+        ProfileFunction
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        return tryTransitionBufferLocked(buffer, expectedState, newState);
     }
 
     FrameBuffer * AsyncRenderController::frontBuffer() noexcept
@@ -474,19 +511,29 @@ namespace gladius::ui::async_rendering
     {
         ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        // Find an Idle buffer to write to
-        for (auto & buffer : m_frameBuffers)
+        auto const bufferId =
+          m_framePresentation.acquireWriteBuffer(RenderStamp{.sceneEpoch = epoch});
+        if (!bufferId.has_value() || *bufferId >= m_frameBuffers.size())
         {
-            if (tryTransitionBuffer(&buffer, FrameState::Idle, FrameState::Writing))
-            {
-                buffer.epoch.store(epoch, std::memory_order_release);
-                return &buffer;
-            }
+            return nullptr;
         }
 
-        // No Idle buffer available - this shouldn't happen with triple buffering
-        // but can happen with double buffering if UI is slow
-        return nullptr;
+        auto & buffer = m_frameBuffers[*bufferId];
+        FrameState expected = FrameState::Idle;
+        bool const transitioned = buffer.state.compare_exchange_strong(
+          expected, FrameState::Writing, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
+        {
+            [[maybe_unused]] bool const rolledBack =
+              m_framePresentation.tryTransitionBuffer(*bufferId,
+                                                      FrameState::Writing,
+                                                      FrameState::Idle);
+            return nullptr;
+        }
+
+        buffer.epoch.store(epoch, std::memory_order_release);
+        buffer.viewEpoch.store(0, std::memory_order_release);
+        return &buffer;
     }
 
     void AsyncRenderController::publishFrame(FrameBuffer * buffer,
@@ -513,39 +560,38 @@ namespace gladius::ui::async_rendering
 
         // Transition Writing → Ready
         FrameState expected = FrameState::Writing;
-        buffer->state.compare_exchange_strong(
+        bool const transitioned = buffer->state.compare_exchange_strong(
           expected, FrameState::Ready, std::memory_order_release, std::memory_order_acquire);
+        if (transitioned)
+        {
+            if (auto const index = frameBufferIndex(buffer); index.has_value())
+            {
+                [[maybe_unused]] bool const mirrored = m_framePresentation.publishFrame(
+                  *index, frameId, RenderStamp{.sceneEpoch = epoch, .viewEpoch = viewEpoch});
+            }
+        }
     }
 
     FrameBuffer * AsyncRenderController::promoteReadyToFront() noexcept
     {
         ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        // Find the newest Ready buffer (highest frameId)
-        FrameBuffer * newestReady = nullptr;
-        uint64_t highestFrameId = 0;
-
-        for (auto & buffer : m_frameBuffers)
-        {
-            if (buffer.state.load(std::memory_order_acquire) == FrameState::Ready)
-            {
-                auto const frameId = buffer.frameId.load(std::memory_order_acquire);
-                if (frameId > highestFrameId)
-                {
-                    highestFrameId = frameId;
-                    newestReady = &buffer;
-                }
-            }
-        }
-
-        if (!newestReady)
+        auto const newestReadyIndex = m_framePresentation.selectNewestReady();
+        if (!newestReadyIndex.has_value() || *newestReadyIndex >= m_frameBuffers.size())
         {
             return nullptr; // No Ready buffer available
         }
 
+        auto * newestReady = &m_frameBuffers[*newestReadyIndex];
+
         // Transition Ready → Resampling
-        if (!tryTransitionBuffer(newestReady, FrameState::Ready, FrameState::Resampling))
+        FrameState expected = FrameState::Ready;
+        bool const transitioned = newestReady->state.compare_exchange_strong(
+          expected, FrameState::Resampling, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
         {
+            [[maybe_unused]] bool const rolledBack = m_framePresentation.tryTransitionBuffer(
+              *newestReadyIndex, FrameState::Resampling, FrameState::Ready);
             return nullptr; // Lost race
         }
 
@@ -574,8 +620,8 @@ namespace gladius::ui::async_rendering
                 continue;
             }
 
-            [[maybe_unused]] bool const released = tryTransitionBuffer(
-              &buffer, FrameState::Ready, FrameState::Idle);
+            [[maybe_unused]] bool const released =
+              tryTransitionBufferLocked(&buffer, FrameState::Ready, FrameState::Idle);
             return;
         }
     }
@@ -604,7 +650,10 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        if (!tryTransitionBuffer(&(*it), FrameState::Resampling, FrameState::Front))
+        FrameState expected = FrameState::Resampling;
+        bool const transitioned = it->state.compare_exchange_strong(
+          expected, FrameState::Front, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
         {
             return false;
         }
@@ -623,6 +672,8 @@ namespace gladius::ui::async_rendering
                                                           std::memory_order_acq_rel,
                                                           std::memory_order_acquire);
         }
+
+        [[maybe_unused]] bool const mirrored = m_framePresentation.finalizeFrontPromotion(newIndex);
 
         it->publishTimestampNs.store(static_cast<uint64_t>(ns), std::memory_order_release);
         return true;
@@ -646,7 +697,7 @@ namespace gladius::ui::async_rendering
             if (state == FrameState::Writing && bufEpoch <= oldEpoch)
             {
                 [[maybe_unused]] bool const released =
-                  tryTransitionBuffer(&buffer, FrameState::Writing, FrameState::Idle);
+                  tryTransitionBufferLocked(&buffer, FrameState::Writing, FrameState::Idle);
             }
         }
     }

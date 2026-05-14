@@ -61,6 +61,51 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(controller.buffer(*bufferId)->frameId, 17u);
     }
 
+    TEST(FramePresentationController, AcquireWriteBuffer_WithNoIdleBuffer_ReturnsNullopt)
+    {
+        FramePresentationController controller{2};
+        auto const stamp = makeStamp(1, 2, 3, 4, 5);
+
+        auto const firstWrite = controller.acquireWriteBuffer(stamp);
+        auto const secondWrite = controller.acquireWriteBuffer(stamp);
+
+        ASSERT_TRUE(firstWrite.has_value());
+        EXPECT_FALSE(secondWrite.has_value());
+    }
+
+    TEST(FramePresentationController, PublishFrame_WithNonWritingBuffer_ReturnsFalse)
+    {
+        FramePresentationController controller{3};
+        auto const stamp = makeStamp(1, 2, 3, 4, 5);
+
+        EXPECT_FALSE(controller.publishFrame(*controller.frontBufferId(), 17, stamp));
+        EXPECT_EQ(controller.buffer(*controller.frontBufferId())->state, FrameState::Front);
+    }
+
+    TEST(FramePresentationController, TryTransitionBuffer_WithExpectedState_ReleasesWritingBuffer)
+    {
+        FramePresentationController controller{3};
+        auto const stamp = makeStamp(1, 2, 3, 4, 5);
+        auto const bufferId = controller.acquireWriteBuffer(stamp);
+        ASSERT_TRUE(bufferId.has_value());
+
+        EXPECT_TRUE(controller.tryTransitionBuffer(*bufferId, FrameState::Writing, FrameState::Idle));
+
+        EXPECT_EQ(controller.buffer(*bufferId)->state, FrameState::Idle);
+        EXPECT_EQ(controller.buffer(*bufferId)->frameId, 0u);
+    }
+
+    TEST(FramePresentationController, TryTransitionBuffer_WithWrongExpectedState_ReturnsFalse)
+    {
+        FramePresentationController controller{3};
+        auto const stamp = makeStamp(1, 2, 3, 4, 5);
+        auto const bufferId = controller.acquireWriteBuffer(stamp);
+        ASSERT_TRUE(bufferId.has_value());
+
+        EXPECT_FALSE(controller.tryTransitionBuffer(*bufferId, FrameState::Ready, FrameState::Idle));
+        EXPECT_EQ(controller.buffer(*bufferId)->state, FrameState::Writing);
+    }
+
     TEST(FramePresentationController, SelectNewestReady_WithMultipleReadyBuffers_SelectsHighestFrameId)
     {
         FramePresentationController controller{4};
@@ -78,6 +123,24 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(*selected, *newerReady);
         EXPECT_EQ(controller.buffer(*selected)->state, FrameState::Resampling);
         EXPECT_EQ(controller.buffer(*olderReady)->state, FrameState::Ready);
+    }
+
+    TEST(FramePresentationController, SelectNewestReady_WithoutFreshnessMask_SelectsNewestRegardlessOfStamp)
+    {
+        FramePresentationController controller{4};
+        auto const latest = makeStamp(1, 2, 3, 4, 5);
+        auto const oldView = makeStamp(1, 2, 2, 4, 5);
+        auto const currentReady = controller.acquireWriteBuffer(latest);
+        auto const staleButNewerReady = controller.acquireWriteBuffer(oldView);
+        ASSERT_TRUE(currentReady.has_value());
+        ASSERT_TRUE(staleButNewerReady.has_value());
+        ASSERT_TRUE(controller.publishFrame(*currentReady, 10, latest));
+        ASSERT_TRUE(controller.publishFrame(*staleButNewerReady, 11, oldView));
+
+        auto const selected = controller.selectNewestReady();
+
+        ASSERT_TRUE(selected.has_value());
+        EXPECT_EQ(*selected, *staleButNewerReady);
     }
 
     TEST(FramePresentationController, SelectNewestReady_WithStaleReadyBuffer_IgnoresStaleFrame)
@@ -111,6 +174,38 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(*controller.frontBufferId(), *selected);
         EXPECT_EQ(controller.buffer(*selected)->state, FrameState::Front);
         EXPECT_EQ(controller.buffer(0)->state, *selected == 0u ? FrameState::Front : FrameState::Idle);
+    }
+
+    TEST(FramePresentationController, FinalizeFrontPromotion_WithWrongState_ReturnsFalseAndKeepsFront)
+    {
+        FramePresentationController controller{3};
+        auto const stamp = makeStamp(1, 2, 3, 4, 5);
+        auto const bufferId = controller.acquireWriteBuffer(stamp);
+        ASSERT_TRUE(bufferId.has_value());
+        auto const originalFront = controller.frontBufferId();
+
+        EXPECT_FALSE(controller.finalizeFrontPromotion(*bufferId));
+
+        EXPECT_EQ(controller.frontBufferId(), originalFront);
+        EXPECT_EQ(controller.buffer(*bufferId)->state, FrameState::Writing);
+    }
+
+    TEST(FramePresentationController, FinalizeFrontPromotion_AfterPromotion_AllowsOldFrontReuse)
+    {
+        FramePresentationController controller{3};
+        auto const latest = makeStamp(1, 2, 3, 4, 5);
+        auto const bufferId = controller.acquireWriteBuffer(latest);
+        ASSERT_TRUE(bufferId.has_value());
+        ASSERT_TRUE(controller.publishFrame(*bufferId, 12, latest));
+        auto const selected = controller.selectNewestReady(latest, RenderStampMask::displayFrame());
+        ASSERT_TRUE(selected.has_value());
+        ASSERT_TRUE(controller.finalizeFrontPromotion(*selected));
+
+        auto const nextWrite = controller.acquireWriteBuffer(latest);
+
+        ASSERT_TRUE(nextWrite.has_value());
+        EXPECT_EQ(*nextWrite, 0u);
+        EXPECT_EQ(controller.buffer(*nextWrite)->state, FrameState::Writing);
     }
 
     TEST(FramePresentationController, DiscardReadyFrame_WithReadyBuffer_ReleasesItToIdle)

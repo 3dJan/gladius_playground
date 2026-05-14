@@ -37,6 +37,15 @@ namespace gladius::ui::async_rendering
             return {};
         }
 
+        [[nodiscard]] static constexpr RenderStampMask none() noexcept
+        {
+            return {.scene = false,
+                    .parameters = false,
+                    .view = false,
+                    .viewport = false,
+                    .quality = false};
+        }
+
         [[nodiscard]] static constexpr RenderStampMask sceneOnly() noexcept
         {
             return {.scene = true,

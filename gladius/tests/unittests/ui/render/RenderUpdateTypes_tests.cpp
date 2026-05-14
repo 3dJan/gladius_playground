@@ -39,6 +39,15 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(matches(candidate, latest, RenderStampMask::sceneAndParameters()));
     }
 
+    TEST(RenderStampMatches, WithNoneMask_IgnoresAllAxes)
+    {
+        auto const latest = makeStamp(3, 5, 7, 11, 13);
+        auto const completelyDifferent = makeStamp(30, 50, 70, 110, 130);
+
+        EXPECT_TRUE(matches(completelyDifferent, latest, RenderStampMask::none()));
+        EXPECT_FALSE(isOlderThan(completelyDifferent, latest, RenderStampMask::none()));
+    }
+
     TEST(RenderStampMatches, WithDifferentView_FailsDisplayFrameButPassesHeavyGeometryTask)
     {
         auto const latest = makeStamp(3, 5, 7, 11, 13);
