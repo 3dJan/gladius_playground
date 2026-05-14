@@ -262,6 +262,7 @@ namespace gladius::ui
         RenderWindowState m_renderWindowState{};
 
         bool m_centerViewRequested = false;
+        int m_cameraIdleFrames{0};
         bool m_enableHQRendering = true;
 
         ImVec2 m_contentAreaMin;

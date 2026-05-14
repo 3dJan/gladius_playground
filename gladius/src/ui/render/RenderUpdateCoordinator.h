@@ -4,6 +4,7 @@
 #include "RenderUpdateTypes.h"
 
 #include <algorithm>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -391,6 +392,7 @@ namespace gladius::ui::async_rendering
 
         void resetRealtimeLearning()
         {
+            std::cout << "[RT Coord] resetRealtimeLearning (Parameter/Scene/Resolution changed)\n";
             m_realtime.reset();
             m_realtime.resetForResolution(m_width, m_height);
         }

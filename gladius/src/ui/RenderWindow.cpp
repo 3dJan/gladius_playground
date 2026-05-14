@@ -291,7 +291,6 @@ namespace gladius::ui
         ProfileFunction;
         m_dirty = true;
         m_renderWindowState.isMoving = true;
-        [[maybe_unused]] bool const cameraChanged = m_camera.update(0.0f);
         m_renderWindowState.currentLine = 0;
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
         m_renderWindowState.isRendering = false;
@@ -503,8 +502,7 @@ namespace gladius::ui
     {
         return m_renderUpdateCoordinator.interactionState() ==
                  async_rendering::RenderInteractionState::CameraInteracting &&
-               (m_renderUpdateCoordinator.isRealtimeActive() ||
-                m_asyncRealtimeJobInFlight.load(std::memory_order_acquire));
+               m_renderUpdateCoordinator.isRealtimeActive();
     }
 
     bool RenderWindow::scheduleAsyncSdfPrecomputation(
@@ -949,7 +947,15 @@ namespace gladius::ui
         // Update camera and set isMoving based on whether camera is currently animating.
         // Note: Parameter changes use forceLowResRender and lowResFeedbackPending flags,
         // not isMoving. isMoving is specifically for camera movement.
-        m_renderWindowState.isMoving = m_camera.update(io.DeltaTime * 1000.f);
+        bool const cameraActuallyMoving = m_camera.update(io.DeltaTime * 1000.f);
+        if (cameraActuallyMoving) {
+            m_cameraIdleFrames = 0;
+            m_renderWindowState.isMoving = true;
+        } else {
+            m_cameraIdleFrames++;
+            // Keep isMoving true for 10 frames after last movement to debounce fast refresh rates
+            m_renderWindowState.isMoving = m_cameraIdleFrames < 10;
+        }
         m_dirty = m_dirty || m_renderWindowState.isMoving;
 
         // Floating cut-height slider overlay (inside the Preview window)
@@ -2521,9 +2527,9 @@ namespace gladius::ui
             // Stale scene/view results are deliberately discarded before promotion; otherwise
             // a late realtime frame could replace a valid front buffer with an old camera or
             // parameter state.
-            bool const allowForcedRealtimeStaleView =
-                isRealtimeJob && m_renderUpdateCoordinator.realtimeConfig().mode ==
-                                   async_rendering::RealtimeRaymarchMode::Force;
+            // Realtime raymarching frames (both Auto and Force) need to be displayed even if 
+            // the view epoch has incremented, otherwise continuous camera motion freezes.
+            bool const allowForcedRealtimeStaleView = isRealtimeJob;
             bool const discardForStaleView = isViewOutdated && !allowForcedRealtimeStaleView;
 
             if (result.completedFrame)
@@ -3974,6 +3980,9 @@ namespace gladius::ui
         // Skip cancelled results
         if (meta.cancelled)
         {
+            if (auto logger = m_core->getSharedLogger()) {
+                logger->logInfo("[Preview] Cancelled preview skipped.");
+            }
             ZoneText("CancelledPreviewSkipped", 23);
             m_streamingFrameConsumed.store(true, std::memory_order_release);
             completeCoordinatorPreviewTask(meta);
@@ -3989,6 +3998,10 @@ namespace gladius::ui
         auto resultImage = m_core->getResultImage();
         auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
         bool scheduleAdaptivePreview = false;
+        
+        if (auto logger = m_core->getSharedLogger()) {
+            logger->logInfo(std::string("[Preview] Result Consumed, Latency ") + std::to_string(meta.latencyNs / 1000000) + "ms. Resampling!");
+        }
 
         if (lowResImage && resultImage && renderProgram)
         {
@@ -4076,6 +4089,9 @@ namespace gladius::ui
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
         completeCoordinatorPreviewTask(meta);
+        if (auto logger = m_core->getSharedLogger()) {
+            logger->logInfo("[Preview] Task Complete triggered!");
+        }
 
         if (scheduleAdaptivePreview)
         {
