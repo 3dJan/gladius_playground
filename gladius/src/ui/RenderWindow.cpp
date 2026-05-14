@@ -147,6 +147,8 @@ namespace gladius::ui
               m_configManager->getValue<bool>("renderWindow", "permanentCenteringEnabled", false);
         }
 
+                m_realtimeRaymarchController.configure(loadRealtimeRaymarchConfig());
+
         // Don't initialize async rendering here - will be done lazily on first render
     }
 
@@ -202,7 +204,9 @@ namespace gladius::ui
             m_asyncController->start();
             m_asyncEpochCounter.store(0, std::memory_order_release);
             m_asyncCurrentEpoch.store(0, std::memory_order_release);
+            m_asyncViewEpoch.store(0, std::memory_order_release);
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
+            m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
@@ -218,7 +222,9 @@ namespace gladius::ui
             }
             m_asyncEpochCounter.store(0, std::memory_order_release);
             m_asyncCurrentEpoch.store(0, std::memory_order_release);
+            m_asyncViewEpoch.store(0, std::memory_order_release);
             m_asyncInFlightEpoch.store(0, std::memory_order_release);
+            m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
@@ -237,7 +243,9 @@ namespace gladius::ui
         auto const oldEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
         auto const newEpoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
+        m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
         m_asyncInFlightEpoch.store(0, std::memory_order_release);
+        m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
         m_asyncJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfJobInFlight.store(false, std::memory_order_release);
         m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
@@ -259,6 +267,7 @@ namespace gladius::ui
             m_asyncProgressiveBuffer = nullptr;
         }
         m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+        m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
 
         // IMPORTANT: Release any other Writing buffers from old epoch
         // (they belong to cancelled jobs and should be returned to Idle)
@@ -267,6 +276,67 @@ namespace gladius::ui
             m_asyncController->releaseStaleBuffers(oldEpoch);
             m_asyncController->setLatestEpoch(newEpoch);
         }
+    }
+
+    void RenderWindow::invalidateCameraView()
+    {
+        ProfileFunction;
+        m_dirty = true;
+        m_renderWindowState.isMoving = true;
+        m_renderWindowState.currentLine = 0;
+        m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
+        m_renderWindowState.isRendering = false;
+        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+        m_lastLowResRenderTime = std::chrono::system_clock::now();
+        m_suppressHQDisplay.store(false, std::memory_order_release);
+        m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
+
+        if (m_core)
+        {
+            m_core->invalidateDistanceInitBuffer();
+        }
+
+        if (m_asyncController && m_asyncProgressiveBuffer &&
+            !m_asyncJobInFlight.load(std::memory_order_acquire))
+        {
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+            m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+        }
+    }
+
+    async_rendering::RealtimeRaymarchConfig RenderWindow::loadRealtimeRaymarchConfig() const
+    {
+        async_rendering::RealtimeRaymarchConfig config{};
+        if (!m_configManager)
+        {
+            return config;
+        }
+
+        auto const mode = m_configManager->getValue<std::string>(
+          "renderWindow", "realtimeRaymarchMode", "auto");
+        config.mode = async_rendering::realtimeRaymarchModeFromString(mode);
+        config.targetFrameTimeMs =
+          m_configManager->getValue<float>("renderWindow", "realtimeRaymarchTargetMs", 25.0f);
+        return config;
+    }
+
+    void RenderWindow::saveRealtimeRaymarchMode(
+      async_rendering::RealtimeRaymarchMode mode) const
+    {
+        if (!m_configManager)
+        {
+            return;
+        }
+
+        m_configManager->setValue("renderWindow",
+                                  "realtimeRaymarchMode",
+                                  std::string(async_rendering::realtimeRaymarchModeToString(mode)));
+        m_configManager->save();
     }
 
     void RenderWindow::renderWindow()
@@ -303,19 +373,21 @@ namespace gladius::ui
             // Use the front buffer from triple buffering system
             auto * frontBuf = m_asyncController->frontBuffer();
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+            auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
 
             // For HQ frames (front buffer from progressive rendering) we require an epoch match
             // to avoid showing stale HQ results from an old parameter set.
             // For low-res preview during rapid parameter edits, we fall back to m_resultImage
             // which is updated synchronously and always shows *something* recent.
             bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
+                        bool const viewMatches = frontBuf && frontBuf->viewEpoch == currentViewEpoch;
             bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
-                                        !m_renderWindowState.isRendering &&
-                                        !m_renderWindowState.isMoving &&
+                                                                                viewMatches && !m_renderWindowState.isRendering &&
                                         !m_suppressHQDisplay.load(std::memory_order_acquire);
             bool const useProgressiveBuffer =
               m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image &&
               m_asyncProgressiveEpoch.load(std::memory_order_acquire) == currentEpoch &&
+                            m_asyncProgressiveViewEpoch.load(std::memory_order_acquire) == currentViewEpoch &&
               !m_renderWindowState.isMoving &&
               !m_suppressHQDisplay.load(std::memory_order_acquire);
 
@@ -470,6 +542,45 @@ namespace gladius::ui
                                   }
                                   m_renderWindowState.renderQuality = quality;
 
+                                  ImGui::Separator();
+                                  if (ImGui::BeginMenu("Realtime Raymarch"))
+                                  {
+                                      auto config = m_realtimeRaymarchController.config();
+                                      auto const setMode = [&](async_rendering::RealtimeRaymarchMode mode)
+                                      {
+                                          config.mode = mode;
+                                          m_realtimeRaymarchController.configure(config);
+                                          saveRealtimeRaymarchMode(mode);
+                                      };
+
+                                      if (ImGui::MenuItem(
+                                            "Auto", nullptr, config.mode == async_rendering::RealtimeRaymarchMode::Auto))
+                                      {
+                                          setMode(async_rendering::RealtimeRaymarchMode::Auto);
+                                      }
+                                      if (ImGui::MenuItem(
+                                            "Off", nullptr, config.mode == async_rendering::RealtimeRaymarchMode::Off))
+                                      {
+                                          setMode(async_rendering::RealtimeRaymarchMode::Off);
+                                      }
+                                      if (ImGui::MenuItem(
+                                            "Force", nullptr, config.mode == async_rendering::RealtimeRaymarchMode::Force))
+                                      {
+                                          setMode(async_rendering::RealtimeRaymarchMode::Force);
+                                      }
+
+                                      ImGui::Separator();
+                                      ImGui::Text("Budget: %.1f ms", config.targetFrameTimeMs);
+                                      if (ImGui::IsItemHovered())
+                                      {
+                                          ImGui::SetTooltip(
+                                            "Auto attempts full-resolution async raymarching when "
+                                            "recent timings fit this budget; otherwise Gladius "
+                                            "falls back to low-res preview/progressive rendering.");
+                                      }
+                                      ImGui::EndMenu();
+                                  }
+
                                   ImGui::EndMenu();
                               }
 
@@ -567,7 +678,7 @@ namespace gladius::ui
 
             if (m_camera.mouseMotionHandler(mousePos.x, mousePos.y))
             {
-                invalidateView();
+                invalidateCameraView();
             }
             if (!ImGui::IsAnyMouseDown())
             {
@@ -733,6 +844,7 @@ namespace gladius::ui
         m_parameterDirty.store(true, std::memory_order_release);
         m_lowResFeedbackPending.store(true, std::memory_order_release);
         m_modelModifiedSinceLastCenter = true;
+        m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
 
         // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin
         m_core->markBoundingBoxStale();
@@ -829,7 +941,7 @@ namespace gladius::ui
     void RenderWindow::centerView()
     {
         m_centerViewRequested = true;
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setTopView()
@@ -837,7 +949,7 @@ namespace gladius::ui
         // Top view: looking down the Z axis (pitch = +90°, yaw = 0°)
         m_camera.setAngle(CL_M_PI_F / 2.0f, 0.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setFrontView()
@@ -845,7 +957,7 @@ namespace gladius::ui
         // Front view: looking along the Y axis (pitch = 0°, yaw = -90°)
         m_camera.setAngle(0.0f, -CL_M_PI_F / 2.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setLeftView()
@@ -853,7 +965,7 @@ namespace gladius::ui
         // Left view: looking along the X axis (pitch = 0°, yaw = 0°)
         m_camera.setAngle(0.0f, 0.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setRightView()
@@ -861,7 +973,7 @@ namespace gladius::ui
         // Right view: looking along the negative X axis (pitch = 0°, yaw = 180°)
         m_camera.setAngle(0.0f, CL_M_PI_F);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setBackView()
@@ -869,7 +981,7 @@ namespace gladius::ui
         // Back view: looking along the negative Y axis (pitch = 0°, yaw = 90°)
         m_camera.setAngle(0.0f, CL_M_PI_F / 2.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setBottomView()
@@ -877,7 +989,7 @@ namespace gladius::ui
         // Bottom view: looking up the Z axis (pitch = -90°, yaw = 0°)
         m_camera.setAngle(-CL_M_PI_F / 2.0f, 0.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setIsometricView()
@@ -887,7 +999,7 @@ namespace gladius::ui
         float const yaw = CL_M_PI_F / 4.0f;                     // 45 degrees
         m_camera.setAngle(pitch, yaw);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::togglePerspective()
@@ -895,7 +1007,7 @@ namespace gladius::ui
         // This would require camera implementation to support orthographic/perspective toggle
         // For now, we'll save current view and restore it
         saveCurrentView();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::frameAll()
@@ -914,7 +1026,7 @@ namespace gladius::ui
         }
 
         m_camera.adjustDistanceToTarget(*bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::zoomSelected()
@@ -930,7 +1042,7 @@ namespace gladius::ui
         Position newLookAt{currentLookAt.x - m_panSensitivity, currentLookAt.y, currentLookAt.z};
         m_camera.setLookAt(newLookAt);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::panRight()
@@ -940,7 +1052,7 @@ namespace gladius::ui
         Position newLookAt{currentLookAt.x + m_panSensitivity, currentLookAt.y, currentLookAt.z};
         m_camera.setLookAt(newLookAt);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::panUp()
@@ -950,7 +1062,7 @@ namespace gladius::ui
         Position newLookAt{currentLookAt.x, currentLookAt.y, currentLookAt.z + m_panSensitivity};
         m_camera.setLookAt(newLookAt);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::panDown()
@@ -960,35 +1072,35 @@ namespace gladius::ui
         Position newLookAt{currentLookAt.x, currentLookAt.y, currentLookAt.z - m_panSensitivity};
         m_camera.setLookAt(newLookAt);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::rotateLeft()
     {
         m_camera.rotate(0.0f, -m_rotateSensitivity);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::rotateRight()
     {
         m_camera.rotate(0.0f, m_rotateSensitivity);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::rotateUp()
     {
         m_camera.rotate(m_rotateSensitivity, 0.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::rotateDown()
     {
         m_camera.rotate(-m_rotateSensitivity, 0.0f);
         onCameraManuallyMoved();
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::previousView()
@@ -1000,7 +1112,7 @@ namespace gladius::ui
 
             // Restore the view (this would require camera API support)
             // For now, we'll invalidate the view
-            invalidateView();
+            invalidateCameraView();
         }
     }
 
@@ -1013,7 +1125,7 @@ namespace gladius::ui
 
             // Restore the view (this would require camera API support)
             // For now, we'll invalidate the view
-            invalidateView();
+            invalidateCameraView();
         }
     }
 
@@ -1052,7 +1164,7 @@ namespace gladius::ui
         {
             // Restore the saved view (this would require camera API support)
             // For now, we'll invalidate the view
-            invalidateView();
+            invalidateCameraView();
         }
     }
 
@@ -1060,7 +1172,7 @@ namespace gladius::ui
     {
         m_flyModeEnabled = !m_flyModeEnabled;
         m_cameraMode = m_flyModeEnabled ? CameraMode::Fly : CameraMode::Orbit;
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::setOrbitMode()
@@ -1522,6 +1634,7 @@ namespace gladius::ui
 
         // Update camera now that we know core is ready
         m_core->applyCamera(m_camera);
+        m_realtimeRaymarchController.beginFrame();
 
         processAsyncResults(state);
 
@@ -1601,7 +1714,6 @@ namespace gladius::ui
             {
                 // Delay progressive rendering until low-res feedback is presented
                 state.isRendering = false;
-                m_asyncJobInFlight.store(false, std::memory_order_release);
             }
         }
 
@@ -1702,6 +1814,8 @@ namespace gladius::ui
           std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f));
         int const desiredScreenHeight = static_cast<int>(
           std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f));
+                m_realtimeRaymarchController.resetForResolution(
+                    static_cast<uint32_t>(desiredScreenWidth), static_cast<uint32_t>(desiredScreenHeight));
         auto const resultImage = m_core->getResultImage();
         bool const screenResizeRequired =
           resultImage && (static_cast<int>(resultImage->getWidth()) != desiredScreenWidth ||
@@ -1801,6 +1915,30 @@ namespace gladius::ui
             bool const sdfJobRunning = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
             bool const streamingActive = m_streamingPreviewActive.load(std::memory_order_acquire);
             bool const useAsyncPreview = !previewJobInFlight && sdfValid;
+
+                        async_rendering::RealtimeRaymarchGuards const realtimeGuards{
+                            .hardBlocker = !m_enableHQRendering || sdfJobRunning ||
+                                                         m_asyncBboxJobInFlight.load(std::memory_order_acquire) ||
+                                                         m_core->isAnyCompilationInProgressNonBlocking(),
+                            .renderJobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire),
+                            .previewJobInFlight = previewJobInFlight,
+                            .streamingActive = streamingActive,
+                            .streamingJobInFlight = m_streamingJobInFlight.load(std::memory_order_acquire),
+                            .resizePending = shouldDeferResize || screenResizeRequired};
+
+                        if (m_realtimeRaymarchController.canAttemptRealtime(
+                                    static_cast<uint32_t>(desiredScreenWidth),
+                                    static_cast<uint32_t>(desiredScreenHeight),
+                                    realtimeGuards))
+                        {
+                                if (scheduleRealtimeRenderJob(state))
+                                {
+                                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                                        return;
+                                }
+                                m_realtimeRaymarchController.recordRejectedAttempt();
+                                state.isRendering = false;
+                        }
 
             if (streamingActive)
             {
@@ -1936,8 +2074,14 @@ namespace gladius::ui
             ZoneScopedN("ProcessSingleResult");
             auto & result = *resultOpt;
 
-            auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
-            bool const isOutdated = result.epoch < currentEpoch;
+                        auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+                        bool const isOutdated = result.epoch < currentEpoch;
+                        auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+                        bool const isRealtimeJob =
+                            result.jobType == async_rendering::RenderJobType::RealtimeHighQuality;
+                        bool const isHqRenderJob =
+                            result.jobType == async_rendering::RenderJobType::HighQuality || isRealtimeJob;
+                        bool const isViewOutdated = isHqRenderJob && result.viewEpoch < currentViewEpoch;
 
             if (result.jobType == async_rendering::RenderJobType::SDFPrecomputation)
             {
@@ -1991,58 +2135,109 @@ namespace gladius::ui
 
             // From here on, only HQ progressive render results are processed.
 
+            if (isHqRenderJob && result.computeDurationNs > 0)
+            {
+                size_t const renderedLines = result.completedLine > result.startLine
+                                             ? result.completedLine - result.startLine
+                                             : size_t{0};
+                m_realtimeRaymarchController.recordSample(
+                  async_rendering::RealtimeRaymarchSample{
+                    .durationMs = static_cast<float>(
+                      static_cast<double>(result.computeDurationNs) / 1'000'000.0),
+                    .width = result.width,
+                    .height = result.height,
+                    .renderedLines = renderedLines,
+                    .totalLines = result.height,
+                    .completedFrame = result.completedFrame,
+                    .cancelled = result.cancelled});
+            }
+
             if (result.cancelled)
             {
+                if (isRealtimeJob)
+                {
+                    m_realtimeRaymarchController.recordRejectedAttempt();
+                }
                 if (result.epoch == m_asyncInFlightEpoch.load(std::memory_order_acquire))
                 {
                     m_asyncJobInFlight.store(false, std::memory_order_release);
                     m_asyncInFlightEpoch.store(0, std::memory_order_release);
+                    m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
                 }
                 continue;
             }
 
-            // Update progressive scheduling state only for current-epoch results.
-            // Outdated results are still presented, but must not affect scheduling.
-            if (!isOutdated)
+            // Update progressive scheduling state only for current scene/view results.
+            if (!isOutdated && !isViewOutdated && !isRealtimeJob)
             {
                 size_t const maxHeight = static_cast<size_t>(result.height);
                 state.currentLine = std::min(result.completedLine, maxHeight);
                 adjustProgressFromDuration(state, result.computeDurationNs);
             }
 
-            // Promote the newest Ready buffer to Front for display
-            // Note: Only happens when completedFrame=true (buffer was published)
+            // Promote the newest Ready buffer to Front for display.
+            // Stale scene/view results are deliberately discarded before promotion; otherwise
+            // a late realtime frame could replace a valid front buffer with an old camera or
+            // parameter state.
             if (result.completedFrame)
             {
-                ZoneScopedN("PromoteReadyToFront");
-                auto * newFront = m_asyncController->promoteReadyToFront();
-                if (newFront && newFront->image)
+                if (isOutdated || isViewOutdated)
                 {
-                    // Bind the new frame to ensure GL texture is updated
-                    newFront->image->invalidateContent();
-                    newFront->image->bind();
-                    newFront->image->unbind();
+                    m_asyncController->discardReadyFrame(
+                      result.frameId, result.epoch, result.viewEpoch);
+                }
+                else
+                {
+                    ZoneScopedN("PromoteReadyToFront");
+                    auto * newFront = m_asyncController->promoteReadyToFront();
+                    if (newFront && newFront->image)
+                    {
+                        // Bind the new frame to ensure GL texture is updated
+                        newFront->image->invalidateContent();
+                        newFront->image->bind();
+                        newFront->image->unbind();
 
-                    bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+                        [[maybe_unused]] bool const promoted =
+                          m_asyncController->finalizeFrontPromotion(newFront);
+                    }
                 }
             }
 
             if (result.completedFrame)
             {
-                if (!isOutdated)
+                if (!isOutdated && !isViewOutdated)
                 {
                     m_dirty = false;
                     state.isRendering = false;
                     // DON'T force state.isMoving = false - let camera update control this
                     // If camera is still animating, it will set isMoving=true on next frame
                     state.currentLine = 0; // Reset for next frame
+                    if (isRealtimeJob)
+                    {
+                        m_lowResFeedbackPending.store(false, std::memory_order_release);
+                        m_lastLowResRenderTime = std::chrono::system_clock::now();
+                        m_lastLowResPreviewEpoch.store(result.epoch, std::memory_order_release);
+                    }
                     m_view->stopAnimationMode();
                 }
             }
             else
             {
-                if (!isOutdated && m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
+                if (isViewOutdated && m_asyncProgressiveBuffer &&
+                    m_asyncProgressiveViewEpoch.load(std::memory_order_acquire) == result.viewEpoch)
+                {
+                    [[maybe_unused]] bool const released =
+                      m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                             async_rendering::FrameState::Writing,
+                                                             async_rendering::FrameState::Idle);
+                    m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                    m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+                    state.isRendering = false;
+                }
+                else if (!isOutdated && !isViewOutdated && m_asyncProgressiveBuffer &&
+                         m_asyncProgressiveBuffer->image)
                 {
                     m_asyncProgressiveBuffer->image->invalidateContent();
                     m_view->startAnimationMode();
@@ -2057,10 +2252,11 @@ namespace gladius::ui
             {
                 m_asyncJobInFlight.store(false, std::memory_order_release);
                 m_asyncInFlightEpoch.store(0, std::memory_order_release);
+                m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
 
                 // If we just consumed an outdated job result, ensure we don't block scheduling for
                 // the new epoch.
-                if (isOutdated)
+                if (isOutdated || isViewOutdated)
                 {
                     state.isRendering = false;
                 }
@@ -2105,6 +2301,7 @@ namespace gladius::ui
             m_asyncCurrentEpoch.store(job.epoch, std::memory_order_release);
         }
         m_asyncController->setLatestEpoch(job.epoch);
+        job.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
         job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         job.type = async_rendering::RenderJobType::HighQuality;
         job.width = static_cast<uint32_t>(width);
@@ -2159,6 +2356,74 @@ namespace gladius::ui
         return true;
     }
 
+    bool RenderWindow::scheduleRealtimeRenderJob(RenderWindowState & state)
+    {
+        ZoneScoped;
+        ZoneName("scheduleRealtimeRenderJob", strlen("scheduleRealtimeRenderJob"));
+
+        if (!m_asyncController || !m_asyncController->isRunning() || !m_enableHQRendering)
+        {
+            return false;
+        }
+
+        auto const image = m_core->getResultImage();
+        if (!image)
+        {
+            return false;
+        }
+
+        size_t const width = static_cast<size_t>(image->getWidth());
+        size_t const height = static_cast<size_t>(image->getHeight());
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+
+        m_asyncController->initializeAsyncResources(*m_core->getComputeContext(), width, height);
+
+        if (m_asyncProgressiveBuffer && !m_asyncJobInFlight.load(std::memory_order_acquire))
+        {
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+            m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+        }
+
+        async_rendering::RenderJob job{};
+        job.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+        if (job.epoch == 0)
+        {
+            job.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+            m_asyncCurrentEpoch.store(job.epoch, std::memory_order_release);
+        }
+        m_asyncController->setLatestEpoch(job.epoch);
+
+        job.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+        job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        job.type = async_rendering::RenderJobType::RealtimeHighQuality;
+        job.width = static_cast<uint32_t>(width);
+        job.height = static_cast<uint32_t>(height);
+        job.startLine = 0;
+        job.stepSize = height;
+        job.precomputeSdf = false;
+        job.enableHighQuality = true;
+
+        state.currentLine = 0;
+        state.renderingStepSize = height;
+        state.isRendering = true;
+
+        m_asyncInFlightEpoch.store(job.epoch, std::memory_order_release);
+        m_asyncInFlightViewEpoch.store(job.viewEpoch, std::memory_order_release);
+        m_asyncJobInFlight.store(true, std::memory_order_release);
+        m_asyncController->enqueueJob(job);
+
+        ZoneText("RealtimeJobEnqueued", 19);
+        return true;
+    }
+
     auto RenderWindow::executeAsyncRenderJob(
       async_rendering::RenderJob const & job,
       async_rendering::AsyncRenderController::CancelCheck const & cancelCheck)
@@ -2182,6 +2447,7 @@ namespace gladius::ui
         async_rendering::FrameResultMeta result{};
         result.frameId = job.frameHint;
         result.epoch = job.epoch;
+        result.viewEpoch = job.viewEpoch;
         result.jobType = job.type;
         result.width = job.width;
         result.height = job.height;
@@ -2217,6 +2483,7 @@ namespace gladius::ui
             {
                 m_asyncProgressiveBuffer = nullptr;
                 m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
             }
 
             writeBuffer = nullptr;
@@ -2245,6 +2512,7 @@ namespace gladius::ui
 
             m_asyncProgressiveBuffer = writeBuffer;
             m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
+            m_asyncProgressiveViewEpoch.store(job.viewEpoch, std::memory_order_release);
         }
         else
         {
@@ -2275,9 +2543,30 @@ namespace gladius::ui
 
                     cl::Event renderEvent{};
                     bool advanced = false;
-                    
-                    advanced = m_core->renderSceneComputeOnly(
-                        commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
+
+                    if (job.type == async_rendering::RenderJobType::RealtimeHighQuality)
+                    {
+                        auto assembly = m_document ? m_document->getAssembly() : nullptr;
+                        if (assembly && m_core->isRendererReady())
+                        {
+                            (void) m_core->tryToupdateParameter(*assembly);
+                        }
+
+                        auto settings = m_core->getResourceContext()->getRenderingSettings();
+                        settings.approximation = AM_FULL_MODEL;
+                        advanced = m_core->renderSceneComputeOnlyWithSettings(
+                          commandQueue,
+                          job.startLine,
+                          endLine,
+                          targetCLBuffer,
+                          settings,
+                          &renderEvent);
+                    }
+                    else
+                    {
+                        advanced = m_core->renderSceneComputeOnly(
+                          commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
+                    }
 
                     if (renderEvent())
                     {
@@ -2291,6 +2580,10 @@ namespace gladius::ui
 
                     result.completedLine = advanced ? endLine : job.startLine;
                     result.completedFrame = result.completedLine >= job.height;
+                    if (!advanced && job.type == async_rendering::RenderJobType::RealtimeHighQuality)
+                    {
+                        result.cancelled = true;
+                    }
                 }
                 else
                 {
@@ -2309,9 +2602,11 @@ namespace gladius::ui
         }
         else if (result.completedFrame)
         {
-            m_asyncController->publishFrame(writeBuffer, result.frameId, result.epoch);
+                        m_asyncController->publishFrame(
+                            writeBuffer, result.frameId, result.epoch, result.viewEpoch);
             m_asyncProgressiveBuffer = nullptr;
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                        m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
         }
 
         auto const endTime = std::chrono::steady_clock::now();
@@ -2747,13 +3042,13 @@ namespace gladius::ui
     void RenderWindow::zoomIn()
     {
         m_camera.zoom(-0.1f); // Negative zoom means zoom in
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::zoomOut()
     {
         m_camera.zoom(0.1f); // Positive zoom means zoom out
-        invalidateView();
+        invalidateCameraView();
     }
 
     void RenderWindow::resetZoom()
@@ -2767,7 +3062,7 @@ namespace gladius::ui
         }
 
         m_camera.adjustDistanceToTarget(*bbox, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
-        invalidateView();
+    invalidateCameraView();
     }
 
     void RenderWindow::scheduleAsyncBboxUpdate()
@@ -3370,6 +3665,42 @@ namespace gladius::ui
 
     void RenderWindow::startStreamingPreview()
     {
+        if (m_core)
+        {
+            auto const image = m_core->getResultImage();
+            if (image && image->getWidth() > 0 && image->getHeight() > 0)
+            {
+                auto const width = static_cast<uint32_t>(image->getWidth());
+                auto const height = static_cast<uint32_t>(image->getHeight());
+                m_realtimeRaymarchController.resetForResolution(width, height);
+
+                async_rendering::RealtimeRaymarchGuards const realtimeGuards{
+                  .hardBlocker = !m_enableHQRendering ||
+                                 m_asyncSdfJobInFlight.load(std::memory_order_acquire) ||
+                                 m_asyncBboxJobInFlight.load(std::memory_order_acquire) ||
+                                 m_core->isAnyCompilationInProgressNonBlocking(),
+                  .renderJobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire),
+                  .previewJobInFlight = m_asyncPreviewJobInFlight.load(std::memory_order_acquire),
+                  .streamingActive = false,
+                  .streamingJobInFlight = m_streamingJobInFlight.load(std::memory_order_acquire),
+                  .resizePending = m_deferredResizePending};
+
+                if (m_realtimeRaymarchController.canAttemptRealtime(width, height, realtimeGuards))
+                {
+                    if (scheduleRealtimeRenderJob(m_renderWindowState))
+                    {
+                        return;
+                    }
+                    m_realtimeRaymarchController.recordRejectedAttempt();
+                }
+
+                if (m_asyncJobInFlight.load(std::memory_order_acquire))
+                {
+                    return;
+                }
+            }
+        }
+
         m_streamingPreviewActive.store(true, std::memory_order_release);
 
         // (Re-)schedule the streaming job if none is currently running.

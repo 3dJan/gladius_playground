@@ -114,13 +114,19 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] FrameBuffer * acquireWriteBuffer(uint64_t epoch) noexcept;
 
         /// Publish a finished frame (Writing → Ready)
-        void publishFrame(FrameBuffer * buffer, uint64_t frameId, uint64_t epoch) noexcept;
+        void publishFrame(FrameBuffer * buffer,
+                uint64_t frameId,
+                uint64_t epoch,
+                uint64_t viewEpoch = 0) noexcept;
 
         /// Promote a Ready buffer to Front (for UI display)
         [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
 
-  /// Finalize promotion by transitioning Resampling → Front and updating indices
-  [[nodiscard]] bool finalizeFrontPromotion(FrameBuffer * buffer) noexcept;
+          /// Release a completed Ready frame that should no longer be displayed.
+          void discardReadyFrame(uint64_t frameId, uint64_t epoch, uint64_t viewEpoch) noexcept;
+
+          /// Finalize promotion by transitioning Resampling → Front and updating indices
+          [[nodiscard]] bool finalizeFrontPromotion(FrameBuffer * buffer) noexcept;
 
         /// Release any Writing buffers from old epochs back to Idle
         /// (used when epoch changes to clean up cancelled jobs)

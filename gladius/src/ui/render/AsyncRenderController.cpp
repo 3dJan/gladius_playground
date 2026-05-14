@@ -386,6 +386,7 @@ namespace gladius::ui::async_rendering
                 fb.state.store(FrameState::Idle, std::memory_order_release);
                 fb.frameId.store(0, std::memory_order_release);
                 fb.epoch.store(0, std::memory_order_release);
+                fb.viewEpoch.store(0, std::memory_order_release);
                 fb.readyTimestampNs.store(0, std::memory_order_release);
                 fb.publishTimestampNs.store(0, std::memory_order_release);
             }
@@ -490,7 +491,8 @@ namespace gladius::ui::async_rendering
 
     void AsyncRenderController::publishFrame(FrameBuffer * buffer,
                                              uint64_t frameId,
-                                             uint64_t epoch) noexcept
+                                             uint64_t epoch,
+                                             uint64_t viewEpoch) noexcept
     {
         ProfileFunction if (!buffer)
         {
@@ -501,6 +503,7 @@ namespace gladius::ui::async_rendering
 
         buffer->frameId.store(frameId, std::memory_order_release);
         buffer->epoch.store(epoch, std::memory_order_release);
+        buffer->viewEpoch.store(viewEpoch, std::memory_order_release);
 
         // Get current timestamp (nanoseconds since epoch)
         auto const now = std::chrono::high_resolution_clock::now();
@@ -549,6 +552,32 @@ namespace gladius::ui::async_rendering
         // After resampling completes, we'll transition Resampling → Front
         // and old Front → Idle in a separate call
         return newestReady;
+    }
+
+    void AsyncRenderController::discardReadyFrame(uint64_t frameId,
+                                                  uint64_t epoch,
+                                                  uint64_t viewEpoch) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+
+        for (auto & buffer : m_frameBuffers)
+        {
+            if (buffer.state.load(std::memory_order_acquire) != FrameState::Ready)
+            {
+                continue;
+            }
+
+            if (buffer.frameId.load(std::memory_order_acquire) != frameId ||
+                buffer.epoch.load(std::memory_order_acquire) != epoch ||
+                buffer.viewEpoch.load(std::memory_order_acquire) != viewEpoch)
+            {
+                continue;
+            }
+
+            [[maybe_unused]] bool const released = tryTransitionBuffer(
+              &buffer, FrameState::Ready, FrameState::Idle);
+            return;
+        }
     }
 
     bool AsyncRenderController::finalizeFrontPromotion(FrameBuffer * buffer) noexcept

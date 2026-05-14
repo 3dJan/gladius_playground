@@ -434,6 +434,23 @@ namespace gladius
                                                   ImageRGBA & targetImage,
                                                   cl::Event * completionEvent = nullptr);
 
+                /// @brief Render scene to a pure OpenCL image buffer with caller-provided settings.
+                /// @param commandQueue OpenCL command queue used for dispatch
+                /// @param startLine Starting line for rendering
+                /// @param endLine Ending line for rendering
+                /// @param targetImage Pure CL image buffer to render into (no GL texture)
+                /// @param settings Rendering settings copy used for this dispatch
+                /// @param completionEvent Optional event for async completion tracking
+                /// @return true if rendering was enqueued successfully, false otherwise
+                /// @thread Any thread with compute context access
+                [[nodiscard]] bool renderSceneComputeOnlyWithSettings(
+                    cl::CommandQueue const & commandQueue,
+                    size_t startLine,
+                    size_t endLine,
+                    ImageRGBA & targetImage,
+                    RenderingSettings settings,
+                    cl::Event * completionEvent = nullptr);
+
         /// @brief Render the current low-resolution preview when the precomputed SDF is ready.
         /// @return Rendered when a preview frame was produced, Skipped when the SDF is not ready, or Failed on an execution/precondition error.
         [[nodiscard]] LowResPreviewRenderStatus renderLowResPreview() const;

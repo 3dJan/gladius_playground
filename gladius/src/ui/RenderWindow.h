@@ -5,6 +5,7 @@
 #include "OrbitalCamera.h"
 #include "compute/ComputeCore.h"
 #include "render/AsyncRenderController.h"
+#include "render/RealtimeRaymarchController.h"
 #include <CL/cl_platform.h>
 #include <atomic>
 #include <chrono>
@@ -170,11 +171,15 @@ namespace gladius::ui
         void renderAsync(RenderWindowState & state);
         void processAsyncResults(RenderWindowState & state);
         bool scheduleAsyncRenderJob(RenderWindowState & state);
+        bool scheduleRealtimeRenderJob(RenderWindowState & state);
         coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void notifyAsyncEpochIncrement();
+        void invalidateCameraView();
         void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
+        [[nodiscard]] async_rendering::RealtimeRaymarchConfig loadRealtimeRaymarchConfig() const;
+        void saveRealtimeRaymarchMode(async_rendering::RealtimeRaymarchMode mode) const;
 
         [[nodiscard]] bool isAsyncBackendActive() const noexcept;
         [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
@@ -316,10 +321,13 @@ namespace gladius::ui
         void onCameraManuallyMoved();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
+          async_rendering::RealtimeRaymarchController m_realtimeRaymarchController{};
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};
         std::atomic<uint64_t> m_asyncCurrentEpoch{0};
+          std::atomic<uint64_t> m_asyncViewEpoch{0};
         std::atomic<uint64_t> m_asyncInFlightEpoch{0};
+          std::atomic<uint64_t> m_asyncInFlightViewEpoch{0};
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
         std::atomic<bool> m_asyncBboxJobInFlight{false};
@@ -339,6 +347,7 @@ namespace gladius::ui
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
+        std::atomic<uint64_t> m_asyncProgressiveViewEpoch{0};
 
         // Async preview rendering state (separate from HQ progressive rendering)
         std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation

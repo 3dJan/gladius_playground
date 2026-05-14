@@ -44,6 +44,7 @@ namespace gladius::ui::async_rendering
     enum class RenderJobType
     {
         HighQuality,
+        RealtimeHighQuality,
         LowResPreview,
         StreamingPreview,     // Continuous preview loop during parameter drag
         BoundingBoxUpdate,
@@ -58,6 +59,7 @@ namespace gladius::ui::async_rendering
     struct RenderJob
     {
         uint64_t epoch{0};
+        uint64_t viewEpoch{0};
         uint64_t frameHint{0};
         RenderJobType type{RenderJobType::HighQuality};
         uint32_t width{0};
@@ -76,6 +78,7 @@ namespace gladius::ui::async_rendering
     {
         uint64_t frameId{0};
         uint64_t epoch{0};
+        uint64_t viewEpoch{0};
         RenderJobType jobType{RenderJobType::HighQuality};
         uint32_t width{0};
         uint32_t height{0};
@@ -127,6 +130,7 @@ namespace gladius::ui::async_rendering
         std::atomic<FrameState> state{FrameState::Idle};
         std::atomic<uint64_t> frameId{0};
         std::atomic<uint64_t> epoch{0};
+        std::atomic<uint64_t> viewEpoch{0};
         std::atomic<uint64_t> readyTimestampNs{0};
         std::atomic<uint64_t> publishTimestampNs{0};
 
