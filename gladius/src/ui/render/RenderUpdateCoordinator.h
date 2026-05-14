@@ -4,6 +4,7 @@
 #include "RenderUpdateTypes.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -74,9 +75,19 @@ namespace gladius::ui::async_rendering
             m_realtimeGuards = guards;
         }
 
-        void recordRealtimeSample(RealtimeRaymarchSample const & sample)
+        void recordStaticProgressiveSample(RealtimeRaymarchSample const & sample)
         {
-            m_realtime.recordSample(sample);
+            m_realtime.recordStaticProgressiveSample(sample);
+        }
+
+        void recordStaticFullFrameSample(RealtimeRaymarchSample const & sample)
+        {
+            m_realtime.recordStaticFullFrameSample(sample);
+        }
+
+        void recordInteractiveRealtimeSample(RealtimeRaymarchSample const & sample)
+        {
+            m_realtime.recordInteractiveRealtimeSample(sample);
         }
 
         void recordRealtimeRejectedAttempt()
@@ -151,6 +162,7 @@ namespace gladius::ui::async_rendering
         {
             RenderUpdateDecision decision{};
             ++m_latestStamp.parameterEpoch;
+            resetRealtimeLearning();
             m_parameterUploadStamp.reset();
             m_boundingBoxStamp.reset();
             m_sdfStamp.reset();
@@ -182,6 +194,7 @@ namespace gladius::ui::async_rendering
             RenderUpdateDecision decision{};
             ++m_latestStamp.sceneEpoch;
             ++m_latestStamp.parameterEpoch;
+            resetRealtimeLearning();
             m_programStamp.reset();
             m_parameterUploadStamp.reset();
             m_boundingBoxStamp.reset();
@@ -340,7 +353,10 @@ namespace gladius::ui::async_rendering
                    matches(*m_highQualityFrameStamp, m_latestStamp, RenderStampMask::displayFrame());
         }
 
-        void startTask(RenderUpdateDecision & decision, RenderTaskType type, RenderStamp const & stamp)
+        void startTask(RenderUpdateDecision & decision,
+                       RenderTaskType type,
+                       RenderStamp const & stamp,
+                       size_t lineCount = 0)
         {
             if (hasAnyInFlight(type) || hasEquivalentInFlight(type, stamp))
             {
@@ -348,13 +364,17 @@ namespace gladius::ui::async_rendering
                 return;
             }
 
+            size_t const requestedLines = lineCount == 0 ? static_cast<size_t>(m_height) : lineCount;
+            size_t const clampedLineCount =
+                std::clamp(requestedLines, size_t{1}, static_cast<size_t>(m_height));
+
             RenderTaskRequest request{.requestId = m_nextRequestId++,
                                       .type = type,
                                       .stamp = stamp,
                                       .width = m_width,
                                       .height = m_height,
                                       .startLine = 0,
-                                      .lineCount = m_height};
+                                      .lineCount = clampedLineCount};
             m_inFlight.push_back(InFlightTask{.requestId = request.requestId,
                                               .type = request.type,
                                               .stamp = request.stamp});
@@ -367,6 +387,12 @@ namespace gladius::ui::async_rendering
         {
             decision.commands.push_back(RenderCommand{.type = RenderCommandType::KeepCurrentFrame,
                                                       .stamp = m_latestStamp});
+        }
+
+        void resetRealtimeLearning()
+        {
+            m_realtime.reset();
+            m_realtime.resetForResolution(m_width, m_height);
         }
 
         void scheduleInteractiveFrame(RenderUpdateDecision & decision)
@@ -429,6 +455,11 @@ namespace gladius::ui::async_rendering
             if (isHighQualityFrameCurrent())
             {
                 keepCurrentFrame(decision);
+                return;
+            }
+            if (m_realtime.canAttemptStaticFullFrame(m_width, m_height, m_realtimeGuards))
+            {
+                startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
                 return;
             }
             startTask(decision, RenderTaskType::ProgressiveHighQualityChunk, m_latestStamp);

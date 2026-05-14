@@ -21,13 +21,15 @@ namespace gladius::ui::async_rendering
     {
         RealtimeRaymarchMode mode{RealtimeRaymarchMode::Auto};
         float targetFrameTimeMs{25.0f};
-        float enterBudgetRatio{0.8f};
+        float enterBudgetRatio{1.0f};
         float exitBudgetRatio{1.1f};
         float severeMissRatio{2.0f};
         float ewmaAlpha{0.35f};
-        int requiredFastSamples{3};
+        int requiredFastSamples{1};
         int maxSlowSamples{2};
         int cooldownFrames{30};
+        float staticFullFrameBudgetMs{60.0f};
+        float realtimeDropBudgetMs{60.0f};
     };
 
     struct RealtimeRaymarchGuards
@@ -61,12 +63,17 @@ namespace gladius::ui::async_rendering
         void resetForResolution(uint32_t width, uint32_t height);
         void beginFrame();
 
-        void recordSample(RealtimeRaymarchSample const & sample);
+        void recordStaticProgressiveSample(RealtimeRaymarchSample const & sample);
+        void recordStaticFullFrameSample(RealtimeRaymarchSample const & sample);
+        void recordInteractiveRealtimeSample(RealtimeRaymarchSample const & sample);
         void recordRejectedAttempt();
 
         [[nodiscard]] bool canAttemptRealtime(uint32_t width,
                                               uint32_t height,
                                               RealtimeRaymarchGuards const & guards) const noexcept;
+        [[nodiscard]] bool canAttemptStaticFullFrame(uint32_t width,
+                                                     uint32_t height,
+                                                     RealtimeRaymarchGuards const & guards) const noexcept;
         [[nodiscard]] bool isRealtimeActive() const noexcept;
         [[nodiscard]] bool isCoolingDown() const noexcept;
         [[nodiscard]] std::optional<float> estimatedFullFrameTimeMs() const noexcept;
@@ -78,6 +85,7 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] std::optional<float> estimateSampleFullFrameTimeMs(
           RealtimeRaymarchSample const & sample) const noexcept;
         void recordEstimatedTime(float estimatedMs);
+        void deactivateRealtime();
         void enterCooldown();
 
         RealtimeRaymarchConfig m_config{};
@@ -88,5 +96,6 @@ namespace gladius::ui::async_rendering
         int m_slowSampleStreak{0};
         int m_cooldownFramesRemaining{0};
         bool m_realtimeActive{false};
+        bool m_staticFullFramePreferred{false};
     };
 }

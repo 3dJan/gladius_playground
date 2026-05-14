@@ -57,6 +57,8 @@ namespace gladius::ui::async_rendering
         config.requiredFastSamples = std::max(config.requiredFastSamples, 1);
         config.maxSlowSamples = std::max(config.maxSlowSamples, 1);
         config.cooldownFrames = std::max(config.cooldownFrames, 0);
+        config.staticFullFrameBudgetMs = std::max(config.staticFullFrameBudgetMs, config.targetFrameTimeMs);
+        config.realtimeDropBudgetMs = std::max(config.realtimeDropBudgetMs, config.targetFrameTimeMs);
 
         m_config = config;
         if (m_config.mode == RealtimeRaymarchMode::Off)
@@ -79,6 +81,7 @@ namespace gladius::ui::async_rendering
         m_slowSampleStreak = 0;
         m_cooldownFramesRemaining = 0;
         m_realtimeActive = false;
+        m_staticFullFramePreferred = false;
     }
 
     void RealtimeRaymarchController::resetForResolution(uint32_t width, uint32_t height)
@@ -88,9 +91,48 @@ namespace gladius::ui::async_rendering
             return;
         }
 
+        auto const previousEstimate = m_estimatedFullFrameMs;
+        auto const previousWidth = m_width;
+        auto const previousHeight = m_height;
+        bool const wasRealtimeActive = m_realtimeActive;
+
         reset();
         m_width = width;
         m_height = height;
+
+        if (!previousEstimate.has_value() || previousWidth == 0 || previousHeight == 0 || width == 0 || height == 0)
+        {
+            return;
+        }
+
+        auto const previousPixels = static_cast<double>(previousWidth) * static_cast<double>(previousHeight);
+        auto const currentPixels = static_cast<double>(width) * static_cast<double>(height);
+        if (previousPixels <= 0.0 || currentPixels <= 0.0)
+        {
+            return;
+        }
+
+        auto const scale = std::clamp(currentPixels / previousPixels, 0.1, 10.0);
+        auto const scaledEstimate = static_cast<float>(*previousEstimate * scale);
+        if (!std::isfinite(scaledEstimate) || scaledEstimate <= 0.0f)
+        {
+            return;
+        }
+
+        m_estimatedFullFrameMs = scaledEstimate;
+
+        auto const enterBudget = m_config.targetFrameTimeMs * m_config.enterBudgetRatio;
+        auto const exitBudget = m_config.targetFrameTimeMs * m_config.exitBudgetRatio;
+        if (scaledEstimate <= enterBudget || (wasRealtimeActive && scaledEstimate <= exitBudget))
+        {
+            m_fastSampleStreak = m_config.requiredFastSamples;
+            m_realtimeActive = m_config.mode == RealtimeRaymarchMode::Auto;
+            m_staticFullFramePreferred = true;
+        }
+        else if (scaledEstimate <= m_config.staticFullFrameBudgetMs)
+        {
+            m_staticFullFramePreferred = true;
+        }
     }
 
     void RealtimeRaymarchController::beginFrame()
@@ -101,9 +143,9 @@ namespace gladius::ui::async_rendering
         }
     }
 
-    void RealtimeRaymarchController::recordSample(RealtimeRaymarchSample const & sample)
+    void RealtimeRaymarchController::recordStaticProgressiveSample(RealtimeRaymarchSample const & sample)
     {
-        if (sample.cancelled)
+        if (m_config.mode != RealtimeRaymarchMode::Auto || sample.cancelled)
         {
             return;
         }
@@ -125,11 +167,90 @@ namespace gladius::ui::async_rendering
         }
 
         recordEstimatedTime(*estimatedMs);
+        m_staticFullFramePreferred = *estimatedMs <= m_config.staticFullFrameBudgetMs;
+        if (m_staticFullFramePreferred)
+        {
+            m_slowSampleStreak = 0;
+        }
+    }
+
+    void RealtimeRaymarchController::recordStaticFullFrameSample(RealtimeRaymarchSample const & sample)
+    {
+        if (m_config.mode != RealtimeRaymarchMode::Auto || sample.cancelled || !sample.completedFrame)
+        {
+            return;
+        }
+
+        if (sample.width == 0 || sample.height == 0)
+        {
+            return;
+        }
+
+        if (!hasValidResolution(sample.width, sample.height))
+        {
+            resetForResolution(sample.width, sample.height);
+        }
+
+        auto const estimatedMs = estimateSampleFullFrameTimeMs(sample);
+        if (!estimatedMs.has_value())
+        {
+            return;
+        }
+
+        recordEstimatedTime(*estimatedMs);
+        m_staticFullFramePreferred = *estimatedMs <= m_config.staticFullFrameBudgetMs;
+
+        if (*estimatedMs <= m_config.targetFrameTimeMs * m_config.enterBudgetRatio)
+        {
+            ++m_fastSampleStreak;
+            m_slowSampleStreak = 0;
+            if (m_fastSampleStreak >= m_config.requiredFastSamples)
+            {
+                m_realtimeActive = true;
+            }
+            return;
+        }
+
+        m_fastSampleStreak = 0;
+        if (*estimatedMs > m_config.realtimeDropBudgetMs)
+        {
+            deactivateRealtime();
+        }
+    }
+
+    void RealtimeRaymarchController::recordInteractiveRealtimeSample(RealtimeRaymarchSample const & sample)
+    {
+        if (m_config.mode != RealtimeRaymarchMode::Auto || sample.cancelled || !sample.completedFrame)
+        {
+            return;
+        }
+
+        if (sample.width == 0 || sample.height == 0)
+        {
+            return;
+        }
+
+        if (!hasValidResolution(sample.width, sample.height))
+        {
+            resetForResolution(sample.width, sample.height);
+        }
+
+        auto const estimatedMs = estimateSampleFullFrameTimeMs(sample);
+        if (!estimatedMs.has_value())
+        {
+            return;
+        }
+
+        recordEstimatedTime(*estimatedMs);
+        if (*estimatedMs > m_config.realtimeDropBudgetMs)
+        {
+            deactivateRealtime();
+        }
     }
 
     void RealtimeRaymarchController::recordRejectedAttempt()
     {
-        m_realtimeActive = false;
+        deactivateRealtime();
         m_fastSampleStreak = 0;
         ++m_slowSampleStreak;
         if (m_slowSampleStreak >= m_config.maxSlowSamples)
@@ -164,6 +285,26 @@ namespace gladius::ui::async_rendering
             return false;
         }
         return m_realtimeActive;
+    }
+
+    bool RealtimeRaymarchController::canAttemptStaticFullFrame(
+      uint32_t width,
+      uint32_t height,
+      RealtimeRaymarchGuards const & guards) const noexcept
+    {
+        if (m_config.mode != RealtimeRaymarchMode::Auto)
+        {
+            return false;
+        }
+        if (!m_staticFullFramePreferred || m_cooldownFramesRemaining > 0)
+        {
+            return false;
+        }
+        if (!hasValidResolution(width, height))
+        {
+            return false;
+        }
+        return guardsAllowAttempt(guards);
     }
 
     bool RealtimeRaymarchController::isRealtimeActive() const noexcept
@@ -253,43 +394,18 @@ namespace gladius::ui::async_rendering
             m_estimatedFullFrameMs = (*m_estimatedFullFrameMs * (1.0f - m_config.ewmaAlpha)) +
                                      (estimatedMs * m_config.ewmaAlpha);
         }
+    }
 
-        auto const enterBudget = m_config.targetFrameTimeMs * m_config.enterBudgetRatio;
-        auto const exitBudget = m_config.targetFrameTimeMs * m_config.exitBudgetRatio;
-        auto const severeMissBudget = m_config.targetFrameTimeMs * m_config.severeMissRatio;
-
-        if (*m_estimatedFullFrameMs <= enterBudget)
-        {
-            ++m_fastSampleStreak;
-            m_slowSampleStreak = 0;
-            if (m_fastSampleStreak >= m_config.requiredFastSamples &&
-                m_cooldownFramesRemaining == 0)
-            {
-                m_realtimeActive = true;
-            }
-            return;
-        }
-
+    void RealtimeRaymarchController::deactivateRealtime()
+    {
+        m_realtimeActive = false;
         m_fastSampleStreak = 0;
-        if (*m_estimatedFullFrameMs > exitBudget)
-        {
-            ++m_slowSampleStreak;
-        }
-        else
-        {
-            m_slowSampleStreak = 0;
-        }
-
-        if (*m_estimatedFullFrameMs > severeMissBudget ||
-            m_slowSampleStreak >= m_config.maxSlowSamples)
-        {
-            enterCooldown();
-        }
+        m_staticFullFramePreferred = false;
     }
 
     void RealtimeRaymarchController::enterCooldown()
     {
-        m_realtimeActive = false;
+        deactivateRealtime();
         m_fastSampleStreak = 0;
         m_slowSampleStreak = 0;
         m_cooldownFramesRemaining = m_config.cooldownFrames;
