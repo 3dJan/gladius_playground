@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderUpdateTypes.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -69,6 +71,8 @@ namespace gladius::ui::async_rendering
         bool precomputeSdf{false};
         bool enableHighQuality{true};
         bool precomputedSdf{false};  // True if SDF should be precomputed before rendering
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
@@ -91,6 +95,8 @@ namespace gladius::ui::async_rendering
         float compilationProgress{0.0f};  // 0.0 - 1.0 for compilation jobs
         bool compilationSucceeded{false};
         std::string compilationError;     // Empty if no error
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
@@ -116,9 +122,12 @@ namespace gladius::ui::async_rendering
     {
         uint64_t frameId{0};         ///< Matches PreviewRenderJob::frameId
         uint64_t epoch{0};           ///< Matches PreviewRenderJob::epoch
+        uint64_t viewEpoch{0};       ///< Camera/view generation captured when the preview was queued
         uint64_t latencyNs{0};       ///< Time from job enqueue to completion (nanoseconds)
         bool cancelled{false};       ///< True if job was cancelled due to epoch change
         bool sdfWasValid{false};     ///< True if SDF was available during rendering
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
