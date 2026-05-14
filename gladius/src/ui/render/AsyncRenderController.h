@@ -82,6 +82,7 @@ namespace gladius::ui::async_rendering
 
         void enqueueJob(RenderJob job);
         void setLatestEpoch(uint64_t epoch);
+        void setLatestViewEpoch(uint64_t viewEpoch);
         void setJobExecutor(JobExecutor executor);
         [[nodiscard]] std::optional<FrameResultMeta> tryConsumeResult();
 
@@ -93,6 +94,9 @@ namespace gladius::ui::async_rendering
 
         /// Get worker-specific command queue (used by worker thread for rendering)
         [[nodiscard]] cl::CommandQueue * workerQueue() noexcept;
+        /// Thread-safe snapshot — safe to call from worker threads concurrently with
+        /// initializeAsyncResources(). Holds the queue alive for the caller's lifetime.
+        [[nodiscard]] std::shared_ptr<cl::CommandQueue> workerQueueShared() const noexcept;
 
         /// Get staging buffer (used by worker thread for rendering output)
         [[nodiscard]] cl::Image2D * stagingBuffer() noexcept;
@@ -173,7 +177,8 @@ namespace gladius::ui::async_rendering
         std::atomic<bool> m_running{false};
 
         // OpenCL resources for async rendering (Option A: separate CL queue, no GL interop)
-        std::unique_ptr<cl::CommandQueue> m_workerQueue;
+        mutable std::mutex m_workerQueueMutex;
+        std::shared_ptr<cl::CommandQueue> m_workerQueue;
         std::unique_ptr<cl::Image2D> m_stagingBuffer;
         size_t m_stagingWidth{0};
         size_t m_stagingHeight{0};

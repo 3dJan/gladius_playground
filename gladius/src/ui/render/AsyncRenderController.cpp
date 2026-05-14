@@ -45,6 +45,7 @@ namespace gladius::ui::async_rendering
             coro::queue<RenderJob> jobQueue;
             std::atomic<bool> shutdownRequested{false};
             std::atomic<uint64_t> latestEpoch{0};
+            std::atomic<uint64_t> latestViewEpoch{0};
             AsyncRenderController::JobExecutor jobExecutor;
 
             std::mutex resultMutex;
@@ -133,6 +134,7 @@ namespace gladius::ui::async_rendering
 
         m_state->data.shutdownRequested.store(false, std::memory_order_release);
         m_state->data.latestEpoch.store(0, std::memory_order_release);
+        m_state->data.latestViewEpoch.store(0, std::memory_order_release);
         {
             std::lock_guard<std::mutex> resultLock(m_state->data.resultMutex);
             m_state->data.pendingResult.reset();
@@ -195,6 +197,22 @@ namespace gladius::ui::async_rendering
         while (epoch > current &&
                !latestEpoch.compare_exchange_weak(
                  current, epoch, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+        }
+    }
+
+    void AsyncRenderController::setLatestViewEpoch(uint64_t viewEpoch)
+    {
+        if (!m_state)
+        {
+            return;
+        }
+
+        auto & latestViewEpoch = m_state->data.latestViewEpoch;
+        auto current = latestViewEpoch.load(std::memory_order_acquire);
+        while (viewEpoch > current &&
+               !latestViewEpoch.compare_exchange_weak(
+                 current, viewEpoch, std::memory_order_acq_rel, std::memory_order_acquire))
         {
         }
     }
@@ -298,10 +316,34 @@ namespace gladius::ui::async_rendering
             // (the UI thread). Without this, the entire job runs on the UI thread, blocking it.
             co_await data->workerPool->schedule();
 
-            auto cancellationCheck = [data, jobEpoch = job.epoch]() -> bool
+            // Pre-execution epoch-only check: safe to skip without storing a result because
+            // notifyAsyncEpochIncrement() clears the in-flight flags on epoch changes.
+            // View-epoch changes must NOT skip here — they need the executor to store a
+            // cancelled result so processAsyncResults() can clear m_asyncJobInFlight.
+            auto const epochOnlyCheck = [data, jobEpoch = job.epoch]() -> bool
             {
                 return data->shutdownRequested.load(std::memory_order_acquire) ||
                        data->latestEpoch.load(std::memory_order_acquire) > jobEpoch;
+            };
+
+            // In-execution check: also cancels HQ progressive jobs when the view epoch advances
+            // (camera moved), so the GPU is released quickly for realtime rendering.
+            // Realtime jobs are intentionally excluded: they complete fast and are always shown
+            // even with a stale view (allowForcedRealtimeStaleView = true).
+            bool const isHqProgressiveJob = (job.type == RenderJobType::HighQuality);
+            auto cancellationCheck = [data,
+                                      jobEpoch = job.epoch,
+                                      jobViewEpoch = job.viewEpoch,
+                                      isHqProgressiveJob]() -> bool
+            {
+                if (data->shutdownRequested.load(std::memory_order_acquire))
+                    return true;
+                if (data->latestEpoch.load(std::memory_order_acquire) > jobEpoch)
+                    return true;
+                if (isHqProgressiveJob && jobViewEpoch > 0 &&
+                    data->latestViewEpoch.load(std::memory_order_acquire) > jobViewEpoch)
+                    return true;
+                return false;
             };
 
             // Preview/streaming jobs must not be skipped here — their executors
@@ -310,7 +352,7 @@ namespace gladius::ui::async_rendering
             // leave those flags stuck at true, preventing any future scheduling.
             bool const isPreviewJob = (job.type == RenderJobType::LowResPreview ||
                                        job.type == RenderJobType::StreamingPreview);
-            if (!isPreviewJob && cancellationCheck())
+            if (!isPreviewJob && epochOnlyCheck())
             {
                 continue;
             }
@@ -358,10 +400,10 @@ namespace gladius::ui::async_rendering
               !m_stagingBuffer)
         {
             m_stagingBuffer.reset();
-            m_workerQueue.reset();
-
-            // Create dedicated worker command queue (no GL interop needed)
-            m_workerQueue = std::make_unique<cl::CommandQueue>(context.createQueue());
+            {
+                std::lock_guard<std::mutex> queueLock(m_workerQueueMutex);
+                m_workerQueue = std::make_shared<cl::CommandQueue>(context.createQueue());
+            }
 
             // Create CL-only staging buffer for async rendering
             static cl::ImageFormat const format = {CL_RGBA, CL_FLOAT};
@@ -401,6 +443,12 @@ namespace gladius::ui::async_rendering
     cl::CommandQueue * AsyncRenderController::workerQueue() noexcept
     {
         return m_workerQueue.get();
+    }
+
+    std::shared_ptr<cl::CommandQueue> AsyncRenderController::workerQueueShared() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_workerQueueMutex);
+        return m_workerQueue;
     }
 
     cl::Image2D * AsyncRenderController::stagingBuffer() noexcept

@@ -306,7 +306,11 @@ namespace gladius::ui
             m_lowResFeedbackPending.store(false, std::memory_order_release);
         }
         m_suppressHQDisplay.store(false, std::memory_order_release);
-        m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
+        auto const newViewEpoch = m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (m_asyncController)
+        {
+            m_asyncController->setLatestViewEpoch(newViewEpoch);
+        }
         queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged());
 
         if (m_core)
@@ -2817,10 +2821,9 @@ namespace gladius::ui
         tracy::SetThreadName("AsyncRenderWorker");
 #endif
 
-        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto queueOwner = (m_asyncController ? m_asyncController->workerQueueShared() : nullptr);
         auto const & commandQueue =
-          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
-        if (workerQueue == nullptr) {}
+          queueOwner ? *queueOwner : m_core->getComputeContext()->GetQueue();
 
         auto const cancellationRequested = [&]() -> bool { return cancelCheck && cancelCheck(); };
 
@@ -3586,10 +3589,9 @@ namespace gladius::ui
         try
         {
             // Get worker queue (or fallback to main queue)
-            auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
-
-            cl::CommandQueue const * queuePtr =
-              workerQueue != nullptr ? workerQueue : &m_core->getComputeContext()->GetQueue();
+            auto queueOwner = (m_asyncController ? m_asyncController->workerQueueShared() : nullptr);
+            cl::CommandQueue const & queueRef =
+              queueOwner ? *queueOwner : m_core->getComputeContext()->GetQueue();
 
             // Acquire compute token non-blockingly to serialize with refreshWorker().
             // refreshWorker() holds the mutex while it rebuilds CL programs and
@@ -3604,7 +3606,7 @@ namespace gladius::ui
             }
 
             // Launch async SDF precomputation (returns cl::Event)
-            cl::Event sdfEvent = m_core->precomputeSdfAsync(*queuePtr);
+            cl::Event sdfEvent = m_core->precomputeSdfAsync(queueRef);
 
             // Release the compute token — the kernel is already enqueued and the
             // CL runtime retains its own references to the memory objects.
@@ -3782,9 +3784,9 @@ namespace gladius::ui
 
         using namespace async_rendering;
 
-        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto queueOwner = (m_asyncController ? m_asyncController->workerQueueShared() : nullptr);
         auto const & commandQueue =
-          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+          queueOwner ? *queueOwner : m_core->getComputeContext()->GetQueue();
 
         FrameResultMeta result{};
         result.frameId = job.frameHint;
@@ -4230,9 +4232,9 @@ namespace gladius::ui
 #endif
         using namespace async_rendering;
 
-        auto * workerQueue = (m_asyncController ? m_asyncController->workerQueue() : nullptr);
+        auto queueOwner = (m_asyncController ? m_asyncController->workerQueueShared() : nullptr);
         auto const & commandQueue =
-          workerQueue != nullptr ? *workerQueue : m_core->getComputeContext()->GetQueue();
+          queueOwner ? *queueOwner : m_core->getComputeContext()->GetQueue();
 
         FrameResultMeta result{};
         result.epoch = job.epoch;
