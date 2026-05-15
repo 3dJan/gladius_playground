@@ -290,6 +290,11 @@ namespace gladius::ui
     {
         ProfileFunction;
         m_dirty = true;
+        // Camera interaction supersedes parameter streaming. Leaving the streaming flag
+        // latched blocks realtime admission and makes Force mode hold a stale frame even
+        // when no exact realtime job is actually in flight.
+        m_streamingPreviewActive.store(false, std::memory_order_release);
+        m_streamingFrameConsumed.store(true, std::memory_order_release);
         m_renderWindowState.isMoving = true;
         m_renderWindowState.currentLine = 0;
         m_renderWindowState.renderingStepSize = kInitialProgressiveStepSize;
@@ -505,8 +510,14 @@ namespace gladius::ui
     bool RenderWindow::isRealtimeRaymarchCameraInteraction() const noexcept
     {
         return m_renderUpdateCoordinator.interactionState() ==
-                 async_rendering::RenderInteractionState::CameraInteracting &&
-               m_renderUpdateCoordinator.isRealtimeActive();
+               async_rendering::RenderInteractionState::CameraInteracting &&
+               m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
+    }
+
+    bool RenderWindow::isForceRealtimeMode() const noexcept
+    {
+        return m_renderUpdateCoordinator.realtimeConfig().mode ==
+               async_rendering::RealtimeRaymarchMode::Force;
     }
 
     bool RenderWindow::scheduleAsyncSdfPrecomputation(
@@ -659,11 +670,12 @@ namespace gladius::ui
             // which is updated synchronously and always shows *something* recent.
             // Exact realtime camera motion must not fall back to that preview texture.
             bool const realtimeCameraInteraction = isRealtimeRaymarchCameraInteraction();
-            bool const realtimeRaymarchActive = m_renderUpdateCoordinator.isRealtimeActive();
+            bool const exactRealtimeJobInFlight =
+                m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
             bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
             bool const viewMatches = frontBuf && frontBuf->viewEpoch == currentViewEpoch;
                         bool const allowRealtimeFront =
-                            (realtimeCameraInteraction || realtimeRaymarchActive) && epochMatches;
+                            (realtimeCameraInteraction || exactRealtimeJobInFlight) && epochMatches;
             bool const frontBlockedByRendering = m_renderWindowState.isRendering &&
                                                  !allowRealtimeFront;
             bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
@@ -1130,8 +1142,24 @@ namespace gladius::ui
         m_core->setSdfValid(false);
 
         m_dirty = true;
-        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-        m_lastLowResRenderTime = std::chrono::system_clock::now();
+
+        // In realtime mode, mirror invalidateCameraView(): skip the legacy low-res preview
+        // path entirely. The coordinator already schedules a RealtimeFullFrame, and
+        // m_forceLowResRenderOnNextFrame / m_lowResFeedbackPending would trigger the old
+        // voxel-SDF preview path, producing a stale flash instead of instant feedback.
+        bool const isRealtimeMode =
+            m_renderUpdateCoordinator.realtimeConfig().mode !=
+            async_rendering::RealtimeRaymarchMode::Off;
+        m_forceLowResRenderOnNextFrame.store(!isRealtimeMode, std::memory_order_release);
+        if (isRealtimeMode)
+        {
+            m_lowResFeedbackPending.store(false, std::memory_order_release);
+        }
+        else
+        {
+            m_lastLowResRenderTime = std::chrono::system_clock::now();
+            m_lowResFeedbackPending.store(true, std::memory_order_release);
+        }
 
         // Cancel any in-progress progressive render (stale parameters)
         m_renderWindowState.currentLine = 0;
@@ -1140,7 +1168,6 @@ namespace gladius::ui
 
         m_preComputedSdfDirty.store(true, std::memory_order_release);
         m_parameterDirty.store(true, std::memory_order_release);
-        m_lowResFeedbackPending.store(true, std::memory_order_release);
         m_modelModifiedSinceLastCenter = true;
         m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
         queueRenderDecision(m_renderUpdateCoordinator.notifyParameterChanged(true));
@@ -1997,7 +2024,22 @@ namespace gladius::ui
               !bboxStale ||
               (std::chrono::steady_clock::now() - m_lastParameterChangeTime >= kBboxDebounceDelay);
 
-            if (sdfDirty && !sdfJobActive && sdfDebounceElapsed)
+            // Don't schedule SDF precomputation while the camera is actively moving in
+            // realtime mode: the realtime renderer evaluates SDF on-the-fly and doesn't
+            // need the precomputed version. Starting the SDF job now would set
+            // hardBlocker=true, preventing canAttemptRealtime() from returning true for
+            // the entire SDF compute duration. The coordinator will schedule SDF via
+            // scheduleStaticCatchUp() once notifyCameraInteractionEnded() fires.
+            bool const cameraInteracting =
+              m_renderUpdateCoordinator.interactionState() ==
+              async_rendering::RenderInteractionState::CameraInteracting;
+            bool const isRealtimeForSdfGuard =
+              m_renderUpdateCoordinator.realtimeConfig().mode !=
+              async_rendering::RealtimeRaymarchMode::Off;
+            bool const suppressSdfDuringCameraInteraction =
+              cameraInteracting && isRealtimeForSdfGuard;
+
+            if (sdfDirty && !sdfJobActive && sdfDebounceElapsed && !suppressSdfDuringCameraInteraction)
             {
                 async_rendering::RenderJob sdfJob{};
                 sdfJob.type = async_rendering::RenderJobType::SDFPrecomputation;
@@ -2230,13 +2272,6 @@ namespace gladius::ui
         {
             m_lowResFeedbackPending.store(false, std::memory_order_release);
             state.isRendering = true;
-            return;
-        }
-
-        if (isRealtimeRaymarchCameraInteraction())
-        {
-            m_lowResFeedbackPending.store(false, std::memory_order_release);
-            state.isRendering = m_asyncJobInFlight.load(std::memory_order_acquire);
             return;
         }
 
@@ -3953,13 +3988,26 @@ namespace gladius::ui
                 auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
                 bool const staleForCurrentView =
                     meta.epoch < currentEpoch || (meta.viewEpoch != 0 && meta.viewEpoch < currentViewEpoch);
+                bool const exactRealtimeJobInFlight =
+                    m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
                 bool const suppressForRealtimeRaymarch =
-                    isRealtimeRaymarchCameraInteraction() ||
-                    (m_renderUpdateCoordinator.isRealtimeActive() && staleForCurrentView);
+                    exactRealtimeJobInFlight || staleForCurrentView;
 
         if (suppressForRealtimeRaymarch)
         {
             ZoneText("PreviewSkippedForRealtimeRaymarch", 34);
+            m_streamingFrameConsumed.store(true, std::memory_order_release);
+            auto cancelledMeta = meta;
+            cancelledMeta.cancelled = true;
+            completeCoordinatorPreviewTask(cancelledMeta);
+            return;
+        }
+
+        // FR-026: Do not replace a higher-quality frame with a lower-quality preview.
+        // If a HQ/realtime frame for the current view is already displayed, suppress the preview.
+        if (m_renderUpdateCoordinator.isHighQualityFrameCurrent())
+        {
+            ZoneText("PreviewSkippedForQualityRegression", 35);
             m_streamingFrameConsumed.store(true, std::memory_order_release);
             auto cancelledMeta = meta;
             cancelledMeta.cancelled = true;

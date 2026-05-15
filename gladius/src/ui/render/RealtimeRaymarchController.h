@@ -78,10 +78,10 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool isCoolingDown() const noexcept;
         [[nodiscard]] std::optional<float> estimatedFullFrameTimeMs() const noexcept;
         [[nodiscard]] char const * modeLabel() const noexcept;
+        [[nodiscard]] bool guardsAllowAttempt(RealtimeRaymarchGuards const & guards) const noexcept;
 
       private:
         [[nodiscard]] bool hasValidResolution(uint32_t width, uint32_t height) const noexcept;
-        [[nodiscard]] bool guardsAllowAttempt(RealtimeRaymarchGuards const & guards) const noexcept;
         [[nodiscard]] std::optional<float> estimateSampleFullFrameTimeMs(
           RealtimeRaymarchSample const & sample) const noexcept;
         void recordEstimatedTime(float estimatedMs);

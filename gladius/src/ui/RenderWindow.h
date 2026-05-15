@@ -160,6 +160,8 @@ namespace gladius::ui
          */
         [[nodiscard]] bool isCameraMoving() const;
 
+        [[nodiscard]] bool isForceRealtimeMode() const noexcept;
+
       private:
         void render(RenderWindowState & state);
         void renderLoadingOverlay();

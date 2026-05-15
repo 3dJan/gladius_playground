@@ -4,7 +4,6 @@
 #include <cctype>
 #include <cmath>
 
-#include <iostream>
 namespace gladius::ui::async_rendering
 {
     namespace
@@ -129,15 +128,10 @@ namespace gladius::ui::async_rendering
             m_fastSampleStreak = m_config.requiredFastSamples;
             m_realtimeActive = m_config.mode == RealtimeRaymarchMode::Auto;
             m_staticFullFramePreferred = true;
-            std::cout << "[RT Auto] resetForResolution: active=" << m_realtimeActive
-                      << " staticFullFrame=" << m_staticFullFramePreferred
-                      << " est=" << scaledEstimate << " enterBudg=" << enterBudget << "\n";
         }
         else if (scaledEstimate <= m_config.staticFullFrameBudgetMs)
         {
             m_staticFullFramePreferred = true;
-            std::cout << "[RT Auto] resetForResolution: staticFullFramePreferred=true"
-                      << " est=" << scaledEstimate << "\n";
         }
     }
 
@@ -176,12 +170,7 @@ namespace gladius::ui::async_rendering
         m_staticFullFramePreferred = *estimatedMs <= m_config.staticFullFrameBudgetMs;
         if (m_staticFullFramePreferred)
         {
-            std::cout << "[RT Auto] Progressive sample set staticFullFrame=true, est=" << *estimatedMs << "\n";
             m_slowSampleStreak = 0;
-        }
-        else
-        {
-            std::cout << "[RT Auto] Progressive sample est=" << *estimatedMs << " > " << m_config.staticFullFrameBudgetMs << " (staticFullFrame=false)\n";
         }
     }
 
@@ -215,17 +204,14 @@ namespace gladius::ui::async_rendering
         {
             ++m_fastSampleStreak;
             m_slowSampleStreak = 0;
-            std::cout << "[RT Auto] Static FullFrame sample FAST, streak=" << m_fastSampleStreak << ", est=" << *estimatedMs << "\n";
             if (m_fastSampleStreak >= m_config.requiredFastSamples)
             {
-                if (!m_realtimeActive) std::cout << "[RT Auto] Realtime ACTIVATED\n";
                 m_realtimeActive = true;
             }
             return;
         }
 
         m_fastSampleStreak = 0;
-        std::cout << "[RT Auto] Static FullFrame sample est=" << *estimatedMs << ", realtimeDropBudget=" << m_config.realtimeDropBudgetMs << "\n";
         if (*estimatedMs > m_config.realtimeDropBudgetMs)
         {
             deactivateRealtime();
@@ -258,7 +244,6 @@ namespace gladius::ui::async_rendering
         recordEstimatedTime(*estimatedMs);
         if (*estimatedMs > m_config.realtimeDropBudgetMs)
         {
-            std::cout << "[RT Auto] Interactive sample SLOW est=" << *estimatedMs << ", dropping realtime\n";
             deactivateRealtime();
         }
     }
@@ -270,7 +255,6 @@ namespace gladius::ui::async_rendering
         ++m_slowSampleStreak;
         if (m_slowSampleStreak >= m_config.maxSlowSamples)
         {
-            std::cout << "[RT Auto] Rejected attempt max streak reached, entering cooldown\n";
             enterCooldown();
         }
     }
@@ -414,10 +398,6 @@ namespace gladius::ui::async_rendering
 
     void RealtimeRaymarchController::deactivateRealtime()
     {
-        if (m_realtimeActive || m_staticFullFramePreferred)
-        {
-            std::cout << "[RT Auto] Dropping realtime / static preferred\n";
-        }
         m_realtimeActive = false;
         m_fastSampleStreak = 0;
         m_staticFullFramePreferred = false;

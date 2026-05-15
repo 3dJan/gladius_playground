@@ -4,7 +4,6 @@
 #include "RenderUpdateTypes.h"
 
 #include <algorithm>
-#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -123,6 +122,12 @@ namespace gladius::ui::async_rendering
             return isBoundingBoxCurrent() && isSdfCurrent();
         }
 
+        [[nodiscard]] bool isHighQualityFrameCurrent() const noexcept
+        {
+            return m_highQualityFrameStamp.has_value() &&
+                   matches(*m_highQualityFrameStamp, m_latestStamp, RenderStampMask::displayFrame());
+        }
+
         [[nodiscard]] RenderUpdateDecision configureViewport(uint32_t width, uint32_t height)
         {
             RenderUpdateDecision decision{};
@@ -135,6 +140,7 @@ namespace gladius::ui::async_rendering
             m_height = height;
             ++m_latestStamp.viewportEpoch;
             m_realtime.resetForResolution(m_width, m_height);
+            m_staticHQRenderTimeMs = -1.0f;
             scheduleStaticCatchUp(decision);
             return decision;
         }
@@ -155,6 +161,7 @@ namespace gladius::ui::async_rendering
             {
                 m_interactionState = RenderInteractionState::Static;
             }
+            m_autoGestureLockedSimpler = false;
             scheduleStaticCatchUp(decision);
             return decision;
         }
@@ -163,13 +170,15 @@ namespace gladius::ui::async_rendering
         {
             RenderUpdateDecision decision{};
             ++m_latestStamp.parameterEpoch;
-            resetRealtimeLearning();
             m_parameterUploadStamp.reset();
             m_boundingBoxStamp.reset();
             m_sdfStamp.reset();
             m_interactionState = interactionActive ? RenderInteractionState::ParameterInteracting
                                                    : RenderInteractionState::Static;
-
+            if (!interactionActive)
+            {
+                resetRealtimeLearning();
+            }
             startTask(decision, RenderTaskType::ParameterUpload, m_latestStamp);
             if (interactionActive)
             {
@@ -186,6 +195,7 @@ namespace gladius::ui::async_rendering
         {
             RenderUpdateDecision decision{};
             m_interactionState = RenderInteractionState::Static;
+            m_autoGestureLockedSimpler = false;
             scheduleStaticCatchUp(decision);
             return decision;
         }
@@ -271,6 +281,13 @@ namespace gladius::ui::async_rendering
                          result.type == RenderTaskType::RealtimeFullFrame))
                     {
                         m_highQualityFrameStamp = result.stamp;
+                        if (result.type == RenderTaskType::ProgressiveHighQualityChunk &&
+                            m_interactionState == RenderInteractionState::Static &&
+                            result.durationNs > 0)
+                        {
+                            m_staticHQRenderTimeMs =
+                                static_cast<float>(result.durationNs) / 1'000'000.0f;
+                        }
                     }
                     decision.commands.push_back(RenderCommand{.type = RenderCommandType::PresentFrame,
                                                               .result = result,
@@ -348,12 +365,6 @@ namespace gladius::ui::async_rendering
                    matches(*m_parameterUploadStamp, m_latestStamp, RenderStampMask::heavyGeometryTask());
         }
 
-        [[nodiscard]] bool isHighQualityFrameCurrent() const noexcept
-        {
-            return m_highQualityFrameStamp.has_value() &&
-                   matches(*m_highQualityFrameStamp, m_latestStamp, RenderStampMask::displayFrame());
-        }
-
         void startTask(RenderUpdateDecision & decision,
                        RenderTaskType type,
                        RenderStamp const & stamp,
@@ -392,9 +403,15 @@ namespace gladius::ui::async_rendering
 
         void resetRealtimeLearning()
         {
-            std::cout << "[RT Coord] resetRealtimeLearning (Parameter/Scene/Resolution changed)\n";
             m_realtime.reset();
             m_realtime.resetForResolution(m_width, m_height);
+            m_staticHQRenderTimeMs = -1.0f;
+            m_autoGestureLockedSimpler = false;
+        }
+
+        [[nodiscard]] bool autoModeAdmitsRealtime() const noexcept
+        {
+            return m_staticHQRenderTimeMs >= 0.0f && m_staticHQRenderTimeMs < 100.0f;
         }
 
         void scheduleInteractiveFrame(RenderUpdateDecision & decision)
@@ -411,25 +428,42 @@ namespace gladius::ui::async_rendering
                 return;
             }
 
-            if (m_realtime.isRealtimeActive())
+            // Auto mode: gate on measured static HQ time with per-gesture hysteresis
+            if (m_realtime.config().mode == RealtimeRaymarchMode::Auto)
             {
-                if (m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards))
+                if (!m_autoGestureLockedSimpler && !autoModeAdmitsRealtime())
+                {
+                    m_autoGestureLockedSimpler = true;
+                }
+                if (m_autoGestureLockedSimpler)
+                {
+                    startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
+                    return;
+                }
+                if (m_realtime.guardsAllowAttempt(m_realtimeGuards))
                 {
                     startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
                     return;
                 }
-
+                // Guards transiently blocked — hold the current frame (FR-026: no quality regression)
                 keepCurrentFrame(decision);
                 return;
             }
 
+            // Off mode: always preview
+            if (m_realtime.config().mode == RealtimeRaymarchMode::Off)
+            {
+                startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
+                return;
+            }
+
+            // Force mode: prefer exact realtime; hold current frame if guards temporarily block (FR-014)
             if (m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards))
             {
                 startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
                 return;
             }
-
-            startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
+            keepCurrentFrame(decision);
         }
 
         void scheduleStaticCatchUp(RenderUpdateDecision & decision)
@@ -504,5 +538,11 @@ namespace gladius::ui::async_rendering
         uint64_t m_nextRequestId{1};
         uint32_t m_width{1};
         uint32_t m_height{1};
+        /// Wall-clock duration of the last completed static progressive HQ render in milliseconds.
+        /// Negative means not yet measured. Used by Auto mode to gate exact-realtime admission.
+        float m_staticHQRenderTimeMs{-1.0f};
+        /// Per-gesture latch: set when Auto mode first decides to use simpler rendering during
+        /// an interaction. Cleared when the gesture ends to prevent mid-gesture quality switches.
+        bool m_autoGestureLockedSimpler{false};
     };
 }

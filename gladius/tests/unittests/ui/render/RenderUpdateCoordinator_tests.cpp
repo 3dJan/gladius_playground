@@ -46,7 +46,7 @@ namespace gladius::ui::async_rendering::tests
                                     .type = request.type,
                                     .stamp = request.stamp,
                                     .status = RenderTaskStatus::Completed,
-                                    .durationNs = 1'000'000,
+                                    .durationNs = 200'000'000,
                                     .producedDisplayFrame = producedDisplayFrame,
                                     .completedFrame = completedFrame};
         }
@@ -74,6 +74,25 @@ namespace gladius::ui::async_rendering::tests
                                           .totalLines = 480,
                                           .completedFrame = true,
                                           .cancelled = false};
+        }
+
+        /// Drives the coordinator through the static pipeline until a ProgressiveHighQualityChunk
+        /// completes with a duration under the 100ms Auto-mode threshold.
+        /// Call immediately after configureViewport(), passing its returned decision.
+        void primeAutoRealtimeAdmission(RenderUpdateCoordinator & coordinator,
+                                        RenderUpdateDecision const & viewportDecision)
+        {
+            auto bbox = findStartedTask(viewportDecision, RenderTaskType::BoundingBoxUpdate);
+            ASSERT_TRUE(bbox.has_value());
+            auto decision = coordinator.completeTask(completed(*bbox));
+            auto sdf = findStartedTask(decision, RenderTaskType::SdfPrecomputation);
+            ASSERT_TRUE(sdf.has_value());
+            decision = coordinator.completeTask(completed(*sdf));
+            auto hq = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+            ASSERT_TRUE(hq.has_value());
+            auto hqResult = completed(*hq, true, true);
+            hqResult.durationNs = 50'000'000; // 50ms < 100ms → autoModeAdmitsRealtime() = true
+            coordinator.completeTask(hqResult);
         }
     }
 
@@ -164,10 +183,9 @@ namespace gladius::ui::async_rendering::tests
     TEST(RenderUpdateCoordinator, CameraChanged_WithAutoRealtimeAfterFastSamples_StartsRealtimeFullFrame)
     {
         RenderUpdateCoordinator coordinator;
-        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
-        coordinator.recordStaticFullFrameSample(fullFrameSample(15.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(16.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(17.0f));
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
 
         auto const decision = coordinator.notifyCameraChanged();
 
@@ -178,10 +196,9 @@ namespace gladius::ui::async_rendering::tests
     TEST(RenderUpdateCoordinator, CameraChanged_WithAutoRealtimeInFlight_KeepsCurrentFrameWithoutPreview)
     {
         RenderUpdateCoordinator coordinator;
-        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
-        coordinator.recordStaticFullFrameSample(fullFrameSample(15.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(16.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(17.0f));
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
 
         auto decision = coordinator.notifyCameraChanged();
         ASSERT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
@@ -196,10 +213,9 @@ namespace gladius::ui::async_rendering::tests
     TEST(RenderUpdateCoordinator, CameraChanged_WithAutoRealtimeGuardBlocker_KeepsCurrentFrame)
     {
         RenderUpdateCoordinator coordinator;
-        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
-        coordinator.recordStaticFullFrameSample(fullFrameSample(15.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(16.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(17.0f));
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
         async_rendering::RealtimeRaymarchGuards guards{};
         guards.hardBlocker = true;
         coordinator.setRealtimeGuards(guards);
@@ -214,10 +230,9 @@ namespace gladius::ui::async_rendering::tests
     TEST(RenderUpdateCoordinator, CameraInteractionEnded_WithAutoRealtimeCurrentHq_KeepsCurrentFrame)
     {
         RenderUpdateCoordinator coordinator;
-        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
-        coordinator.recordStaticFullFrameSample(fullFrameSample(15.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(16.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(17.0f));
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
 
         auto decision = coordinator.notifyCameraChanged();
         auto realtime = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
@@ -236,10 +251,9 @@ namespace gladius::ui::async_rendering::tests
     TEST(RenderUpdateCoordinator, CameraInteractionEnded_WithStaleAutoRealtime_StartsHqNotPreview)
     {
         RenderUpdateCoordinator coordinator;
-        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
-        coordinator.recordStaticFullFrameSample(fullFrameSample(15.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(16.0f));
-        coordinator.recordStaticFullFrameSample(fullFrameSample(17.0f));
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
 
         auto decision = coordinator.notifyCameraChanged();
         auto realtime = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
