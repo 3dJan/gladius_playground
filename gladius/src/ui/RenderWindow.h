@@ -82,7 +82,13 @@ namespace gladius::ui
         /// scheduling round-trip through the UI thread.
         void startStreamingPreview();
         void stopStreamingPreview();
+        void refreshStreamingParameterInteraction();
         [[nodiscard]] bool isStreamingPreviewActive() const;
+        [[nodiscard]] async_rendering::RealtimeRaymarchMode realtimeRaymarchMode() const noexcept;
+        /// Returns true when the realtime learning controller has confirmed the GPU can
+        /// sustain realtime frames at the current resolution (Auto mode) or when Force mode
+        /// is active.  Mirrors @ref RenderUpdateCoordinator::isRealtimeSchedulingActive().
+        [[nodiscard]] bool isRealtimeActive() const noexcept;
 
         /// Cancel all in-flight async work (streaming preview, SDF, bbox, render jobs)
         /// by stopping streaming and bumping the epoch. Call before operations that
@@ -236,6 +242,19 @@ namespace gladius::ui
         coro::task<async_rendering::FrameResultMeta> executeStreamingPreviewJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void finishParameterInteraction();
+
+        /// Render a single full-quality realtime frame synchronously on the UI thread.
+        /// Pushes the latest parameters to the GPU, submits the OpenCL render kernel,
+        /// blocks until the GPU is done, then immediately promotes the result to the
+        /// front buffer for display.  Returns true on success.
+        ///
+        /// Used when @ref RenderUpdateCoordinator::isRealtimeSchedulingActive() is true so
+        /// that both Force mode and Auto mode (once performance is proven) get direct,
+        /// zero-latency parameter feedback without going through the async job queue.
+        /// SDF precomputation and bounding-box updates remain asynchronous.
+        [[nodiscard]] bool tryRenderRealtimeFrameSync(
+          async_rendering::RenderTaskRequest const & task);
 
         GLView * m_view{};
 

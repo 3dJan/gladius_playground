@@ -24,6 +24,7 @@
 #include "OverflowMenuBar.h"
 #include "compute/ComputeCore.h"
 #include "imgui.h"
+#include "render/RenderModeUpdatePolicy.h"
 #include <nodes/Model.h>
 
 namespace gladius::ui
@@ -453,6 +454,31 @@ namespace gladius::ui
 
         case async_rendering::RenderTaskType::RealtimeFullFrame:
         {
+            // When realtime rendering is actually active (Force always; Auto once the
+            // controller has measured sufficient GPU performance) render synchronously on
+            // the UI thread instead of going through the async job queue.  This gives
+            // zero-latency parameter feedback because every drag event yields a fresh,
+            // full-quality frame in the same UI pass — no round-trip through the worker.
+            // SDF and BBox jobs remain asynchronous via the existing path.
+            if (m_renderUpdateCoordinator.isRealtimeSchedulingActive())
+            {
+                bool const rendered = tryRenderRealtimeFrameSync(task);
+                                queueRenderDecision(m_renderUpdateCoordinator.completeTask(
+                                    async_rendering::RenderTaskResult{
+                                        .requestId = task.requestId,
+                                        .type = task.type,
+                                        .stamp = task.stamp,
+                                        .status = rendered ? async_rendering::RenderTaskStatus::Completed
+                                                                             : async_rendering::RenderTaskStatus::Failed,
+                                        .producedDisplayFrame = rendered,
+                                        .completedFrame = rendered}));
+                if (!rendered)
+                {
+                    m_renderUpdateCoordinator.recordRealtimeRejectedAttempt();
+                }
+                return false; // no async job started; task is already completed above
+            }
+
             bool const started = scheduleRealtimeRenderJob(state, &task);
             if (!started)
             {
@@ -468,7 +494,7 @@ namespace gladius::ui
                 completeCoordinatorTask(task, async_rendering::RenderTaskStatus::Cancelled);
                 return false;
             }
-            if (!m_core || !m_core->isSdfValid())
+            if (!m_core)
             {
                 failTask();
                 return false;
@@ -664,18 +690,22 @@ namespace gladius::ui
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
             auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
 
-            // For HQ frames (front buffer from progressive rendering) we require an epoch match
-            // to avoid showing stale HQ results from an old parameter set.
-            // For low-res preview during rapid parameter edits, we fall back to m_resultImage
-            // which is updated synchronously and always shows *something* recent.
-            // Exact realtime camera motion must not fall back to that preview texture.
-            bool const realtimeCameraInteraction = isRealtimeRaymarchCameraInteraction();
-            bool const exactRealtimeJobInFlight =
-                m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
+                        // For HQ frames (front buffer from progressive rendering) we require an epoch match
+                        // to avoid showing stale HQ results from an old parameter set.
+                        // For low-res preview during rapid parameter edits, we fall back to m_resultImage
+                        // which is updated synchronously and always shows *something* recent.
+                        // Exact realtime interaction (camera or parameter) must not fall back to the
+                        // preview texture just because the sync path does not mark m_asyncRealtimeJobInFlight.
+                        bool const exactRealtimeInteraction =
+                                m_renderUpdateCoordinator.isRealtimeSchedulingActive() &&
+                                m_renderUpdateCoordinator.interactionState() !=
+                                    async_rendering::RenderInteractionState::Static;
+                        bool const exactRealtimeJobInFlight =
+                            m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
             bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
             bool const viewMatches = frontBuf && frontBuf->viewEpoch == currentViewEpoch;
                         bool const allowRealtimeFront =
-                            (realtimeCameraInteraction || exactRealtimeJobInFlight) && epochMatches;
+                            (exactRealtimeInteraction || exactRealtimeJobInFlight) && epochMatches;
             bool const frontBlockedByRendering = m_renderWindowState.isRendering &&
                                                  !allowRealtimeFront;
             bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
@@ -2074,10 +2104,10 @@ namespace gladius::ui
                 auto const now = std::chrono::steady_clock::now();
                 if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
                 {
-                    // Stop the streaming preview loop — drag has ended.
-                    // The streaming coroutine's last iteration already pushed the
-                    // final parameter values to the GPU buffer.
-                    stopStreamingPreview();
+                    // Parameter drag has ended. This is a semantic interaction transition,
+                    // independent of whether the active feedback path used streaming preview
+                    // (Force mode does not start streaming preview at all).
+                    finishParameterInteraction();
 
                     m_core->recomputeStaleBoundingBox();
                     m_core->setSdfValid(false);
@@ -2169,20 +2199,11 @@ namespace gladius::ui
                 }
             }
 
-            // Camera-only change from centering — don't bump epoch.
-            // SDF/bbox jobs are not camera-dependent and must not be cancelled.
-            m_dirty = true;
-            state.isMoving = true;
-            state.currentLine = 0;
-            state.renderingStepSize = kInitialProgressiveStepSize;
-            state.isRendering = false;
-            bool const forceLowResPreview =
-                m_renderUpdateCoordinator.realtimeConfig().mode == async_rendering::RealtimeRaymarchMode::Off;
-            m_forceLowResRenderOnNextFrame.store(forceLowResPreview, std::memory_order_release);
-            if (forceLowResPreview)
-            {
-                m_lastLowResRenderTime = std::chrono::system_clock::now();
-            }
+            // Auto-centering changed the camera.  Route this through the normal camera
+            // invalidation path so the coordinator sees a view change and exact realtime
+            // modes schedule a RealtimeFullFrame instead of falling back to the legacy
+            // low-res preview via state.isMoving in Static state.
+            invalidateCameraView();
         }
 
         if (state.isMoving && m_preComputedSdfDirty)
@@ -2275,7 +2296,17 @@ namespace gladius::ui
             return;
         }
 
-        if (state.isMoving || forceLowResRender || lowResPending)
+                bool const shouldUseLowResPreview = async_rendering::shouldUseLegacyLowResPreview(
+                    async_rendering::LegacyLowResPreviewInput{
+                        .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
+                        .interactionState = m_renderUpdateCoordinator.interactionState(),
+                        .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
+                        .stateIsMoving = state.isMoving,
+                        .forceLowResRender = forceLowResRender,
+                        .lowResFeedbackPending = lowResPending,
+                        .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
+
+                if (shouldUseLowResPreview)
         {
             bool const hadActiveProgressive =
               state.isRendering || m_asyncJobInFlight.load(std::memory_order_acquire);
@@ -2293,9 +2324,8 @@ namespace gladius::ui
             // - Async preview keeps the UI thread non-blocking for smooth parameter drag
             // - Sync preview is the fallback when async is unavailable
             // During parameter drag, SDF jobs are debounced so there's no GPU contention.
-            bool const sdfValid = m_core->isSdfValid();
             bool const streamingActive = m_streamingPreviewActive.load(std::memory_order_acquire);
-            bool const useAsyncPreview = !previewJobInFlight && sdfValid;
+            bool const useAsyncPreview = !previewJobInFlight;
 
             if (streamingActive)
             {
@@ -2378,7 +2408,11 @@ namespace gladius::ui
         // Only enforce timeout if we're NOT already in middle of progressive rendering
         // (otherwise chunks would be blocked after any interaction)
         bool const isProgressiveRenderInProgress = state.isRendering && state.currentLine > 0;
-        bool const useLowResPreviewBeforeHq = !m_renderUpdateCoordinator.isRealtimeActive();
+        auto const realtimeMode = m_renderUpdateCoordinator.realtimeConfig().mode;
+        bool const preferExactRealtime =
+            realtimeMode == async_rendering::RealtimeRaymarchMode::Force ||
+            m_renderUpdateCoordinator.isRealtimeActive();
+        bool const useLowResPreviewBeforeHq = !preferExactRealtime;
 
         if (!isProgressiveRenderInProgress && useLowResPreviewBeforeHq)
         {
@@ -2454,7 +2488,16 @@ namespace gladius::ui
                 if (result.precomputedSdfUpdated && !isOutdated)
                 {
                     m_preComputedSdfDirty.store(false, std::memory_order_release);
-                    m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                    // In realtime mode the coordinator drives the next render through
+                    // scheduleStaticCatchUp (fired via completeCoordinatorTask below).
+                    // Setting forceLowResRenderOnNextFrame here would cause a spurious
+                    // low-res preview one frame after the RealtimeFullFrame is already
+                    // queued, because the flag persists past the coordinator's early-return
+                    // and usesExactRealtimeInteraction returns false for Static state.
+                    if (!m_renderUpdateCoordinator.isRealtimeSchedulingActive())
+                    {
+                        m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                    }
                     // SDF computation already updated bbox (via updateBBox() in
                     // precomputeSdfAsync and commitSdfSuccess). Clear pending bbox
                     // to avoid scheduling a redundant bbox job.
@@ -2762,6 +2805,134 @@ namespace gladius::ui
         m_asyncController->enqueueJob(job);
 
         ZoneText("JobEnqueued", 11);
+        return true;
+    }
+
+    bool RenderWindow::tryRenderRealtimeFrameSync(
+      async_rendering::RenderTaskRequest const & task)
+    {
+        ProfileFunction;
+
+        if (!m_asyncController || !m_core || !m_document)
+        {
+            return false;
+        }
+
+        auto assembly = m_document->getAssembly();
+        if (!assembly || !m_core->isRendererReady())
+        {
+            return false;
+        }
+
+        // Push latest parameters — the coordinator has already done one upload, but the
+        // assembly may have been updated between that upload and now (e.g. another UI event
+        // fired between the ParameterUpload task and the RealtimeFullFrame task).
+        (void) m_core->tryToupdateParameter(*assembly);
+
+        // Initialize async resources (allocates triple-buffer images at current resolution)
+        auto const image = m_core->getResultImage();
+        if (!image)
+        {
+            return false;
+        }
+        size_t const width = static_cast<size_t>(image->getWidth());
+        size_t const height = static_cast<size_t>(image->getHeight());
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+        m_asyncController->initializeAsyncResources(*m_core->getComputeContext(), width, height);
+
+        // Acquire an Idle triple-buffer slot to render into
+        uint64_t const epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
+        auto * writeBuffer = m_asyncController->acquireWriteBuffer(epoch);
+        if (!writeBuffer || !writeBuffer->image)
+        {
+            return false;
+        }
+
+        auto const releaseBuffer = [&]()
+        {
+            [[maybe_unused]] bool const released =
+              m_asyncController->tryTransitionBuffer(writeBuffer,
+                                                     async_rendering::FrameState::Writing,
+                                                     async_rendering::FrameState::Idle);
+        };
+
+        if (writeBuffer->image->getWidth() < static_cast<int>(width) ||
+            writeBuffer->image->getHeight() < static_cast<int>(height))
+        {
+            releaseBuffer();
+            return false;
+        }
+
+        // Reuse the worker's command queue — it is idle (no async job enqueued) and avoids
+        // GL-interop synchronization overhead of the main queue.
+        auto queueOwner = m_asyncController->workerQueueShared();
+        if (!queueOwner)
+        {
+            releaseBuffer();
+            return false;
+        }
+        cl::CommandQueue const & queue = *queueOwner;
+
+        auto settings = m_core->getResourceContext()->getRenderingSettings();
+        settings.approximation = AM_FULL_MODEL;
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        cl::Event renderEvent{};
+        bool const advanced = m_core->renderSceneComputeOnlyWithSettings(
+          queue, 0, height, *writeBuffer->image, settings, &renderEvent);
+
+        if (!advanced || !renderEvent())
+        {
+            releaseBuffer();
+            return false;
+        }
+
+        // Block until the GPU is done.  In realtime mode the user has opted into lower
+        // peak throughput in exchange for zero-latency feedback, and Auto mode only takes
+        // this path once performance has been measured to fit within the frame budget.
+        renderEvent.wait();
+
+        auto const endTime = std::chrono::steady_clock::now();
+
+        // Publish the completed buffer, then promote immediately to front for display
+        uint64_t const viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+        m_asyncController->publishFrame(writeBuffer, task.requestId, epoch, viewEpoch);
+
+        auto * newFront = m_asyncController->promoteReadyToFront();
+        if (newFront && newFront->image)
+        {
+            newFront->image->invalidateContent();
+            newFront->image->bind();
+            newFront->image->unbind();
+            [[maybe_unused]] bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+        }
+
+        // Feed the timing sample to the realtime learning controller so Auto mode can track
+        // whether performance is still within budget and deactivate realtime if it degrades.
+        uint64_t const durationNs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count());
+        float const durationMs =
+          static_cast<float>(static_cast<double>(durationNs) / 1'000'000.0);
+        async_rendering::RealtimeRaymarchSample sample{};
+        sample.durationMs = durationMs;
+        sample.width = static_cast<uint32_t>(width);
+        sample.height = static_cast<uint32_t>(height);
+        sample.renderedLines = height;
+        sample.totalLines = height;
+        sample.completedFrame = true;
+        sample.cancelled = false;
+        m_renderUpdateCoordinator.recordInteractiveRealtimeSample(sample);
+
+        m_dirty = false;
+        m_suppressHQDisplay.store(false, std::memory_order_release);
+        m_lowResFeedbackPending.store(false, std::memory_order_release);
+        m_lastLowResPreviewEpoch.store(epoch, std::memory_order_release);
+        m_view->stopAnimationMode();
+
         return true;
     }
 
@@ -3790,6 +3961,7 @@ namespace gladius::ui
         job.stepSize = static_cast<size_t>(previewHeight);
         job.precomputeSdf = false;
         job.enableHighQuality = false;
+        job.coordinatorStamp = m_renderUpdateCoordinator.latestStamp();
         if (coordinatorTask != nullptr)
         {
             job.coordinatorRequestId = coordinatorTask->requestId;
@@ -3844,11 +4016,19 @@ namespace gladius::ui
         auto const startTime = std::chrono::steady_clock::now();
 
         // Perform the async preview render using the low-res preview infrastructure.
-        // Preview rendering intentionally waits for the precomputed SDF so the
-        // feedback pass stays cheap and independent of mesh complexity.
+        // When the precomputed SDF is unavailable (e.g. parameter edits invalidated it),
+        // fall back to a low-resolution full-model render instead of producing no
+        // feedback frame at all.
         {
             ZoneScopedN("RenderLowResPreviewAsync");
             auto computeToken = m_core->waitForComputeToken();
+
+            // Push latest parameters so the preview reflects the current assembly state.
+            if (auto assembly = m_document ? m_document->getAssembly() : nullptr;
+                assembly && m_core->isRendererReady())
+            {
+                (void) m_core->tryToupdateParameter(*assembly);
+            }
 
             // Use the non-blocking async preview render
             // This renders at low resolution and returns a cl::Event for completion tracking
@@ -3860,9 +4040,35 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Kick off the async render with distance output for HQ initialization (FR-005)
-            // This populates the distance init buffer for use by subsequent HQ renders
-            cl::Event renderEvent = m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
+                        bool producedDistanceInit = false;
+
+                        // Kick off the async render with distance output for HQ initialization (FR-005)
+                        // when the precomputed SDF is available.  Otherwise fall back to a low-res
+                        // full-model render so parameter edits still show immediate feedback.
+                        cl::Event renderEvent =
+                            m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
+                        if (renderEvent())
+                        {
+                                producedDistanceInit = true;
+                        }
+                        else
+                        {
+                                auto settings = m_core->getResourceContext()->getRenderingSettings();
+                                settings.approximation = AM_FULL_MODEL;
+                                settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+                                renderEvent = cl::Event{};
+                                bool const advanced = m_core->renderSceneComputeOnlyWithSettings(
+                                    commandQueue,
+                                    0,
+                                    static_cast<size_t>(lowResImage->getHeight()),
+                                    *lowResImage,
+                                    settings,
+                                    &renderEvent);
+                                if (!advanced)
+                                {
+                                        renderEvent = cl::Event{};
+                                }
+                        }
 
             if (!renderEvent())
             {
@@ -3930,9 +4136,12 @@ namespace gladius::ui
 
             // Finish the queue to ensure all work is complete before UI thread reads the buffer.
             commandQueue.finish();
-            
-            // Mark distance init buffer as valid - HQ renders can now use it (FR-005)
-            m_core->setDistanceInitBufferValid();
+
+            // Mark distance init buffer as valid only when the preview actually populated it.
+            if (producedDistanceInit)
+            {
+                m_core->setDistanceInitBufferValid();
+            }
 
             // NOTE: We intentionally do NOT resample here because resample writes to
             // m_resultImage which is a GL-interop buffer. GL operations must happen
@@ -4182,8 +4391,15 @@ namespace gladius::ui
 
     void RenderWindow::stopStreamingPreview()
     {
-        bool const wasActive = m_streamingPreviewActive.exchange(false, std::memory_order_acq_rel);
-        if (wasActive)
+        finishParameterInteraction();
+    }
+
+    void RenderWindow::finishParameterInteraction()
+    {
+        m_streamingPreviewActive.store(false, std::memory_order_release);
+        m_streamingFrameConsumed.store(true, std::memory_order_release);
+        if (m_renderUpdateCoordinator.interactionState() ==
+            async_rendering::RenderInteractionState::ParameterInteracting)
         {
             queueRenderDecision(m_renderUpdateCoordinator.notifyParameterInteractionEnded());
         }
@@ -4213,6 +4429,31 @@ namespace gladius::ui
     bool RenderWindow::isStreamingPreviewActive() const
     {
         return m_streamingPreviewActive.load(std::memory_order_acquire);
+    }
+
+    async_rendering::RealtimeRaymarchMode RenderWindow::realtimeRaymarchMode() const noexcept
+    {
+        return m_renderUpdateCoordinator.realtimeConfig().mode;
+    }
+
+    bool RenderWindow::isRealtimeActive() const noexcept
+    {
+        return m_renderUpdateCoordinator.isRealtimeSchedulingActive();
+    }
+
+    void RenderWindow::refreshStreamingParameterInteraction()
+    {
+        if (m_core)
+        {
+            m_core->setSdfValid(false);
+            m_core->markBoundingBoxStale();
+        }
+
+        m_dirty = true;
+        m_preComputedSdfDirty.store(true, std::memory_order_release);
+        m_parameterDirty.store(true, std::memory_order_release);
+        m_modelModifiedSinceLastCenter = true;
+        m_lastParameterChangeTime = std::chrono::steady_clock::now();
     }
 
     bool RenderWindow::scheduleStreamingPreviewJob(
@@ -4257,6 +4498,7 @@ namespace gladius::ui
         job.stepSize = static_cast<size_t>(previewHeight);
         job.precomputeSdf = false;
         job.enableHighQuality = false;
+        job.coordinatorStamp = m_renderUpdateCoordinator.latestStamp();
         if (coordinatorTask != nullptr)
         {
             job.coordinatorRequestId = coordinatorTask->requestId;
@@ -4362,9 +4604,35 @@ namespace gladius::ui
                 (void) m_core->tryToupdateParameter(*assembly);
             }
 
-            // Render low-res preview
-            cl::Event renderEvent =
-              m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
+                        bool producedDistanceInit = false;
+
+                        // Render low-res preview.  If the precomputed SDF is unavailable because the
+                        // user is actively editing parameters, fall back to a low-resolution full-model
+                        // render so the interaction still produces visible feedback.
+                        cl::Event renderEvent =
+                            m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
+                        if (renderEvent())
+                        {
+                                producedDistanceInit = true;
+                        }
+                        else
+                        {
+                                auto settings = m_core->getResourceContext()->getRenderingSettings();
+                                settings.approximation = AM_FULL_MODEL;
+                                settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+                                renderEvent = cl::Event{};
+                                bool const advanced = m_core->renderSceneComputeOnlyWithSettings(
+                                    commandQueue,
+                                    0,
+                                    static_cast<size_t>(lowResImage->getHeight()),
+                                    *lowResImage,
+                                    settings,
+                                    &renderEvent);
+                                if (!advanced)
+                                {
+                                        renderEvent = cl::Event{};
+                                }
+                        }
 
             if (!renderEvent())
             {
@@ -4432,7 +4700,10 @@ namespace gladius::ui
 
             consecutiveFailures = 0;
             commandQueue.finish();
-            m_core->setDistanceInitBufferValid();
+            if (producedDistanceInit)
+            {
+                m_core->setDistanceInitBufferValid();
+            }
 
             // Publish frame for UI thread consumption
             ++frameCounter;

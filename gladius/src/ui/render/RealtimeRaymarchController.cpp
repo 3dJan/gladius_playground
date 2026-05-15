@@ -309,7 +309,7 @@ namespace gladius::ui::async_rendering
 
     bool RealtimeRaymarchController::isRealtimeActive() const noexcept
     {
-        return m_config.mode == RealtimeRaymarchMode::Force || m_realtimeActive;
+        return m_realtimeActive;
     }
 
     bool RealtimeRaymarchController::isCoolingDown() const noexcept

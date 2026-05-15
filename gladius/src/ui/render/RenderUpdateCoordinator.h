@@ -70,6 +70,18 @@ namespace gladius::ui::async_rendering
             return m_realtime.isRealtimeActive();
         }
 
+        /// Returns true when realtime frame rendering is expected to succeed at interactive rates.
+        /// This covers Force mode (always) and Auto mode once the controller has measured
+        /// sufficient GPU performance.  Use this — rather than checking the mode directly —
+        /// to gate the synchronous render path so Auto-mode users get the same low-latency
+        /// feedback as Force-mode users.
+        [[nodiscard]] bool isRealtimeSchedulingActive() const noexcept
+        {
+            return m_realtime.config().mode == RealtimeRaymarchMode::Force ||
+                   (m_realtime.config().mode == RealtimeRaymarchMode::Auto &&
+                    m_realtime.isRealtimeActive());
+        }
+
         void setRealtimeGuards(RealtimeRaymarchGuards guards) noexcept
         {
             m_realtimeGuards = guards;
@@ -170,15 +182,12 @@ namespace gladius::ui::async_rendering
         {
             RenderUpdateDecision decision{};
             ++m_latestStamp.parameterEpoch;
+            resetRealtimeLearning();
             m_parameterUploadStamp.reset();
             m_boundingBoxStamp.reset();
             m_sdfStamp.reset();
             m_interactionState = interactionActive ? RenderInteractionState::ParameterInteracting
                                                    : RenderInteractionState::Static;
-            if (!interactionActive)
-            {
-                resetRealtimeLearning();
-            }
             startTask(decision, RenderTaskType::ParameterUpload, m_latestStamp);
             if (interactionActive)
             {
@@ -424,6 +433,29 @@ namespace gladius::ui::async_rendering
 
             if (m_interactionState == RenderInteractionState::ParameterInteracting)
             {
+                if (m_realtime.config().mode == RealtimeRaymarchMode::Force)
+                {
+                    if (m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards))
+                    {
+                        startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
+                        return;
+                    }
+                    keepCurrentFrame(decision);
+                    return;
+                }
+                // Auto mode: once the learning controller confirms the GPU is fast enough,
+                // use the same realtime path as Force so parameter drags get direct feedback.
+                if (m_realtime.config().mode == RealtimeRaymarchMode::Auto &&
+                    m_realtime.isRealtimeActive())
+                {
+                    if (m_realtime.guardsAllowAttempt(m_realtimeGuards))
+                    {
+                        startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
+                        return;
+                    }
+                    keepCurrentFrame(decision);
+                    return;
+                }
                 startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
                 return;
             }

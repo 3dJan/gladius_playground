@@ -32,6 +32,7 @@
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/Writer3mf.h"
 #include "io/ImageStackExporter.h"
+#include "render/RenderModeUpdatePolicy.h"
 #include <nodes/ToCommandStreamVisitor.h>
 
 namespace gladius::ui
@@ -2721,7 +2722,11 @@ namespace gladius::ui
             // bypass the throttle — the debounce already elapsed, we just need to retry.
             if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
             {
-                bool const useStreamingPreview = !m_renderWindow.isForceRealtimeMode();
+                auto const parameterDispatch = async_rendering::classifyParameterChange(
+                  async_rendering::ParameterChangeDispatchInput{
+                    .mode = m_renderWindow.realtimeRaymarchMode(),
+                    .streamingPreviewActive = m_renderWindow.isStreamingPreviewActive(),
+                    .autoRealtimeActive = m_renderWindow.isRealtimeActive()});
 
                 // Streaming preview mode: the worker coroutine becomes the sole GPU
                 // writer, reading the latest Assembly values and pushing them to the
@@ -2729,13 +2734,17 @@ namespace gladius::ui
                 // round-trip latency that limits one-shot preview scheduling.
                 // In Force realtime mode, parameter changes should be served by exact
                 // full-frame raymarching instead of the low-res streaming preview.
-                if (!m_renderWindow.isStreamingPreviewActive())
+                if (parameterDispatch.invalidateInteraction)
                 {
                     m_renderWindow.invalidateViewDueToParameterChange();
-                    if (useStreamingPreview)
-                    {
-                        m_renderWindow.startStreamingPreview();
-                    }
+                }
+                if (parameterDispatch.refreshStreamingInteraction)
+                {
+                    m_renderWindow.refreshStreamingParameterInteraction();
+                }
+                if (parameterDispatch.startStreamingPreview)
+                {
+                    m_renderWindow.startStreamingPreview();
                 }
                 m_parameterDirty = false;
                 m_contoursDirty = true;

@@ -92,7 +92,7 @@ namespace gladius::ui::async_rendering::tests
             ASSERT_TRUE(hq.has_value());
             auto hqResult = completed(*hq, true, true);
             hqResult.durationNs = 50'000'000; // 50ms < 100ms → autoModeAdmitsRealtime() = true
-            coordinator.completeTask(hqResult);
+            [[maybe_unused]] auto const finalDecision = coordinator.completeTask(hqResult);
         }
     }
 
@@ -344,7 +344,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
     }
 
-    TEST(RenderUpdateCoordinator, ParameterDrag_WithForcedRealtime_UsesPreviewNotRealtime)
+    TEST(RenderUpdateCoordinator, ParameterDrag_WithForcedRealtime_StartsRealtimeFullFrame)
     {
         RenderUpdateCoordinator coordinator;
         coordinator.configureRealtime(forcedRealtimeConfig());
@@ -353,8 +353,66 @@ namespace gladius::ui::async_rendering::tests
         auto const decision = coordinator.notifyParameterChanged(true);
 
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
-        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+    }
+
+    TEST(RenderUpdateCoordinator, ParameterDrag_WithForcedRealtimeGuardBlocker_KeepsCurrentFrame)
+    {
+        RenderUpdateCoordinator coordinator;
+        coordinator.configureRealtime(forcedRealtimeConfig());
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+        async_rendering::RealtimeRaymarchGuards guards{};
+        guards.hardBlocker = true;
+        coordinator.setRealtimeGuards(guards);
+
+        auto const decision = coordinator.notifyParameterChanged(true);
+
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+    }
+
+    TEST(RenderUpdateCoordinator, ContinuousParameterDrag_WithForcedRealtimeInFlight_NeverStartsPreview)
+    {
+        RenderUpdateCoordinator coordinator;
+        coordinator.configureRealtime(forcedRealtimeConfig());
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+
+        auto decision = coordinator.notifyParameterChanged(true);
+        auto firstUpload = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(firstUpload.has_value());
+        auto firstRealtime = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(firstRealtime.has_value());
+
+        decision = coordinator.notifyParameterChanged(true);
+        auto const latestStamp = coordinator.latestStamp();
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+
+        decision = coordinator.completeTask(completed(*firstUpload));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+
+        decision = coordinator.tick();
+        auto latestUpload = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(latestUpload.has_value());
+        EXPECT_TRUE(matches(latestUpload->stamp, latestStamp, RenderStampMask::heavyGeometryTask()));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+
+        decision = coordinator.completeTask(completed(*firstRealtime, true, true));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+
+        decision = coordinator.completeTask(completed(*latestUpload));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+
+        decision = coordinator.tick();
+        auto latestRealtime = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(latestRealtime.has_value());
+        EXPECT_TRUE(matches(latestRealtime->stamp, latestStamp, RenderStampMask::displayFrame()));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
     }
 
     TEST(RenderUpdateCoordinator, ParameterDrag_StartsUploadAndPreviewButDefersHeavyTasks)
@@ -396,6 +454,37 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(matches(latestUpload->stamp, latest, RenderStampMask::heavyGeometryTask()));
     }
 
+    TEST(RenderUpdateCoordinator, ContinuousParameterDrag_WithStaleAutoPreview_CompletesLatestPreview)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.notifyParameterChanged(true);
+        auto firstUpload = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(firstUpload.has_value());
+        auto firstPreview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(firstPreview.has_value());
+
+        decision = coordinator.notifyParameterChanged(true);
+        auto const latestStamp = coordinator.latestStamp();
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+
+        decision = coordinator.completeTask(completed(*firstUpload));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+
+        decision = coordinator.completeTask(completed(*firstPreview, true, true));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+
+        decision = coordinator.tick();
+        auto latestUpload = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(latestUpload.has_value());
+        EXPECT_TRUE(matches(latestUpload->stamp, latestStamp, RenderStampMask::heavyGeometryTask()));
+        auto latestPreview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(latestPreview.has_value());
+        EXPECT_TRUE(matches(latestPreview->stamp, latestStamp, RenderStampMask::displayFrame()));
+
+        decision = coordinator.completeTask(completed(*latestUpload));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+    }
+
     TEST(RenderUpdateCoordinator, ParameterChanged_AfterRealtimeLearning_ResetsToProgressiveStaticLearning)
     {
         RenderUpdateCoordinator coordinator;
@@ -421,6 +510,28 @@ namespace gladius::ui::async_rendering::tests
 
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+    }
+
+    TEST(RenderUpdateCoordinator, ActiveParameterChanged_AfterFastAutoSample_ResetsInteractionAdmission)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
+
+        auto decision = coordinator.notifyParameterChanged(true);
+        auto upload = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(upload.has_value());
+        auto preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+
+        [[maybe_unused]] auto const uploadDecision = coordinator.completeTask(completed(*upload));
+        [[maybe_unused]] auto const previewDecision = coordinator.completeTask(completed(*preview, true, true));
+
+        decision = coordinator.notifyCameraChanged();
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
     }
 
     TEST(RenderUpdateCoordinator, StaticCatchUp_AfterParameterEdit_SequencesUploadBboxSdfThenHq)
