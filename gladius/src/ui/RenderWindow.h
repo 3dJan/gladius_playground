@@ -5,6 +5,7 @@
 #include "OrbitalCamera.h"
 #include "compute/ComputeCore.h"
 #include "render/AsyncRenderController.h"
+#include "render/PresentedFrameLedger.h"
 #include "render/RealtimeRaymarchController.h"
 #include "render/RenderUpdateCoordinator.h"
 #include <CL/cl_platform.h>
@@ -366,6 +367,7 @@ namespace gladius::ui
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         async_rendering::RenderUpdateCoordinator m_renderUpdateCoordinator{};
+        async_rendering::PresentedFrameLedger m_presentedFrames{};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};

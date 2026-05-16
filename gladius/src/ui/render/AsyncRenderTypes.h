@@ -128,6 +128,7 @@ namespace gladius::ui::async_rendering
         bool cancelled{false};       ///< True if job was cancelled due to epoch change
         bool sdfWasValid{false};     ///< True if SDF was available during rendering
         FramePresentationQuality quality{FramePresentationQuality::Preview};
+        FramePresentationSource source{FramePresentationSource::LowResolutionPreview};
         uint64_t coordinatorRequestId{0};
         RenderStamp coordinatorStamp{};
     };

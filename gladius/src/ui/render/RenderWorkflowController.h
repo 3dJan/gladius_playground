@@ -1,6 +1,6 @@
 #pragma once
 
-#include "FramePresentationTypes.h"
+#include "PresentedFrameLedger.h"
 #include "RenderUpdateCoordinator.h"
 
 #include <optional>
@@ -80,17 +80,17 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] std::optional<PresentedFrame> const & presentedFrame() const noexcept
         {
-            return m_presentedFrame;
+            return m_presentedFrames.presentedFrame();
         }
 
         void seedPresentedFrame(PresentedFrame frame)
         {
-            m_presentedFrame = frame;
+            m_presentedFrames.seedPresentedFrame(frame);
         }
 
         void clearPresentedFrame() noexcept
         {
-            m_presentedFrame.reset();
+            m_presentedFrames.clearPresentedFrame();
         }
 
         [[nodiscard]] RenderWorkflowDecision configureViewport(uint32_t width, uint32_t height)
@@ -141,39 +141,12 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool canPresentCandidate(
           FramePresentationCandidate const & candidate) const noexcept
         {
-            if (!matches(candidate.stamp, latestStamp(), RenderStampMask::displayFrame()))
-            {
-                return false;
-            }
-
-            if (!m_presentedFrame.has_value())
-            {
-                return true;
-            }
-
-            auto const & current = *m_presentedFrame;
-            if (!matches(current.stamp, latestStamp(), RenderStampMask::displayFrame()))
-            {
-                return true;
-            }
-
-            return framePresentationQualityRank(candidate.quality) >=
-                   framePresentationQualityRank(current.quality);
+            return m_presentedFrames.canPresentCandidate(candidate, latestStamp());
         }
 
         [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate) noexcept
         {
-            if (!canPresentCandidate(candidate))
-            {
-                return false;
-            }
-
-            m_presentedFrame = PresentedFrame{.frameId = candidate.frameId,
-                                              .stamp = candidate.stamp,
-                                              .quality = candidate.quality,
-                                              .source = candidate.source,
-                                              .completedFrame = candidate.completedFrame};
-            return true;
+            return m_presentedFrames.presentCandidate(candidate, latestStamp());
         }
 
       private:
@@ -272,7 +245,7 @@ namespace gladius::ui::async_rendering
         }
 
         RenderUpdateCoordinator m_coordinator;
-        std::optional<PresentedFrame> m_presentedFrame;
+        PresentedFrameLedger m_presentedFrames;
         uint64_t m_nextSyntheticFrameId{1};
     };
 }

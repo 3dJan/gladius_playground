@@ -27,6 +27,7 @@
 #include "render/DisplayFrameSelector.h"
 #include "render/RenderModeUpdatePolicy.h"
 #include "render/PreviewBackendPolicy.h"
+#include "render/PreviewResultAcceptancePolicy.h"
 #include <nodes/Model.h>
 
 namespace gladius::ui
@@ -2678,11 +2679,11 @@ namespace gladius::ui
                 else
                 {
                     ZoneScopedN("PromoteReadyToFront");
-                                        auto const requiredPresentationStamp =
-                                            isExactRealtimeJob ? result.coordinatorStamp
-                                                                                 : m_renderUpdateCoordinator.latestStamp();
-                                        auto * newFront = m_asyncController->promoteReadyToFront(
-                                            requiredPresentationStamp, async_rendering::RenderStampMask::displayFrame());
+                    auto const requiredPresentationStamp = isExactRealtimeJob
+                                                             ? result.coordinatorStamp
+                                                             : m_renderUpdateCoordinator.latestStamp();
+                    auto * newFront = m_asyncController->promoteReadyToFront(
+                      requiredPresentationStamp, async_rendering::RenderStampMask::displayFrame());
                     if (newFront && newFront->image)
                     {
                         // Bind the new frame to ensure GL texture is updated
@@ -2690,8 +2691,21 @@ namespace gladius::ui
                         newFront->image->bind();
                         newFront->image->unbind();
 
-                        [[maybe_unused]] bool const promoted =
-                          m_asyncController->finalizeFrontPromotion(newFront);
+                                                bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+                                                if (promoted)
+                                                {
+                                                        auto const source = isExactRealtimeJob
+                                                                                                    ? async_rendering::FramePresentationSource::ExactRealtime
+                                                                                                    : async_rendering::FramePresentationSource::ProgressiveHighQuality;
+                                                        [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+                                                            async_rendering::FramePresentationCandidate{
+                                                                .frameId = result.frameId,
+                                                                .stamp = result.coordinatorStamp,
+                                                                .quality = async_rendering::FramePresentationQuality::FullQuality,
+                                                                .source = source,
+                                                                .completedFrame = true},
+                                                            requiredPresentationStamp);
+                                                }
                     }
                 }
             }
@@ -2973,7 +2987,18 @@ namespace gladius::ui
             newFront->image->invalidateContent();
             newFront->image->bind();
             newFront->image->unbind();
-            [[maybe_unused]] bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+                        bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
+                        if (promoted)
+                        {
+                                [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+                                    async_rendering::FramePresentationCandidate{
+                                        .frameId = task.requestId,
+                                        .stamp = task.stamp,
+                                        .quality = async_rendering::FramePresentationQuality::FullQuality,
+                                        .source = async_rendering::FramePresentationSource::ExactRealtime,
+                                        .completedFrame = true},
+                                    task.stamp);
+                        }
         }
 
         // Feed the timing sample to the realtime learning controller so Auto mode can track
@@ -4209,6 +4234,7 @@ namespace gladius::ui
         previewMeta.cancelled = false;
         previewMeta.sdfWasValid = m_core->isSdfValid();
         previewMeta.quality = async_rendering::FramePresentationQuality::Preview;
+        previewMeta.source = async_rendering::FramePresentationSource::LowResolutionPreview;
         previewMeta.coordinatorRequestId = job.coordinatorRequestId;
         previewMeta.coordinatorStamp = job.coordinatorStamp;
 
@@ -4240,63 +4266,51 @@ namespace gladius::ui
 
         auto const & meta = result.value();
 
-                auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
-                auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
-                bool const staleForCurrentView =
-                    meta.epoch < currentEpoch || (meta.viewEpoch != 0 && meta.viewEpoch < currentViewEpoch);
-                bool const exactRealtimeJobInFlight =
-                    m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
-                bool const suppressForRealtimeRaymarch =
-                    exactRealtimeJobInFlight || staleForCurrentView;
-
-        if (suppressForRealtimeRaymarch)
+        auto presentedFrame = m_presentedFrames.presentedFrame();
+        if (!presentedFrame.has_value())
         {
-            ZoneText("PreviewSkippedForRealtimeRaymarch", 34);
-            m_streamingFrameConsumed.store(true, std::memory_order_release);
-            auto cancelledMeta = meta;
-            cancelledMeta.cancelled = true;
-            completeCoordinatorPreviewTask(cancelledMeta);
-            return;
-        }
-
-        // FR-026: Do not replace a higher-quality frame with a lower-quality preview.
-        // Preview frames are resampled directly into m_resultImage rather than promoted
-        // through the HQ triple buffer, so ask the shared presentation policy whether
-        // this external candidate may replace what is currently shown.
-        if (!m_asyncController->canPresentFrame(meta.coordinatorStamp,
-                                                meta.quality,
-                                                meta.coordinatorStamp,
-                                                async_rendering::RenderStampMask::displayFrame()))
-        {
-            ZoneText("PreviewSkippedForQualityRegression", 35);
-            m_streamingFrameConsumed.store(true, std::memory_order_release);
-            auto cancelledMeta = meta;
-            cancelledMeta.cancelled = true;
-            completeCoordinatorPreviewTask(cancelledMeta);
-            return;
-        }
-
-        // Skip frames that are older than what we've already displayed.
-        // This ensures we never show an older frame after a newer one.
-        // Use frameId (which is monotonically increasing) for ordering.
-        auto const lastDisplayedFrame = m_asyncPreviewFrameId.load(std::memory_order_acquire);
-        if (meta.frameId <= lastDisplayedFrame)
-        {
-            ZoneText("OutOfOrderPreviewSkipped", 24);
-            m_streamingFrameConsumed.store(true, std::memory_order_release);
-            completeCoordinatorPreviewTask(meta);
-            return;
-        }
-
-        // Skip cancelled results
-        if (meta.cancelled)
-        {
-            if (auto logger = m_core->getSharedLogger()) {
-                logger->logInfo("[Preview] Cancelled preview skipped.");
+            if (auto mirroredFront = m_asyncController->mirroredFrontPresentationBuffer();
+                mirroredFront.has_value())
+            {
+                presentedFrame = async_rendering::PresentedFrame{
+                  .frameId = mirroredFront->frameId,
+                  .stamp = mirroredFront->stamp,
+                  .quality = mirroredFront->quality,
+                  .source = async_rendering::FramePresentationSource::ProgressiveHighQuality,
+                  .completedFrame = mirroredFront->quality ==
+                                    async_rendering::FramePresentationQuality::FullQuality};
+                m_presentedFrames.seedPresentedFrame(*presentedFrame);
             }
-            ZoneText("CancelledPreviewSkipped", 23);
+        }
+
+        auto const requiredPresentationStamp = m_renderUpdateCoordinator.latestStamp();
+
+        auto const acceptance = async_rendering::evaluatePreviewResultAcceptance(
+          meta,
+          async_rendering::PreviewResultAcceptanceContext{
+            .requiredStamp = requiredPresentationStamp,
+            .presentedFrame = presentedFrame,
+            .currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire),
+            .currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire),
+            .lastPresentedPreviewFrameId =
+              m_asyncPreviewFrameId.load(std::memory_order_acquire),
+                        .realtimeRaymarchInteractionActive = isRealtimeRaymarchInteractionActive() ||
+                                                                                                m_asyncRealtimeJobInFlight.load(
+                                                                                                    std::memory_order_acquire)});
+
+        if (!acceptance.accepted())
+        {
+            ZoneText("PreviewRejectedByPolicy", 23);
+            if (auto logger = m_core->getSharedLogger())
+            {
+                logger->logInfo(std::string("[Preview] Rejected: ") +
+                                async_rendering::previewResultRejectionReasonName(
+                                  acceptance.rejectionReason));
+            }
             m_streamingFrameConsumed.store(true, std::memory_order_release);
-            completeCoordinatorPreviewTask(meta);
+            auto rejectedMeta = meta;
+            rejectedMeta.cancelled = acceptance.shouldCompleteAsCancelled();
+            completeCoordinatorPreviewTask(rejectedMeta);
             return;
         }
 
@@ -4328,6 +4342,15 @@ namespace gladius::ui
             // Sync the CL buffer to the GL texture
             resultImage->bind();
             resultImage->unbind();
+
+                        [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+                            async_rendering::FramePresentationCandidate{
+                                .frameId = meta.frameId,
+                                .stamp = meta.coordinatorStamp,
+                                .quality = meta.quality,
+                                .source = meta.source,
+                                .completedFrame = true},
+                            requiredPresentationStamp);
 
             // Update the last displayed frame ID for ordering
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
@@ -4741,6 +4764,7 @@ namespace gladius::ui
             previewMeta.cancelled = false;
             previewMeta.sdfWasValid = m_core->isSdfValid();
             previewMeta.quality = async_rendering::FramePresentationQuality::Preview;
+            previewMeta.source = async_rendering::FramePresentationSource::StreamingPreview;
             previewMeta.coordinatorRequestId = job.coordinatorRequestId;
             previewMeta.coordinatorStamp = job.coordinatorStamp;
 
