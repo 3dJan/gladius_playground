@@ -158,6 +158,7 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] static constexpr bool isDisplayTask(RenderTaskType type) noexcept
         {
             return type == RenderTaskType::RealtimeFullFrame ||
+                   type == RenderTaskType::StaticFullFrameProbe ||
                    type == RenderTaskType::ProgressiveHighQualityChunk ||
                    type == RenderTaskType::LowResolutionPreview ||
                    type == RenderTaskType::StreamingPreview;
@@ -170,6 +171,8 @@ namespace gladius::ui::async_rendering
             {
             case RenderTaskType::RealtimeFullFrame:
                 return FramePresentationSource::ExactRealtime;
+            case RenderTaskType::StaticFullFrameProbe:
+                return FramePresentationSource::ProgressiveHighQuality;
             case RenderTaskType::LowResolutionPreview:
                 return FramePresentationSource::LowResolutionPreview;
             case RenderTaskType::StreamingPreview:
@@ -191,6 +194,7 @@ namespace gladius::ui::async_rendering
             switch (result.type)
             {
             case RenderTaskType::RealtimeFullFrame:
+            case RenderTaskType::StaticFullFrameProbe:
                 return FramePresentationQuality::FullQuality;
             case RenderTaskType::ProgressiveHighQualityChunk:
                 return result.completedFrame ? FramePresentationQuality::FullQuality

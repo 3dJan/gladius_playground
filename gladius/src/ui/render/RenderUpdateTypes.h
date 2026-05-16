@@ -123,6 +123,7 @@ namespace gladius::ui::async_rendering
     enum class RenderTaskType
     {
         RealtimeFullFrame,
+        StaticFullFrameProbe,
         ProgressiveHighQualityChunk,
         LowResolutionPreview,
         StreamingPreview,

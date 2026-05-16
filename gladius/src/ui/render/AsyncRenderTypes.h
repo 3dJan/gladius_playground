@@ -48,6 +48,7 @@ namespace gladius::ui::async_rendering
     {
         HighQuality,
         RealtimeHighQuality,
+        StaticFullFrameProbe,
         LowResPreview,
         StreamingPreview,     // Continuous preview loop during parameter drag
         BoundingBoxUpdate,

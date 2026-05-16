@@ -357,17 +357,18 @@ namespace gladius::ui::async_rendering
             // (camera moved), so the GPU is released quickly for realtime rendering.
             // Realtime jobs are intentionally excluded: they complete fast and are always shown
             // even with a stale view (allowForcedRealtimeStaleView = true).
-            bool const isHqProgressiveJob = (job.type == RenderJobType::HighQuality);
+            bool const needsCurrentViewBeforeLaunch = job.type == RenderJobType::HighQuality ||
+                                                      job.type == RenderJobType::StaticFullFrameProbe;
             auto cancellationCheck = [data,
                                       jobEpoch = job.epoch,
                                       jobViewEpoch = job.viewEpoch,
-                                      isHqProgressiveJob]() -> bool
+                                      needsCurrentViewBeforeLaunch]() -> bool
             {
                 if (data->shutdownRequested.load(std::memory_order_acquire))
                     return true;
                 if (data->latestEpoch.load(std::memory_order_acquire) > jobEpoch)
                     return true;
-                if (isHqProgressiveJob && jobViewEpoch > 0 &&
+                if (needsCurrentViewBeforeLaunch && jobViewEpoch > 0 &&
                     data->latestViewEpoch.load(std::memory_order_acquire) > jobViewEpoch)
                     return true;
                 return false;
@@ -385,10 +386,10 @@ namespace gladius::ui::async_rendering
                 continue;
             }
 
-            bool const staleProgressiveView = isHqProgressiveJob && job.viewEpoch > 0 &&
-                                              data->latestViewEpoch.load(std::memory_order_acquire) >
-                                                job.viewEpoch;
-            if (staleProgressiveView)
+            auto const latestViewEpoch = data->latestViewEpoch.load(std::memory_order_acquire);
+            bool const staleViewBeforeLaunch = needsCurrentViewBeforeLaunch && job.viewEpoch > 0 &&
+                                               latestViewEpoch > job.viewEpoch;
+            if (staleViewBeforeLaunch)
             {
                 publishResult(*data, makeCancelledResult(job));
                 continue;

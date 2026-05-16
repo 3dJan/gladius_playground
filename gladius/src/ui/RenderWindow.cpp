@@ -508,9 +508,6 @@ namespace gladius::ui
 
         case async_rendering::RenderTaskType::RealtimeFullFrame:
         {
-                        // Only exact realtime interactions run synchronously on the UI thread. Static
-                        // catch-up/full-frame probes must stay on the async worker so loading or
-                        // catching up a complex model cannot block the UI on renderEvent.wait().
                         auto const executionPath = async_rendering::chooseRealtimeFrameExecutionPath(
                             async_rendering::RealtimeInteractionActivityInput{
                                 .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
@@ -537,10 +534,21 @@ namespace gladius::ui
                 return false; // no async job started; task is already completed above
             }
 
-            bool const started = scheduleRealtimeRenderJob(state, &task);
+            bool const started = scheduleFullFrameRenderJob(state, &task);
             if (!started)
             {
                 m_renderUpdateCoordinator.recordRealtimeRejectedAttempt();
+                failTask();
+            }
+            return started;
+        }
+
+        case async_rendering::RenderTaskType::StaticFullFrameProbe:
+        {
+            bool const started = scheduleFullFrameRenderJob(
+              state, &task, async_rendering::RenderJobType::StaticFullFrameProbe);
+            if (!started)
+            {
                 failTask();
             }
             return started;
@@ -660,6 +668,9 @@ namespace gladius::ui
         {
         case async_rendering::RenderJobType::RealtimeHighQuality:
             taskType = async_rendering::RenderTaskType::RealtimeFullFrame;
+            break;
+        case async_rendering::RenderJobType::StaticFullFrameProbe:
+            taskType = async_rendering::RenderTaskType::StaticFullFrameProbe;
             break;
         case async_rendering::RenderJobType::LowResPreview:
             taskType = async_rendering::RenderTaskType::LowResolutionPreview;
@@ -2528,11 +2539,15 @@ namespace gladius::ui
 
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
             bool const isOutdated = result.epoch < currentEpoch;
-            auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
-            bool const isRealtimeJob = result.jobType == async_rendering::RenderJobType::RealtimeHighQuality;
-            bool const isExactRealtimeJob = isRealtimeJob;
-            bool const isHqRenderJob = result.jobType == async_rendering::RenderJobType::HighQuality || isExactRealtimeJob;
-            bool const isViewOutdated = isHqRenderJob && result.viewEpoch < currentViewEpoch;
+                        auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+                        auto const jobType = result.jobType;
+                        bool const isExactRealtimeJob = jobType == async_rendering::RenderJobType::RealtimeHighQuality;
+                        bool const isStaticFullFrameProbe =
+                            jobType == async_rendering::RenderJobType::StaticFullFrameProbe;
+                        bool const isFullFrameRenderJob = isExactRealtimeJob || isStaticFullFrameProbe;
+                        bool const isHqRenderJob = jobType == async_rendering::RenderJobType::HighQuality ||
+                                                                             isFullFrameRenderJob;
+                        bool const isViewOutdated = isHqRenderJob && result.viewEpoch < currentViewEpoch;
 
             if (result.jobType == async_rendering::RenderJobType::SDFPrecomputation)
             {
@@ -2599,7 +2614,7 @@ namespace gladius::ui
                 continue;
             }
 
-            // From here on, only HQ/full exact render results are processed.
+            // From here on, only HQ/full-frame render results are processed.
 
             if (isHqRenderJob && result.computeDurationNs > 0)
             {
@@ -2617,7 +2632,11 @@ namespace gladius::ui
                 sample.completedFrame = result.completedFrame && result.startLine == 0 &&
                                         renderedLines >= static_cast<size_t>(result.height);
                 sample.cancelled = result.cancelled;
-                if (isRealtimeJob)
+                if (isStaticFullFrameProbe && !isOutdated && !isViewOutdated)
+                {
+                    m_renderUpdateCoordinator.recordStaticFullFrameSample(sample);
+                }
+                else if (isExactRealtimeJob)
                 {
                     if (m_renderUpdateCoordinator.interactionState() ==
                         async_rendering::RenderInteractionState::Static)
@@ -2669,9 +2688,9 @@ namespace gladius::ui
             // Stale scene/view results are deliberately discarded before promotion; otherwise
             // a late realtime frame could replace a valid front buffer with an old camera or
             // parameter state.
-            // Realtime raymarching frames (both Auto and Force) need to be displayed even if 
+            // Interactive realtime raymarching frames (both Auto and Force) need to be displayed even if
             // the view epoch has incremented, otherwise continuous camera motion freezes.
-            bool const allowForcedRealtimeStaleView = isRealtimeJob;
+            bool const allowForcedRealtimeStaleView = isExactRealtimeJob;
             bool const discardForStaleView = isViewOutdated && !allowForcedRealtimeStaleView;
 
             if (result.completedFrame)
@@ -2681,38 +2700,38 @@ namespace gladius::ui
                     m_asyncController->discardReadyFrame(
                       result.frameId, result.epoch, result.viewEpoch);
                 }
-                else
-                {
-                    ZoneScopedN("PromoteReadyToFront");
-                    auto const requiredPresentationStamp = isExactRealtimeJob
-                                                             ? result.coordinatorStamp
-                                                             : m_renderUpdateCoordinator.latestStamp();
-                    auto * newFront = m_asyncController->promoteReadyToFront(
-                      requiredPresentationStamp, async_rendering::RenderStampMask::displayFrame());
-                    if (newFront && newFront->image)
-                    {
-                        // Bind the new frame to ensure GL texture is updated
-                        newFront->image->invalidateContent();
-                        newFront->image->bind();
-                        newFront->image->unbind();
+                                else
+                                {
+                                        ZoneScopedN("PromoteReadyToFront");
+                                        auto const requiredPresentationStamp = isExactRealtimeJob
+                                                                                                                         ? result.coordinatorStamp
+                                                                                                                         : m_renderUpdateCoordinator.latestStamp();
+                                        auto * newFront = m_asyncController->promoteReadyToFront(
+                                            requiredPresentationStamp, async_rendering::RenderStampMask::displayFrame());
+                                        if (newFront && newFront->image)
+                                        {
+                                                // Bind the new frame to ensure GL texture is updated
+                                                newFront->image->invalidateContent();
+                                                newFront->image->bind();
+                                                newFront->image->unbind();
 
-                                                bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
-                                                if (promoted)
+                                                bool const wasPromoted = m_asyncController->finalizeFrontPromotion(newFront);
+                                                if (wasPromoted)
                                                 {
                                                         auto const source = isExactRealtimeJob
                                                                                                     ? async_rendering::FramePresentationSource::ExactRealtime
                                                                                                     : async_rendering::FramePresentationSource::ProgressiveHighQuality;
-                                                        [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
-                                                            async_rendering::FramePresentationCandidate{
-                                                                .frameId = result.frameId,
-                                                                .stamp = result.coordinatorStamp,
-                                                                .quality = async_rendering::FramePresentationQuality::FullQuality,
-                                                                .source = source,
-                                                                .completedFrame = true},
-                                                            requiredPresentationStamp);
+                                                        auto const candidate = async_rendering::FramePresentationCandidate{
+                                                            .frameId = result.frameId,
+                                                            .stamp = result.coordinatorStamp,
+                                                            .quality = async_rendering::FramePresentationQuality::FullQuality,
+                                                            .source = source,
+                                                            .completedFrame = true};
+                                                        [[maybe_unused]] bool const presented =
+                                                            m_presentedFrames.presentCandidate(candidate, requiredPresentationStamp);
                                                 }
-                    }
-                }
+                                        }
+                                }
             }
 
             if (result.completedFrame)
@@ -3031,12 +3050,13 @@ namespace gladius::ui
         return true;
     }
 
-    bool RenderWindow::scheduleRealtimeRenderJob(
+        bool RenderWindow::scheduleFullFrameRenderJob(
       RenderWindowState & state,
-      async_rendering::RenderTaskRequest const * coordinatorTask)
+            async_rendering::RenderTaskRequest const * coordinatorTask,
+            async_rendering::RenderJobType jobType)
     {
         ZoneScoped;
-        ZoneName("scheduleRealtimeRenderJob", strlen("scheduleRealtimeRenderJob"));
+                ZoneName("scheduleFullFrameRenderJob", strlen("scheduleFullFrameRenderJob"));
 
         if (!m_asyncController || !m_asyncController->isRunning() || !m_enableHQRendering)
         {
@@ -3080,7 +3100,7 @@ namespace gladius::ui
 
         job.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
         job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
-        job.type = async_rendering::RenderJobType::RealtimeHighQuality;
+        job.type = jobType;
         job.width = static_cast<uint32_t>(width);
         job.height = static_cast<uint32_t>(height);
         job.startLine = 0;
@@ -3103,10 +3123,11 @@ namespace gladius::ui
         m_asyncInFlightEpoch.store(job.epoch, std::memory_order_release);
         m_asyncInFlightViewEpoch.store(job.viewEpoch, std::memory_order_release);
         m_asyncJobInFlight.store(true, std::memory_order_release);
-        m_asyncRealtimeJobInFlight.store(true, std::memory_order_release);
+        m_asyncRealtimeJobInFlight.store(job.type == async_rendering::RenderJobType::RealtimeHighQuality,
+                                         std::memory_order_release);
         m_asyncController->enqueueJob(job);
 
-        ZoneText("RealtimeJobEnqueued", 19);
+        ZoneText("FullFrameJobEnqueued", 20);
         return true;
     }
 
@@ -3136,10 +3157,14 @@ namespace gladius::ui
         result.jobType = job.type;
         result.width = job.width;
         result.height = job.height;
-        result.startLine = job.startLine;
-        result.coordinatorRequestId = job.coordinatorRequestId;
-        result.coordinatorStamp = job.coordinatorStamp;
-        bool const isExactRealtimeJob = job.type == async_rendering::RenderJobType::RealtimeHighQuality;
+                result.startLine = job.startLine;
+                result.coordinatorRequestId = job.coordinatorRequestId;
+                result.coordinatorStamp = job.coordinatorStamp;
+                auto const jobType = job.type;
+                bool const isExactRealtimeJob = jobType == async_rendering::RenderJobType::RealtimeHighQuality;
+                bool const isStaticFullFrameProbe =
+                    jobType == async_rendering::RenderJobType::StaticFullFrameProbe;
+                bool const usesFullModelApproximation = isExactRealtimeJob || isStaticFullFrameProbe;
 
         if (cancellationRequested())
         {
@@ -3232,7 +3257,7 @@ namespace gladius::ui
                     cl::Event renderEvent{};
                     bool advanced = false;
 
-                    if (isExactRealtimeJob)
+                    if (usesFullModelApproximation)
                     {
                         auto assembly = m_document ? m_document->getAssembly() : nullptr;
                         if (assembly && m_core->isRendererReady())
@@ -3268,7 +3293,7 @@ namespace gladius::ui
 
                     result.completedLine = advanced ? endLine : job.startLine;
                     result.completedFrame = result.completedLine >= job.height;
-                    if (!advanced && isExactRealtimeJob)
+                    if (!advanced && usesFullModelApproximation)
                     {
                         result.cancelled = true;
                     }

@@ -11,14 +11,17 @@ namespace gladius::ui::async_rendering::tests
 {
     namespace
     {
-        [[nodiscard]] RenderJob makeHighQualityJob(uint64_t epoch, uint64_t viewEpoch)
+                [[nodiscard]] RenderJob makeRenderJob(
+                    uint64_t epoch,
+                    uint64_t viewEpoch,
+                    RenderJobType type = RenderJobType::HighQuality)
         {
             RenderStamp stamp{};
             stamp.viewEpoch = viewEpoch;
             return RenderJob{.epoch = epoch,
                              .viewEpoch = viewEpoch,
                              .frameHint = 42,
-                             .type = RenderJobType::HighQuality,
+                                                         .type = type,
                              .width = 640,
                              .height = 480,
                              .startLine = 16,
@@ -47,8 +50,8 @@ namespace gladius::ui::async_rendering::tests
         AsyncRenderController controller;
         std::atomic<int> executions{0};
         controller.setJobExecutor(
-                    [&executions](RenderJob const & job,
-                                                AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
+          [&executions](RenderJob const & job,
+                        AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
           {
               executions.fetch_add(1, std::memory_order_relaxed);
               co_return FrameResultMeta{.frameId = job.frameHint,
@@ -65,7 +68,7 @@ namespace gladius::ui::async_rendering::tests
         controller.start();
         controller.setLatestViewEpoch(2);
 
-        controller.enqueueJob(makeHighQualityJob(1, 1));
+        controller.enqueueJob(makeRenderJob(1, 1));
 
         auto const result = waitForResult(controller);
         controller.stop();
@@ -83,8 +86,8 @@ namespace gladius::ui::async_rendering::tests
         AsyncRenderController controller;
         std::atomic<int> executions{0};
         controller.setJobExecutor(
-                    [&executions](RenderJob const & job,
-                                                AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
+          [&executions](RenderJob const & job,
+                        AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
           {
               executions.fetch_add(1, std::memory_order_relaxed);
               co_return FrameResultMeta{.frameId = job.frameHint,
@@ -95,7 +98,7 @@ namespace gladius::ui::async_rendering::tests
         controller.start();
         controller.setLatestEpoch(2);
 
-        controller.enqueueJob(makeHighQualityJob(1, 1));
+        controller.enqueueJob(makeRenderJob(1, 1));
 
         auto const result = waitForResult(controller);
         controller.stop();
@@ -111,8 +114,8 @@ namespace gladius::ui::async_rendering::tests
         AsyncRenderController controller;
         std::atomic<int> executions{0};
         controller.setJobExecutor(
-                    [&executions](RenderJob const & job,
-                                                AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
+          [&executions](RenderJob const & job,
+                        AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
           {
               executions.fetch_add(1, std::memory_order_relaxed);
               co_return FrameResultMeta{.frameId = job.frameHint,
@@ -123,8 +126,8 @@ namespace gladius::ui::async_rendering::tests
         controller.start();
         controller.setLatestViewEpoch(3);
 
-        controller.enqueueJob(makeHighQualityJob(1, 1));
-        controller.enqueueJob(makeHighQualityJob(1, 2));
+        controller.enqueueJob(makeRenderJob(1, 1));
+        controller.enqueueJob(makeRenderJob(1, 2));
 
         auto const firstResult = waitForResult(controller);
         auto const secondResult = waitForResult(controller);
@@ -139,13 +142,41 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(executions.load(std::memory_order_relaxed), 0);
     }
 
+    TEST(AsyncRenderController, Worker_WithStaleViewStaticFullFrameProbe_CancelsBeforeExecutor)
+    {
+        AsyncRenderController controller;
+        std::atomic<int> executions{0};
+        controller.setJobExecutor(
+          [&executions](RenderJob const & job,
+                        AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
+          {
+              executions.fetch_add(1, std::memory_order_relaxed);
+              co_return FrameResultMeta{.frameId = job.frameHint,
+                                        .epoch = job.epoch,
+                                        .viewEpoch = job.viewEpoch,
+                                        .jobType = job.type};
+          });
+        controller.start();
+        controller.setLatestViewEpoch(2);
+
+        controller.enqueueJob(makeRenderJob(1, 1, RenderJobType::StaticFullFrameProbe));
+
+        auto const result = waitForResult(controller);
+        controller.stop();
+
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->cancelled);
+        EXPECT_EQ(result->jobType, RenderJobType::StaticFullFrameProbe);
+        EXPECT_EQ(executions.load(std::memory_order_relaxed), 0);
+    }
+
     TEST(AsyncRenderController, Worker_WithCurrentProgressiveJob_Executes)
     {
         AsyncRenderController controller;
         std::atomic<int> executions{0};
         controller.setJobExecutor(
-                    [&executions](RenderJob const & job,
-                                                AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
+          [&executions](RenderJob const & job,
+                        AsyncRenderController::CancelCheck const &) -> coro::task<FrameResultMeta>
           {
               executions.fetch_add(1, std::memory_order_relaxed);
               co_return FrameResultMeta{.frameId = job.frameHint,
@@ -162,7 +193,7 @@ namespace gladius::ui::async_rendering::tests
         controller.start();
         controller.setLatestViewEpoch(1);
 
-        controller.enqueueJob(makeHighQualityJob(1, 1));
+        controller.enqueueJob(makeRenderJob(1, 1));
 
         auto const result = waitForResult(controller);
         controller.stop();

@@ -183,9 +183,11 @@ namespace gladius::ui
         bool scheduleAsyncRenderJob(
           RenderWindowState & state,
           async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
-        bool scheduleRealtimeRenderJob(
+        bool scheduleFullFrameRenderJob(
           RenderWindowState & state,
-          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr,
+          async_rendering::RenderJobType jobType =
+            async_rendering::RenderJobType::RealtimeHighQuality);
         coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);

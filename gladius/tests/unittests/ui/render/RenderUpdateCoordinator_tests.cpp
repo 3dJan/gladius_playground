@@ -103,7 +103,7 @@ namespace gladius::ui::async_rendering::tests
             ASSERT_TRUE(hq.has_value());
             coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
             decision = coordinator.completeTask(completed(*hq));
-            auto staticFullFrame = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
+            auto staticFullFrame = findStartedTask(decision, RenderTaskType::StaticFullFrameProbe);
             ASSERT_TRUE(staticFullFrame.has_value());
             coordinator.recordStaticFullFrameSample(fullFrameSample(50.0f));
             [[maybe_unused]] auto const finalDecision =
@@ -163,7 +163,8 @@ namespace gladius::ui::async_rendering::tests
 
         decision = coordinator.completeTask(completed(*progressive));
 
-        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::StaticFullFrameProbe));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
     }
 
@@ -186,6 +187,7 @@ namespace gladius::ui::async_rendering::tests
 
         decision = coordinator.completeTask(completed(*progressive));
 
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StaticFullFrameProbe));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
     }
@@ -207,11 +209,12 @@ namespace gladius::ui::async_rendering::tests
 
         coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
         decision = coordinator.completeTask(completed(*progressive));
-        ASSERT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        ASSERT_TRUE(hasStartedTask(decision, RenderTaskType::StaticFullFrameProbe));
         EXPECT_FALSE(coordinator.isRealtimeActive());
 
         decision = coordinator.notifyCameraChanged();
 
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StaticFullFrameProbe));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
     }

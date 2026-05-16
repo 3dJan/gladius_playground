@@ -48,6 +48,10 @@ namespace gladius::ui::async_rendering::tests
             {
                 return realtime;
             }
+            if (auto staticProbe = findStartedTask(decision, RenderTaskType::StaticFullFrameProbe))
+            {
+                return staticProbe;
+            }
             if (auto progressive = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk))
             {
                 return progressive;

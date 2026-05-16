@@ -293,6 +293,7 @@ namespace gladius::ui::async_rendering
                 m_sdfStamp = result.stamp;
                 break;
             case RenderTaskType::RealtimeFullFrame:
+            case RenderTaskType::StaticFullFrameProbe:
             case RenderTaskType::ProgressiveHighQualityChunk:
             case RenderTaskType::LowResolutionPreview:
             case RenderTaskType::StreamingPreview:
@@ -300,7 +301,8 @@ namespace gladius::ui::async_rendering
                 {
                     if (result.completedFrame &&
                         (result.type == RenderTaskType::ProgressiveHighQualityChunk ||
-                         result.type == RenderTaskType::RealtimeFullFrame))
+                         result.type == RenderTaskType::RealtimeFullFrame ||
+                         result.type == RenderTaskType::StaticFullFrameProbe))
                     {
                         m_highQualityFrameStamp = result.stamp;
                     }
@@ -337,6 +339,7 @@ namespace gladius::ui::async_rendering
             case RenderTaskType::SdfPrecomputation:
                 return RenderStampMask::heavyGeometryTask();
             case RenderTaskType::RealtimeFullFrame:
+            case RenderTaskType::StaticFullFrameProbe:
             case RenderTaskType::ProgressiveHighQualityChunk:
             case RenderTaskType::LowResolutionPreview:
             case RenderTaskType::StreamingPreview:
@@ -522,7 +525,7 @@ namespace gladius::ui::async_rendering
             }
             if (m_realtime.canAttemptStaticFullFrame(m_width, m_height, m_realtimeGuards))
             {
-                startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
+                startTask(decision, RenderTaskType::StaticFullFrameProbe, m_latestStamp);
                 return;
             }
             startTask(decision, RenderTaskType::ProgressiveHighQualityChunk, m_latestStamp);
