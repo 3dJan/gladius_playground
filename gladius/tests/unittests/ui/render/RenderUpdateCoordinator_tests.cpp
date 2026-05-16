@@ -210,7 +210,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
     }
 
-    TEST(RenderUpdateCoordinator, CameraChanged_WithAutoRealtimeGuardBlocker_KeepsCurrentFrame)
+    TEST(RenderUpdateCoordinator, CameraChanged_WithAutoRealtimeGuardBlocker_FallsBackToPreview)
     {
         RenderUpdateCoordinator coordinator;
         auto const viewportDecision = coordinator.configureViewport(640, 480);
@@ -223,8 +223,37 @@ namespace gladius::ui::async_rendering::tests
         auto const decision = coordinator.notifyCameraChanged();
 
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
-        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
-        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_FALSE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+        EXPECT_TRUE(coordinator.isAutoPreviewFallbackActive());
+    }
+
+    TEST(RenderUpdateCoordinator, CameraChanged_WithAutoPreviewFallbackLatch_StaysPreviewUntilGestureEnds)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto const viewportDecision = coordinator.configureViewport(640, 480);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+        primeAutoRealtimeAdmission(coordinator, viewportDecision);
+        async_rendering::RealtimeRaymarchGuards guards{};
+        guards.hardBlocker = true;
+        coordinator.setRealtimeGuards(guards);
+
+        auto decision = coordinator.notifyCameraChanged();
+        auto preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_TRUE(coordinator.isAutoPreviewFallbackActive());
+
+        coordinator.setRealtimeGuards(async_rendering::RealtimeRaymarchGuards{});
+        decision = coordinator.completeTask(completed(*preview, true, true));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::PresentFrame));
+
+        decision = coordinator.notifyCameraChanged();
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(coordinator.isAutoPreviewFallbackActive());
+
+        (void) coordinator.notifyCameraInteractionEnded();
+        EXPECT_FALSE(coordinator.isAutoPreviewFallbackActive());
     }
 
     TEST(RenderUpdateCoordinator, CameraInteractionEnded_WithAutoRealtimeCurrentHq_KeepsCurrentFrame)

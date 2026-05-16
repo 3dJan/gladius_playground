@@ -111,6 +111,49 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(decision);
     }
 
+    TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithAutoRealtimeActive_IsActive)
+    {
+        auto const active = isExactRealtimeInteractionActive(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Auto,
+                                           .interactionState = RenderInteractionState::CameraInteracting,
+                                           .autoRealtimeActive = true,
+                                           .autoPreviewFallbackActive = false,
+                                           .exactRealtimeJobInFlight = false});
+
+        EXPECT_TRUE(active);
+    }
+
+    TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithAutoFallbackPreview_IsNotActive)
+    {
+        auto const active = isExactRealtimeInteractionActive(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Auto,
+                                           .interactionState = RenderInteractionState::CameraInteracting,
+                                           .autoRealtimeActive = true,
+                                           .autoPreviewFallbackActive = true,
+                                           .exactRealtimeJobInFlight = false});
+
+        EXPECT_FALSE(active);
+    }
+
+    TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithForce_IsActive)
+    {
+        auto const active = isExactRealtimeInteractionActive(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Force,
+                                           .interactionState = RenderInteractionState::CameraInteracting});
+
+        EXPECT_TRUE(active);
+    }
+
+    TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithStaticState_IsNotActive)
+    {
+        auto const active = isExactRealtimeInteractionActive(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Force,
+                                           .interactionState = RenderInteractionState::Static,
+                                           .exactRealtimeJobInFlight = true});
+
+        EXPECT_FALSE(active);
+    }
+
     TEST(RenderModeUpdatePolicy, ParameterChangeDispatch_WithForce_InvalidatesWithoutStreaming)
     {
         auto const dispatch = classifyParameterChange(

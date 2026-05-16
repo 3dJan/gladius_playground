@@ -68,6 +68,11 @@ namespace gladius::ui::async_rendering
             return m_coordinator.isRealtimeSchedulingActive();
         }
 
+        [[nodiscard]] bool isAutoPreviewFallbackActive() const noexcept
+        {
+            return m_coordinator.isAutoPreviewFallbackActive();
+        }
+
         [[nodiscard]] RenderStamp latestStamp() const noexcept
         {
             return m_coordinator.latestStamp();

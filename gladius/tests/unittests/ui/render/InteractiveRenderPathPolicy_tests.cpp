@@ -80,7 +80,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(path, InteractiveRenderPath::ExactRealtime);
     }
 
-    TEST(InteractiveRenderPathPolicy, AutoCamera_WithRealtimeAdmittedButBlocked_KeepsCurrentFrame)
+    TEST(InteractiveRenderPathPolicy, AutoCamera_WithRealtimeAdmittedButBlocked_FallsBackToPreview)
     {
         auto const path = chooseInteractiveRenderPath(
           InteractiveRenderPathInput{.mode = RealtimeRaymarchMode::Auto,
@@ -88,7 +88,7 @@ namespace gladius::ui::async_rendering::tests
                                      .autoInteractiveExactRealtimeAdmitted = true,
                                      .exactRealtimeAllowed = false});
 
-        EXPECT_EQ(path, InteractiveRenderPath::KeepCurrentFrame);
+        EXPECT_EQ(path, InteractiveRenderPath::LowResolutionPreview);
     }
 
     TEST(InteractiveRenderPathPolicy, OffInteraction_UsesLowResolutionPreview)

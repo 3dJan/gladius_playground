@@ -48,6 +48,40 @@ namespace gladius::ui::async_rendering
         return true;
     }
 
+    struct RealtimeInteractionActivityInput
+    {
+        RealtimeRaymarchMode mode{RealtimeRaymarchMode::Auto};
+        RenderInteractionState interactionState{RenderInteractionState::Static};
+        bool autoRealtimeActive{false};
+        /// True when Auto has fallen back to the simpler low-res preview path for the
+        /// current gesture.  While this latch is active, preview tasks/results are the
+        /// intended feedback path and must not be cancelled as "realtime active".
+        bool autoPreviewFallbackActive{false};
+        bool exactRealtimeJobInFlight{false};
+    };
+
+    [[nodiscard]] constexpr bool isExactRealtimeInteractionActive(
+      RealtimeInteractionActivityInput const & input) noexcept
+    {
+        if (input.interactionState == RenderInteractionState::Static)
+        {
+            return false;
+        }
+
+        if (input.exactRealtimeJobInFlight)
+        {
+            return true;
+        }
+
+        if (input.mode == RealtimeRaymarchMode::Force)
+        {
+            return true;
+        }
+
+        return input.mode == RealtimeRaymarchMode::Auto && input.autoRealtimeActive &&
+               !input.autoPreviewFallbackActive;
+    }
+
     struct ParameterChangeDispatchInput
     {
         RealtimeRaymarchMode mode{RealtimeRaymarchMode::Auto};

@@ -67,7 +67,7 @@ namespace gladius::ui::async_rendering
             }
 
             return input.exactRealtimeAllowed ? InteractiveRenderPath::ExactRealtime
-                                              : InteractiveRenderPath::KeepCurrentFrame;
+                                              : InteractiveRenderPath::LowResolutionPreview;
         }
 
         if (input.mode == RealtimeRaymarchMode::Off)

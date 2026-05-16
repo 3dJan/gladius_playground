@@ -589,10 +589,13 @@ namespace gladius::ui
 
     bool RenderWindow::isRealtimeRaymarchInteractionActive() const noexcept
     {
-        return m_renderUpdateCoordinator.interactionState() !=
-                 async_rendering::RenderInteractionState::Static &&
-               (m_renderUpdateCoordinator.isRealtimeSchedulingActive() ||
-                m_asyncRealtimeJobInFlight.load(std::memory_order_acquire));
+                return async_rendering::isExactRealtimeInteractionActive(
+                    async_rendering::RealtimeInteractionActivityInput{
+                        .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
+                        .interactionState = m_renderUpdateCoordinator.interactionState(),
+                        .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
+                        .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
+                        .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
     }
 
     bool RenderWindow::isForceRealtimeMode() const noexcept

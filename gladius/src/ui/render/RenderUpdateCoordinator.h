@@ -76,6 +76,16 @@ namespace gladius::ui::async_rendering
                     m_realtime.isRealtimeActive());
         }
 
+        /// Returns true when Auto mode has latched the current interaction to the
+        /// simpler preview path after a guard blocked exact realtime.  This latch is
+        /// cleared when the gesture ends and prevents mid-gesture path switching.
+        [[nodiscard]] bool isAutoPreviewFallbackActive() const noexcept
+        {
+            return m_realtime.config().mode == RealtimeRaymarchMode::Auto &&
+                   m_interactionState != RenderInteractionState::Static &&
+                   m_autoGestureLockedSimpler;
+        }
+
         void setRealtimeGuards(RealtimeRaymarchGuards guards) noexcept
         {
             m_realtimeGuards = guards;
