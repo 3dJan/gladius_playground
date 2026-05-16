@@ -35,6 +35,24 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(selected, DisplayFrameSource::ResultImage);
     }
 
+    TEST(DisplayFrameSelector, WithPreviouslyPresentedRealtimeFrontAfterEpochBump_HoldsFrontBuffer)
+    {
+                auto const presentedFrame = PresentedFrame{.frameId = 10,
+                                                                                                     .stamp = RenderStamp{.sceneEpoch = 3,
+                                                                                                                                                .viewEpoch = 7},
+                                                                                                     .quality = FramePresentationQuality::FullQuality,
+                                                                                                     .source = FramePresentationSource::ExactRealtime,
+                                                                                                     .completedFrame = true};
+        auto const selected = selectDisplayFrameSource(
+          DisplayFrameSelectionInput{.frontBuffer = buffer(3, 7),
+                                     .currentEpoch = 4,
+                                     .currentViewEpoch = 8,
+                                                                         .resultImageAvailable = true,
+                                                                         .presentedFrame = presentedFrame});
+
+        EXPECT_EQ(selected, DisplayFrameSource::FrontBuffer);
+    }
+
     TEST(DisplayFrameSelector, WithStaleViewFrontBufferDuringRealtimeInteraction_SelectsFrontBuffer)
     {
         auto const selected = selectDisplayFrameSource(

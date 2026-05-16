@@ -25,12 +25,14 @@ namespace gladius::ui::async_rendering
         uint64_t currentViewEpoch{0};
         uint64_t lastPresentedPreviewFrameId{0};
         bool realtimeRaymarchInteractionActive{false};
+        bool allowStaleViewDuringCameraInteraction{false};
         RenderStampMask freshnessMask{RenderStampMask::displayFrame()};
     };
 
     struct PreviewResultAcceptanceDecision
     {
         PreviewResultRejectionReason rejectionReason{PreviewResultRejectionReason::None};
+        bool presentAsRequiredStamp{false};
 
         [[nodiscard]] constexpr bool accepted() const noexcept
         {
@@ -65,16 +67,52 @@ namespace gladius::ui::async_rendering
         }
     }
 
+        [[nodiscard]] constexpr RenderStampMask displayFrameIgnoringViewMask() noexcept
+        {
+                return {.scene = true,
+                                .parameters = true,
+                                .view = false,
+                                .viewport = true,
+                                .quality = true};
+        }
+
+        [[nodiscard]] constexpr bool isPreviewResultStaleViewOnly(
+            PreviewResultMeta const & meta,
+            PreviewResultAcceptanceContext const & context) noexcept
+        {
+                bool const nonViewAxesMatch = matches(meta.coordinatorStamp,
+                                                                                         context.requiredStamp,
+                                                                                         displayFrameIgnoringViewMask());
+                bool const viewEpochStale =
+                    meta.viewEpoch != 0u && meta.viewEpoch < context.currentViewEpoch;
+                bool const stampViewStale =
+                    meta.coordinatorStamp.viewEpoch < context.requiredStamp.viewEpoch;
+                bool const epochCurrent = meta.epoch >= context.currentEpoch;
+                return epochCurrent && nonViewAxesMatch && (viewEpochStale || stampViewStale);
+        }
+
     [[nodiscard]] constexpr bool isPreviewResultStale(
       PreviewResultMeta const & meta,
       PreviewResultAcceptanceContext const & context) noexcept
     {
         bool const staleEpoch = meta.epoch < context.currentEpoch;
-        bool const staleViewEpoch = meta.viewEpoch != 0u && meta.viewEpoch < context.currentViewEpoch;
+                if (staleEpoch)
+                {
+                        return true;
+                }
+
+                if (context.allowStaleViewDuringCameraInteraction &&
+                        isPreviewResultStaleViewOnly(meta, context))
+                {
+                        return false;
+                }
+
+                bool const staleViewEpoch = meta.viewEpoch != 0u &&
+                                                                        meta.viewEpoch < context.currentViewEpoch;
         bool const staleStamp = !matches(meta.coordinatorStamp,
                                          context.requiredStamp,
                                          context.freshnessMask);
-        return staleEpoch || staleViewEpoch || staleStamp;
+                return staleViewEpoch || staleStamp;
     }
 
     [[nodiscard]] constexpr bool wouldRegressPresentedQuality(
@@ -117,7 +155,11 @@ namespace gladius::ui::async_rendering
             return {PreviewResultRejectionReason::RealtimeRaymarchActive};
         }
 
-        if (isPreviewResultStale(meta, context))
+                bool const presentAsRequiredStamp =
+                    context.allowStaleViewDuringCameraInteraction &&
+                    isPreviewResultStaleViewOnly(meta, context);
+
+                if (isPreviewResultStale(meta, context))
         {
             return {PreviewResultRejectionReason::StaleFrame};
         }
@@ -132,6 +174,7 @@ namespace gladius::ui::async_rendering
             return {PreviewResultRejectionReason::QualityRegression};
         }
 
-        return {};
+        return {.rejectionReason = PreviewResultRejectionReason::None,
+            .presentAsRequiredStamp = presentAsRequiredStamp};
     }
 }

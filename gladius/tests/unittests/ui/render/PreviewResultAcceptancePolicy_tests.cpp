@@ -71,6 +71,42 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(decision.rejectionReason, PreviewResultRejectionReason::StaleFrame);
     }
 
+    TEST(PreviewResultAcceptancePolicy, CameraInteraction_WithStaleViewPreview_AllowsPresentationAsLatestView)
+    {
+        auto const oldViewStamp = makeStamp(1, 2, 3, 4, 5);
+        auto const latestStamp = makeStamp(1, 2, 4, 4, 5);
+        auto meta = previewResult(oldViewStamp);
+        meta.viewEpoch = 3;
+
+        auto const decision = evaluatePreviewResultAcceptance(
+          meta,
+          PreviewResultAcceptanceContext{.requiredStamp = latestStamp,
+                                         .currentEpoch = meta.epoch,
+                                         .currentViewEpoch = 4,
+                                         .allowStaleViewDuringCameraInteraction = true});
+
+        EXPECT_TRUE(decision.accepted());
+        EXPECT_TRUE(decision.presentAsRequiredStamp);
+    }
+
+    TEST(PreviewResultAcceptancePolicy, CameraInteraction_WithStaleParameterPreview_RemainsRejected)
+    {
+        auto const oldParameterStamp = makeStamp(1, 2, 3, 4, 5);
+        auto const latestStamp = makeStamp(1, 3, 4, 4, 5);
+        auto meta = previewResult(oldParameterStamp);
+        meta.viewEpoch = 3;
+
+        auto const decision = evaluatePreviewResultAcceptance(
+          meta,
+          PreviewResultAcceptanceContext{.requiredStamp = latestStamp,
+                                         .currentEpoch = meta.epoch,
+                                         .currentViewEpoch = 4,
+                                         .allowStaleViewDuringCameraInteraction = true});
+
+        EXPECT_FALSE(decision.accepted());
+        EXPECT_EQ(decision.rejectionReason, PreviewResultRejectionReason::StaleFrame);
+    }
+
     TEST(PreviewResultAcceptancePolicy, ActiveRealtimeInteraction_RejectsPreview)
     {
         auto const stamp = makeStamp(1, 2, 3, 4, 5);

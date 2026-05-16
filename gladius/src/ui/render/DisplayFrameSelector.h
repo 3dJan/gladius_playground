@@ -1,6 +1,9 @@
 #pragma once
 
+#include "FramePresentationTypes.h"
+
 #include <cstdint>
+#include <optional>
 
 namespace gladius::ui::async_rendering
 {
@@ -31,7 +34,16 @@ namespace gladius::ui::async_rendering
         bool isMoving{false};
         bool suppressHqDisplay{false};
         bool resultImageAvailable{true};
+                std::optional<PresentedFrame> presentedFrame{};
     };
+
+        [[nodiscard]] constexpr bool isFrontBufferPresentationSource(
+            FramePresentationSource source) noexcept
+        {
+                return source == FramePresentationSource::ExactRealtime ||
+                             source == FramePresentationSource::ProgressiveHighQuality ||
+                             source == FramePresentationSource::HeldFrame;
+        }
 
     /**
      * @brief Chooses which already-produced image should be drawn in the preview window.
@@ -52,6 +64,9 @@ namespace gladius::ui::async_rendering
           (input.exactRealtimeInteraction || input.exactRealtimeJobInFlight) &&
           frontEpochMatches;
         bool const frontBlockedByRendering = input.isRendering && !allowRealtimeFront;
+                bool const frontBufferIsPresentedFrame =
+                    input.frontBuffer.hasImage && input.presentedFrame.has_value() &&
+                    isFrontBufferPresentationSource(input.presentedFrame->source);
 
         if (input.frontBuffer.hasImage && frontEpochMatches &&
             (frontViewMatches || allowRealtimeFront) && !frontBlockedByRendering &&
@@ -68,6 +83,11 @@ namespace gladius::ui::async_rendering
         if (progressiveBufferCurrent && !input.isMoving && !input.suppressHqDisplay)
         {
             return DisplayFrameSource::ProgressiveBuffer;
+        }
+
+        if (frontBufferIsPresentedFrame && !input.suppressHqDisplay)
+        {
+            return DisplayFrameSource::FrontBuffer;
         }
 
         return input.resultImageAvailable ? DisplayFrameSource::ResultImage

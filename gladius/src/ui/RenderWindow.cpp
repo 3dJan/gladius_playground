@@ -776,7 +776,8 @@ namespace gladius::ui
                                 .isRendering = m_renderWindowState.isRendering,
                                 .isMoving = m_renderWindowState.isMoving,
                                 .suppressHqDisplay = m_suppressHQDisplay.load(std::memory_order_acquire),
-                                .resultImageAvailable = resultImage != nullptr});
+                                .resultImageAvailable = resultImage != nullptr,
+                                .presentedFrame = m_presentedFrames.presentedFrame()});
 
             if (displaySource == async_rendering::DisplayFrameSource::FrontBuffer && frontBuf)
             {
@@ -4285,7 +4286,12 @@ namespace gladius::ui
 
         auto const requiredPresentationStamp = m_renderUpdateCoordinator.latestStamp();
 
-        auto const acceptance = async_rendering::evaluatePreviewResultAcceptance(
+                bool const cameraLowResInteraction =
+                    m_renderUpdateCoordinator.interactionState() ==
+                        async_rendering::RenderInteractionState::CameraInteracting &&
+                    !isRealtimeRaymarchInteractionActive();
+
+                auto const acceptance = async_rendering::evaluatePreviewResultAcceptance(
           meta,
           async_rendering::PreviewResultAcceptanceContext{
             .requiredStamp = requiredPresentationStamp,
@@ -4296,7 +4302,8 @@ namespace gladius::ui
               m_asyncPreviewFrameId.load(std::memory_order_acquire),
                         .realtimeRaymarchInteractionActive = isRealtimeRaymarchInteractionActive() ||
                                                                                                 m_asyncRealtimeJobInFlight.load(
-                                                                                                    std::memory_order_acquire)});
+                                                                                                    std::memory_order_acquire),
+                        .allowStaleViewDuringCameraInteraction = cameraLowResInteraction});
 
         if (!acceptance.accepted())
         {
@@ -4343,14 +4350,16 @@ namespace gladius::ui
             resultImage->bind();
             resultImage->unbind();
 
-                        [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
-                            async_rendering::FramePresentationCandidate{
-                                .frameId = meta.frameId,
-                                .stamp = meta.coordinatorStamp,
-                                .quality = meta.quality,
-                                .source = meta.source,
-                                .completedFrame = true},
-                            requiredPresentationStamp);
+            auto const previewPresentationStamp = acceptance.presentAsRequiredStamp
+                                                    ? requiredPresentationStamp
+                                                    : meta.coordinatorStamp;
+            [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+              async_rendering::FramePresentationCandidate{.frameId = meta.frameId,
+                                                          .stamp = previewPresentationStamp,
+                                                          .quality = meta.quality,
+                                                          .source = meta.source,
+                                                          .completedFrame = true},
+              requiredPresentationStamp);
 
             // Update the last displayed frame ID for ordering
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
@@ -4422,7 +4431,13 @@ namespace gladius::ui
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
-        completeCoordinatorPreviewTask(meta);
+        auto presentedMeta = meta;
+        if (acceptance.presentAsRequiredStamp)
+        {
+            presentedMeta.coordinatorStamp = requiredPresentationStamp;
+            presentedMeta.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+        }
+        completeCoordinatorPreviewTask(presentedMeta);
         if (auto logger = m_core->getSharedLogger()) {
             logger->logInfo("[Preview] Task Complete triggered!");
         }
