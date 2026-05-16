@@ -14,6 +14,16 @@ namespace gladius::ui::async_rendering
         FullQuality
     };
 
+    enum class FramePresentationSource
+    {
+        Unknown,
+        ExactRealtime,
+        LowResolutionPreview,
+        StreamingPreview,
+        ProgressiveHighQuality,
+        HeldFrame
+    };
+
     [[nodiscard]] constexpr int framePresentationQualityRank(
       FramePresentationQuality quality) noexcept
     {
@@ -36,5 +46,16 @@ namespace gladius::ui::async_rendering
         uint64_t frameId{0};
         RenderStamp stamp{};
         FramePresentationQuality quality{FramePresentationQuality::Unknown};
+        FramePresentationSource source{FramePresentationSource::Unknown};
+        bool completedFrame{false};
+    };
+
+    struct PresentedFrame
+    {
+        uint64_t frameId{0};
+        RenderStamp stamp{};
+        FramePresentationQuality quality{FramePresentationQuality::Unknown};
+        FramePresentationSource source{FramePresentationSource::Unknown};
+        bool completedFrame{false};
     };
 }

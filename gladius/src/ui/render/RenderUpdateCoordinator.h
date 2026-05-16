@@ -154,7 +154,12 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] RenderUpdateDecision notifyCameraChanged()
         {
             RenderUpdateDecision decision{};
+            auto const previousState = m_interactionState;
             ++m_latestStamp.viewEpoch;
+            if (previousState != RenderInteractionState::CameraInteracting)
+            {
+                releaseStaleInteractiveInFlight();
+            }
             m_interactionState = RenderInteractionState::CameraInteracting;
             scheduleInteractiveFrame(decision);
             return decision;
@@ -175,6 +180,7 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] RenderUpdateDecision notifyParameterChanged(bool interactionActive)
         {
             RenderUpdateDecision decision{};
+            auto const previousState = m_interactionState;
             ++m_latestStamp.parameterEpoch;
             resetRealtimeLearning();
             m_parameterUploadStamp.reset();
@@ -182,6 +188,10 @@ namespace gladius::ui::async_rendering
             m_sdfStamp.reset();
             m_interactionState = interactionActive ? RenderInteractionState::ParameterInteracting
                                                    : RenderInteractionState::Static;
+            if (interactionActive && previousState != RenderInteractionState::ParameterInteracting)
+            {
+                releaseStaleInteractiveInFlight();
+            }
             startTask(decision, RenderTaskType::ParameterUpload, m_latestStamp);
             if (interactionActive)
             {
@@ -342,9 +352,28 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] bool hasInteractiveFrameInFlight() const noexcept
         {
-            return hasAnyInFlight(RenderTaskType::RealtimeFullFrame) ||
-                   hasAnyInFlight(RenderTaskType::LowResolutionPreview) ||
-                   hasAnyInFlight(RenderTaskType::StreamingPreview);
+            return hasEquivalentInFlight(RenderTaskType::RealtimeFullFrame, m_latestStamp) ||
+                   hasEquivalentInFlight(RenderTaskType::LowResolutionPreview, m_latestStamp) ||
+                   hasEquivalentInFlight(RenderTaskType::StreamingPreview, m_latestStamp);
+        }
+
+        void releaseStaleInteractiveInFlight()
+        {
+            auto const oldEnd = m_inFlight.end();
+            auto const newEnd = std::remove_if(m_inFlight.begin(),
+                                               m_inFlight.end(),
+                                               [this](InFlightTask const & task)
+                                               {
+                                                   bool const interactiveFrameTask =
+                                                     task.type == RenderTaskType::RealtimeFullFrame ||
+                                                     task.type == RenderTaskType::LowResolutionPreview ||
+                                                     task.type == RenderTaskType::StreamingPreview;
+                                                   return interactiveFrameTask &&
+                                                          !matches(task.stamp,
+                                                                   m_latestStamp,
+                                                                   RenderStampMask::displayFrame());
+                                               });
+            m_inFlight.erase(newEnd, oldEnd);
         }
 
         [[nodiscard]] bool hasEquivalentInFlight(RenderTaskType type, RenderStamp const & stamp) const noexcept
@@ -440,6 +469,13 @@ namespace gladius::ui::async_rendering
                                          .autoInteractiveExactRealtimeAdmitted = autoModeAdmitsRealtime(),
                                          .preferSimplerPreview = m_autoGestureLockedSimpler,
                                          .exactRealtimeAllowed = exactRealtimeAllowed});
+
+            if (mode == RealtimeRaymarchMode::Auto &&
+                m_interactionState != RenderInteractionState::Static &&
+                path == InteractiveRenderPath::LowResolutionPreview)
+            {
+                m_autoGestureLockedSimpler = true;
+            }
 
             switch (path)
             {
