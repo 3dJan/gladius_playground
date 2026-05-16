@@ -24,6 +24,7 @@
 #include "OverflowMenuBar.h"
 #include "compute/ComputeCore.h"
 #include "imgui.h"
+#include "render/DisplayFrameSelector.h"
 #include "render/RenderModeUpdatePolicy.h"
 #include "render/PreviewBackendPolicy.h"
 #include <nodes/Model.h>
@@ -743,50 +744,50 @@ namespace gladius::ui
             auto const currentEpoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
             auto const currentViewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
 
-                        // For HQ frames (front buffer from progressive rendering) we require an epoch match
-                        // to avoid showing stale HQ results from an old parameter set.
-                        // For low-res preview during rapid parameter edits, we fall back to m_resultImage
-                        // which is updated synchronously and always shows *something* recent.
-                        // Exact realtime interaction (camera or parameter) must not fall back to the
-                        // preview texture just because the sync path does not mark m_asyncRealtimeJobInFlight.
-                        bool const exactRealtimeInteraction =
-                                m_renderUpdateCoordinator.isRealtimeSchedulingActive() &&
-                                m_renderUpdateCoordinator.interactionState() !=
-                                    async_rendering::RenderInteractionState::Static;
-                        bool const exactRealtimeJobInFlight =
+            // For HQ frames (front buffer from progressive rendering) we require an epoch match
+            // to avoid showing stale HQ results from an old parameter set. Exact realtime
+            // interaction may keep a current-epoch front buffer visible while the view epoch is
+            // catching up, and all other cases fall back to m_resultImage to avoid blanking.
+            bool const exactRealtimeInteraction =
+                            m_renderUpdateCoordinator.isRealtimeSchedulingActive() &&
+                            m_renderUpdateCoordinator.interactionState() !=
+                                async_rendering::RenderInteractionState::Static;
+            bool const exactRealtimeJobInFlight =
                             m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
-            bool const epochMatches = frontBuf && frontBuf->epoch == currentEpoch;
-            bool const viewMatches = frontBuf && frontBuf->viewEpoch == currentViewEpoch;
-                        bool const allowRealtimeFront =
-                            (exactRealtimeInteraction || exactRealtimeJobInFlight) && epochMatches;
-            bool const frontBlockedByRendering = m_renderWindowState.isRendering &&
-                                                 !allowRealtimeFront;
-            bool const useFrontBuffer = frontBuf && frontBuf->image && epochMatches &&
-                                        (viewMatches || allowRealtimeFront) &&
-                                        !frontBlockedByRendering &&
-                                        !m_suppressHQDisplay.load(std::memory_order_acquire);
-                        bool const progressiveBufferCurrent =
-                            m_asyncProgressiveEpoch.load(std::memory_order_acquire) == currentEpoch &&
-                            m_asyncProgressiveViewEpoch.load(std::memory_order_acquire) == currentViewEpoch;
-                        bool const useProgressiveBuffer =
-                            m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image &&
-                            progressiveBufferCurrent && !m_renderWindowState.isMoving &&
-                            !m_suppressHQDisplay.load(std::memory_order_acquire);
+            auto const resultImage = m_core->getResultImage();
+                        auto const frontState = async_rendering::DisplayFrameBufferState{
+                            .hasImage = frontBuf && frontBuf->image != nullptr,
+                            .epoch = frontBuf ? frontBuf->epoch.load(std::memory_order_acquire) : 0u,
+                            .viewEpoch = frontBuf ? frontBuf->viewEpoch.load(std::memory_order_acquire) : 0u};
+                        auto const progressiveState = async_rendering::DisplayFrameBufferState{
+                            .hasImage = m_asyncProgressiveBuffer &&
+                                                    m_asyncProgressiveBuffer->image != nullptr,
+                            .epoch = m_asyncProgressiveEpoch.load(std::memory_order_acquire),
+                            .viewEpoch = m_asyncProgressiveViewEpoch.load(std::memory_order_acquire)};
+            auto const displaySource = async_rendering::selectDisplayFrameSource(
+                            async_rendering::DisplayFrameSelectionInput{
+                                .frontBuffer = frontState,
+                                .progressiveBuffer = progressiveState,
+                                .currentEpoch = currentEpoch,
+                                .currentViewEpoch = currentViewEpoch,
+                                .exactRealtimeInteraction = exactRealtimeInteraction,
+                                .exactRealtimeJobInFlight = exactRealtimeJobInFlight,
+                                .isRendering = m_renderWindowState.isRendering,
+                                .isMoving = m_renderWindowState.isMoving,
+                                .suppressHqDisplay = m_suppressHQDisplay.load(std::memory_order_acquire),
+                                .resultImageAvailable = resultImage != nullptr});
 
-            if (useFrontBuffer)
+            if (displaySource == async_rendering::DisplayFrameSource::FrontBuffer && frontBuf)
             {
                 displayImage = frontBuf->image;
             }
-            else if (useProgressiveBuffer)
+            else if (displaySource == async_rendering::DisplayFrameSource::ProgressiveBuffer)
             {
                 displayImage = m_asyncProgressiveBuffer->image;
             }
-            else
+            else if (displaySource == async_rendering::DisplayFrameSource::ResultImage)
             {
-                // Fallback to result image for progressive rendering or when no valid front buffer.
-                // Preview result suppression keeps realtime camera motion from writing stale
-                // surrogate frames here; returning nullptr would blank the viewport.
-                displayImage = m_core->getResultImage();
+                displayImage = resultImage;
             }
         }
         else
