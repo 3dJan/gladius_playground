@@ -5,6 +5,13 @@
 
 namespace gladius::ui::async_rendering
 {
+    enum class RenderInteractionState
+    {
+        Static,
+        CameraInteracting,
+        ParameterInteracting
+    };
+
     /**
      * @brief Identifies the independently changing inputs that make a rendered artifact fresh.
      *

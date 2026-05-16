@@ -1,7 +1,7 @@
 #pragma once
 
 #include "RealtimeRaymarchController.h"
-#include "RenderUpdateCoordinator.h"
+#include "RenderUpdateTypes.h"
 
 namespace gladius::ui::async_rendering
 {

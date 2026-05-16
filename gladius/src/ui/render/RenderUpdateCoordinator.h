@@ -1,5 +1,6 @@
 #pragma once
 
+#include "InteractiveRenderPathPolicy.h"
 #include "RealtimeRaymarchController.h"
 #include "RenderUpdateTypes.h"
 
@@ -11,13 +12,6 @@
 
 namespace gladius::ui::async_rendering
 {
-    enum class RenderInteractionState
-    {
-        Static,
-        CameraInteracting,
-        ParameterInteracting
-    };
-
     enum class RenderCommandType
     {
         StartTask,
@@ -425,77 +419,41 @@ namespace gladius::ui::async_rendering
 
         void scheduleInteractiveFrame(RenderUpdateDecision & decision)
         {
-            if (hasInteractiveFrameInFlight())
+            auto const mode = m_realtime.config().mode;
+
+            bool exactRealtimeAllowed = false;
+            if (mode == RealtimeRaymarchMode::Force)
             {
-                keepCurrentFrame(decision);
-                return;
+                exactRealtimeAllowed =
+                  m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards);
+            }
+            else if (mode == RealtimeRaymarchMode::Auto)
+            {
+                exactRealtimeAllowed = m_realtime.guardsAllowAttempt(m_realtimeGuards);
             }
 
-            if (m_interactionState == RenderInteractionState::ParameterInteracting)
-            {
-                if (m_realtime.config().mode == RealtimeRaymarchMode::Force)
-                {
-                    if (m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards))
-                    {
-                        startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
-                        return;
-                    }
-                    keepCurrentFrame(decision);
-                    return;
-                }
-                // Auto mode: once the learning controller confirms the GPU is fast enough,
-                // use the same realtime path as Force so parameter drags get direct feedback.
-                if (m_realtime.config().mode == RealtimeRaymarchMode::Auto &&
-                    m_realtime.isRealtimeActive())
-                {
-                    if (m_realtime.guardsAllowAttempt(m_realtimeGuards))
-                    {
-                        startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
-                        return;
-                    }
-                    keepCurrentFrame(decision);
-                    return;
-                }
-                startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
-                return;
-            }
+            auto const path = chooseInteractiveRenderPath(
+              InteractiveRenderPathInput{.mode = mode,
+                                         .interactionState = m_interactionState,
+                                         .interactiveFrameAlreadyInFlight = hasInteractiveFrameInFlight(),
+                                         .autoParameterExactRealtimeActive = m_realtime.isRealtimeActive(),
+                                         .autoInteractiveExactRealtimeAdmitted = autoModeAdmitsRealtime(),
+                                         .preferSimplerPreview = m_autoGestureLockedSimpler,
+                                         .exactRealtimeAllowed = exactRealtimeAllowed});
 
-            // Auto mode: gate on measured static HQ time with per-gesture hysteresis
-            if (m_realtime.config().mode == RealtimeRaymarchMode::Auto)
+            switch (path)
             {
-                if (!m_autoGestureLockedSimpler && !autoModeAdmitsRealtime())
-                {
-                    m_autoGestureLockedSimpler = true;
-                }
-                if (m_autoGestureLockedSimpler)
-                {
-                    startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
-                    return;
-                }
-                if (m_realtime.guardsAllowAttempt(m_realtimeGuards))
-                {
-                    startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
-                    return;
-                }
-                // Guards transiently blocked — hold the current frame (FR-026: no quality regression)
-                keepCurrentFrame(decision);
-                return;
-            }
-
-            // Off mode: always preview
-            if (m_realtime.config().mode == RealtimeRaymarchMode::Off)
-            {
-                startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
-                return;
-            }
-
-            // Force mode: prefer exact realtime; hold current frame if guards temporarily block (FR-014)
-            if (m_realtime.canAttemptRealtime(m_width, m_height, m_realtimeGuards))
-            {
+            case InteractiveRenderPath::ExactRealtime:
                 startTask(decision, RenderTaskType::RealtimeFullFrame, m_latestStamp);
                 return;
+            case InteractiveRenderPath::LowResolutionPreview:
+                startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
+                return;
+            case InteractiveRenderPath::KeepCurrentFrame:
+            default:
+                keepCurrentFrame(decision);
+                return;
             }
-            keepCurrentFrame(decision);
         }
 
         void scheduleStaticCatchUp(RenderUpdateDecision & decision)
