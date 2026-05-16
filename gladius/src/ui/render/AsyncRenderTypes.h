@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FramePresentationTypes.h"
 #include "RenderUpdateTypes.h"
 
 #include <atomic>
@@ -126,6 +127,7 @@ namespace gladius::ui::async_rendering
         uint64_t latencyNs{0};       ///< Time from job enqueue to completion (nanoseconds)
         bool cancelled{false};       ///< True if job was cancelled due to epoch change
         bool sdfWasValid{false};     ///< True if SDF was available during rendering
+        FramePresentationQuality quality{FramePresentationQuality::Preview};
         uint64_t coordinatorRequestId{0};
         RenderStamp coordinatorStamp{};
     };

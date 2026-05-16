@@ -199,7 +199,7 @@ namespace gladius::ui
                                                 RenderWindowState & state);
         [[nodiscard]] bool scheduleCoordinatorTask(async_rendering::RenderTaskRequest const & task,
                                                    RenderWindowState & state);
-        [[nodiscard]] bool isRealtimeRaymarchCameraInteraction() const noexcept;
+        [[nodiscard]] bool isRealtimeRaymarchInteractionActive() const noexcept;
         [[nodiscard]] bool scheduleAsyncSdfPrecomputation(
           async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
         void completeCoordinatorTask(async_rendering::RenderTaskRequest const & request,

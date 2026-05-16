@@ -61,6 +61,21 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(controller.buffer(*bufferId)->frameId, 17u);
     }
 
+        TEST(FramePresentationController, PublishFrame_WithExplicitQuality_StoresMetadata)
+        {
+                FramePresentationController controller{3};
+                auto const stamp = makeStamp(1, 2, 3, 4, 5);
+                auto const bufferId = controller.acquireWriteBuffer(stamp);
+                ASSERT_TRUE(bufferId.has_value());
+
+                EXPECT_TRUE(controller.publishFrame(
+                    *bufferId, 17, stamp, FramePresentationQuality::ProgressivePartial));
+
+                ASSERT_NE(controller.buffer(*bufferId), nullptr);
+                EXPECT_EQ(controller.buffer(*bufferId)->quality,
+                                    FramePresentationQuality::ProgressivePartial);
+        }
+
     TEST(FramePresentationController, AcquireWriteBuffer_WithNoIdleBuffer_ReturnsNullopt)
     {
         FramePresentationController controller{2};
@@ -157,6 +172,128 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(selected.has_value());
         EXPECT_EQ(controller.buffer(*bufferId)->state, FrameState::Ready);
     }
+
+        TEST(FramePresentationController, SelectBestReadyForPresentation_WithCurrentFullQuality_SkipsPreviewRegression)
+        {
+                FramePresentationController controller{3};
+                auto const current = makeStamp(1, 2, 3, 4, 5);
+
+                auto const fullQuality = controller.acquireWriteBuffer(current);
+                ASSERT_TRUE(fullQuality.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *fullQuality, 10, current, FramePresentationQuality::FullQuality));
+                auto const promoted =
+                    controller.selectNewestReady(current, RenderStampMask::displayFrame());
+                ASSERT_TRUE(promoted.has_value());
+                ASSERT_TRUE(controller.finalizeFrontPromotion(*promoted));
+
+                auto const preview = controller.acquireWriteBuffer(current);
+                ASSERT_TRUE(preview.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *preview, 11, current, FramePresentationQuality::Preview));
+
+                auto const selected =
+                    controller.selectBestReadyForPresentation(current, RenderStampMask::displayFrame());
+
+                EXPECT_FALSE(selected.has_value());
+                EXPECT_EQ(controller.buffer(*preview)->state, FrameState::Ready);
+        }
+
+        TEST(FramePresentationController, SelectBestReadyForPresentation_WithStaleFront_AllowsFreshPreview)
+        {
+                FramePresentationController controller{3};
+                auto const oldStamp = makeStamp(1, 2, 2, 4, 5);
+                auto const latest = makeStamp(1, 2, 3, 4, 5);
+
+                auto const oldFullQuality = controller.acquireWriteBuffer(oldStamp);
+                ASSERT_TRUE(oldFullQuality.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *oldFullQuality, 10, oldStamp, FramePresentationQuality::FullQuality));
+                auto const promoted =
+                    controller.selectNewestReady(oldStamp, RenderStampMask::displayFrame());
+                ASSERT_TRUE(promoted.has_value());
+                ASSERT_TRUE(controller.finalizeFrontPromotion(*promoted));
+
+                auto const preview = controller.acquireWriteBuffer(latest);
+                ASSERT_TRUE(preview.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *preview, 11, latest, FramePresentationQuality::Preview));
+
+                auto const selected =
+                    controller.selectBestReadyForPresentation(latest, RenderStampMask::displayFrame());
+
+                ASSERT_TRUE(selected.has_value());
+                EXPECT_EQ(*selected, *preview);
+                EXPECT_EQ(controller.buffer(*selected)->state, FrameState::Resampling);
+        }
+
+        TEST(FramePresentationController, SelectBestReadyForPresentation_PrefersHigherQualityOverNewerPreview)
+        {
+                FramePresentationController controller{4};
+                auto const latest = makeStamp(1, 2, 3, 4, 5);
+
+                auto const fullQuality = controller.acquireWriteBuffer(latest);
+                auto const preview = controller.acquireWriteBuffer(latest);
+                ASSERT_TRUE(fullQuality.has_value());
+                ASSERT_TRUE(preview.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *fullQuality, 10, latest, FramePresentationQuality::FullQuality));
+                ASSERT_TRUE(controller.publishFrame(
+                    *preview, 11, latest, FramePresentationQuality::Preview));
+
+                auto const selected = controller.selectBestReadyForPresentation(
+                    latest, RenderStampMask::displayFrame());
+
+                ASSERT_TRUE(selected.has_value());
+                EXPECT_EQ(*selected, *fullQuality);
+                EXPECT_EQ(controller.buffer(*selected)->state, FrameState::Resampling);
+                EXPECT_EQ(controller.buffer(*preview)->state, FrameState::Ready);
+        }
+
+        TEST(FramePresentationController, CanPresentCandidate_WithCurrentFullQuality_RejectsPreview)
+        {
+                FramePresentationController controller{3};
+                auto const current = makeStamp(1, 2, 3, 4, 5);
+
+                auto const fullQuality = controller.acquireWriteBuffer(current);
+                ASSERT_TRUE(fullQuality.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *fullQuality, 10, current, FramePresentationQuality::FullQuality));
+                auto const promoted = controller.selectBestReadyForPresentation(
+                    current, RenderStampMask::displayFrame());
+                ASSERT_TRUE(promoted.has_value());
+                ASSERT_TRUE(controller.finalizeFrontPromotion(*promoted));
+
+                EXPECT_FALSE(controller.canPresentCandidate(
+                    FramePresentationCandidate{.frameId = 11,
+                                               .stamp = current,
+                                               .quality = FramePresentationQuality::Preview},
+                    current,
+                    RenderStampMask::displayFrame()));
+        }
+
+        TEST(FramePresentationController, CanPresentCandidate_WithStaleFront_AllowsFreshPreview)
+        {
+                FramePresentationController controller{3};
+                auto const oldStamp = makeStamp(1, 2, 2, 4, 5);
+                auto const latest = makeStamp(1, 2, 3, 4, 5);
+
+                auto const oldFullQuality = controller.acquireWriteBuffer(oldStamp);
+                ASSERT_TRUE(oldFullQuality.has_value());
+                ASSERT_TRUE(controller.publishFrame(
+                    *oldFullQuality, 10, oldStamp, FramePresentationQuality::FullQuality));
+                auto const promoted = controller.selectBestReadyForPresentation(
+                    oldStamp, RenderStampMask::displayFrame());
+                ASSERT_TRUE(promoted.has_value());
+                ASSERT_TRUE(controller.finalizeFrontPromotion(*promoted));
+
+                EXPECT_TRUE(controller.canPresentCandidate(
+                    FramePresentationCandidate{.frameId = 11,
+                                               .stamp = latest,
+                                               .quality = FramePresentationQuality::Preview},
+                    latest,
+                    RenderStampMask::displayFrame()));
+        }
 
     TEST(FramePresentationController, FinalizeFrontPromotion_WithSelectedBuffer_DemotesPreviousFront)
     {

@@ -587,7 +587,23 @@ namespace gladius::ui::async_rendering
     void AsyncRenderController::publishFrame(FrameBuffer * buffer,
                                              uint64_t frameId,
                                              uint64_t epoch,
-                                             uint64_t viewEpoch) noexcept
+                                             uint64_t viewEpoch,
+                                             FramePresentationQuality quality) noexcept
+    {
+        publishFrame(buffer,
+                     frameId,
+                     epoch,
+                     viewEpoch,
+                     RenderStamp{.sceneEpoch = epoch, .viewEpoch = viewEpoch},
+                     quality);
+    }
+
+    void AsyncRenderController::publishFrame(FrameBuffer * buffer,
+                                             uint64_t frameId,
+                                             uint64_t epoch,
+                                             uint64_t viewEpoch,
+                                             RenderStamp const & stamp,
+                                             FramePresentationQuality quality) noexcept
     {
         ProfileFunction if (!buffer)
         {
@@ -615,16 +631,66 @@ namespace gladius::ui::async_rendering
             if (auto const index = frameBufferIndex(buffer); index.has_value())
             {
                 [[maybe_unused]] bool const mirrored = m_framePresentation.publishFrame(
-                  *index, frameId, RenderStamp{.sceneEpoch = epoch, .viewEpoch = viewEpoch});
+                  *index, frameId, stamp, quality);
             }
         }
     }
 
+    std::optional<PresentationBuffer>
+    AsyncRenderController::mirroredPresentationBuffer(FrameBuffer const * buffer) const noexcept
+    {
+        if (buffer == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        auto const index = frameBufferIndex(buffer);
+        if (!index.has_value())
+        {
+            return std::nullopt;
+        }
+
+        auto const * mirrored = m_framePresentation.buffer(*index);
+        if (mirrored == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        return *mirrored;
+    }
+
+    std::optional<PresentationBuffer>
+    AsyncRenderController::mirroredFrontPresentationBuffer() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        auto const frontId = m_framePresentation.frontBufferId();
+        if (!frontId.has_value())
+        {
+            return std::nullopt;
+        }
+
+        auto const * mirrored = m_framePresentation.buffer(*frontId);
+        if (mirrored == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        return *mirrored;
+    }
+
     FrameBuffer * AsyncRenderController::promoteReadyToFront() noexcept
+    {
+        return promoteReadyToFront(RenderStamp{}, RenderStampMask::none());
+    }
+
+    FrameBuffer * AsyncRenderController::promoteReadyToFront(RenderStamp const & required,
+                                                            RenderStampMask mask) noexcept
     {
         ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        auto const newestReadyIndex = m_framePresentation.selectNewestReady();
+        auto const newestReadyIndex =
+          m_framePresentation.selectBestReadyForPresentation(required, mask);
         if (!newestReadyIndex.has_value() || *newestReadyIndex >= m_frameBuffers.size())
         {
             return nullptr; // No Ready buffer available
@@ -646,6 +712,18 @@ namespace gladius::ui::async_rendering
         // After resampling completes, we'll transition Resampling → Front
         // and old Front → Idle in a separate call
         return newestReady;
+    }
+
+    bool AsyncRenderController::canPresentFrame(RenderStamp const & candidateStamp,
+                                                FramePresentationQuality candidateQuality,
+                                                RenderStamp const & required,
+                                                RenderStampMask mask) const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        return m_framePresentation.canPresentCandidate(
+          FramePresentationCandidate{.stamp = candidateStamp, .quality = candidateQuality},
+          required,
+          mask);
     }
 
     void AsyncRenderController::discardReadyFrame(uint64_t frameId,

@@ -25,6 +25,7 @@
 #include "compute/ComputeCore.h"
 #include "imgui.h"
 #include "render/RenderModeUpdatePolicy.h"
+#include "render/PreviewBackendPolicy.h"
 #include <nodes/Model.h>
 
 namespace gladius::ui
@@ -122,6 +123,57 @@ namespace gladius::ui
         constexpr float kAdaptivePreviewMinDimension = 1.0f;
         constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
         constexpr float kAdaptivePreviewResizeThresholdPercent = 5.0f;
+
+        struct AsyncPreviewLaunch
+        {
+            cl::Event event{};
+            bool producedDistanceInit{false};
+        };
+
+        [[nodiscard]] AsyncPreviewLaunch launchAsyncPreviewRender(
+          ComputeCore & core,
+          cl::CommandQueue const & commandQueue,
+          ImageRGBA & lowResImage)
+        {
+            auto const backend = async_rendering::choosePreviewBackend(
+              async_rendering::PreviewBackendInput{.rendererReady = core.isRendererReady(),
+                                                   .lowResTargetAvailable = true,
+                                                   .precomputedSdfValid = core.isSdfValid(),
+                                                   .allowDynamicFullModelFallback = true});
+
+            AsyncPreviewLaunch launch{};
+            switch (backend)
+            {
+            case async_rendering::PreviewBackend::PrecomputedSdfWithDistanceInit:
+                launch.event =
+                  core.renderLowResPreviewWithDistanceOutputAsync(commandQueue, lowResImage);
+                launch.producedDistanceInit = launch.event();
+                return launch;
+
+            case async_rendering::PreviewBackend::DynamicFullModel:
+            {
+                auto settings = core.getResourceContext()->getRenderingSettings();
+                settings.approximation = AM_FULL_MODEL;
+                settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+                bool const advanced = core.renderSceneComputeOnlyWithSettings(
+                  commandQueue,
+                  0,
+                  static_cast<size_t>(lowResImage.getHeight()),
+                  lowResImage,
+                  settings,
+                  &launch.event);
+                if (!advanced)
+                {
+                    launch.event = cl::Event{};
+                }
+                return launch;
+            }
+
+            case async_rendering::PreviewBackend::None:
+            default:
+                return launch;
+            }
+        }
     }
 
     void RenderWindow::initialize(ComputeCore * core,
@@ -489,7 +541,7 @@ namespace gladius::ui
         }
 
         case async_rendering::RenderTaskType::LowResolutionPreview:
-            if (isRealtimeRaymarchCameraInteraction())
+            if (isRealtimeRaymarchInteractionActive())
             {
                 completeCoordinatorTask(task, async_rendering::RenderTaskStatus::Cancelled);
                 return false;
@@ -533,11 +585,12 @@ namespace gladius::ui
         return false;
     }
 
-    bool RenderWindow::isRealtimeRaymarchCameraInteraction() const noexcept
+    bool RenderWindow::isRealtimeRaymarchInteractionActive() const noexcept
     {
-        return m_renderUpdateCoordinator.interactionState() ==
-               async_rendering::RenderInteractionState::CameraInteracting &&
-               m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
+        return m_renderUpdateCoordinator.interactionState() !=
+                 async_rendering::RenderInteractionState::Static &&
+               (m_renderUpdateCoordinator.isRealtimeSchedulingActive() ||
+                m_asyncRealtimeJobInFlight.load(std::memory_order_acquire));
     }
 
     bool RenderWindow::isForceRealtimeMode() const noexcept
@@ -829,31 +882,31 @@ namespace gladius::ui
                                 &m_enableHQRendering);
                           });
 
-            overflow.item("Rendering Options",
-                          [&]
-                          {
-                              int renderingFlags =
-                                m_core->getResourceContext()->getRenderingSettings().flags;
+                        overflow.item("Rendering Options",
+                                                    [&]
+                                                    {
+                                                            int renderingFlags =
+                                                                m_core->getResourceContext()->getRenderingSettings().flags;
 
-                              bool flagsChanged = false;
-                              if (ImGui::BeginMenu("..."))
-                              {
-                                  flagsChanged |= ImGui::CheckboxFlags(
-                                    "Show Build Plate", &renderingFlags, RF_SHOW_BUILDPLATE);
-                                  flagsChanged |= ImGui::CheckboxFlags(
-                                    "Cut Off Object", &renderingFlags, RF_CUT_OFF_OBJECT);
-                                  flagsChanged |= ImGui::CheckboxFlags(
-                                    "Show Field", &renderingFlags, RF_SHOW_FIELD);
-                                  flagsChanged |= ImGui::CheckboxFlags(
-                                    "Show Stack", &renderingFlags, RF_SHOW_STACK);
-                                  flagsChanged |= ImGui::CheckboxFlags(
-                                    "Show Coordinate System",
-                                    &renderingFlags,
-                                    RF_SHOW_COORDINATE_SYSTEM);
+                                                            bool flagsChanged = false;
+                                                            if (ImGui::BeginMenu("..."))
+                                                            {
+                                                                    flagsChanged |= ImGui::CheckboxFlags(
+                                                                        "Show Build Plate", &renderingFlags, RF_SHOW_BUILDPLATE);
+                                                                    flagsChanged |= ImGui::CheckboxFlags(
+                                                                        "Cut Off Object", &renderingFlags, RF_CUT_OFF_OBJECT);
+                                                                    flagsChanged |= ImGui::CheckboxFlags(
+                                                                        "Show Field", &renderingFlags, RF_SHOW_FIELD);
+                                                                    flagsChanged |= ImGui::CheckboxFlags(
+                                                                        "Show Stack", &renderingFlags, RF_SHOW_STACK);
+                                                                    flagsChanged |= ImGui::CheckboxFlags(
+                                                                        "Show Coordinate System",
+                                                                        &renderingFlags,
+                                                                        RF_SHOW_COORDINATE_SYSTEM);
 
-                                  ImGui::Separator();
-                                  float quality =
-                                    m_core->getResourceContext()->getRenderingSettings().quality;
+                                                                    ImGui::Separator();
+                                                                    float quality =
+                                                                        m_core->getResourceContext()->getRenderingSettings().quality;
                                   ImGui::SetNextItemWidth(150.f * m_uiScale);
                                   bool qualityChanged =
                                     ImGui::SliderFloat("Quality", &quality, 0.1f, 2.0f);
@@ -2624,7 +2677,11 @@ namespace gladius::ui
                 else
                 {
                     ZoneScopedN("PromoteReadyToFront");
-                    auto * newFront = m_asyncController->promoteReadyToFront();
+                                        auto const requiredPresentationStamp =
+                                            isExactRealtimeJob ? result.coordinatorStamp
+                                                                                 : m_renderUpdateCoordinator.latestStamp();
+                                        auto * newFront = m_asyncController->promoteReadyToFront(
+                                            requiredPresentationStamp, async_rendering::RenderStampMask::displayFrame());
                     if (newFront && newFront->image)
                     {
                         // Bind the new frame to ensure GL texture is updated
@@ -2763,6 +2820,7 @@ namespace gladius::ui
           std::max<size_t>(1, std::min(state.renderingStepSize, height - job.startLine));
         job.precomputeSdf = false;
         job.enableHighQuality = m_enableHQRendering;
+        job.coordinatorStamp = m_renderUpdateCoordinator.latestStamp();
         if (coordinatorTask != nullptr)
         {
             job.coordinatorRequestId = coordinatorTask->requestId;
@@ -2900,9 +2958,15 @@ namespace gladius::ui
 
         // Publish the completed buffer, then promote immediately to front for display
         uint64_t const viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
-        m_asyncController->publishFrame(writeBuffer, task.requestId, epoch, viewEpoch);
+        m_asyncController->publishFrame(writeBuffer,
+                                                                                task.requestId,
+                                                                                epoch,
+                                                                                viewEpoch,
+                                                                                task.stamp,
+                                                                                async_rendering::FramePresentationQuality::FullQuality);
 
-        auto * newFront = m_asyncController->promoteReadyToFront();
+                auto * newFront = m_asyncController->promoteReadyToFront(
+                    task.stamp, async_rendering::RenderStampMask::displayFrame());
         if (newFront && newFront->image)
         {
             newFront->image->invalidateContent();
@@ -2992,6 +3056,7 @@ namespace gladius::ui
         job.stepSize = height;
         job.precomputeSdf = false;
         job.enableHighQuality = true;
+        job.coordinatorStamp = m_renderUpdateCoordinator.latestStamp();
         if (coordinatorTask != nullptr)
         {
             job.coordinatorRequestId = coordinatorTask->requestId;
@@ -3195,7 +3260,12 @@ namespace gladius::ui
         else if (result.completedFrame)
         {
                         m_asyncController->publishFrame(
-                            writeBuffer, result.frameId, result.epoch, result.viewEpoch);
+                            writeBuffer,
+                            result.frameId,
+                            result.epoch,
+                            result.viewEpoch,
+                            result.coordinatorStamp,
+                            async_rendering::FramePresentationQuality::FullQuality);
             m_asyncProgressiveBuffer = nullptr;
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                         m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
@@ -4040,35 +4110,10 @@ namespace gladius::ui
                 co_return result;
             }
 
-                        bool producedDistanceInit = false;
-
-                        // Kick off the async render with distance output for HQ initialization (FR-005)
-                        // when the precomputed SDF is available.  Otherwise fall back to a low-res
-                        // full-model render so parameter edits still show immediate feedback.
-                        cl::Event renderEvent =
-                            m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
-                        if (renderEvent())
-                        {
-                                producedDistanceInit = true;
-                        }
-                        else
-                        {
-                                auto settings = m_core->getResourceContext()->getRenderingSettings();
-                                settings.approximation = AM_FULL_MODEL;
-                                settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
-                                renderEvent = cl::Event{};
-                                bool const advanced = m_core->renderSceneComputeOnlyWithSettings(
-                                    commandQueue,
-                                    0,
-                                    static_cast<size_t>(lowResImage->getHeight()),
-                                    *lowResImage,
-                                    settings,
-                                    &renderEvent);
-                                if (!advanced)
-                                {
-                                        renderEvent = cl::Event{};
-                                }
-                        }
+                        auto const launch =
+                            launchAsyncPreviewRender(*m_core, commandQueue, *lowResImage);
+                        bool const producedDistanceInit = launch.producedDistanceInit;
+                        cl::Event renderEvent = launch.event;
 
             if (!renderEvent())
             {
@@ -4162,6 +4207,7 @@ namespace gladius::ui
         previewMeta.latencyNs = result.computeDurationNs;
         previewMeta.cancelled = false;
         previewMeta.sdfWasValid = m_core->isSdfValid();
+        previewMeta.quality = async_rendering::FramePresentationQuality::Preview;
         previewMeta.coordinatorRequestId = job.coordinatorRequestId;
         previewMeta.coordinatorStamp = job.coordinatorStamp;
 
@@ -4213,8 +4259,13 @@ namespace gladius::ui
         }
 
         // FR-026: Do not replace a higher-quality frame with a lower-quality preview.
-        // If a HQ/realtime frame for the current view is already displayed, suppress the preview.
-        if (m_renderUpdateCoordinator.isHighQualityFrameCurrent())
+        // Preview frames are resampled directly into m_resultImage rather than promoted
+        // through the HQ triple buffer, so ask the shared presentation policy whether
+        // this external candidate may replace what is currently shown.
+        if (!m_asyncController->canPresentFrame(meta.coordinatorStamp,
+                                                meta.quality,
+                                                meta.coordinatorStamp,
+                                                async_rendering::RenderStampMask::displayFrame()))
         {
             ZoneText("PreviewSkippedForQualityRegression", 35);
             m_streamingFrameConsumed.store(true, std::memory_order_release);
@@ -4604,35 +4655,10 @@ namespace gladius::ui
                 (void) m_core->tryToupdateParameter(*assembly);
             }
 
-                        bool producedDistanceInit = false;
-
-                        // Render low-res preview.  If the precomputed SDF is unavailable because the
-                        // user is actively editing parameters, fall back to a low-resolution full-model
-                        // render so the interaction still produces visible feedback.
-                        cl::Event renderEvent =
-                            m_core->renderLowResPreviewWithDistanceOutputAsync(commandQueue, *lowResImage);
-                        if (renderEvent())
-                        {
-                                producedDistanceInit = true;
-                        }
-                        else
-                        {
-                                auto settings = m_core->getResourceContext()->getRenderingSettings();
-                                settings.approximation = AM_FULL_MODEL;
-                                settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
-                                renderEvent = cl::Event{};
-                                bool const advanced = m_core->renderSceneComputeOnlyWithSettings(
-                                    commandQueue,
-                                    0,
-                                    static_cast<size_t>(lowResImage->getHeight()),
-                                    *lowResImage,
-                                    settings,
-                                    &renderEvent);
-                                if (!advanced)
-                                {
-                                        renderEvent = cl::Event{};
-                                }
-                        }
+                        auto const launch =
+                            launchAsyncPreviewRender(*m_core, commandQueue, *lowResImage);
+                        bool const producedDistanceInit = launch.producedDistanceInit;
+                        cl::Event renderEvent = launch.event;
 
             if (!renderEvent())
             {
@@ -4713,6 +4739,7 @@ namespace gladius::ui
             previewMeta.viewEpoch = job.viewEpoch;
             previewMeta.cancelled = false;
             previewMeta.sdfWasValid = m_core->isSdfValid();
+            previewMeta.quality = async_rendering::FramePresentationQuality::Preview;
             previewMeta.coordinatorRequestId = job.coordinatorRequestId;
             previewMeta.coordinatorStamp = job.coordinatorStamp;
 

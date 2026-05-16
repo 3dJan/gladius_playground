@@ -11,7 +11,8 @@ namespace gladius::ui::async_rendering::tests
         auto * buffer = controller.acquireWriteBuffer(10);
         ASSERT_NE(buffer, nullptr);
 
-        controller.publishFrame(buffer, 2, 10, 3);
+                controller.publishFrame(
+                    buffer, 2, 10, 3, FramePresentationQuality::FullQuality);
         auto * promoted = controller.promoteReadyToFront();
         ASSERT_EQ(promoted, buffer);
 
@@ -20,6 +21,10 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(buffer->state.load(std::memory_order_acquire), FrameState::Front);
         EXPECT_EQ(buffer->epoch.load(std::memory_order_acquire), 10u);
         EXPECT_EQ(buffer->viewEpoch.load(std::memory_order_acquire), 3u);
+
+                auto const mirroredFront = controller.mirroredFrontPresentationBuffer();
+                ASSERT_TRUE(mirroredFront.has_value());
+                EXPECT_EQ(mirroredFront->quality, FramePresentationQuality::FullQuality);
     }
 
     TEST(AsyncRenderControllerPresentation,
@@ -35,7 +40,8 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_NE(buffer, nullptr);
         ASSERT_NE(buffer, initialFront);
 
-        controller.publishFrame(buffer, 2, 10, 3);
+                controller.publishFrame(
+                    buffer, 2, 10, 3, FramePresentationQuality::FullQuality);
         auto * promoted = controller.promoteReadyToFront();
         ASSERT_EQ(promoted, buffer);
         ASSERT_TRUE(controller.finalizeFrontPromotion(promoted));
@@ -58,8 +64,10 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_NE(newer, nullptr);
         ASSERT_NE(older, newer);
 
-        controller.publishFrame(older, 5, 10, 3);
-        controller.publishFrame(newer, 6, 10, 3);
+                controller.publishFrame(
+                    older, 5, 10, 3, FramePresentationQuality::FullQuality);
+                controller.publishFrame(
+                    newer, 6, 10, 3, FramePresentationQuality::FullQuality);
 
         auto * promoted = controller.promoteReadyToFront();
 
@@ -74,7 +82,8 @@ namespace gladius::ui::async_rendering::tests
 
         auto * buffer = controller.acquireWriteBuffer(10);
         ASSERT_NE(buffer, nullptr);
-        controller.publishFrame(buffer, 2, 10, 3);
+                controller.publishFrame(
+                    buffer, 2, 10, 3, FramePresentationQuality::FullQuality);
 
         controller.discardReadyFrame(2, 10, 3);
 
@@ -108,5 +117,71 @@ namespace gladius::ui::async_rendering::tests
 
         auto * reacquired = controller.acquireWriteBuffer(11);
         EXPECT_EQ(reacquired, buffer);
+    }
+
+    TEST(AsyncRenderControllerPresentation, PublishFrame_MirrorsQualityMetadataWhileReady)
+    {
+        AsyncRenderController controller;
+
+        auto * buffer = controller.acquireWriteBuffer(10);
+        ASSERT_NE(buffer, nullptr);
+
+        controller.publishFrame(
+          buffer, 2, 10, 3, FramePresentationQuality::ProgressivePartial);
+
+        auto const mirrored = controller.mirroredPresentationBuffer(buffer);
+        ASSERT_TRUE(mirrored.has_value());
+        EXPECT_EQ(mirrored->state, FrameState::Ready);
+        EXPECT_EQ(mirrored->quality, FramePresentationQuality::ProgressivePartial);
+        EXPECT_EQ(mirrored->frameId, 2u);
+    }
+
+    TEST(AsyncRenderControllerPresentation, PublishFrame_WithFullStamp_MirrorsStampMetadata)
+    {
+        AsyncRenderController controller;
+
+        auto * buffer = controller.acquireWriteBuffer(10);
+        ASSERT_NE(buffer, nullptr);
+
+        RenderStamp const stamp{.sceneEpoch = 1,
+                                .parameterEpoch = 2,
+                                .viewEpoch = 3,
+                                .viewportEpoch = 4,
+                                .qualityEpoch = 5};
+        controller.publishFrame(buffer, 2, 10, 3, stamp, FramePresentationQuality::FullQuality);
+
+        auto const mirrored = controller.mirroredPresentationBuffer(buffer);
+        ASSERT_TRUE(mirrored.has_value());
+        EXPECT_TRUE(matches(mirrored->stamp, stamp, RenderStampMask::displayFrame()));
+        EXPECT_EQ(mirrored->quality, FramePresentationQuality::FullQuality);
+    }
+
+    TEST(AsyncRenderControllerPresentation,
+         PromoteReadyToFront_WithCurrentFullQuality_SkipsPreviewRegression)
+    {
+        AsyncRenderController controller;
+        RenderStamp const stamp{.sceneEpoch = 1,
+                                .parameterEpoch = 2,
+                                .viewEpoch = 3,
+                                .viewportEpoch = 4,
+                                .qualityEpoch = 5};
+
+        auto * fullQuality = controller.acquireWriteBuffer(10);
+        ASSERT_NE(fullQuality, nullptr);
+        controller.publishFrame(fullQuality, 2, 10, 3, stamp, FramePresentationQuality::FullQuality);
+        auto * promoted = controller.promoteReadyToFront(stamp, RenderStampMask::displayFrame());
+        ASSERT_EQ(promoted, fullQuality);
+        ASSERT_TRUE(controller.finalizeFrontPromotion(promoted));
+
+        auto * preview = controller.acquireWriteBuffer(10);
+        ASSERT_NE(preview, nullptr);
+        controller.publishFrame(preview, 3, 10, 3, stamp, FramePresentationQuality::Preview);
+
+        EXPECT_EQ(controller.promoteReadyToFront(stamp, RenderStampMask::displayFrame()), nullptr);
+        EXPECT_EQ(preview->state.load(std::memory_order_acquire), FrameState::Ready);
+        EXPECT_FALSE(controller.canPresentFrame(stamp,
+                                               FramePresentationQuality::Preview,
+                                               stamp,
+                                               RenderStampMask::displayFrame()));
     }
 }

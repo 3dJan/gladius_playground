@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AsyncRenderTypes.h"
+#include "FramePresentationTypes.h"
 #include "RenderUpdateTypes.h"
 
 #include <cstddef>
@@ -19,6 +20,7 @@ namespace gladius::ui::async_rendering
         FrameState state{FrameState::Idle};
         uint64_t frameId{0};
         RenderStamp stamp{};
+        FramePresentationQuality quality{FramePresentationQuality::Unknown};
     };
 
     /**
@@ -81,6 +83,7 @@ namespace gladius::ui::async_rendering
                 candidate.state = FrameState::Writing;
                 candidate.frameId = 0;
                 candidate.stamp = stamp;
+                candidate.quality = FramePresentationQuality::Unknown;
                 return candidate.id;
             }
             return std::nullopt;
@@ -90,6 +93,15 @@ namespace gladius::ui::async_rendering
                                         uint64_t frameId,
                                         RenderStamp const & stamp) noexcept
         {
+            return publishFrame(
+              bufferId, frameId, stamp, FramePresentationQuality::Unknown);
+        }
+
+        [[nodiscard]] bool publishFrame(size_t bufferId,
+                                        uint64_t frameId,
+                                        RenderStamp const & stamp,
+                                        FramePresentationQuality quality) noexcept
+        {
             auto * target = mutableBuffer(bufferId);
             if (target == nullptr || target->state != FrameState::Writing)
             {
@@ -98,6 +110,7 @@ namespace gladius::ui::async_rendering
 
             target->frameId = frameId;
             target->stamp = stamp;
+            target->quality = quality;
             target->state = FrameState::Ready;
             return true;
         }
@@ -116,6 +129,7 @@ namespace gladius::ui::async_rendering
             if (newState == FrameState::Idle)
             {
                 target->frameId = 0;
+                target->quality = FramePresentationQuality::Unknown;
             }
             if (newState == FrameState::Front)
             {
@@ -155,6 +169,71 @@ namespace gladius::ui::async_rendering
             return newest->id;
         }
 
+        [[nodiscard]] std::optional<size_t> selectBestReadyForPresentation(
+          RenderStamp const & required,
+          RenderStampMask const mask) noexcept
+        {
+            PresentationBuffer * best = nullptr;
+            for (auto & candidate : m_buffers)
+            {
+                if (candidate.state != FrameState::Ready ||
+                    !matches(candidate.stamp, required, mask))
+                {
+                    continue;
+                }
+
+                if (!canPresentCandidate(FramePresentationCandidate{.frameId = candidate.frameId,
+                                                                    .stamp = candidate.stamp,
+                                                                    .quality = candidate.quality},
+                                         required,
+                                         mask))
+                {
+                    continue;
+                }
+
+                if (best == nullptr)
+                {
+                    best = &candidate;
+                    continue;
+                }
+
+                auto const candidateRank = framePresentationQualityRank(candidate.quality);
+                auto const bestRank = framePresentationQualityRank(best->quality);
+                if (candidateRank > bestRank ||
+                    (candidateRank == bestRank && candidate.frameId > best->frameId))
+                {
+                    best = &candidate;
+                }
+            }
+
+            if (best == nullptr)
+            {
+                return std::nullopt;
+            }
+
+            best->state = FrameState::Resampling;
+            return best->id;
+        }
+
+        [[nodiscard]] bool canPresentCandidate(FramePresentationCandidate const & candidate,
+                                               RenderStamp const & required,
+                                               RenderStampMask const mask) const noexcept
+        {
+            if (!matches(candidate.stamp, required, mask))
+            {
+                return false;
+            }
+
+            auto const * currentFront = currentFrontMatching(required, mask);
+            if (currentFront == nullptr)
+            {
+                return true;
+            }
+
+            return framePresentationQualityRank(candidate.quality) >=
+                   framePresentationQualityRank(currentFront->quality);
+        }
+
         [[nodiscard]] bool finalizeFrontPromotion(size_t bufferId) noexcept
         {
             auto * target = mutableBuffer(bufferId);
@@ -171,6 +250,7 @@ namespace gladius::ui::async_rendering
                 {
                     previousFront->state = FrameState::Idle;
                     previousFront->frameId = 0;
+                    previousFront->quality = FramePresentationQuality::Unknown;
                 }
             }
 
@@ -189,6 +269,7 @@ namespace gladius::ui::async_rendering
 
             target->state = FrameState::Idle;
             target->frameId = 0;
+            target->quality = FramePresentationQuality::Unknown;
             return true;
         }
 
@@ -205,6 +286,7 @@ namespace gladius::ui::async_rendering
 
                 candidate.state = FrameState::Idle;
                 candidate.frameId = 0;
+                candidate.quality = FramePresentationQuality::Unknown;
                 ++releasedCount;
             }
             return releasedCount;
@@ -218,6 +300,24 @@ namespace gladius::ui::async_rendering
                 return nullptr;
             }
             return &m_buffers[bufferId];
+        }
+
+        [[nodiscard]] PresentationBuffer const * currentFrontMatching(
+          RenderStamp const & required,
+          RenderStampMask const mask) const noexcept
+        {
+            if (!m_frontBufferId.has_value())
+            {
+                return nullptr;
+            }
+
+            auto const * front = buffer(*m_frontBufferId);
+            if (front == nullptr || front->state != FrameState::Front ||
+                !matches(front->stamp, required, mask))
+            {
+                return nullptr;
+            }
+            return front;
         }
 
         std::vector<PresentationBuffer> m_buffers;

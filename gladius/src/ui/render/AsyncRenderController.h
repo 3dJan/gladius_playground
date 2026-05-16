@@ -120,12 +120,39 @@ namespace gladius::ui::async_rendering
 
         /// Publish a finished frame (Writing → Ready)
         void publishFrame(FrameBuffer * buffer,
-                uint64_t frameId,
-                uint64_t epoch,
-                uint64_t viewEpoch = 0) noexcept;
+                          uint64_t frameId,
+                          uint64_t epoch,
+                          uint64_t viewEpoch = 0,
+                          FramePresentationQuality quality =
+                            FramePresentationQuality::Unknown) noexcept;
+
+        /// Publish a finished frame with the coordinator stamp used for presentation policy.
+        void publishFrame(FrameBuffer * buffer,
+                          uint64_t frameId,
+                          uint64_t epoch,
+                          uint64_t viewEpoch,
+                          RenderStamp const & stamp,
+                          FramePresentationQuality quality) noexcept;
+
+        /// Snapshot mirrored presentation metadata for a specific HQ buffer.
+        [[nodiscard]] std::optional<PresentationBuffer>
+          mirroredPresentationBuffer(FrameBuffer const * buffer) const noexcept;
+
+        /// Snapshot mirrored presentation metadata for the currently presented front buffer.
+        [[nodiscard]] std::optional<PresentationBuffer> mirroredFrontPresentationBuffer() const noexcept;
 
         /// Promote a Ready buffer to Front (for UI display)
         [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
+
+        /// Promote the best Ready buffer that is acceptable for the requested display stamp.
+        [[nodiscard]] FrameBuffer * promoteReadyToFront(RenderStamp const & required,
+                                                        RenderStampMask mask) noexcept;
+
+        /// Check whether an external/non-HQ candidate may be presented against the current front.
+        [[nodiscard]] bool canPresentFrame(RenderStamp const & candidateStamp,
+                                           FramePresentationQuality candidateQuality,
+                                           RenderStamp const & required,
+                                           RenderStampMask mask) const noexcept;
 
           /// Release a completed Ready frame that should no longer be displayed.
           void discardReadyFrame(uint64_t frameId, uint64_t epoch, uint64_t viewEpoch) noexcept;
