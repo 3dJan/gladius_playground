@@ -156,7 +156,6 @@ namespace gladius::ui::async_rendering
             m_height = height;
             ++m_latestStamp.viewportEpoch;
             m_realtime.resetForResolution(m_width, m_height);
-            m_staticHQRenderTimeMs = -1.0f;
             scheduleStaticCatchUp(decision);
             return decision;
         }
@@ -304,13 +303,6 @@ namespace gladius::ui::async_rendering
                          result.type == RenderTaskType::RealtimeFullFrame))
                     {
                         m_highQualityFrameStamp = result.stamp;
-                        if (result.type == RenderTaskType::ProgressiveHighQualityChunk &&
-                            m_interactionState == RenderInteractionState::Static &&
-                            result.durationNs > 0)
-                        {
-                            m_staticHQRenderTimeMs =
-                                static_cast<float>(result.durationNs) / 1'000'000.0f;
-                        }
                     }
                     decision.commands.push_back(RenderCommand{.type = RenderCommandType::PresentFrame,
                                                               .result = result,
@@ -447,13 +439,12 @@ namespace gladius::ui::async_rendering
         {
             m_realtime.reset();
             m_realtime.resetForResolution(m_width, m_height);
-            m_staticHQRenderTimeMs = -1.0f;
             m_autoGestureLockedSimpler = false;
         }
 
         [[nodiscard]] bool autoModeAdmitsRealtime() const noexcept
         {
-            return m_staticHQRenderTimeMs >= 0.0f && m_staticHQRenderTimeMs < 100.0f;
+            return m_realtime.isRealtimeActive();
         }
 
         void scheduleInteractiveFrame(RenderUpdateDecision & decision)
@@ -574,9 +565,6 @@ namespace gladius::ui::async_rendering
         uint64_t m_nextRequestId{1};
         uint32_t m_width{1};
         uint32_t m_height{1};
-        /// Wall-clock duration of the last completed static progressive HQ render in milliseconds.
-        /// Negative means not yet measured. Used by Auto mode to gate exact-realtime admission.
-        float m_staticHQRenderTimeMs{-1.0f};
         /// Per-gesture latch: set when Auto mode first decides to use simpler rendering during
         /// an interaction. Cleared when the gesture ends to prevent mid-gesture quality switches.
         bool m_autoGestureLockedSimpler{false};

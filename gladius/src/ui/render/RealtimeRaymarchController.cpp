@@ -121,15 +121,15 @@ namespace gladius::ui::async_rendering
 
         m_estimatedFullFrameMs = scaledEstimate;
 
-        auto const enterBudget = m_config.targetFrameTimeMs * m_config.enterBudgetRatio;
-        auto const exitBudget = m_config.targetFrameTimeMs * m_config.exitBudgetRatio;
-        if (scaledEstimate <= enterBudget || (wasRealtimeActive && scaledEstimate <= exitBudget))
+        if (wasRealtimeActive && scaledEstimate <= m_config.realtimeDropBudgetMs)
         {
             m_fastSampleStreak = m_config.requiredFastSamples;
             m_realtimeActive = m_config.mode == RealtimeRaymarchMode::Auto;
-            m_staticFullFramePreferred = true;
+            m_staticFullFramePreferred = scaledEstimate < m_config.staticFullFrameBudgetMs;
+            return;
         }
-        else if (scaledEstimate <= m_config.staticFullFrameBudgetMs)
+
+        if (scaledEstimate < m_config.staticFullFrameBudgetMs)
         {
             m_staticFullFramePreferred = true;
         }
@@ -167,7 +167,7 @@ namespace gladius::ui::async_rendering
         }
 
         recordEstimatedTime(*estimatedMs);
-        m_staticFullFramePreferred = *estimatedMs <= m_config.staticFullFrameBudgetMs;
+        m_staticFullFramePreferred = *estimatedMs < m_config.staticFullFrameBudgetMs;
         if (m_staticFullFramePreferred)
         {
             m_slowSampleStreak = 0;
@@ -198,9 +198,9 @@ namespace gladius::ui::async_rendering
         }
 
         recordEstimatedTime(*estimatedMs);
-        m_staticFullFramePreferred = *estimatedMs <= m_config.staticFullFrameBudgetMs;
+        m_staticFullFramePreferred = *estimatedMs < m_config.staticFullFrameBudgetMs;
 
-        if (*estimatedMs <= m_config.targetFrameTimeMs * m_config.enterBudgetRatio)
+        if (*estimatedMs < m_config.staticFullFrameBudgetMs)
         {
             ++m_fastSampleStreak;
             m_slowSampleStreak = 0;

@@ -69,7 +69,7 @@ namespace gladius::ui::async_rendering::tests
         controller.recordStaticFullFrameSample(makeFullFrameSample(18.0f));
         ASSERT_TRUE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
 
-        controller.recordInteractiveRealtimeSample(makeFullFrameSample(65.0f));
+        controller.recordInteractiveRealtimeSample(makeFullFrameSample(120.0f));
 
         EXPECT_FALSE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
         EXPECT_FALSE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
@@ -124,6 +124,7 @@ namespace gladius::ui::async_rendering::tests
 
         controller.recordStaticProgressiveSample(makeProgressiveChunkSample(2.0f));
 
+        EXPECT_FALSE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
         EXPECT_TRUE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
 
         auto blockedGuards = makeOpenGuards();
@@ -156,7 +157,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
     }
 
-    TEST(RealtimeRaymarchController, StaticFullFrameBetweenRealtimeAndStaticBudgets_DoesNotActivateRealtime)
+    TEST(RealtimeRaymarchController, StaticFullFrameBelowStaticBudget_ActivatesRealtime)
     {
         RealtimeRaymarchController controller;
         controller.configure(makeTestConfig());
@@ -165,8 +166,10 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_TRUE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
 
         controller.recordStaticFullFrameSample(makeFullFrameSample(40.0f));
+        controller.recordStaticFullFrameSample(makeFullFrameSample(40.0f));
+        controller.recordStaticFullFrameSample(makeFullFrameSample(40.0f));
 
-        EXPECT_FALSE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
+        EXPECT_TRUE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
         EXPECT_TRUE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
     }
 
@@ -200,6 +203,21 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(controller.canAttemptRealtime(400, 300, makeOpenGuards()));
         ASSERT_TRUE(controller.estimatedFullFrameTimeMs().has_value());
         EXPECT_FLOAT_EQ(*controller.estimatedFullFrameTimeMs(), 4.5f);
+    }
+
+    TEST(RealtimeRaymarchController, ResolutionChange_AfterProgressiveOnlySample_DoesNotActivateRealtime)
+    {
+        RealtimeRaymarchController controller;
+        controller.configure(makeTestConfig());
+
+        controller.recordStaticProgressiveSample(makeProgressiveChunkSample(2.0f));
+        ASSERT_TRUE(controller.canAttemptStaticFullFrame(800, 600, makeOpenGuards()));
+        ASSERT_FALSE(controller.canAttemptRealtime(800, 600, makeOpenGuards()));
+
+        controller.resetForResolution(400, 300);
+
+        EXPECT_FALSE(controller.canAttemptRealtime(400, 300, makeOpenGuards()));
+        EXPECT_TRUE(controller.canAttemptStaticFullFrame(400, 300, makeOpenGuards()));
     }
 
     TEST(RealtimeRaymarchModeFromString, WithKnownValues_ParsesModes)

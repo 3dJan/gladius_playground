@@ -76,8 +76,19 @@ namespace gladius::ui::async_rendering::tests
                                           .cancelled = false};
         }
 
-        /// Drives the coordinator through the static pipeline until a ProgressiveHighQualityChunk
-        /// completes with a duration under the 100ms Auto-mode threshold.
+        [[nodiscard]] RealtimeRaymarchSample progressiveChunkSample(float durationMs)
+        {
+            return RealtimeRaymarchSample{.durationMs = durationMs,
+                                          .width = 640,
+                                          .height = 480,
+                                          .renderedLines = 48,
+                                          .totalLines = 480,
+                                          .completedFrame = false,
+                                          .cancelled = false};
+        }
+
+        /// Drives the coordinator through the static pipeline until a fast progressive estimate
+        /// admits an async static full-frame probe, and the completed probe unlocks Auto exact interaction.
         /// Call immediately after configureViewport(), passing its returned decision.
         void primeAutoRealtimeAdmission(RenderUpdateCoordinator & coordinator,
                                         RenderUpdateDecision const & viewportDecision)
@@ -90,9 +101,13 @@ namespace gladius::ui::async_rendering::tests
             decision = coordinator.completeTask(completed(*sdf));
             auto hq = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
             ASSERT_TRUE(hq.has_value());
-            auto hqResult = completed(*hq, true, true);
-            hqResult.durationNs = 50'000'000; // 50ms < 100ms → autoModeAdmitsRealtime() = true
-            [[maybe_unused]] auto const finalDecision = coordinator.completeTask(hqResult);
+            coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
+            decision = coordinator.completeTask(completed(*hq));
+            auto staticFullFrame = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
+            ASSERT_TRUE(staticFullFrame.has_value());
+            coordinator.recordStaticFullFrameSample(fullFrameSample(50.0f));
+            [[maybe_unused]] auto const finalDecision =
+                coordinator.completeTask(completed(*staticFullFrame, true, true));
         }
     }
 
@@ -129,7 +144,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
     }
 
-    TEST(RenderUpdateCoordinator, StaticCatchUp_AfterFastProgressiveSample_StartsStaticFullFrame)
+    TEST(RenderUpdateCoordinator, StaticCatchUp_AfterFastProgressiveEstimate_StartsStaticFullFrameProbe)
     {
         RenderUpdateCoordinator coordinator;
         auto decision = coordinator.configureViewport(640, 480);
@@ -144,12 +159,61 @@ namespace gladius::ui::async_rendering::tests
         auto progressive = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
         ASSERT_TRUE(progressive.has_value());
 
-        coordinator.recordStaticProgressiveSample(fullFrameSample(40.0f));
+        coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
 
         decision = coordinator.completeTask(completed(*progressive));
 
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
+    }
+
+    TEST(RenderUpdateCoordinator, StaticCatchUp_AfterSlowProgressiveEstimate_ContinuesProgressive)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.configureViewport(640, 480);
+        auto bbox = findStartedTask(decision, RenderTaskType::BoundingBoxUpdate);
+        ASSERT_TRUE(bbox.has_value());
+
+        decision = coordinator.completeTask(completed(*bbox));
+        auto sdf = findStartedTask(decision, RenderTaskType::SdfPrecomputation);
+        ASSERT_TRUE(sdf.has_value());
+
+        decision = coordinator.completeTask(completed(*sdf));
+        auto progressive = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+        ASSERT_TRUE(progressive.has_value());
+
+        coordinator.recordStaticProgressiveSample(progressiveChunkSample(12.0f));
+
+        decision = coordinator.completeTask(completed(*progressive));
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
+    }
+
+    TEST(RenderUpdateCoordinator, CameraChanged_AfterFastProgressiveEstimateBeforeStaticProbe_ComesFromPreview)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.configureViewport(640, 480);
+        auto bbox = findStartedTask(decision, RenderTaskType::BoundingBoxUpdate);
+        ASSERT_TRUE(bbox.has_value());
+
+        decision = coordinator.completeTask(completed(*bbox));
+        auto sdf = findStartedTask(decision, RenderTaskType::SdfPrecomputation);
+        ASSERT_TRUE(sdf.has_value());
+
+        decision = coordinator.completeTask(completed(*sdf));
+        auto progressive = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+        ASSERT_TRUE(progressive.has_value());
+
+        coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
+        decision = coordinator.completeTask(completed(*progressive));
+        ASSERT_TRUE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(coordinator.isRealtimeActive());
+
+        decision = coordinator.notifyCameraChanged();
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
     }
 
     TEST(RenderUpdateCoordinator, CameraChanged_WithForcedRealtime_StartsRealtimeFullFrame)

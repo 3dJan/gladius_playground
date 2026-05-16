@@ -28,8 +28,8 @@ namespace gladius::ui::async_rendering
         int requiredFastSamples{1};
         int maxSlowSamples{2};
         int cooldownFrames{30};
-        float staticFullFrameBudgetMs{60.0f};
-        float realtimeDropBudgetMs{60.0f};
+        float staticFullFrameBudgetMs{100.0f};
+        float realtimeDropBudgetMs{100.0f};
     };
 
     struct RealtimeRaymarchGuards

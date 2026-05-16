@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -49,7 +50,7 @@ namespace gladius::ui::async_rendering
             AsyncRenderController::JobExecutor jobExecutor;
 
             std::mutex resultMutex;
-            std::optional<FrameResultMeta> pendingResult;
+            std::deque<FrameResultMeta> pendingResults;
             std::atomic<bool> hasPendingResult{false};
 
             std::mutex lifecycleMutex;
@@ -61,6 +62,33 @@ namespace gladius::ui::async_rendering
             {
             }
         };
+
+        [[nodiscard]] FrameResultMeta makeCancelledResult(RenderJob const & job)
+        {
+            return FrameResultMeta{.frameId = job.frameHint,
+                                   .epoch = job.epoch,
+                                   .viewEpoch = job.viewEpoch,
+                                   .jobType = job.type,
+                                   .width = job.width,
+                                   .height = job.height,
+                                   .cancelled = true,
+                                   .completedFrame = false,
+                                   .precomputedSdfUpdated = false,
+                                   .startLine = job.startLine,
+                                   .completedLine = job.startLine,
+                                   .computeDurationNs = 0,
+                                   .compilationProgress = 0.0f,
+                                   .compilationSucceeded = false,
+                                   .coordinatorRequestId = job.coordinatorRequestId,
+                                   .coordinatorStamp = job.coordinatorStamp};
+        }
+
+        void publishResult(ControllerStateData & data, FrameResultMeta result)
+        {
+            std::lock_guard<std::mutex> guard(data.resultMutex);
+            data.pendingResults.push_back(std::move(result));
+            data.hasPendingResult.store(true, std::memory_order_release);
+        }
     }
 
     struct AsyncRenderController::ControllerState
@@ -137,7 +165,7 @@ namespace gladius::ui::async_rendering
         m_state->data.latestViewEpoch.store(0, std::memory_order_release);
         {
             std::lock_guard<std::mutex> resultLock(m_state->data.resultMutex);
-            m_state->data.pendingResult.reset();
+            m_state->data.pendingResults.clear();
             m_state->data.hasPendingResult.store(false, std::memory_order_release);
         }
 
@@ -242,15 +270,15 @@ namespace gladius::ui::async_rendering
         }
 
         std::lock_guard<std::mutex> lock(data.resultMutex);
-        if (!data.pendingResult.has_value())
+        if (data.pendingResults.empty())
         {
             data.hasPendingResult.store(false, std::memory_order_release);
             return std::nullopt;
         }
 
-        FrameResultMeta result = std::move(*data.pendingResult);
-        data.pendingResult.reset();
-        data.hasPendingResult.store(false, std::memory_order_release);
+        FrameResultMeta result = std::move(data.pendingResults.front());
+        data.pendingResults.pop_front();
+        data.hasPendingResult.store(!data.pendingResults.empty(), std::memory_order_release);
         return result;
     }
 
@@ -316,10 +344,9 @@ namespace gladius::ui::async_rendering
             // (the UI thread). Without this, the entire job runs on the UI thread, blocking it.
             co_await data->workerPool->schedule();
 
-            // Pre-execution epoch-only check: safe to skip without storing a result because
-            // notifyAsyncEpochIncrement() clears the in-flight flags on epoch changes.
-            // View-epoch changes must NOT skip here — they need the executor to store a
-            // cancelled result so processAsyncResults() can clear m_asyncJobInFlight.
+            // Pre-execution checks: stale queued work is cancelled before entering the job
+            // executor so obsolete OpenCL kernels are not launched.  The worker still publishes
+            // a cancelled result, allowing the UI/coordinator to clear any in-flight bookkeeping.
             auto const epochOnlyCheck = [data, jobEpoch = job.epoch]() -> bool
             {
                 return data->shutdownRequested.load(std::memory_order_acquire) ||
@@ -354,6 +381,16 @@ namespace gladius::ui::async_rendering
                                        job.type == RenderJobType::StreamingPreview);
             if (!isPreviewJob && epochOnlyCheck())
             {
+                publishResult(*data, makeCancelledResult(job));
+                continue;
+            }
+
+            bool const staleProgressiveView = isHqProgressiveJob && job.viewEpoch > 0 &&
+                                              data->latestViewEpoch.load(std::memory_order_acquire) >
+                                                job.viewEpoch;
+            if (staleProgressiveView)
+            {
+                publishResult(*data, makeCancelledResult(job));
                 continue;
             }
 
@@ -369,16 +406,10 @@ namespace gladius::ui::async_rendering
             }
             catch (...)
             {
-                result.epoch = job.epoch;
-                result.frameId = job.frameHint;
-                result.cancelled = true;
+                result = makeCancelledResult(job);
             }
 
-            {
-                std::lock_guard<std::mutex> guard(data->resultMutex);
-                data->pendingResult = std::move(result);
-                data->hasPendingResult.store(true, std::memory_order_release);
-            }
+            publishResult(*data, std::move(result));
         }
 
         {
