@@ -82,6 +82,20 @@ namespace gladius::ui::async_rendering
                !input.autoPreviewFallbackActive;
     }
 
+    enum class RealtimeFrameExecutionPath
+    {
+        AsyncWorker,
+        SynchronousUiThread
+    };
+
+    [[nodiscard]] constexpr RealtimeFrameExecutionPath chooseRealtimeFrameExecutionPath(
+      RealtimeInteractionActivityInput const & input) noexcept
+    {
+        return isExactRealtimeInteractionActive(input)
+                 ? RealtimeFrameExecutionPath::SynchronousUiThread
+                 : RealtimeFrameExecutionPath::AsyncWorker;
+    }
+
     struct ParameterChangeDispatchInput
     {
         RealtimeRaymarchMode mode{RealtimeRaymarchMode::Auto};

@@ -35,6 +35,26 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(selected, DisplayFrameSource::ResultImage);
     }
 
+    TEST(DisplayFrameSelector, WithAutoPreviewFallbackResultAndStaleFront_SelectsResultImage)
+    {
+        auto const presentedPreview = PresentedFrame{.frameId = 11,
+                                                     .stamp = RenderStamp{.sceneEpoch = 3,
+                                                                          .viewEpoch = 7},
+                                                     .quality = FramePresentationQuality::Preview,
+                                                     .source = FramePresentationSource::LowResolutionPreview,
+                                                     .completedFrame = true};
+
+        auto const selected = selectDisplayFrameSource(
+          DisplayFrameSelectionInput{.frontBuffer = buffer(3, 6),
+                                     .currentEpoch = 3,
+                                     .currentViewEpoch = 7,
+                                     .exactRealtimeInteraction = false,
+                                     .resultImageAvailable = true,
+                                     .presentedFrame = presentedPreview});
+
+        EXPECT_EQ(selected, DisplayFrameSource::ResultImage);
+    }
+
     TEST(DisplayFrameSelector, WithPreviouslyPresentedRealtimeFrontAfterEpochBump_HoldsFrontBuffer)
     {
                 auto const presentedFrame = PresentedFrame{.frameId = 10,

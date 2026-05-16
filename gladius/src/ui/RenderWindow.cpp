@@ -508,13 +508,17 @@ namespace gladius::ui
 
         case async_rendering::RenderTaskType::RealtimeFullFrame:
         {
-            // When realtime rendering is actually active (Force always; Auto once the
-            // controller has measured sufficient GPU performance) render synchronously on
-            // the UI thread instead of going through the async job queue.  This gives
-            // zero-latency parameter feedback because every drag event yields a fresh,
-            // full-quality frame in the same UI pass — no round-trip through the worker.
-            // SDF and BBox jobs remain asynchronous via the existing path.
-            if (m_renderUpdateCoordinator.isRealtimeSchedulingActive())
+                        // Only exact realtime interactions run synchronously on the UI thread. Static
+                        // catch-up/full-frame probes must stay on the async worker so loading or
+                        // catching up a complex model cannot block the UI on renderEvent.wait().
+                        auto const executionPath = async_rendering::chooseRealtimeFrameExecutionPath(
+                            async_rendering::RealtimeInteractionActivityInput{
+                                .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
+                                .interactionState = m_renderUpdateCoordinator.interactionState(),
+                                .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
+                                .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
+                                .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
+                        if (executionPath == async_rendering::RealtimeFrameExecutionPath::SynchronousUiThread)
             {
                 bool const rendered = tryRenderRealtimeFrameSync(task);
                                 queueRenderDecision(m_renderUpdateCoordinator.completeTask(
@@ -752,10 +756,7 @@ namespace gladius::ui
             // to avoid showing stale HQ results from an old parameter set. Exact realtime
             // interaction may keep a current-epoch front buffer visible while the view epoch is
             // catching up, and all other cases fall back to m_resultImage to avoid blanking.
-            bool const exactRealtimeInteraction =
-                            m_renderUpdateCoordinator.isRealtimeSchedulingActive() &&
-                            m_renderUpdateCoordinator.interactionState() !=
-                                async_rendering::RenderInteractionState::Static;
+            bool const exactRealtimeInteraction = isRealtimeRaymarchInteractionActive();
             bool const exactRealtimeJobInFlight =
                             m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
             auto const resultImage = m_core->getResultImage();

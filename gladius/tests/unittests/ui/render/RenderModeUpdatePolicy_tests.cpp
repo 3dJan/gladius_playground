@@ -154,6 +154,38 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(active);
     }
 
+    TEST(RenderModeUpdatePolicy, RealtimeFrameExecution_WithStaticAutoRealtimeActive_UsesAsyncWorker)
+    {
+        auto const path = chooseRealtimeFrameExecutionPath(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Auto,
+                                           .interactionState = RenderInteractionState::Static,
+                                           .autoRealtimeActive = true});
+
+        EXPECT_EQ(path, RealtimeFrameExecutionPath::AsyncWorker);
+    }
+
+    TEST(RenderModeUpdatePolicy, RealtimeFrameExecution_WithAutoExactInteraction_UsesSynchronousUiThread)
+    {
+        auto const path = chooseRealtimeFrameExecutionPath(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Auto,
+                                           .interactionState = RenderInteractionState::CameraInteracting,
+                                           .autoRealtimeActive = true,
+                                           .autoPreviewFallbackActive = false});
+
+        EXPECT_EQ(path, RealtimeFrameExecutionPath::SynchronousUiThread);
+    }
+
+    TEST(RenderModeUpdatePolicy, RealtimeFrameExecution_WithAutoPreviewFallback_UsesAsyncWorker)
+    {
+        auto const path = chooseRealtimeFrameExecutionPath(
+          RealtimeInteractionActivityInput{.mode = RealtimeRaymarchMode::Auto,
+                                           .interactionState = RenderInteractionState::CameraInteracting,
+                                           .autoRealtimeActive = true,
+                                           .autoPreviewFallbackActive = true});
+
+        EXPECT_EQ(path, RealtimeFrameExecutionPath::AsyncWorker);
+    }
+
     TEST(RenderModeUpdatePolicy, ParameterChangeDispatch_WithForce_InvalidatesWithoutStreaming)
     {
         auto const dispatch = classifyParameterChange(
