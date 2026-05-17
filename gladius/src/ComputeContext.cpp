@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -370,21 +369,18 @@ namespace gladius
     }
 
     ComputeContext::ComputeContext()
-        : m_gpuAccessSafeModeEnabled(std::getenv("GLADIUS_GPU_ACCESS_SAFE_MODE") != nullptr)
     {
         initContext();
     }
 
     ComputeContext::ComputeContext(EnableGLOutput enableOutput)
         : m_outputGL(enableOutput)
-        , m_gpuAccessSafeModeEnabled(std::getenv("GLADIUS_GPU_ACCESS_SAFE_MODE") != nullptr)
     {
         initContext();
     }
 
     ComputeContext::ComputeContext(EnableGLOutput enableOutput, Accelerator const & accelerator)
         : m_outputGL(enableOutput)
-        , m_gpuAccessSafeModeEnabled(std::getenv("GLADIUS_GPU_ACCESS_SAFE_MODE") != nullptr)
     {
         initContextWithAccelerator(accelerator);
     }

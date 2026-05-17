@@ -40,7 +40,7 @@ The current production rollout also prefers conservative generation retirement o
 
 ## Safe mode
 
-Set `GLADIUS_GPU_ACCESS_SAFE_MODE=1` before launching Gladius to serialize guarded GPU work more aggressively. In safe mode, each guarded launch drains tracked GPU work before enqueue and waits for its own returned event before returning. This is slower, but useful for validating whether HSA/GPU faults are caused by dependency or lifetime races.
+Guarded GPU access uses the conservative serialized mode by default. Each guarded launch drains tracked GPU work before enqueue and waits for its own returned event before returning. This is slower than maximally overlapping command queues, but it keeps the production behavior deterministic and avoids environment-dependent synchronization semantics.
 
 ## Adding a new kernel launch
 

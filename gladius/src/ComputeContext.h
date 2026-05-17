@@ -267,7 +267,7 @@ namespace gladius
 
         // Debug output control (instance-level)
         bool m_debugOutputEnabled{false};
-        bool m_gpuAccessSafeModeEnabled{false};
+        bool m_gpuAccessSafeModeEnabled{true};
 
         // Device memory capabilities (queried at init)
         size_t m_deviceGlobalMemBytes{0};
