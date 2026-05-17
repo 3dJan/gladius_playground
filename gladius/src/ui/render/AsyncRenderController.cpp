@@ -301,9 +301,8 @@ namespace gladius::ui::async_rendering
     {
         // NOTE: No ZoneScoped / DebugText / ZoneScopedN in the outer coroutine scope here.
         // This coroutine crosses thread boundaries via co_await pop() (push() resumes the consumer
-        // inline on the caller's thread) and co_await waitForEvent() (resumes on the OpenCL
-        // callback thread). Tracy zones must begin and end on the same OS thread — any zone that
-        // spans a co_await that changes threads will corrupt Tracy's per-thread zone stack.
+        // inline on the caller's thread). Tracy zones must begin and end on the same OS thread —
+        // any zone that spans a co_await that changes threads will corrupt Tracy's per-thread zone stack.
         // Inner ZoneScopedN blocks (inside the job executors, which don't cross co_await) are fine.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
@@ -431,6 +430,20 @@ namespace gladius::ui::async_rendering
           if (m_stagingWidth != width || m_stagingHeight != height || !m_workerQueue ||
               !m_stagingBuffer)
         {
+            std::lock_guard<std::mutex> lock(m_bufferMutex);
+            bool const hasGpuOwnedFrame = std::any_of(
+              m_frameBuffers.begin(),
+              m_frameBuffers.end(),
+              [](FrameBuffer const & buffer)
+              {
+                  auto const state = buffer.state.load(std::memory_order_acquire);
+                  return state == FrameState::Writing || state == FrameState::Resampling;
+              });
+            if (hasGpuOwnedFrame)
+            {
+                return;
+            }
+
             m_stagingBuffer.reset();
             {
                 std::lock_guard<std::mutex> queueLock(m_workerQueueMutex);
@@ -451,7 +464,6 @@ namespace gladius::ui::async_rendering
             m_stagingHeight = height;
 
             // Initialize frame buffers with GLImageBuffer instances
-            std::lock_guard<std::mutex> lock(m_bufferMutex);
             for (size_t i = 0; i < m_frameBuffers.size(); ++i)
             {
                 auto & fb = m_frameBuffers[i];
@@ -851,11 +863,13 @@ namespace gladius::ui::async_rendering
             auto const state = buffer.state.load(std::memory_order_acquire);
             auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
 
-            // Release Writing buffers from old epochs
-            if (state == FrameState::Writing && bufEpoch <= oldEpoch)
+            // Ready frames are already complete and may be discarded when their epoch is stale.
+            // Writing/Resampling frames are still owned by an OpenCL kernel or the UI upload path;
+            // recycling them here can cause use-after-free/racing writes on the GPU.
+            if (state == FrameState::Ready && bufEpoch <= oldEpoch)
             {
                 [[maybe_unused]] bool const released =
-                  tryTransitionBufferLocked(&buffer, FrameState::Writing, FrameState::Idle);
+                  tryTransitionBufferLocked(&buffer, FrameState::Ready, FrameState::Idle);
             }
         }
     }

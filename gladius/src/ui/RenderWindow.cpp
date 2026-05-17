@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <fmt/core.h>
 #include <iterator>
+#include <thread>
 
 #include "../CLMath.h"
 #include "../ComputeContext.h"
@@ -112,6 +113,37 @@ namespace gladius::ui
             }
 
             co_await ClEventAwaiter(std::move(event));
+        }
+
+        [[nodiscard]] bool waitForEventBlocking(cl::Event const & event)
+        {
+            if (!event())
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                try
+                {
+                    cl_int status = CL_QUEUED;
+                    event.getInfo(CL_EVENT_COMMAND_EXECUTION_STATUS, &status);
+                    if (status == CL_COMPLETE)
+                    {
+                        return true;
+                    }
+                    if (status < 0)
+                    {
+                        return false;
+                    }
+                }
+                catch (...)
+                {
+                    return false;
+                }
+
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
         }
 
         constexpr size_t kInitialProgressiveStepSize = 8;
@@ -306,13 +338,6 @@ namespace gladius::ui
         auto const newEpoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         m_asyncCurrentEpoch.store(newEpoch, std::memory_order_release);
         m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
-        m_asyncInFlightEpoch.store(0, std::memory_order_release);
-        m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
-        m_asyncJobInFlight.store(false, std::memory_order_release);
-        m_asyncRealtimeJobInFlight.store(false, std::memory_order_release);
-        m_asyncSdfJobInFlight.store(false, std::memory_order_release);
-        m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
-        m_asyncBboxJobInFlight.store(false, std::memory_order_release);
         
         // Invalidate distance init buffer on epoch change - camera/scene changed (FR-005)
         if (m_core)
@@ -320,20 +345,10 @@ namespace gladius::ui
             m_core->invalidateDistanceInitBuffer();
         }
 
-        // Release progressive buffer on epoch change
-        if (m_asyncProgressiveBuffer)
-        {
-            [[maybe_unused]] bool const released =
-              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
-                                                     async_rendering::FrameState::Writing,
-                                                     async_rendering::FrameState::Idle);
-            m_asyncProgressiveBuffer = nullptr;
-        }
-        m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-        m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
-
-        // IMPORTANT: Release any other Writing buffers from old epoch
-        // (they belong to cancelled jobs and should be returned to Idle)
+        // Do not release Writing buffers or clear in-flight render flags here. Once an OpenCL
+        // kernel has been submitted, the buffer remains GPU-owned until the worker observes the
+        // completion event. Recycling it early can race a later render/parameter upload against
+        // memory still used by the old kernel, which is illegal on several OpenCL stacks.
         if (m_asyncController)
         {
             m_asyncController->releaseStaleBuffers(oldEpoch);
@@ -2661,6 +2676,17 @@ namespace gladius::ui
                 {
                     m_renderUpdateCoordinator.recordRealtimeRejectedAttempt();
                 }
+                if (m_asyncProgressiveBuffer &&
+                    m_asyncProgressiveEpoch.load(std::memory_order_acquire) == result.epoch)
+                {
+                    [[maybe_unused]] bool const released =
+                      m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                             async_rendering::FrameState::Writing,
+                                                             async_rendering::FrameState::Idle);
+                    m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                    m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+                }
                 if (result.epoch == m_asyncInFlightEpoch.load(std::memory_order_acquire))
                 {
                     m_asyncJobInFlight.store(false, std::memory_order_release);
@@ -2973,6 +2999,13 @@ namespace gladius::ui
         }
         cl::CommandQueue const & queue = *queueOwner;
 
+        auto computeToken = m_core->requestComputeToken();
+        if (!computeToken.has_value())
+        {
+            releaseBuffer();
+            return false;
+        }
+
         auto settings = m_core->getResourceContext()->getRenderingSettings();
         settings.approximation = AM_FULL_MODEL;
 
@@ -2991,7 +3024,11 @@ namespace gladius::ui
         // Block until the GPU is done.  In realtime mode the user has opted into lower
         // peak throughput in exchange for zero-latency feedback, and Auto mode only takes
         // this path once performance has been measured to fit within the frame budget.
-        renderEvent.wait();
+        if (!waitForEventBlocking(renderEvent))
+        {
+            releaseBuffer();
+            return false;
+        }
 
         auto const endTime = std::chrono::steady_clock::now();
 
@@ -3137,9 +3174,7 @@ namespace gladius::ui
       -> coro::task<async_rendering::FrameResultMeta>
     {
         // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
-        // co_await waitForEvent() resumes on the OpenCL callback thread, so the zone destructor
-        // would fire on a different thread than where it was created.
-        // Use the inner ZoneScopedN blocks (which don't cross co_await) for profiling.
+        // Keep profiling scopes inside non-suspending blocks only.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
 #endif
@@ -3254,48 +3289,56 @@ namespace gladius::ui
                 {
                     ImageRGBA & targetCLBuffer = *writeBuffer->image;
 
-                    cl::Event renderEvent{};
-                    bool advanced = false;
-
-                    if (usesFullModelApproximation)
+                    auto computeToken = m_core->requestComputeToken();
+                    if (!computeToken.has_value())
                     {
-                        auto assembly = m_document ? m_document->getAssembly() : nullptr;
-                        if (assembly && m_core->isRendererReady())
-                        {
-                            (void) m_core->tryToupdateParameter(*assembly);
-                        }
-
-                        auto settings = m_core->getResourceContext()->getRenderingSettings();
-                        settings.approximation = AM_FULL_MODEL;
-                        advanced = m_core->renderSceneComputeOnlyWithSettings(
-                          commandQueue,
-                          job.startLine,
-                          endLine,
-                          targetCLBuffer,
-                          settings,
-                          &renderEvent);
+                        result.cancelled = true;
                     }
                     else
                     {
-                        advanced = m_core->renderSceneComputeOnly(
-                          commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
-                    }
+                        cl::Event renderEvent{};
+                        bool advanced = false;
 
-                    if (renderEvent())
-                    {
-                        co_await waitForEvent(renderEvent, cancelCheck);
-                    }
+                        if (usesFullModelApproximation)
+                        {
+                            auto assembly = m_document ? m_document->getAssembly() : nullptr;
+                            if (assembly && m_core->isRendererReady())
+                            {
+                                (void) m_core->tryToupdateParameter(*assembly);
+                            }
 
-                    if (cancellationRequested())
-                    {
-                        result.cancelled = true;
-                    }
+                            auto settings = m_core->getResourceContext()->getRenderingSettings();
+                            settings.approximation = AM_FULL_MODEL;
+                            advanced = m_core->renderSceneComputeOnlyWithSettings(
+                              commandQueue,
+                              job.startLine,
+                              endLine,
+                              targetCLBuffer,
+                              settings,
+                              &renderEvent);
+                        }
+                        else
+                        {
+                            advanced = m_core->renderSceneComputeOnly(
+                              commandQueue, job.startLine, endLine, targetCLBuffer, &renderEvent);
+                        }
 
-                    result.completedLine = advanced ? endLine : job.startLine;
-                    result.completedFrame = result.completedLine >= job.height;
-                    if (!advanced && usesFullModelApproximation)
-                    {
-                        result.cancelled = true;
+                        if (renderEvent())
+                        {
+                            advanced = waitForEventBlocking(renderEvent) && advanced;
+                        }
+
+                        if (cancellationRequested())
+                        {
+                            result.cancelled = true;
+                        }
+
+                        result.completedLine = advanced ? endLine : job.startLine;
+                        result.completedFrame = result.completedLine >= job.height;
+                        if (!advanced && usesFullModelApproximation)
+                        {
+                            result.cancelled = true;
+                        }
                     }
                 }
                 else
@@ -3879,7 +3922,7 @@ namespace gladius::ui
       -> coro::task<async_rendering::FrameResultMeta>
     {
         // NOTE: No ZoneScoped here — Tracy zones are not coroutine-safe across thread hops.
-        // co_await waitForEvent() resumes on the OpenCL callback thread.
+        // Keep profiling scopes inside non-suspending blocks only.
 
         using namespace async_rendering;
 
@@ -3937,12 +3980,11 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Launch async SDF precomputation (returns cl::Event)
+            // Launch async SDF precomputation (returns cl::Event). Keep the compute token until
+            // the GPU event completes: the kernel reads/writes shared resource buffers and those
+            // buffers must not be reallocated or rewritten by another host path while the event is
+            // still running.
             cl::Event sdfEvent = m_core->precomputeSdfAsync(queueRef);
-
-            // Release the compute token — the kernel is already enqueued and the
-            // CL runtime retains its own references to the memory objects.
-            computeToken.reset();
 
             if (!sdfEvent())
             {
@@ -3960,11 +4002,10 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Await SDF completion using waitForEvent helper
-            co_await waitForEvent(sdfEvent, cancelCheck);
+            bool const sdfCompleted = waitForEventBlocking(sdfEvent);
 
             // Check if cancelled during wait - don't invalidate, keep old SDF
-            if (cancelCheck && cancelCheck())
+            if (!sdfCompleted || (cancelCheck && cancelCheck()))
             {
                 result.cancelled = true;
                 co_return result;
@@ -4179,52 +4220,12 @@ namespace gladius::ui
                 co_return result;
             }
 
-            // Wait for GPU completion using polling with timeout instead of blocking wait.
-            // Some OpenCL implementations (e.g., rusticl) have issues with event.wait().
-            // Poll with short sleeps and timeout to avoid hangs.
-            auto const pollStart = std::chrono::steady_clock::now();
-            auto constexpr timeout = std::chrono::milliseconds(500);
-            bool eventCompleted = false;
-            
-            while (!eventCompleted)
+            bool const eventCompleted = waitForEventBlocking(renderEvent);
+            if (!eventCompleted)
             {
-                try
-                {
-                    cl_int status = CL_QUEUED;
-                    renderEvent.getInfo(CL_EVENT_COMMAND_EXECUTION_STATUS, &status);
-                    
-                    if (status == CL_COMPLETE)
-                    {
-                        eventCompleted = true;
-                    }
-                    else if (status < 0)
-                    {
-                        // Error status
-                        result.cancelled = true;
-                        m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
-                        co_return result;
-                    }
-                    else
-                    {
-                        // Check timeout
-                        auto const elapsed = std::chrono::steady_clock::now() - pollStart;
-                        if (elapsed > timeout)
-                        {
-                            result.cancelled = true;
-                            m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
-                            co_return result;
-                        }
-                        
-                        // Sleep to avoid busy-waiting (500us reduces CPU usage while staying responsive)
-                        std::this_thread::sleep_for(std::chrono::microseconds(500));
-                    }
-                }
-                catch (std::exception const &)
-                {
-                    result.cancelled = true;
-                    m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
-                    co_return result;
-                }
+                result.cancelled = true;
+                m_asyncPreviewJobInFlight.store(false, std::memory_order_release);
+                co_return result;
             }
 
             // Only check for shutdown, not epoch-based cancellation
@@ -4714,6 +4715,14 @@ namespace gladius::ui
 
             auto const iterStart = std::chrono::steady_clock::now();
 
+            auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                m_streamingFrameConsumed.store(true, std::memory_order_release);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
             // Push latest Assembly parameter values to GPU.
             // Skip when the renderer is not ready (compilation in progress) —
             // refreshWorker modifies the Assembly without a dedicated lock,
@@ -4732,6 +4741,7 @@ namespace gladius::ui
             {
                 // Precondition failed — program not valid or similar.
                 // Retry a few times in case compilation is finishing.
+                m_streamingFrameConsumed.store(true, std::memory_order_release);
                 ++consecutiveFailures;
                 if (consecutiveFailures >= kMaxConsecutiveFailures)
                 {
@@ -4741,49 +4751,11 @@ namespace gladius::ui
                 continue;
             }
 
-            // Poll GPU completion. Use a generous timeout for driver hiccups,
-            // but preview rendering itself never falls back to full-model SDF.
-            auto constexpr timeout = std::chrono::milliseconds(5000);
-            auto const pollStart = std::chrono::steady_clock::now();
-            bool eventCompleted = false;
-
-            while (!eventCompleted)
-            {
-                try
-                {
-                    cl_int status = CL_QUEUED;
-                    renderEvent.getInfo(CL_EVENT_COMMAND_EXECUTION_STATUS, &status);
-
-                    if (status == CL_COMPLETE)
-                    {
-                        eventCompleted = true;
-                    }
-                    else if (status < 0)
-                    {
-                        break; // Error
-                    }
-                    else
-                    {
-                        if (std::chrono::steady_clock::now() - pollStart > timeout)
-                        {
-                            break; // Timeout
-                        }
-                        std::this_thread::sleep_for(std::chrono::microseconds(500));
-                    }
-                }
-                catch (std::exception const &)
-                {
-                    eventCompleted = false;
-                    break;
-                }
-            }
+            bool const eventCompleted = waitForEventBlocking(renderEvent);
 
             if (!eventCompleted)
             {
-                // GPU work timed out or errored — flush (not finish!) so
-                // we don't block the coroutine indefinitely on a GPU stall.
-                // The next enqueue will be ordered after pending work.
-                try { commandQueue.flush(); } catch (...) {}
+                m_streamingFrameConsumed.store(true, std::memory_order_release);
                 ++consecutiveFailures;
                 if (consecutiveFailures >= kMaxConsecutiveFailures)
                 {

@@ -92,12 +92,27 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(reacquired, buffer);
     }
 
-    TEST(AsyncRenderControllerPresentation, ReleaseStaleBuffers_WithWritingBuffer_ReleasesIt)
+    TEST(AsyncRenderControllerPresentation, ReleaseStaleBuffers_WithWritingBuffer_KeepsItReserved)
     {
         AsyncRenderController controller;
 
         auto * buffer = controller.acquireWriteBuffer(10);
         ASSERT_NE(buffer, nullptr);
+
+        controller.releaseStaleBuffers(10);
+
+        EXPECT_EQ(buffer->state.load(std::memory_order_acquire), FrameState::Writing);
+        auto * reacquired = controller.acquireWriteBuffer(11);
+        EXPECT_NE(reacquired, buffer);
+    }
+
+    TEST(AsyncRenderControllerPresentation, ReleaseStaleBuffers_WithReadyBuffer_ReleasesIt)
+    {
+        AsyncRenderController controller;
+
+        auto * buffer = controller.acquireWriteBuffer(10);
+        ASSERT_NE(buffer, nullptr);
+        controller.publishFrame(buffer, 2, 10, 3, FramePresentationQuality::FullQuality);
 
         controller.releaseStaleBuffers(10);
 
