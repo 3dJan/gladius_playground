@@ -10,7 +10,9 @@
 #include "../../Document.h"
 #include "../../ResourceContext.h"
 #include "../../compute/ComputeCore.h"
+#include "../../compute/GpuKernelAccessGuard.h"
 #include "../../compute/ProgramManager.h"
+#include "../../compute/RenderPayloadSnapshot.h"
 #include "../../nodes/Assembly.h"
 #include "../../nodes/Model.h"
 #include "../../nodes/Parameter.h"
@@ -677,11 +679,28 @@ namespace gladius::mcp::tools
             auto queue = computeContext->createQueue();
 
             auto primitives = core->getPrimitives();
-            evalProg.run(
+                        if (!primitives)
+                        {
+                                return createToolError("Primitive buffers are not available.");
+                        }
+
+                        auto payloadSnapshot = RenderPayloadSnapshot::capture(resources, *primitives);
+                        GpuKernelAccessGuard gpuAccess(
+                            *computeContext,
+                            queue,
+                            "gladius_eval",
+                            payloadSnapshot.readAccesses());
+                        if (!gpuAccess.granted())
+                        {
+                                return createToolError("GPU resources are not available for evaluation.");
+                        }
+
+                        cl::Event const evalEvent = evalProg.runNonBlockingWithWaitList(
               queue,
               "gladius_eval",
               cl::NullRange,
               cl::NDRange(sampleCount),
+                            gpuAccess.waitEvents(),
               *clInputBuffer,
               *clOutputBuffer,
               static_cast<cl_uint>(sampleCount),
@@ -696,6 +715,12 @@ namespace gladius::mcp::tools
               resources->getCommandBuffer().getBuffer(),
               static_cast<cl_int>(resources->getCommandBuffer().getData().size()),
               resources->getPreCompSdfBBox());
+                        gpuAccess.complete(evalEvent);
+                        if (evalEvent())
+                        {
+                                evalEvent.wait();
+                        }
+                        CL_ERROR(queue.finish());
 
             // Read back results.
             std::vector<float> outputData(outputFloatCount);

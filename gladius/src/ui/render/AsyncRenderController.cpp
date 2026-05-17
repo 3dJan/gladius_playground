@@ -992,10 +992,12 @@ namespace gladius::ui::async_rendering
             auto const state = buffer.state.load(std::memory_order_acquire);
             auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
 
-            // Release Writing buffers from old epochs
-            if (state == FrameState::Writing && bufEpoch <= oldEpoch)
+            // Ready preview frames are complete and may be discarded when stale.
+            // Writing frames are still owned by a worker/GPU operation; recycling them here can
+            // race an in-flight kernel or host download.
+            if (state == FrameState::Ready && bufEpoch <= oldEpoch)
             {
-                auto expected = FrameState::Writing;
+                auto expected = FrameState::Ready;
                 buffer.state.compare_exchange_strong(expected, FrameState::Idle,
                                                      std::memory_order_acq_rel);
             }

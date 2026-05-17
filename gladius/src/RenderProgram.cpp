@@ -1,6 +1,8 @@
 #include "RenderProgram.h"
 #include "Profiling.h"
 #include "ProgramBase.h"
+#include "compute/GpuKernelAccessGuard.h"
+#include "compute/RenderPayloadSnapshot.h"
 #include "gpgpu.h"
 #include "kernel/types.h"
 
@@ -11,6 +13,23 @@
 
 namespace gladius
 {
+    namespace
+    {
+        [[nodiscard]] std::vector<GpuKernelResourceAccess>
+        makeRenderPayloadReadAccesses(SharedResources const & resources,
+                                      Primitives const & lines)
+        {
+            return RenderPayloadSnapshot::capture(resources, lines).readAccesses();
+        }
+
+        void appendAccess(std::vector<GpuKernelResourceAccess> & accesses,
+                          GpuResourceHandle resource,
+                          GpuAccessMode mode)
+        {
+            accesses.push_back(GpuKernelResourceAccess{.resource = resource, .mode = mode});
+        }
+    }
+
     /// Maximum render height per dispatch to prevent excessive GPU workload
     constexpr size_t kMaxRenderHeightPerDispatch = 16000;
 
@@ -146,11 +165,21 @@ namespace gladius
 
         try
         {
-            kernelEvent = m_programFront->runNonBlocking(
+                        auto accesses = makeRenderPayloadReadAccesses(m_resources, lines);
+                        appendAccess(accesses, targetImage.gpuResourceHandle(), GpuAccessMode::Write);
+                        GpuKernelAccessGuard gpuAccess(
+                            *m_ComputeContext, queue, "renderScene", std::move(accesses));
+                        if (!gpuAccess.granted())
+                        {
+                                return kernelEvent;
+                        }
+
+                        kernelEvent = m_programFront->runNonBlockingWithWaitList(
               queue,
               "renderScene",
               setup.origin,
               setup.globalRange,
+                            gpuAccess.waitEvents(),
               targetImage.getBuffer(),
               m_resources->getBuildArea(),
               lines.primitives.getBuffer(),
@@ -165,6 +194,7 @@ namespace gladius
               m_resources->getPreCompSdfBBox(),
               m_resources->getEyePosition(),
               m_resources->getModelViewPerspectiveMat());
+                        gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)
         {
@@ -213,8 +243,29 @@ namespace gladius
         }
         cl::NDRange const origin = {0, startHeight, 0};
         cl::NDRange const range = {targetImage.getWidth(), endHeight - startHeight, 1};
-        cl::Event const event = m_programFront->runNonBlocking(
-          queue, "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
+        GpuKernelAccessGuard gpuAccess(
+          *m_ComputeContext,
+          queue,
+          "resample",
+          {{targetImage.gpuResourceHandle(), GpuAccessMode::Write},
+           {sourceImage.gpuResourceHandle(), GpuAccessMode::Read}});
+        if (!gpuAccess.granted())
+        {
+            if (completionEvent)
+            {
+                *completionEvent = cl::Event{};
+            }
+            return;
+        }
+        cl::Event const event = m_programFront->runNonBlockingWithWaitList(
+          queue,
+          "resample",
+          origin,
+          range,
+          gpuAccess.waitEvents(),
+          targetImage.getBuffer(),
+          sourceImage.getBuffer());
+        gpuAccess.complete(event);
         if (completionEvent)
         {
             *completionEvent = event;
@@ -260,11 +311,22 @@ namespace gladius
 
         try
         {
-            kernelEvent = m_programFront->runNonBlocking(
+                        auto accesses = makeRenderPayloadReadAccesses(m_resources, lines);
+                        appendAccess(accesses, targetImage.gpuResourceHandle(), GpuAccessMode::Write);
+                        appendAccess(accesses, distanceOutput.gpuResourceHandle(), GpuAccessMode::Write);
+                        GpuKernelAccessGuard gpuAccess(
+                            *m_ComputeContext, queue, "renderSceneWithDistanceOutput", std::move(accesses));
+                        if (!gpuAccess.granted())
+                        {
+                                return kernelEvent;
+                        }
+
+                        kernelEvent = m_programFront->runNonBlockingWithWaitList(
               queue,
               "renderSceneWithDistanceOutput",
               setup.origin,
               setup.globalRange,
+                            gpuAccess.waitEvents(),
               targetImage.getBuffer(),
               distanceOutput.getBuffer(),
               m_resources->getBuildArea(),
@@ -280,6 +342,7 @@ namespace gladius
               m_resources->getPreCompSdfBBox(),
               m_resources->getEyePosition(),
               m_resources->getModelViewPerspectiveMat());
+                        gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)
         {
@@ -316,11 +379,24 @@ namespace gladius
 
         try
         {
-            kernelEvent = m_programFront->runNonBlocking(
+                        auto accesses = makeRenderPayloadReadAccesses(m_resources, lines);
+                        appendAccess(accesses, targetImage.gpuResourceHandle(), GpuAccessMode::Write);
+                        appendAccess(accesses, distanceInit.gpuResourceHandle(), GpuAccessMode::Read);
+                        GpuKernelAccessGuard gpuAccess(
+                            *m_ComputeContext, queue, "renderSceneWithDistanceInit", std::move(accesses));
+                        if (!gpuAccess.granted())
+                        {
+                                m_resources->getRenderingSettings().approximation = static_cast<ApproximationMode>(
+                                    m_resources->getRenderingSettings().approximation & ~AM_USE_DISTANCE_INIT);
+                                return kernelEvent;
+                        }
+
+                        kernelEvent = m_programFront->runNonBlockingWithWaitList(
               queue,
               "renderSceneWithDistanceInit",
               setup.origin,
               setup.globalRange,
+                            gpuAccess.waitEvents(),
               targetImage.getBuffer(),
               distanceInit.getBuffer(),
               m_resources->getBuildArea(),
@@ -336,6 +412,7 @@ namespace gladius
               m_resources->getPreCompSdfBBox(),
               m_resources->getEyePosition(),
               m_resources->getModelViewPerspectiveMat());
+                        gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)
         {
@@ -372,11 +449,22 @@ namespace gladius
 
         try
         {
-            kernelEvent = m_programFront->runNonBlocking(
+                        auto accesses = makeRenderPayloadReadAccesses(m_resources, lines);
+                        appendAccess(accesses, targetImage.gpuResourceHandle(), GpuAccessMode::Write);
+                        appendAccess(accesses, m_resources->getMetricsBufferGpuResource(), GpuAccessMode::Write);
+                        GpuKernelAccessGuard gpuAccess(
+                            *m_ComputeContext, queue, "renderSceneWithMetrics", std::move(accesses));
+                        if (!gpuAccess.granted())
+                        {
+                                return kernelEvent;
+                        }
+
+                        kernelEvent = m_programFront->runNonBlockingWithWaitList(
               queue,
               "renderSceneWithMetrics",
               setup.origin,
               setup.globalRange,
+                            gpuAccess.waitEvents(),
               targetImage.getBuffer(),
               metricsBuffer,
               m_resources->getBuildArea(),
@@ -392,6 +480,7 @@ namespace gladius
               m_resources->getPreCompSdfBBox(),
               m_resources->getEyePosition(),
               m_resources->getModelViewPerspectiveMat());
+                        gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)
         {
