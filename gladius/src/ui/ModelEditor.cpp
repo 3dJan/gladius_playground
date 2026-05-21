@@ -1862,7 +1862,15 @@ namespace gladius::ui
 
                 // Export overlay is now rendered at MainWindow level to block entire UI
 
-                if (m_nodeViewVisitor.haveParameterChanged())
+                // Read per-frame flags before clearing them. clearPerFrameFlags() is called
+                // unconditionally BEFORE storeState() so that if storeState() throws, the
+                // flags are already cleared and won't re-trigger the same exception every
+                // subsequent frame (which would flood the ImGui log and cause a segfault).
+                bool const nodeViewParamChanged = m_nodeViewVisitor.haveParameterChanged();
+                m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
+                m_nodeViewVisitor.clearPerFrameFlags();
+
+                if (nodeViewParamChanged)
                 {
                     m_dirty = true;
                     parameterChanged = true;
@@ -1876,14 +1884,6 @@ namespace gladius::ui
                         m_history.storeState(*m_assembly, "Parameter changed");
                     }
                 }
-
-                m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
-
-                // Clear per-frame flags so they don't persist into the next frame.
-                // Without this, a single parameter change causes showAndEdit() to
-                // return true every subsequent frame, continuously bumping the async
-                // epoch and preventing HQ progressive rendering from ever starting.
-                m_nodeViewVisitor.clearPerFrameFlags();
 
                 if (m_currentTabMode == TabMode::Graph)
                 {
@@ -1908,6 +1908,11 @@ namespace gladius::ui
         }
         catch (std::exception const & e)
         {
+            // Ensure ImGui window state is properly terminated even when an exception
+            // is thrown inside the Begin/End block, otherwise ImGui becomes corrupt.
+            ImGui::End();
+            ImGui::PopStyleVar();
+
             if (m_doc && m_doc->getSharedLogger())
             {
                 m_doc->getSharedLogger()->addEvent(
