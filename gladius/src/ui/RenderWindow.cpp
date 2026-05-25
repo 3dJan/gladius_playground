@@ -1227,9 +1227,6 @@ namespace gladius::ui
         // Mark model as modified for permanent centering
         m_modelModifiedSinceLastCenter = true;
 
-        // Reset first-time bounding box availability for new model
-        m_boundingBoxEverAvailable = false;
-
         // Reset bounding box so it will be recomputed
         m_core->resetBoundingBox();
 
@@ -2087,9 +2084,70 @@ namespace gladius::ui
                 int const desiredScreenHeight = static_cast<int>(
                     std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f));
                 auto const resultImage = m_core->getResultImage();
-                bool const screenResizeRequired =
+                bool screenResizeRequired =
                     resultImage && (static_cast<int>(resultImage->getWidth()) != desiredScreenWidth ||
                                                     static_cast<int>(resultImage->getHeight()) != desiredScreenHeight);
+
+        // Treat render-target resize as a scheduling barrier: the pure coordinator's
+        // viewport stamp must not be advanced until the concrete CL/GL images have the
+        // matching size. Otherwise an old-size render job can complete with the new
+        // viewport stamp, making HQ/static catch-up and Auto realtime learning believe
+        // the resized viewport is already current.
+        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
+        bool const hqRenderInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
+        if (!shouldDeferResize && screenResizeRequired)
+        {
+            if (hqRenderInFlight)
+            {
+                m_dirty = true;
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                state.isRendering = false;
+                return;
+            }
+
+            if (m_asyncController && m_asyncProgressiveBuffer != nullptr)
+            {
+                [[maybe_unused]] bool const released =
+                  m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                         async_rendering::FrameState::Writing,
+                                                         async_rendering::FrameState::Idle);
+                m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+                state.currentLine = 0;
+                state.isRendering = false;
+            }
+
+            bool const resized = m_core->setScreenResolution(desiredScreenWidth, desiredScreenHeight);
+            auto const latestImage = m_core->getResultImage();
+            bool const resizeStillRequired =
+              !latestImage || static_cast<int>(latestImage->getWidth()) != desiredScreenWidth ||
+              static_cast<int>(latestImage->getHeight()) != desiredScreenHeight;
+            if (resizeStillRequired)
+            {
+                // setScreenResolution can legitimately fail while another compute operation
+                // holds the token. Keep the old frame visible and retry next UI frame instead
+                // of scheduling work against stale dimensions.
+                m_dirty = true;
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                state.isRendering = false;
+                return;
+            }
+
+            screenResizeRequired = false;
+            if (resized)
+            {
+                invalidateView();
+            }
+        }
+        
+        // Clear preserve flags once rendering may resume. The early render() guard normally
+        // handles this on the first stable-size frame; this branch is a defensive fallback.
+        if (shouldDeferResize && m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire))
+        {
+            m_preserveContentDuringResize = false;
+            m_deferredResizePending = false;
+        }
 
         if (m_asyncController && m_asyncController->isRunning())
         {
@@ -2295,56 +2353,6 @@ namespace gladius::ui
         if (state.isMoving && m_preComputedSdfDirty)
         {
             m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
-        }
-
-        // Defer buffer reallocation during resize to preserve visible content. Also wait until
-        // async HQ rendering has fully drained before reallocating the displayed CL/GL image:
-        // worker jobs copy their staging image back into m_resultImage after the render kernel
-        // completes, and resizing that image concurrently can crash inside clEnqueueCopyImage.
-        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
-        bool const hqRenderInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
-
-        if (!shouldDeferResize && screenResizeRequired && !hqRenderInFlight &&
-            m_asyncProgressiveBuffer != nullptr)
-        {
-            [[maybe_unused]] bool const released =
-              m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
-                                                     async_rendering::FrameState::Writing,
-                                                     async_rendering::FrameState::Idle);
-            m_asyncProgressiveBuffer = nullptr;
-            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-            state.currentLine = 0;
-            state.isRendering = false;
-        }
-
-        if (!shouldDeferResize && screenResizeRequired && hqRenderInFlight)
-        {
-            m_dirty = true;
-            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-            state.isRendering = false;
-            return;
-        }
-
-        if (!shouldDeferResize &&
-            m_core->setScreenResolution(desiredScreenWidth, desiredScreenHeight))
-        {
-            // Resolution changed - mark dirty but DON'T bump epoch if already rendering
-            // (bumping epoch would cancel in-flight jobs)
-            if (!state.isRendering && !m_asyncJobInFlight.load(std::memory_order_acquire))
-            {
-                invalidateView();
-            }
-            else
-            {
-                m_dirty = true;
-            }
-        }
-        
-        // Clear preserve flags once low-res preview starts rendering
-        if (shouldDeferResize && m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire))
-        {
-            m_preserveContentDuringResize = false;
-            m_deferredResizePending = false;
         }
 
         std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
@@ -2562,6 +2570,11 @@ namespace gladius::ui
                         bool const isFullFrameRenderJob = isExactRealtimeJob || isStaticFullFrameProbe;
                         bool const isHqRenderJob = jobType == async_rendering::RenderJobType::HighQuality ||
                                                                              isFullFrameRenderJob;
+                        auto const currentResultImage = m_core ? m_core->getResultImage() : SharedGLImageBuffer{};
+                        bool const isTargetSizeOutdated =
+                            isHqRenderJob && currentResultImage &&
+                            (static_cast<uint32_t>(currentResultImage->getWidth()) != result.width ||
+                             static_cast<uint32_t>(currentResultImage->getHeight()) != result.height);
                         bool const isViewOutdated = isHqRenderJob && result.viewEpoch < currentViewEpoch;
 
             if (result.jobType == async_rendering::RenderJobType::SDFPrecomputation)
@@ -2647,11 +2660,12 @@ namespace gladius::ui
                 sample.completedFrame = result.completedFrame && result.startLine == 0 &&
                                         renderedLines >= static_cast<size_t>(result.height);
                 sample.cancelled = result.cancelled;
-                if (isStaticFullFrameProbe && !isOutdated && !isViewOutdated)
+                if (isStaticFullFrameProbe && !isOutdated && !isViewOutdated &&
+                    !isTargetSizeOutdated)
                 {
                     m_renderUpdateCoordinator.recordStaticFullFrameSample(sample);
                 }
-                else if (isExactRealtimeJob)
+                else if (isExactRealtimeJob && !isTargetSizeOutdated)
                 {
                     if (m_renderUpdateCoordinator.interactionState() ==
                         async_rendering::RenderInteractionState::Static)
@@ -2664,6 +2678,7 @@ namespace gladius::ui
                     }
                 }
                 else if (!isOutdated && !isViewOutdated &&
+                         !isTargetSizeOutdated &&
                          m_renderUpdateCoordinator.interactionState() == async_rendering::RenderInteractionState::Static)
                 {
                     m_renderUpdateCoordinator.recordStaticProgressiveSample(sample);
@@ -2703,7 +2718,8 @@ namespace gladius::ui
             }
 
             // Update progressive scheduling state only for current scene/view results.
-            if (!isOutdated && !isViewOutdated && result.jobType == async_rendering::RenderJobType::HighQuality)
+            if (!isOutdated && !isViewOutdated && !isTargetSizeOutdated &&
+                result.jobType == async_rendering::RenderJobType::HighQuality)
             {
                 size_t const maxHeight = static_cast<size_t>(result.height);
                 state.currentLine = std::min(result.completedLine, maxHeight);
@@ -2717,7 +2733,8 @@ namespace gladius::ui
             // Interactive realtime raymarching frames (both Auto and Force) need to be displayed even if
             // the view epoch has incremented, otherwise continuous camera motion freezes.
             bool const allowForcedRealtimeStaleView = isExactRealtimeJob;
-            bool const discardForStaleView = isViewOutdated && !allowForcedRealtimeStaleView;
+                        bool const discardForStaleView =
+                            isTargetSizeOutdated || (isViewOutdated && !allowForcedRealtimeStaleView);
 
             if (result.completedFrame)
             {
@@ -2786,7 +2803,7 @@ namespace gladius::ui
             }
             else
             {
-                if (isViewOutdated && m_asyncProgressiveBuffer &&
+                if ((isViewOutdated || isTargetSizeOutdated) && m_asyncProgressiveBuffer &&
                     m_asyncProgressiveViewEpoch.load(std::memory_order_acquire) == result.viewEpoch)
                 {
                     [[maybe_unused]] bool const released =
@@ -2822,13 +2839,15 @@ namespace gladius::ui
 
                 // If we just consumed an outdated job result, ensure we don't block scheduling for
                 // the new epoch.
-                if (isOutdated || isViewOutdated)
+                if (isOutdated || isViewOutdated || isTargetSizeOutdated)
                 {
                     state.isRendering = false;
                 }
             }
 
-            completeCoordinatorTask(result, result.completedFrame && !isOutdated && !isViewOutdated);
+            completeCoordinatorTask(result,
+                                    result.completedFrame && !isOutdated && !isViewOutdated &&
+                                      !isTargetSizeOutdated);
         }
     }
 
