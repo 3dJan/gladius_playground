@@ -2285,6 +2285,14 @@ namespace gladius::ui
             targetFunctionName = fileInfo.libraryFunctionNames.front();
         }
 
+        // Extract example constants from the library file before pruning modifies it.
+        std::vector<io::ExampleConstantValue> exampleConstants;
+        if (!targetFunctionName.empty())
+        {
+            exampleConstants =
+              io::extractExampleConstants(fileInfo.filePath, targetFunctionName);
+        }
+
         // Refresh the assembly pointer — the document may have replaced it
         // since we last captured it (e.g. during file load).
         refreshAssembly();
@@ -2314,11 +2322,13 @@ namespace gladius::ui
             return;
         }
 
-        createFunctionCallNodeAtCursor(match.id, match.model);
+        createFunctionCallNodeAtCursor(match.id, match.model, exampleConstants);
     }
 
-    void ModelEditor::createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
-                                                      nodes::SharedModel const & sourceModel)
+    void ModelEditor::createFunctionCallNodeAtCursor(
+      nodes::ResourceId functionId,
+      nodes::SharedModel const & sourceModel,
+      std::vector<io::ExampleConstantValue> const & exampleConstants)
     {
         createUndoRestorePoint("Import library function");
 
@@ -2332,6 +2342,55 @@ namespace gladius::ui
 
         auto * createdNode = m_currentModel->createFunctionCallNode(functionId, *sourceModel);
         ed::SetNodePosition(createdNode->getId(), posOnCanvas);
+
+        // Create pre-wired constant nodes for any argument that has an example value.
+        if (!exampleConstants.empty())
+        {
+            auto const & arguments = createdNode->getArguments();
+            constexpr float kConstantOffsetX = -250.0f;
+            constexpr float kConstantSpacingY = 80.0f;
+
+            int constantIndex = 0;
+            for (auto const & [argName, argParam] : arguments)
+            {
+                auto it = std::find_if(
+                  exampleConstants.begin(),
+                  exampleConstants.end(),
+                  [&argName](io::ExampleConstantValue const & cv)
+                  { return cv.parameterName == argName; });
+
+                if (it == exampleConstants.end())
+                {
+                    continue;
+                }
+
+                ImVec2 const constPos{posOnCanvas.x + kConstantOffsetX,
+                                      posOnCanvas.y + constantIndex * kConstantSpacingY};
+
+                if (it->kind == io::ExampleConstantValue::Kind::Scalar)
+                {
+                    auto * constNode = m_currentModel->create<ConstantScalar>();
+                    constNode->parameter().at(FieldNames::Value).setValue(it->scalarValue);
+                    constNode->setDisplayName(NodeName(argName));
+                    ed::SetNodePosition(constNode->getId(), constPos);
+                    m_currentModel->addLink(constNode->getValueOutputPort().getId(),
+                                            argParam->getId());
+                }
+                else if (it->kind == io::ExampleConstantValue::Kind::Vector)
+                {
+                    auto * constNode = m_currentModel->create<ConstantVector>();
+                    constNode->parameter().at(FieldNames::X).setValue(it->vectorValue.x);
+                    constNode->parameter().at(FieldNames::Y).setValue(it->vectorValue.y);
+                    constNode->parameter().at(FieldNames::Z).setValue(it->vectorValue.z);
+                    constNode->setDisplayName(NodeName(argName));
+                    ed::SetNodePosition(constNode->getId(), constPos);
+                    m_currentModel->addLink(constNode->getVectorOutputPort().getId(),
+                                            argParam->getId());
+                }
+
+                ++constantIndex;
+            }
+        }
 
         requestNodeFocus(createdNode->getId());
         markModelAsModified();

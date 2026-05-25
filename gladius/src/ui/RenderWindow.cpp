@@ -299,6 +299,7 @@ namespace gladius::ui
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncRealtimeJobInFlight.store(false, std::memory_order_release);
+            m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
             m_renderUpdateCoordinator = async_rendering::RenderUpdateCoordinator{};
@@ -321,6 +322,7 @@ namespace gladius::ui
             m_asyncFrameCounter.store(0, std::memory_order_release);
             m_asyncJobInFlight.store(false, std::memory_order_release);
             m_asyncRealtimeJobInFlight.store(false, std::memory_order_release);
+            m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
         }
@@ -785,6 +787,9 @@ namespace gladius::ui
             bool const exactRealtimeInteraction = isRealtimeRaymarchInteractionActive();
             bool const exactRealtimeJobInFlight =
                             m_asyncRealtimeJobInFlight.load(std::memory_order_acquire);
+            bool const fullFrameRenderJobInFlight =
+                            exactRealtimeJobInFlight ||
+                            m_asyncStaticFullFrameJobInFlight.load(std::memory_order_acquire);
             auto const resultImage = m_core->getResultImage();
                         auto const frontState = async_rendering::DisplayFrameBufferState{
                             .hasImage = frontBuf && frontBuf->image != nullptr,
@@ -792,8 +797,7 @@ namespace gladius::ui
                             .viewEpoch = frontBuf ? frontBuf->viewEpoch.load(std::memory_order_acquire) : 0u};
                         auto const progressiveState = async_rendering::DisplayFrameBufferState{
                             .hasImage = m_asyncProgressiveBuffer &&
-                                                    m_asyncProgressiveBuffer->image != nullptr &&
-                                                    !m_asyncStaticFullFrameJobInFlight.load(std::memory_order_acquire),
+                                                    m_asyncProgressiveBuffer->image != nullptr,
                             .epoch = m_asyncProgressiveEpoch.load(std::memory_order_acquire),
                             .viewEpoch = m_asyncProgressiveViewEpoch.load(std::memory_order_acquire)};
             auto const displaySource = async_rendering::selectDisplayFrameSource(
@@ -806,6 +810,7 @@ namespace gladius::ui
                                 .exactRealtimeJobInFlight = exactRealtimeJobInFlight,
                                 .isRendering = m_renderWindowState.isRendering,
                                 .isMoving = m_renderWindowState.isMoving,
+                                .fullFrameRenderJobInFlight = fullFrameRenderJobInFlight,
                                 .suppressHqDisplay = m_suppressHQDisplay.load(std::memory_order_acquire),
                                 .resultImageAvailable = resultImage != nullptr,
                                 .presentedFrame = m_presentedFrames.presentedFrame()});
@@ -2717,6 +2722,10 @@ namespace gladius::ui
                     m_asyncInFlightEpoch.store(0, std::memory_order_release);
                     m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
+                }
+                if (isStaticFullFrameProbe)
+                {
+                    m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
                 }
                 completeCoordinatorTask(result, false);
                 continue;

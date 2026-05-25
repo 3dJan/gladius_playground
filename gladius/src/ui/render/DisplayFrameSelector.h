@@ -32,6 +32,7 @@ namespace gladius::ui::async_rendering
         bool exactRealtimeJobInFlight{false};
         bool isRendering{false};
         bool isMoving{false};
+        bool fullFrameRenderJobInFlight{false};
         bool suppressHqDisplay{false};
         bool resultImageAvailable{true};
                 std::optional<PresentedFrame> presentedFrame{};
@@ -80,7 +81,14 @@ namespace gladius::ui::async_rendering
           input.progressiveBuffer.epoch == input.currentEpoch &&
           input.progressiveBuffer.viewEpoch == input.currentViewEpoch;
 
-        if (progressiveBufferCurrent && !input.isMoving && !input.suppressHqDisplay)
+        if (frontBufferIsPresentedFrame && !input.suppressHqDisplay &&
+            input.presentedFrame->quality == FramePresentationQuality::FullQuality)
+        {
+            return DisplayFrameSource::FrontBuffer;
+        }
+
+        if (progressiveBufferCurrent && !input.isMoving && !input.fullFrameRenderJobInFlight &&
+            !input.suppressHqDisplay)
         {
             return DisplayFrameSource::ProgressiveBuffer;
         }
