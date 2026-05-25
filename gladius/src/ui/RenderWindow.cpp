@@ -792,7 +792,8 @@ namespace gladius::ui
                             .viewEpoch = frontBuf ? frontBuf->viewEpoch.load(std::memory_order_acquire) : 0u};
                         auto const progressiveState = async_rendering::DisplayFrameBufferState{
                             .hasImage = m_asyncProgressiveBuffer &&
-                                                    m_asyncProgressiveBuffer->image != nullptr,
+                                                    m_asyncProgressiveBuffer->image != nullptr &&
+                                                    !m_asyncStaticFullFrameJobInFlight.load(std::memory_order_acquire),
                             .epoch = m_asyncProgressiveEpoch.load(std::memory_order_acquire),
                             .viewEpoch = m_asyncProgressiveViewEpoch.load(std::memory_order_acquire)};
             auto const displaySource = async_rendering::selectDisplayFrameSource(
@@ -2709,6 +2710,10 @@ namespace gladius::ui
                     {
                         m_asyncRealtimeJobInFlight.store(false, std::memory_order_release);
                     }
+                    if (isStaticFullFrameProbe)
+                    {
+                        m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
+                    }
                     m_asyncInFlightEpoch.store(0, std::memory_order_release);
                     m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
@@ -2815,6 +2820,22 @@ namespace gladius::ui
                     m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
                 }
+                else if (m_asyncStaticFullFrameJobInFlight.load(std::memory_order_acquire) &&
+                         m_asyncProgressiveBuffer &&
+                         m_asyncProgressiveEpoch.load(std::memory_order_acquire) == result.epoch)
+                {
+                    // A full-frame probe was scheduled while this chunk was in-flight.
+                    // The chunk kernel is now done (result has arrived), so it is safe to release
+                    // the progressive buffer. This prevents the partial chunk content (stale bottom)
+                    // from being displayed while the probe renders.
+                    [[maybe_unused]] bool const released =
+                      m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
+                                                             async_rendering::FrameState::Writing,
+                                                             async_rendering::FrameState::Idle);
+                    m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+                    m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+                }
                 else if (!isOutdated && !isViewOutdated && m_asyncProgressiveBuffer &&
                          m_asyncProgressiveBuffer->image)
                 {
@@ -2834,6 +2855,10 @@ namespace gladius::ui
                 {
                     m_asyncRealtimeJobInFlight.store(false, std::memory_order_release);
                 }
+                if (isStaticFullFrameProbe)
+                {
+                    m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
+                }
                 m_asyncInFlightEpoch.store(0, std::memory_order_release);
                 m_asyncInFlightViewEpoch.store(0, std::memory_order_release);
 
@@ -2843,6 +2868,15 @@ namespace gladius::ui
                 {
                     state.isRendering = false;
                 }
+            }
+
+            // A StaticFullFrameProbe result clears the flag regardless of the epoch match,
+            // because when a progressive chunk was in-flight when the probe was scheduled the
+            // chunk's result consumes m_asyncInFlightEpoch first, leaving no epoch match for
+            // the later probe result.
+            if (isStaticFullFrameProbe)
+            {
+                m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
             }
 
             completeCoordinatorTask(result,
@@ -3181,6 +3215,9 @@ namespace gladius::ui
         m_asyncJobInFlight.store(true, std::memory_order_release);
         m_asyncRealtimeJobInFlight.store(job.type == async_rendering::RenderJobType::RealtimeHighQuality,
                                          std::memory_order_release);
+        m_asyncStaticFullFrameJobInFlight.store(
+            job.type == async_rendering::RenderJobType::StaticFullFrameProbe,
+            std::memory_order_release);
         m_asyncController->enqueueJob(job);
 
         ZoneText("FullFrameJobEnqueued", 20);
@@ -3256,7 +3293,32 @@ namespace gladius::ui
             writeBuffer = nullptr;
         };
 
-        if (!m_asyncProgressiveBuffer ||
+        if (usesFullModelApproximation)
+        {
+            // Full-frame jobs (StaticFullFrameProbe / RealtimeHighQuality): acquire a dedicated
+            // write buffer without reading or writing m_asyncProgressiveBuffer.  If a progressive
+            // chunk was running before this probe was scheduled, the UI thread keeps a reference
+            // to that partial chunk buffer.  Setting m_asyncProgressiveBuffer to the probe buffer
+            // from this worker thread would cause the display to show the probe's write buffer
+            // (with stale partial content) until the probe completes.
+            writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
+            if (!writeBuffer)
+            {
+                result.cancelled = true;
+                co_return result;
+            }
+            if (writeBuffer->image)
+            {
+                if (writeBuffer->image->getWidth() < job.width ||
+                    writeBuffer->image->getHeight() < job.height)
+                {
+                    releaseProgressiveBuffer();
+                    result.cancelled = true;
+                    co_return result;
+                }
+            }
+        }
+        else if (!m_asyncProgressiveBuffer ||
             m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch)
         {
             writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
@@ -3384,9 +3446,14 @@ namespace gladius::ui
                             result.viewEpoch,
                             result.coordinatorStamp,
                             async_rendering::FramePresentationQuality::FullQuality);
-            m_asyncProgressiveBuffer = nullptr;
-            m_asyncProgressiveEpoch.store(0, std::memory_order_release);
+            // Only clear m_asyncProgressiveBuffer for progressive rendering (not full-frame jobs).
+            // Full-frame jobs never set m_asyncProgressiveBuffer, so there is nothing to clear.
+            if (!usesFullModelApproximation)
+            {
+                m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                         m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+            }
         }
 
         auto const endTime = std::chrono::steady_clock::now();

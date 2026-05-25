@@ -380,6 +380,9 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
         std::atomic<bool> m_asyncRealtimeJobInFlight{false};
+        /// Set when a StaticFullFrameProbe job is in-flight; used to suppress the progressive
+        /// buffer from display so the partial chunk content is not shown while the probe renders.
+        std::atomic<bool> m_asyncStaticFullFrameJobInFlight{false};
         std::atomic<bool> m_asyncBboxJobInFlight{false};
         std::atomic<bool> m_asyncBboxUpdatePending{
           false}; // Tracks if bbox needs update after current job
