@@ -100,7 +100,8 @@ namespace gladius::io::tests
             resNode->SetResource(std::static_pointer_cast<Lib3MF::CResource>(taggedFunc));
 
             auto fcNode = exampleFunc->AddFunctionCallNode("FC", "FC", "");
-            fcNode->AddInput("offset", "offset");
+            auto offsetPort = fcNode->AddInput("offset", "offset");
+            offsetPort->SetType(Lib3MF::eImplicitPortType::Vector);
 
             exampleFunc->AddLink(resNode->GetOutputValue(), fcNode->GetInputFunctionID());
             exampleFunc->AddLinkByNames("CV.vector", "FC.offset");
@@ -234,4 +235,138 @@ namespace gladius::io::tests
         EXPECT_FLOAT_EQ(constants[0].vectorValue.z, 3.0f);
     }
 
+    TEST_F(LibraryExampleExtractorTest,
+           extractExampleConstants_WithMatrixConstant_ReturnsMatrixValue)
+    {
+        // Arrange
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+
+        auto taggedFunc = model->AddImplicitFunction();
+        taggedFunc->SetDisplayName("matFunc");
+        taggedFunc->AddInput("transform", "transform", Lib3MF::eImplicitPortType::Matrix);
+        taggedFunc->AddOutput("shape", "shape", Lib3MF::eImplicitPortType::Scalar);
+
+        auto const taggedId = taggedFunc->GetModelResourceID();
+
+        auto exampleFunc = model->AddImplicitFunction();
+        exampleFunc->SetDisplayName("main");
+        exampleFunc->AddOutput("shape", "shape", Lib3MF::eImplicitPortType::Scalar);
+
+        auto constMat = exampleFunc->AddConstMatNode("CM", "CM", "");
+        Lib3MF::sMatrix4x4 mat{};
+        // Identity matrix with a recognizable off-diagonal value
+        mat.m_Field[0][0] = 1.0;
+        mat.m_Field[1][1] = 2.0;
+        mat.m_Field[2][2] = 3.0;
+        mat.m_Field[3][3] = 4.0;
+        mat.m_Field[0][1] = 5.0;
+        constMat->SetMatrix(mat);
+
+        auto resNode = exampleFunc->AddResourceIdNode("Res", "Res", "");
+        resNode->SetResource(std::static_pointer_cast<Lib3MF::CResource>(taggedFunc));
+
+        auto fcNode = exampleFunc->AddFunctionCallNode("FC", "FC", "");
+        auto transformPort = fcNode->AddInput("transform", "transform");
+        transformPort->SetType(Lib3MF::eImplicitPortType::Matrix);
+
+        exampleFunc->AddLink(resNode->GetOutputValue(), fcNode->GetInputFunctionID());
+        exampleFunc->AddLinkByNames("CM.matrix", "FC.transform");
+
+        writeLibraryMetadata(
+          model, LibraryMetadata{std::to_string(taggedId), "Matrix test function", ""});
+
+        auto const path = m_tempDir / "matrix_lib.3mf";
+        model->QueryWriter("3mf")->WriteToFile(path.string());
+
+        // Act
+        auto const constants = extractExampleConstants(path, "matFunc");
+
+        // Assert
+        ASSERT_EQ(constants.size(), 1u);
+        EXPECT_EQ(constants[0].kind, ExampleConstantValue::Kind::Matrix);
+        EXPECT_EQ(constants[0].parameterName, "transform");
+        EXPECT_FLOAT_EQ(constants[0].matrixValue[0][0], 1.0f);
+        EXPECT_FLOAT_EQ(constants[0].matrixValue[1][1], 2.0f);
+        EXPECT_FLOAT_EQ(constants[0].matrixValue[2][2], 3.0f);
+        EXPECT_FLOAT_EQ(constants[0].matrixValue[3][3], 4.0f);
+        EXPECT_FLOAT_EQ(constants[0].matrixValue[0][1], 5.0f);
+    }
+
 } // namespace gladius::io::tests
+
+namespace gladius::io::integration_tests
+{
+    /// @brief Integration tests that load real 3MF library files shipped with Gladius.
+    ///
+    /// These tests verify end-to-end extraction from actual library files as
+    /// they would be encountered during a library drag-drop in the node editor.
+    class LibraryExampleExtractorIntegrationTest : public ::testing::Test
+    {
+    };
+
+    /// Verifies that @c extractExampleConstants works with the real involute_gear.3mf
+    /// library file. The test dynamically discovers the tagged function display name
+    /// from metadata so it stays correct even if the file is regenerated.
+    TEST_F(LibraryExampleExtractorIntegrationTest,
+           extractExampleConstants_WithRealInvoluteGear_ReturnsNonEmptyScalars)
+    {
+        // Arrange
+        std::filesystem::path const filePath{"testdata/involute_gear.3mf"};
+        ASSERT_TRUE(std::filesystem::exists(filePath))
+          << "involute_gear.3mf not found in testdata/. "
+             "Check that the CMakeLists.txt copy step is present.";
+
+        // Discover the tagged function display name from the file's library metadata.
+        auto wrapper = Lib3MF::CWrapper::loadLibrary();
+        auto model = wrapper->CreateModel();
+        model->QueryReader("3mf")->ReadFromFile(filePath.string());
+
+        auto const libMeta = readLibraryMetadata(model);
+        ASSERT_TRUE(libMeta.has_value()) << "involute_gear.3mf has no library metadata";
+
+        auto const taggedIds = parseResourceIds(libMeta->libraryFunctions);
+        ASSERT_FALSE(taggedIds.empty()) << "No tagged function IDs in metadata";
+
+        // Find the display name of the first tagged function.
+        std::string displayName;
+        auto resIter = model->GetResources();
+        while (resIter->MoveNext())
+        {
+            auto res = resIter->GetCurrent();
+            auto const modelId = res->GetModelResourceID();
+            if (std::find(taggedIds.begin(), taggedIds.end(), modelId) == taggedIds.end())
+            {
+                continue;
+            }
+            auto implicitFunc = std::dynamic_pointer_cast<Lib3MF::CImplicitFunction>(res);
+            if (implicitFunc)
+            {
+                displayName = implicitFunc->GetDisplayName();
+                break;
+            }
+        }
+        ASSERT_FALSE(displayName.empty()) << "Could not find tagged implicit function in file";
+
+        // Act
+        auto const constants = extractExampleConstants(filePath, displayName);
+
+        // Assert — the gear example must supply at least one constant to be useful.
+        ASSERT_FALSE(constants.empty())
+          << "Expected example constants for function '" << displayName << "'";
+
+        // All gear parameters are positive scalars (module, teeth count, height, angles).
+        for (auto const & c : constants)
+        {
+            EXPECT_FALSE(c.parameterName.empty())
+              << "Every extracted constant must have a parameter name";
+            if (c.kind == ExampleConstantValue::Kind::Scalar)
+            {
+                EXPECT_GT(c.scalarValue, 0.0f)
+                  << "Scalar parameter '" << c.parameterName
+                  << "' should be positive for a gear";
+            }
+        }
+    }
+
+} // namespace gladius::io::integration_tests

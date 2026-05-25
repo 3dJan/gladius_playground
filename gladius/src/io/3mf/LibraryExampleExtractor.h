@@ -17,13 +17,15 @@ namespace gladius::io
         enum class Kind
         {
             Scalar,
-            Vector
+            Vector,
+            Matrix
         };
 
         Kind kind = Kind::Scalar;
         std::string parameterName; ///< The FunctionCall argument name this value feeds into
         float scalarValue = 0.0f;
         nodes::float3 vectorValue = {};
+        nodes::Matrix4x4 matrixValue = {};
     };
 
     /// @brief Extract example constant values for a tagged library function from a .3mf file.

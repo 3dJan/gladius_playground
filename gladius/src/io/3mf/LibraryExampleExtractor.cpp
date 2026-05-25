@@ -131,7 +131,7 @@ namespace gladius::io
                             if (resourceIdNode && resourceIdNode->GetResource())
                             {
                                 calledFunctionId =
-                                  resourceIdNode->GetResource()->GetResourceID();
+                                  resourceIdNode->GetResource()->GetModelResourceID();
                             }
                             break;
                         }
@@ -149,8 +149,15 @@ namespace gladius::io
                     {
                         auto input = inputIter->GetCurrent();
 
-                        // Skip the special functionid input.
-                        if (input->GetIdentifier() == "functionid")
+                        // Skip the special functionid input (case-insensitive: lib3mf may
+                        // produce "functionID" or "functionid" depending on source).
+                        auto const inputId = input->GetIdentifier();
+                        if (inputId.size() == 10 &&
+                            std::equal(inputId.begin(), inputId.end(), "functionid",
+                                       [](unsigned char a, unsigned char b)
+                                       {
+                                           return std::tolower(a) == std::tolower(b);
+                                       }))
                         {
                             continue;
                         }
@@ -204,6 +211,27 @@ namespace gladius::io
                                       static_cast<float>(v.m_Coordinates[0]),
                                       static_cast<float>(v.m_Coordinates[1]),
                                       static_cast<float>(v.m_Coordinates[2])};
+                                    result.push_back(std::move(val));
+                                }
+                            }
+                            else if (srcNode->GetNodeType() == Lib3MF::eImplicitNodeType::ConstMat)
+                            {
+                                auto matNode =
+                                  std::dynamic_pointer_cast<Lib3MF::CConstMatNode>(srcNode);
+                                if (matNode)
+                                {
+                                    auto const m = matNode->GetMatrix();
+                                    ExampleConstantValue val;
+                                    val.kind = ExampleConstantValue::Kind::Matrix;
+                                    val.parameterName = makeValidVariableName(input->GetIdentifier());
+                                    for (int row = 0; row < 4; ++row)
+                                    {
+                                        for (int col = 0; col < 4; ++col)
+                                        {
+                                            val.matrixValue[row][col] =
+                                              static_cast<float>(m.m_Field[row][col]);
+                                        }
+                                    }
                                     result.push_back(std::move(val));
                                 }
                             }

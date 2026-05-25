@@ -2387,6 +2387,31 @@ namespace gladius::ui
                     m_currentModel->addLink(constNode->getVectorOutputPort().getId(),
                                             argParam->getId());
                 }
+                else if (it->kind == io::ExampleConstantValue::Kind::Matrix)
+                {
+                    auto * constNode = m_currentModel->create<ConstantMatrix>();
+                    auto const & mat = it->matrixValue;
+                    constNode->parameter().at(FieldNames::M00).setValue(mat[0][0]);
+                    constNode->parameter().at(FieldNames::M01).setValue(mat[0][1]);
+                    constNode->parameter().at(FieldNames::M02).setValue(mat[0][2]);
+                    constNode->parameter().at(FieldNames::M03).setValue(mat[0][3]);
+                    constNode->parameter().at(FieldNames::M10).setValue(mat[1][0]);
+                    constNode->parameter().at(FieldNames::M11).setValue(mat[1][1]);
+                    constNode->parameter().at(FieldNames::M12).setValue(mat[1][2]);
+                    constNode->parameter().at(FieldNames::M13).setValue(mat[1][3]);
+                    constNode->parameter().at(FieldNames::M20).setValue(mat[2][0]);
+                    constNode->parameter().at(FieldNames::M21).setValue(mat[2][1]);
+                    constNode->parameter().at(FieldNames::M22).setValue(mat[2][2]);
+                    constNode->parameter().at(FieldNames::M23).setValue(mat[2][3]);
+                    constNode->parameter().at(FieldNames::M30).setValue(mat[3][0]);
+                    constNode->parameter().at(FieldNames::M31).setValue(mat[3][1]);
+                    constNode->parameter().at(FieldNames::M32).setValue(mat[3][2]);
+                    constNode->parameter().at(FieldNames::M33).setValue(mat[3][3]);
+                    constNode->setDisplayName(NodeName(argName));
+                    ed::SetNodePosition(constNode->getId(), constPos);
+                    m_currentModel->addLink(constNode->getMatrixOutputPort().getId(),
+                                            argParam->getId());
+                }
 
                 ++constantIndex;
             }
