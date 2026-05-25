@@ -129,6 +129,37 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(selected, DisplayFrameSource::ProgressiveBuffer);
     }
 
+    TEST(DisplayFrameSelector, WithPresentedFullFrameAndCurrentProgressive_HoldsFrontBuffer)
+    {
+        auto const presentedFrame = PresentedFrame{.frameId = 10,
+                                                   .stamp = RenderStamp{.sceneEpoch = 2,
+                                                                        .viewEpoch = 6},
+                                                   .quality = FramePresentationQuality::FullQuality,
+                                                   .source = FramePresentationSource::ProgressiveHighQuality,
+                                                   .completedFrame = true};
+
+        auto const selected = selectDisplayFrameSource(
+          DisplayFrameSelectionInput{.frontBuffer = buffer(2, 6),
+                                     .progressiveBuffer = buffer(3, 7),
+                                     .currentEpoch = 3,
+                                     .currentViewEpoch = 7,
+                                     .presentedFrame = presentedFrame});
+
+        EXPECT_EQ(selected, DisplayFrameSource::FrontBuffer);
+    }
+
+    TEST(DisplayFrameSelector, WithFullFrameJobInFlight_DoesNotSelectProgressiveBuffer)
+    {
+        auto const selected = selectDisplayFrameSource(
+          DisplayFrameSelectionInput{.frontBuffer = buffer(2, 7),
+                                     .progressiveBuffer = buffer(3, 7),
+                                     .currentEpoch = 3,
+                                     .currentViewEpoch = 7,
+                                     .fullFrameRenderJobInFlight = true});
+
+        EXPECT_EQ(selected, DisplayFrameSource::ResultImage);
+    }
+
     TEST(DisplayFrameSelector, WithMovingState_DoesNotSelectProgressiveBuffer)
     {
         auto const selected = selectDisplayFrameSource(

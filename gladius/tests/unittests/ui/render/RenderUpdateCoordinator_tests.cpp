@@ -168,6 +168,32 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
     }
 
+    TEST(RenderUpdateCoordinator, StaticCatchUp_WithResizePending_DoesNotStartStaticFullFrameProbe)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.configureViewport(640, 480);
+        auto bbox = findStartedTask(decision, RenderTaskType::BoundingBoxUpdate);
+        ASSERT_TRUE(bbox.has_value());
+
+        decision = coordinator.completeTask(completed(*bbox));
+        auto sdf = findStartedTask(decision, RenderTaskType::SdfPrecomputation);
+        ASSERT_TRUE(sdf.has_value());
+
+        decision = coordinator.completeTask(completed(*sdf));
+        auto progressive = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+        ASSERT_TRUE(progressive.has_value());
+
+        coordinator.recordStaticProgressiveSample(progressiveChunkSample(5.0f));
+        async_rendering::RealtimeRaymarchGuards guards{};
+        guards.resizePending = true;
+        coordinator.setRealtimeGuards(guards);
+
+        decision = coordinator.completeTask(completed(*progressive));
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StaticFullFrameProbe));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
+    }
+
     TEST(RenderUpdateCoordinator, StaticCatchUp_AfterSlowProgressiveEstimate_ContinuesProgressive)
     {
         RenderUpdateCoordinator coordinator;
