@@ -110,7 +110,9 @@ namespace gladius::io
 
             auto objective = [](std::vector<double> const& x, std::vector<double>& /*grad*/, void* data) {
                 auto* c = static_cast<NloptContext*>(data);
-                std::vector<float> xf(x.begin(), x.end());
+                std::vector<float> xf;
+                xf.reserve(x.size());
+                std::transform(x.begin(), x.end(), std::back_inserter(xf), [](double v) { return static_cast<float>(v); });
                 Eigen::Vector3f const predicted = c->solver->predictColor(xf);
                 double err = static_cast<double>((predicted - c->targetColor).squaredNorm());
 
@@ -157,7 +159,8 @@ namespace gladius::io
                 localOpt.set_maxeval(500);
                 localOpt.optimize(x, f);
 
-                out.assign(x.begin(), x.end());
+                out.resize(x.size());
+                std::transform(x.begin(), x.end(), out.begin(), [](double v) { return static_cast<float>(v); });
                 quantizeClampVec(out);
                 return true;
             }

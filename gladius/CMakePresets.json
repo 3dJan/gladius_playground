@@ -23,7 +23,7 @@
                 "VCPKG_TARGET_TRIPLET": "x64-windows-gladius",
                 "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
-                "CMAKE_BUILD_PARALLEL_LEVEL": "8",
+                "CMAKE_BUILD_PARALLEL_LEVEL": "2",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
         },
