@@ -105,6 +105,49 @@ target_link_libraries(${BINARY}_lib PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
 
+# Precompiled headers: heavy/frequently-used headers compiled once per target,
+# dramatically reducing MSVC memory pressure and improving incremental build speed.
+set(GLADIUS_PCH_HEADERS
+    <algorithm>
+    <array>
+    <chrono>
+    <cmath>
+    <cstring>
+    <filesystem>
+    <fstream>
+    <functional>
+    <iostream>
+    <limits>
+    <map>
+    <memory>
+    <mutex>
+    <optional>
+    <set>
+    <sstream>
+    <stdexcept>
+    <string>
+    <unordered_map>
+    <unordered_set>
+    <utility>
+    <variant>
+    <vector>
+    <fmt/format.h>
+    <Eigen/Core>
+    <imgui.h>
+)
+target_precompile_headers(${BINARY}_lib PRIVATE ${GLADIUS_PCH_HEADERS})
+# _lib_mcp has GLADIUS_ENABLE_MCP defined so it gets its own PCH build
+target_precompile_headers(${BINARY}_lib_mcp PRIVATE ${GLADIUS_PCH_HEADERS})
+# executables share the PCH from their corresponding library (same flags)
+target_precompile_headers(${BINARY} REUSE_FROM ${BINARY}_lib)
+
+# Increase the MSVC compiler's internal heap to prevent C1060 heap-overflow
+# errors on large translation units (e.g. ManifoldDualContouringGpu.cpp).
+if (MSVC)
+    target_compile_options(${BINARY}_lib PUBLIC /Zm200)
+    target_compile_options(${BINARY}_lib_mcp PUBLIC /Zm200)
+endif()
+
 # Enable AVX2 SIMD instructions for Phase 3 optimization
 # PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
 # avoiding ODR violations from mismatched struct layouts.
@@ -135,6 +178,8 @@ endif()
 target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
 # Ensure the MCP-enabled static library is built before linking the executable
 add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
+# Share the PCH already built for the MCP library (same flags + GLADIUS_ENABLE_MCP)
+target_precompile_headers(gladiusmcp REUSE_FROM ${BINARY}_lib_mcp)
 if (NOT WIN32)
     target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
 endif()
