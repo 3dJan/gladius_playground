@@ -25,10 +25,30 @@ namespace gladius
     class SpatialMeshResource : public MeshResourceBase
     {
       public:
+        enum class NanoVdbBuildResult : std::uint8_t
+        {
+            NotRequested = 0,
+            Built,
+            PreflightRejected,
+            BuildFailed,
+        };
+
+        struct NanoVdbBuildInfo
+        {
+            NanoVdbBuildResult result = NanoVdbBuildResult::NotRequested;
+            std::size_t estimatedBytes = 0u;
+            std::size_t budgetBytes = 0u;
+            float requestedVoxelSize_mm = 0.0f;
+            float suggestedVoxelSize_mm = 0.0f;
+            std::string reason;
+        };
+
         /// Construct from pre-built spatial data
         /// @param key Resource identifier
         /// @param data Pre-built BVH and mesh data (moved)
-        explicit SpatialMeshResource(ResourceKey key, SpatialMeshData && data);
+        explicit SpatialMeshResource(ResourceKey key,
+                                     SpatialMeshData && data,
+                                     NanoVdbBuildPolicy const & nanovdbBuildPolicy = {});
 
         /// Construct from pre-built spatial data with an explicit SDF evaluation configuration.
         /// @param key Resource identifier
@@ -36,7 +56,8 @@ namespace gladius
         /// @param evaluationConfig Mesh SDF evaluation configuration used while serializing payload data
         SpatialMeshResource(ResourceKey key,
                             SpatialMeshData && data,
-                            MeshSdfEvaluationConfig const & evaluationConfig);
+                            MeshSdfEvaluationConfig const & evaluationConfig,
+                            NanoVdbBuildPolicy const & nanovdbBuildPolicy = {});
 
         /// Construct from raw mesh (will build BVH)
         /// @param key Resource identifier
@@ -44,7 +65,8 @@ namespace gladius
         /// @param indices Triangle indices (3 per triangle)
         SpatialMeshResource(ResourceKey key,
                             std::span<float4 const> vertices,
-                            std::span<TriangleIndices const> indices);
+                            std::span<TriangleIndices const> indices,
+                            NanoVdbBuildPolicy const & nanovdbBuildPolicy = {});
 
         ~SpatialMeshResource() = default;
 
@@ -100,6 +122,55 @@ namespace gladius
         {
             return m_evaluationConfig;
         }
+
+        /// Update the runtime NanoVDB build policy used by subsequent rebuilds.
+        void setNanoVdbBuildPolicy(NanoVdbBuildPolicy const & buildPolicy) noexcept
+        {
+            m_nanovdbBuildPolicy = buildPolicy;
+        }
+
+        [[nodiscard]] NanoVdbBuildPolicy const & getNanoVdbBuildPolicy() const noexcept
+        {
+            return m_nanovdbBuildPolicy;
+        }
+
+        [[nodiscard]] NanoVdbBuildInfo const & getNanoVdbBuildInfo() const noexcept
+        {
+            return m_nanovdbBuildInfo;
+        }
+
+        [[nodiscard]] bool hasNanoVdbBuildIssue() const noexcept
+        {
+            return m_nanovdbBuildInfo.result == NanoVdbBuildResult::PreflightRejected ||
+                   m_nanovdbBuildInfo.result == NanoVdbBuildResult::BuildFailed;
+        }
+
+        [[nodiscard]] bool isNanoVdbSatisfiedWithoutGrid() const noexcept
+        {
+            return hasNanoVdbBuildIssue();
+        }
+
+        /// Mesh topology diagnostics captured during BVH construction.
+        [[nodiscard]] MeshQualityDiagnostics const & getMeshQualityDiagnostics() const noexcept
+        {
+            return m_data.quality;
+        }
+
+        /// True when the source mesh has topology that can make signed SDF sign ambiguous.
+        [[nodiscard]] bool hasMeshQualityIssues() const noexcept
+        {
+            return m_data.quality.hasIssues();
+        }
+
+        /// Format mesh-quality diagnostics into a user-facing message. Returns an empty string
+        /// when the mesh has no recorded quality issues.
+        [[nodiscard]] std::string formatMeshQualityMessage(
+          std::string const & displayName) const;
+
+        /// Format the current NanoVDB issue into a user-facing message. Returns an empty string
+        /// when the resource has no NanoVDB build issue.
+        [[nodiscard]] std::string formatNanoVdbBuildMessage(
+          std::string const & displayName) const;
 
         /// Rebuild BVH from updated mesh data
         /// @param vertices Updated vertex positions
@@ -192,6 +263,9 @@ namespace gladius
         size_t m_voxelDataOffset = 0;
         size_t m_voxelCount = 0;
         size_t m_signCacheDataOffset = 0;
+        size_t m_nanovdbGridOffset = 0;  ///< Local float offset of the NanoVDB grid in m_payloadData (0 = not built)
+        NanoVdbBuildPolicy m_nanovdbBuildPolicy{};
+        NanoVdbBuildInfo m_nanovdbBuildInfo{};
         bool m_needsFwnAggregateBuild = false;
         bool m_needsSignCacheBuild = true;
         int m_signCacheNextWord = 0;

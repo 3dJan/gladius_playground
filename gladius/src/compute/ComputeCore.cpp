@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 #include <iostream>
 
 #include <fmt/core.h>
@@ -377,14 +378,11 @@ namespace gladius
 
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex, std::adopt_lock);
-        if (isAutoUpdateBoundingBoxEnabled())
-        {
-            markBoundingBoxStale();
-        }
 
         auto & paramBuf = getResourceContext()->getParameterBuffer();
         auto & parameter = paramBuf.getData();
-        parameter.clear();
+        std::vector<float> updatedParameter;
+        updatedParameter.reserve(parameter.size());
 
         int currentIndex = 0;
         for (auto & model : assembly.getFunctions())
@@ -413,21 +411,21 @@ namespace gladius
                     if (auto const typedValuePtr = std::get_if<float>(&variant))
                     {
                         param->setLookUpIndex(currentIndex);
-                        parameter.push_back(*typedValuePtr);
+                        updatedParameter.push_back(*typedValuePtr);
                         ++currentIndex;
                     }
                     if (auto const typedValuePtr = std::get_if<int>(&variant))
                     {
                         param->setLookUpIndex(currentIndex);
-                        parameter.push_back(static_cast<float>(*typedValuePtr));
+                        updatedParameter.push_back(static_cast<float>(*typedValuePtr));
                         ++currentIndex;
                     }
                     if (auto const typedValuePtr = std::get_if<nodes::float3>(&variant))
                     {
                         param->setLookUpIndex(currentIndex);
-                        parameter.push_back(typedValuePtr->x);
-                        parameter.push_back(typedValuePtr->y);
-                        parameter.push_back(typedValuePtr->z);
+                        updatedParameter.push_back(typedValuePtr->x);
+                        updatedParameter.push_back(typedValuePtr->y);
+                        updatedParameter.push_back(typedValuePtr->z);
                         currentIndex += 3;
                     }
 
@@ -441,7 +439,7 @@ namespace gladius
                             for (int col = 0; col < 4; ++col)
                             {
                                 float const value = matrix[row][col];
-                                parameter.push_back(value);
+                                updatedParameter.push_back(value);
                                 ++currentIndex;
                             }
                         }
@@ -450,6 +448,15 @@ namespace gladius
             }
         }
 
+        bool const parameterChanged = updatedParameter != parameter;
+        if (parameterChanged)
+        {
+            if (isAutoUpdateBoundingBoxEnabled())
+            {
+                markBoundingBoxStale();
+            }
+        }
+        parameter = std::move(updatedParameter);
         paramBuf.write();
         // NOTE: Do NOT call invalidatePreCompSdf() here!
         // We want to keep the old SDF valid for preview rendering during interactive
@@ -2067,6 +2074,52 @@ namespace gladius
           commandQueue, *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
 
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+
+        if (completionEvent != nullptr)
+        {
+            *completionEvent = renderEvent;
+        }
+
+        if (renderEvent())
+        {
+            commandQueue.flush();
+            LOG_LOCATION
+            return true;
+        }
+
+        LOG_LOCATION
+        return false;
+    }
+
+    bool ComputeCore::renderSceneComputeOnlyWithSettings(cl::CommandQueue const & commandQueue,
+                                                         size_t startLine,
+                                                         size_t endLine,
+                                                         ImageRGBA & targetImage,
+                                                         RenderingSettings settings,
+                                                         cl::Event * completionEvent)
+    {
+        ProfileFunction
+
+          if (!m_computeMutex.try_lock())
+        {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
+
+        recompileIfRequired();
+
+        if (getBestRenderProgram()->isCompilationInProgress())
+        {
+            LOG_LOCATION
+            return false;
+        }
+
+        m_lastUsedApproximation = settings.approximation;
+        m_lastUsedHQApproximation = settings.approximation;
+        m_lastUsedPreviewApproximation = settings.approximation;
+
+        cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
+          commandQueue, *m_primitives, targetImage, settings, m_sliceHeight_mm, startLine, endLine);
 
         if (completionEvent != nullptr)
         {

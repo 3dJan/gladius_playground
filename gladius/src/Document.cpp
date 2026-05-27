@@ -34,6 +34,7 @@
 #include "nodes/ToOCLVisitor.h"
 #include "nodes/Validator.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -52,6 +53,51 @@ namespace gladius
 {
     namespace
     {
+        constexpr double kNanoVdbBudgetUtilization = 0.5;
+
+        [[nodiscard]] NanoVdbBuildPolicy
+        makeNanoVdbBuildPolicy(SharedComputeContext const & computeContext,
+                               NanoVdbFailurePolicy const failurePolicy) noexcept
+        {
+            NanoVdbBuildPolicy policy{};
+            policy.failurePolicy = failurePolicy;
+
+            if (!computeContext)
+            {
+                return policy;
+            }
+
+            size_t const deviceGlobalMemBytes = computeContext->getDeviceGlobalMemBytes();
+            size_t const deviceMaxAllocBytes = computeContext->getDeviceMaxAllocBytes();
+
+            if (deviceGlobalMemBytes == 0u && deviceMaxAllocBytes == 0u)
+            {
+                return policy;
+            }
+
+            size_t budgetFromGlobal = 0u;
+            if (deviceGlobalMemBytes != 0u)
+            {
+                budgetFromGlobal = static_cast<size_t>(
+                  static_cast<double>(deviceGlobalMemBytes) * kNanoVdbBudgetUtilization);
+            }
+
+            if (deviceMaxAllocBytes == 0u)
+            {
+                policy.budgetBytes = budgetFromGlobal;
+                return policy;
+            }
+
+            if (budgetFromGlobal == 0u)
+            {
+                policy.budgetBytes = deviceMaxAllocBytes;
+                return policy;
+            }
+
+            policy.budgetBytes = std::min(deviceMaxAllocBytes, budgetFromGlobal);
+            return policy;
+        }
+
         [[nodiscard]] MeshSdfEvaluationConfig makeInteractivePreviewMeshSdfConfig(
           MeshSdfEvaluationConfig cfg) noexcept
         {
@@ -70,6 +116,44 @@ namespace gladius
                     cfg.method == MeshSdfMethod::FastWindingNumber &&
                     current.fwnBeta != cfg.fwnBeta);
         }
+
+        class ScopedNanoVdbFailurePolicy
+        {
+          public:
+            ScopedNanoVdbFailurePolicy(std::atomic<NanoVdbFailurePolicy> & policy,
+                                       NanoVdbFailurePolicy const next) noexcept
+                : m_policy(policy)
+                , m_previous(policy.exchange(next, std::memory_order_relaxed))
+            {
+            }
+
+            ~ScopedNanoVdbFailurePolicy() noexcept
+            {
+                m_policy.store(m_previous, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<NanoVdbFailurePolicy> & m_policy;
+            NanoVdbFailurePolicy m_previous;
+        };
+
+        class ScopedLoadingFlag
+        {
+          public:
+            explicit ScopedLoadingFlag(std::atomic<bool> & loading) noexcept
+                : m_loading(loading)
+            {
+                m_loading.store(true, std::memory_order_relaxed);
+            }
+
+            ~ScopedLoadingFlag() noexcept
+            {
+                m_loading.store(false, std::memory_order_relaxed);
+            }
+
+          private:
+            std::atomic<bool> & m_loading;
+        };
 
         class ScopedOptimizedRenderCompilationDeferral
         {
@@ -257,6 +341,7 @@ namespace gladius
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         if (!m_3mfmodel)
         {
@@ -964,15 +1049,26 @@ namespace gladius
 
     void Document::load(std::filesystem::path filename)
     {
-        loadImpl(filename);
-        // reset back up time
-        m_lastBackupTime = std::chrono::system_clock::now();
+        ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                      NanoVdbFailurePolicy::Fail};
 
-        // Initial validation with FileLoad context - logs errors once for file loading
-        validateAssembly(nodes::ValidationContext::FileLoad);
+        try
+        {
+            loadImpl(filename);
+            // reset back up time
+            m_lastBackupTime = std::chrono::system_clock::now();
 
-        refreshModelBlocking();
-        m_core->updateBBox();
+            // Initial validation with FileLoad context - logs errors once for file loading
+            validateAssembly(nodes::ValidationContext::FileLoad);
+
+            refreshModelBlocking();
+            m_core->updateBBox();
+        }
+        catch (NanoVdbBuildRejectedError const &)
+        {
+            newModel();
+            throw;
+        }
     }
 
     void Document::loadNonBlocking(std::filesystem::path filename)
@@ -981,7 +1077,8 @@ namespace gladius
         // running load owns document/compute state; waiting here would freeze the UI thread.
         if (m_futureFileLoad.valid())
         {
-            if (m_futureFileLoad.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+            if (m_futureFileLoad.wait_for(std::chrono::milliseconds(0)) !=
+                std::future_status::ready)
             {
                 auto logger = getSharedLogger();
                 if (logger)
@@ -1008,54 +1105,64 @@ namespace gladius
             m_loadingError.clear();
         }
 
-        m_isLoading = true;
-
         // Launch async file loading
-        m_futureFileLoad = std::async(std::launch::async,
-                                      [this, filename]()
-                                      {
-                                          try
-                                          {
-                                              auto const refreshMode = filename.extension() == ".3mf"
-                                                                           ? RefreshMode::InteractiveFirst
-                                                                           : RefreshMode::Normal;
-                                              auto const previewMeshSdfConfig =
-                                                makeInteractivePreviewMeshSdfConfig(
-                                                  m_meshSdfEvaluationConfig);
-                                              ScopedMeshSdfEvaluationConfigOverride
-                                                previewMeshConfigOverride{
-                                                  *this,
-                                                  previewMeshSdfConfig,
-                                                  refreshMode == RefreshMode::InteractiveFirst};
+        m_isLoading.store(true, std::memory_order_relaxed);
+        try
+        {
+            m_futureFileLoad = std::async(
+              std::launch::async,
+              [this, filename]()
+              {
+                  ScopedLoadingFlag loadingScope{m_isLoading};
+                  ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                                NanoVdbFailurePolicy::Degrade};
 
-                                              loadImpl(filename);
-                                              // Initial validation with FileLoad context - logs
-                                              // errors once
-                                              validateAssembly(nodes::ValidationContext::FileLoad);
-                                              // Chain into async model refresh. 3MF loads publish
-                                              // a lightweight command-stream preview first, then
-                                              // start the optimized renderer and slicer
-                                              // compilation in the background.
-                                              refreshWorker(refreshMode);
-                                          }
-                                          catch (const std::exception & e)
-                                          {
-                                              // Store error for UI to display
-                                              {
-                                                  std::lock_guard<std::mutex> lock(
-                                                    m_loadingErrorMutex);
-                                                  m_loadingError = e.what();
-                                              }
-                                              auto logger = getSharedLogger();
-                                              if (logger)
-                                              {
-                                                  logger->addEvent(
-                                                    {fmt::format("File load error: {}", e.what()),
-                                                     events::Severity::Error});
-                                              }
-                                          }
-                                          m_isLoading = false;
-                                      });
+                  try
+                  {
+                      auto const refreshMode = filename.extension() == ".3mf"
+                                                 ? RefreshMode::InteractiveFirst
+                                                 : RefreshMode::Normal;
+                      auto const previewMeshSdfConfig =
+                        makeInteractivePreviewMeshSdfConfig(m_meshSdfEvaluationConfig);
+                      ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
+                        *this, previewMeshSdfConfig, refreshMode == RefreshMode::InteractiveFirst};
+
+                      loadImpl(filename);
+                      // Initial validation with FileLoad context - logs
+                      // errors once
+                      validateAssembly(nodes::ValidationContext::FileLoad);
+                      // Chain into async model refresh. 3MF loads publish
+                      // a lightweight command-stream preview first, then
+                      // start the optimized renderer and slicer
+                      // compilation in the background.
+                      refreshWorker(refreshMode);
+                  }
+                  catch (std::exception const & e)
+                  {
+                      // Store error for UI to display
+                      {
+                          std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                          m_loadingError = e.what();
+                      }
+                      auto logger = getSharedLogger();
+                      if (logger)
+                      {
+                          logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                            events::Severity::Error});
+                      }
+                  }
+                  catch (...)
+                  {
+                      std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                      m_loadingError = "Unknown file load error";
+                  }
+              });
+        }
+        catch (...)
+        {
+            m_isLoading.store(false, std::memory_order_relaxed);
+            throw;
+        }
     }
 
     bool Document::isLoadingInProgress() const
@@ -1290,6 +1397,119 @@ namespace gladius
             throw std::runtime_error("No core");
         }
         return m_core->getComputeContext();
+    }
+
+    NanoVdbBuildPolicy Document::getNanoVdbBuildPolicy() const
+    {
+        return makeNanoVdbBuildPolicy(
+          m_core ? m_core->getComputeContext() : SharedComputeContext{},
+          m_nanovdbFailurePolicy.load(std::memory_order_relaxed));
+    }
+
+    NanoVdbBuildIssueSummary Document::getNanoVdbBuildIssueSummary() const
+    {
+        NanoVdbBuildIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr ||
+                spatialMesh->evaluationConfig().method != MeshSdfMethod::NanoVDB ||
+                !spatialMesh->hasNanoVdbBuildIssue())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+            auto const & buildInfo = spatialMesh->getNanoVdbBuildInfo();
+            summary.suggestedVoxelSize_mm = std::max(summary.suggestedVoxelSize_mm,
+                                                     buildInfo.suggestedVoxelSize_mm);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "NanoVDB is unavailable for {} mesh resources. First issue: {}",
+          summary.affectedMeshCount,
+          firstMessage);
+        return summary;
+    }
+
+    MeshQualityIssueSummary Document::getMeshQualityIssueSummary() const
+    {
+        MeshQualityIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr || !spatialMesh->hasMeshQualityIssues())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+
+            auto const & quality = spatialMesh->getMeshQualityDiagnostics();
+            summary.degenerateTriangleCount +=
+              static_cast<std::size_t>(quality.degenerateTriangleCount);
+            summary.boundaryEdgeCount += static_cast<std::size_t>(quality.boundaryEdgeCount);
+            summary.nonManifoldEdgeCount +=
+              static_cast<std::size_t>(quality.nonManifoldEdgeCount);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "Mesh topology diagnostics affect {} mesh resources ({} boundary edges, {} "
+          "non-manifold edges, {} degenerate triangles total). First issue: {}",
+          summary.affectedMeshCount,
+          summary.boundaryEdgeCount,
+          summary.nonManifoldEdgeCount,
+          summary.degenerateTriangleCount,
+          firstMessage);
+        return summary;
     }
 
     events::SharedLogger Document::getSharedLogger() const
@@ -1565,6 +1785,10 @@ namespace gladius
             {
                 io::loadFrom3mfFile(filename, *this);
             }
+            catch (NanoVdbBuildRejectedError const &)
+            {
+                throw;
+            }
             catch (std::exception const & e)
             {
                 auto logger = getSharedLogger();
@@ -1633,6 +1857,7 @@ namespace gladius
     std::size_t Document::applyMeshSdfEvaluationConfigToResources(
       MeshSdfEvaluationConfig const & cfg)
     {
+        auto const nanovdbBuildPolicy = getNanoVdbBuildPolicy();
         std::size_t changedResources = 0u;
         for (auto const & [key, resource] : getResourceManager().getResourceMap())
         {
@@ -1641,9 +1866,56 @@ namespace gladius
                 continue;
             }
             auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource.get());
-            if (spatialMesh != nullptr && spatialMesh->setEvaluationConfig(cfg))
+            if (spatialMesh != nullptr)
             {
-                ++changedResources;
+                spatialMesh->setNanoVdbBuildPolicy(nanovdbBuildPolicy);
+                bool const changed = spatialMesh->setEvaluationConfig(cfg);
+                if (changed)
+                {
+                    ++changedResources;
+                }
+
+                if (spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasMeshQualityIssues())
+                {
+                    auto const message = spatialMesh->formatMeshQualityMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
+                }
+
+                if (changed && spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasNanoVdbBuildIssue())
+                {
+                    auto const message = spatialMesh->formatNanoVdbBuildMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
+                }
             }
         }
         return changedResources;
@@ -1816,6 +2088,11 @@ namespace gladius
     ResourceManager & Document::getResourceManager()
     {
         return getGeneratorContext().resourceManager;
+    }
+
+    ResourceManager const & Document::getResourceManager() const
+    {
+        return m_generatorContext->resourceManager;
     }
 
     void Document::addBoundingBoxAsMesh()
@@ -2140,6 +2417,7 @@ namespace gladius
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
+        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
 
         // Load build items from the 3MF model
         clearBuildItems();

@@ -7,6 +7,7 @@
 
 #include "ComputeContext.h"
 #include "MeshVoxelGrid.h"
+#include "Primitives.h"
 #include "ResourceKey.h"
 
 #include <optional>
@@ -98,20 +99,20 @@ namespace gladius
         
         /// Build voxel grid in-place in the primitive buffer
         /// @param program CLProgram with compiled buildMeshVoxelGrid kernel
-        /// @param primitiveDataBuffer Primitive data buffer on GPU (read BVH, write voxels)
+        /// @param primitiveData Primitive data buffer on GPU (read BVH, write voxels)
         /// @param params Build parameters (offsets and counts)
         /// @return true if the kernel was executed successfully
-        bool buildGrid(CLProgram& program,
-                       cl::Buffer& primitiveDataBuffer,
-                       MeshVoxelGridBuildParams const& params);
+        bool buildGrid(CLProgram & program,
+                   PrimitiveDataBuffer & primitiveData,
+                   MeshVoxelGridBuildParams const & params);
         
         /// Queue a build request (call during resource iteration)
         void queueBuild(MeshVoxelGridBuildParams params);
         
         /// Execute all queued builds
         /// @param program CLProgram with compiled buildMeshVoxelGrid kernel
-        /// @param primitiveDataBuffer Primitive data buffer on GPU
-        void executeQueuedBuilds(CLProgram& program, cl::Buffer& primitiveDataBuffer);
+        /// @param primitiveData Primitive data buffer on GPU
+        void executeQueuedBuilds(CLProgram & program, PrimitiveDataBuffer & primitiveData);
         
         /// Clear the build queue
         void clearQueue();

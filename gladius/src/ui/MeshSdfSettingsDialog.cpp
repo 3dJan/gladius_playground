@@ -1,5 +1,6 @@
 #include "MeshSdfSettingsDialog.h"
 
+#include <algorithm>
 #include <imgui.h>
 
 namespace gladius::ui
@@ -13,6 +14,16 @@ namespace gladius::ui
     void MeshSdfSettingsDialog::setApplyCallback(ApplyCallback callback)
     {
         m_applyCallback = std::move(callback);
+    }
+
+    void MeshSdfSettingsDialog::setNanoVdbIssueProvider(NanoVdbIssueProvider provider)
+    {
+        m_nanovdbIssueProvider = std::move(provider);
+    }
+
+    void MeshSdfSettingsDialog::setMeshQualityIssueProvider(MeshQualityIssueProvider provider)
+    {
+        m_meshQualityIssueProvider = std::move(provider);
     }
 
     void MeshSdfSettingsDialog::show()
@@ -42,6 +53,12 @@ namespace gladius::ui
         m_dirty = false;
     }
 
+    void MeshSdfSettingsDialog::setVdbSupported(bool supported, std::string const & reason) noexcept
+    {
+        m_vdbSupported = supported;
+        m_vdbNotSupportedReason = reason;
+    }
+
     namespace
     {
         char const * methodLabel(MeshSdfMethod m) noexcept
@@ -50,7 +67,7 @@ namespace gladius::ui
             {
             case MeshSdfMethod::PureBVH:           return "Pure BVH";
             case MeshSdfMethod::VoxelAccelerated:  return "Voxel-accelerated BVH";
-            case MeshSdfMethod::NanoVDB:           return "NanoVDB (not implemented)";
+            case MeshSdfMethod::NanoVDB:           return "NanoVDB";
             case MeshSdfMethod::FastWindingNumber: return "Fast winding number";
             }
             return "Pure BVH";
@@ -80,6 +97,38 @@ namespace gladius::ui
         // ---- Evaluation method ------------------------------------------------
         if (ImGui::CollapsingHeader("Evaluation", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            if (m_meshQualityIssueProvider)
+            {
+                auto const qualityIssue = m_meshQualityIssueProvider();
+                if (qualityIssue.hasIssue)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
+                                       "Mesh topology diagnostics detected");
+                    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
+                    ImGui::TextUnformatted(qualityIssue.message.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::TextDisabled(
+                      "No silent repair or fallback was applied; choose an explicit recovery and Apply.");
+
+                    if (ImGui::Button("Enable repair for next import"))
+                    {
+                        m_repair.weld = true;
+                        m_repair.removeDegenerate = true;
+                        m_repair.orientConsistently = true;
+                        m_repair.fillHoles = true;
+                        m_dirty = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Use FWN sign"))
+                    {
+                        m_eval.method = MeshSdfMethod::FastWindingNumber;
+                        m_eval.fwnUseSignCache = false;
+                        m_dirty = true;
+                    }
+                    ImGui::Separator();
+                }
+            }
+
             char const * preview = methodLabel(m_eval.method);
             if (ImGui::BeginCombo("Method", preview))
             {
@@ -88,7 +137,7 @@ namespace gladius::ui
                                MeshSdfMethod::FastWindingNumber,
                                MeshSdfMethod::NanoVDB})
                 {
-                    bool const disabled = (m == MeshSdfMethod::NanoVDB);
+                    bool const disabled = (m == MeshSdfMethod::NanoVDB && !m_vdbSupported);
                     if (disabled)
                     {
                         ImGui::BeginDisabled();
@@ -109,6 +158,14 @@ namespace gladius::ui
                     if (disabled)
                     {
                         ImGui::EndDisabled();
+                        // Show why NanoVDB is unavailable when the user hovers the item.
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        {
+                            char const * reason = m_vdbNotSupportedReason.empty()
+                                                      ? "Not supported on this OpenCL device."
+                                                      : m_vdbNotSupportedReason.c_str();
+                            ImGui::SetTooltip("NanoVDB unavailable: %s", reason);
+                        }
                     }
                 }
                 ImGui::EndCombo();
@@ -124,6 +181,69 @@ namespace gladius::ui
                 }
                 ImGui::TextDisabled(
                     "Higher = finer cache, slower build, more memory. Default 32.");
+            }
+
+            if (m_eval.method == MeshSdfMethod::NanoVDB)
+            {
+                if (ImGui::DragFloat("Voxel size (mm)",
+                                     &m_eval.nanovdbVoxelSize_mm,
+                                     0.005f,
+                                     0.01f,
+                                     2.0f,
+                                     "%.3f mm"))
+                {
+                    m_eval.nanovdbVoxelSize_mm =
+                        std::max(m_eval.nanovdbVoxelSize_mm, 0.01f);
+                    m_dirty = true;
+                }
+                ImGui::TextDisabled(
+                    "Near-field SDF resolution. 0.1 mm recommended for L-PBF (200 \xC2\xB5m "
+                    "walls). A coarse face-index grid (~5\xC3\x97) covers far-field distances. "
+                    "Smaller values use more GPU memory.");
+
+                if (m_nanovdbIssueProvider)
+                {
+                    auto const issue = m_nanovdbIssueProvider();
+                    if (issue.hasIssue)
+                    {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
+                                           "NanoVDB is currently degraded");
+                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
+                        ImGui::TextUnformatted(issue.message.c_str());
+                        ImGui::PopTextWrapPos();
+                        ImGui::TextDisabled(
+                          "No silent fallback was applied. Choose a recovery option and click Apply.");
+
+                        if (issue.suggestedVoxelSize_mm > m_eval.nanovdbVoxelSize_mm)
+                        {
+                            if (ImGui::Button("Set suggested voxel size"))
+                            {
+                                m_eval.nanovdbVoxelSize_mm = issue.suggestedVoxelSize_mm;
+                                m_dirty = true;
+                            }
+                            ImGui::SameLine();
+                        }
+
+                        if (ImGui::Button("Switch to Voxel-accelerated"))
+                        {
+                            m_eval.method = MeshSdfMethod::VoxelAccelerated;
+                            m_dirty = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Switch to Pure BVH"))
+                        {
+                            m_eval.method = MeshSdfMethod::PureBVH;
+                            m_dirty = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Switch to FWN"))
+                        {
+                            m_eval.method = MeshSdfMethod::FastWindingNumber;
+                            m_dirty = true;
+                        }
+                    }
+                }
             }
 
             if (m_eval.method == MeshSdfMethod::FastWindingNumber)

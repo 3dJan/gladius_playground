@@ -28,6 +28,7 @@ namespace gladius
 
     struct SpatialMeshData;
     struct MeshSdfEvaluationConfig;
+    struct NanoVdbBuildPolicy;
     class Mesh;
     class ResourceContext;
     class ImageStackOCLBuffer;
@@ -153,7 +154,8 @@ namespace gladius
         void addResource(ResourceKey key, SpatialMeshData && spatialData);
         void addResource(ResourceKey key,
                          SpatialMeshData && spatialData,
-                         MeshSdfEvaluationConfig const & evaluationConfig);
+                         MeshSdfEvaluationConfig const & evaluationConfig,
+                         NanoVdbBuildPolicy const & nanovdbBuildPolicy);
 
         /**
          * \brief Loads all resources that have not been load yet

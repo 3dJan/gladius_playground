@@ -277,6 +277,7 @@ namespace gladius
         void deleteFunction(ResourceId id);
 
         ResourceManager & getResourceManager();
+        ResourceManager const & getResourceManager() const;
 
         void addBoundingBoxAsMesh();
         void addCustomBoxMesh(float width,
@@ -451,6 +452,16 @@ namespace gladius
             return m_meshSdfEvaluationConfig;
         }
 
+        /// Runtime NanoVDB build policy derived from the current caller context and compute
+        /// device limits.
+        [[nodiscard]] NanoVdbBuildPolicy getNanoVdbBuildPolicy() const;
+
+        /// Summarize NanoVDB build issues on currently loaded mesh resources, if any.
+        [[nodiscard]] NanoVdbBuildIssueSummary getNanoVdbBuildIssueSummary() const;
+
+        /// Summarize mesh topology diagnostics on currently loaded mesh resources, if any.
+        [[nodiscard]] MeshQualityIssueSummary getMeshQualityIssueSummary() const;
+
         /// Queue applying the mesh-SDF evaluation configuration to existing mesh resources.
         /// Heavy resource rebuild/upload work is folded into the debounced background refresh so
         /// the UI can keep showing the current preview.
@@ -503,6 +514,8 @@ namespace gladius
 
         /// Mesh SDF evaluation configuration applied to newly imported spatial meshes.
         MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+
+        std::atomic<NanoVdbFailurePolicy> m_nanovdbFailurePolicy{NanoVdbFailurePolicy::Degrade};
 
         mutable std::mutex m_pendingMeshSdfEvaluationConfigMutex;
         std::optional<MeshSdfEvaluationConfig> m_pendingMeshSdfEvaluationConfig;

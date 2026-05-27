@@ -627,6 +627,29 @@ namespace gladius::tests
     }
 
     TEST_F(ExpressionToGraphConverterTest,
+           ConvertSnippetOutputAssignment_VectorArgumentToNamedOutput_ConnectsBeginPort)
+    {
+        // Arrange
+        std::vector<FunctionArgument> arguments = {{"pos", ArgumentType::Vector}};
+        std::vector<FunctionOutput> outputs = {{"bearingcenter", ArgumentType::Vector}};
+
+        // Act
+        auto const result = ExpressionToGraphConverter::convertSnippetToGraph(
+          "bearingcenter = in_pos;", *m_model, *m_parser, arguments, outputs, nullptr);
+
+        // Assert
+        EXPECT_NE(result, 0);
+        auto * endNode = m_model->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+
+        auto const & params = endNode->parameter();
+        auto const outputIt = params.find("bearingcenter");
+        ASSERT_NE(outputIt, params.end());
+        ASSERT_TRUE(outputIt->second.getConstSource().has_value());
+        EXPECT_EQ(outputIt->second.getConstSource()->type, nodes::ParameterTypeIndex::Float3);
+    }
+
+    TEST_F(ExpressionToGraphConverterTest,
            ConvertScalarCombination_VectorComponents_AcceptsScalarOutput)
     {
         // Arrange

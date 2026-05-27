@@ -32,6 +32,7 @@
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/Writer3mf.h"
 #include "io/ImageStackExporter.h"
+#include "render/RenderModeUpdatePolicy.h"
 #include <nodes/ToCommandStreamVisitor.h>
 
 namespace gladius::ui
@@ -129,7 +130,19 @@ namespace gladius::ui
         m_mainView.addViewCallBack([&]() { render(); });
         nodeEditor();
 
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
 
         // Set up welcome screen callbacks
         m_welcomeScreen.setNewModelCallback(
@@ -290,6 +303,17 @@ namespace gladius::ui
             }
         }
 
+        if (ImGui::CollapsingHeader("Gamepad"))
+        {
+            if (ImGui::Button("Configure Gamepad"))
+            {
+                showGamepadSettings();
+            }
+            ImGui::Separator();
+            ImGui::Text("Use a gamepad to navigate the model editor");
+            ImGui::Separator();
+        }
+
         auto z = m_core->getSliceHeight();
         if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
         {
@@ -334,7 +358,19 @@ namespace gladius::ui
         m_renderCallback = [&]() { /* no-op until compute ready */ };
         m_mainView.setRenderCallback(m_renderCallback);
         m_mainView.addViewCallBack([&]() { render(); });
-        m_mainView.setFileDropCallback([&](std::filesystem::path const & path) { open(path); });
+        m_mainView.setFileDropCallback(
+          [&](std::filesystem::path const & path, ImVec2 screenPos)
+          {
+              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+                  !m_doc->isLoadingInProgress())
+              {
+                  m_modelEditor.importStlDrop(path, screenPos);
+              }
+              else
+              {
+                  open(path);
+              }
+          });
 
         // Start async OpenCL initialization
         startAsyncComputeInit();
@@ -494,6 +530,11 @@ namespace gladius::ui
         }
 
         m_computeInitState = ComputeInitState::Finalized;
+
+        if (m_onComputeReadyCallback)
+        {
+            m_onComputeReadyCallback();
+        }
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
@@ -623,6 +664,17 @@ namespace gladius::ui
         // Check for keyboard shortcuts
         ImGuiIO & io = ImGui::GetIO();
         processShortcuts(ShortcutContext::Global);
+
+        // Process gamepad input (only active when Model Editor is visible)
+        if (m_modelEditor.isVisible())
+        {
+            m_modelEditor.processGamepadInput();
+
+            if (m_modelEditor.consumeGamepadQuickRefRequest())
+            {
+                showGamepadQuickReference();
+            }
+        }
 
         // If compute is available, validate context
         if (m_computeAvailable && m_core)
@@ -925,6 +977,13 @@ namespace gladius::ui
                 {
                     m_meshSdfSettingsDialog.render();
                 }
+
+                if (m_gamepadSettingsDialog.isVisible())
+                {
+                    m_gamepadSettingsDialog.render();
+                }
+
+                m_gamepadQuickRef.render();
             }
 
             m_welcomeScreen.render();
@@ -1530,6 +1589,26 @@ namespace gladius::ui
                 showShortcutSettings();
             }
 
+            ImGui::Separator();
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_GAMEPAD "\tGamepad Bindings...")))
+            {
+                closeMenu();
+                showGamepadSettings();
+            }
+
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_QUESTION_CIRCLE "\tGamepad Quick Reference")))
+            {
+                closeMenu();
+                showGamepadQuickReference();
+            }
+
+            {
+                bool const gpConnected = GamepadState::instance().isAnyConnected();
+                ImGui::TextDisabled("%s", gpConnected ? "\xe2\x97\x8f Gamepad connected" : "\xe2\x97\x8b No gamepad");
+            }
+
+            ImGui::Separator();
             if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_CUBE "\tMesh SDF Settings")))
             {
                 closeMenu();
@@ -2643,13 +2722,28 @@ namespace gladius::ui
             // bypass the throttle — the debounce already elapsed, we just need to retry.
             if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
             {
+                auto const parameterDispatch = async_rendering::classifyParameterChange(
+                  async_rendering::ParameterChangeDispatchInput{
+                    .mode = m_renderWindow.realtimeRaymarchMode(),
+                    .streamingPreviewActive = m_renderWindow.isStreamingPreviewActive(),
+                    .autoRealtimeActive = m_renderWindow.isRealtimeActive()});
+
                 // Streaming preview mode: the worker coroutine becomes the sole GPU
                 // writer, reading the latest Assembly values and pushing them to the
                 // parameter buffer in a tight loop.  This eliminates the UI-frame
                 // round-trip latency that limits one-shot preview scheduling.
-                if (!m_renderWindow.isStreamingPreviewActive())
+                // In Force realtime mode, parameter changes should be served by exact
+                // full-frame raymarching instead of the low-res streaming preview.
+                if (parameterDispatch.invalidateInteraction)
                 {
                     m_renderWindow.invalidateViewDueToParameterChange();
+                }
+                if (parameterDispatch.refreshStreamingInteraction)
+                {
+                    m_renderWindow.refreshStreamingParameterInteraction();
+                }
+                if (parameterDispatch.startStreamingPreview)
+                {
                     m_renderWindow.startStreamingPreview();
                 }
                 m_parameterDirty = false;
@@ -3337,12 +3431,50 @@ namespace gladius::ui
         m_meshSdfSettingsDialog.show();
     }
 
+    void MainWindow::showGamepadSettings()
+    {
+        m_gamepadSettingsDialog.show();
+    }
+
+    void MainWindow::showGamepadQuickReference()
+    {
+        m_gamepadQuickRef.show();
+    }
+
     void MainWindow::setMeshSdfSettings(MeshSdfSettings * settings,
                                         MeshSdfSettingsDialog::ApplyCallback applyCallback)
     {
         m_meshSdfSettingsDialog.setSettings(settings);
         m_meshSdfApplyCallback = applyCallback;
         m_meshSdfSettingsDialog.setApplyCallback(std::move(applyCallback));
+        m_meshSdfSettingsDialog.setNanoVdbIssueProvider(
+          [this]() -> NanoVdbBuildIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getNanoVdbBuildIssueSummary();
+          });
+        m_meshSdfSettingsDialog.setMeshQualityIssueProvider(
+          [this]() -> MeshQualityIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getMeshQualityIssueSummary();
+          });
+    }
+
+    void MainWindow::setVdbSupported(bool supported, std::string const & reason)
+    {
+        m_meshSdfSettingsDialog.setVdbSupported(supported, reason);
+    }
+
+    void MainWindow::setOnComputeReadyCallback(ViewCallBack callback)
+    {
+        m_onComputeReadyCallback = std::move(callback);
     }
 
     void MainWindow::showWelcomeScreen()

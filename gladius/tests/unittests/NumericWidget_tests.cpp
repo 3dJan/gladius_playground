@@ -118,7 +118,7 @@ namespace gladius::ui::tests
 
     TEST(AdaptiveDragFloat, ComputeDisplayPrecision_AdaptsToMagnitude)
     {
-        EXPECT_LT(numeric_widget_detail::computeDisplayPrecision(0.001f),
+        EXPECT_GT(numeric_widget_detail::computeDisplayPrecision(0.001f),
                   numeric_widget_detail::computeDisplayPrecision(1000.f));
         EXPECT_GE(numeric_widget_detail::computeDisplayPrecision(0.f), 1);
     }

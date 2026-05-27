@@ -10,8 +10,10 @@
 
 #include "MeshRepair.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -27,8 +29,10 @@ namespace gladius
         /// (`spatialMeshSDF_VoxelAccelerated`). Higher memory cost; skips most
         /// of the BVH for far-from-surface queries.
         VoxelAccelerated = 1,
-        /// Reserved for a future NanoVDB-based path. Not implemented in any
-        /// kernel today; the UI surfaces this value as disabled.
+        /// NanoVDB-backed signed distance field. The mesh is rasterised into a
+        /// narrow-band NanoVDB float grid at import time. GPU queries use trilinear
+        /// interpolation inside the band and fall back to the voxel boundary value
+        /// outside. Requires a device that supports NanoVDB (isVdbSupported()).
         NanoVDB = 2,
         /// Fast Winding Number (Barill et al., SIGGRAPH 2018). Uses a
         /// hierarchical Barnes-Hut sum of per-node multipole aggregates on
@@ -67,6 +71,60 @@ namespace gladius
                      s.data());
         return MeshSdfMethod::VoxelAccelerated;
     }
+
+    /// Runtime-only policy for handling NanoVDB builds that are predicted to exceed the
+    /// configured memory budget. This is intentionally separate from the persisted mesh-SDF
+    /// settings: it reflects the caller context (interactive UI vs strict API load).
+    enum class NanoVdbFailurePolicy : std::uint8_t
+    {
+        /// Keep loading and degrade explicitly when NanoVDB cannot be built.
+        Degrade = 0,
+        /// Treat NanoVDB rejection as a hard load error.
+        Fail = 1,
+    };
+
+    /// Runtime-only NanoVDB build policy derived from the current caller context and compute
+    /// device limits.
+    struct NanoVdbBuildPolicy
+    {
+        /// Deterministic budget used for NanoVDB preflight checks. `0` means that no explicit
+        /// device-derived budget was available and the resource should fall back to its internal
+        /// conservative default.
+        std::size_t budgetBytes = 0u;
+
+        /// Behavior when the preflight rejects the requested NanoVDB build.
+        NanoVdbFailurePolicy failurePolicy = NanoVdbFailurePolicy::Degrade;
+    };
+
+    /// User-facing aggregate of NanoVDB build issues currently present in loaded mesh resources.
+    /// This is runtime-only state used by UI and API layers to present explicit recovery options.
+    struct NanoVdbBuildIssueSummary
+    {
+        bool hasIssue = false;
+        std::size_t affectedMeshCount = 0u;
+        std::string message;
+        float suggestedVoxelSize_mm = 0.0f;
+    };
+
+    /// User-facing aggregate of mesh topology diagnostics that can make signed-distance
+    /// evaluation ambiguous unless the mesh is repaired or an orientation-independent
+    /// sign strategy is selected.
+    struct MeshQualityIssueSummary
+    {
+        bool hasIssue = false;
+        std::size_t affectedMeshCount = 0u;
+        std::size_t degenerateTriangleCount = 0u;
+        std::size_t boundaryEdgeCount = 0u;
+        std::size_t nonManifoldEdgeCount = 0u;
+        std::string message;
+    };
+
+    /// Raised when a strict NanoVDB policy rejects the requested load/build.
+    class NanoVdbBuildRejectedError : public std::runtime_error
+    {
+      public:
+        using std::runtime_error::runtime_error;
+    };
 
     /// Runtime parameters for mesh SDF evaluation. Some fields require a
     /// resource rebuild when changed (see @ref SpatialMeshResource), others are
@@ -118,6 +176,12 @@ namespace gladius
         /// refreshes the primitive-buffer header but does not rebuild the mesh
         /// BVH payload.
         bool fwnUseSignCache = true;
+
+        /// Voxel size (in mm) for the NanoVDB near-field SDF grid when
+        /// @ref method is @ref MeshSdfMethod::NanoVDB. Smaller values resolve
+        /// thinner features but use more memory. For L-PBF with 200 µm walls,
+        /// 0.1 mm is recommended. **Rebuild trigger**.
+        float nanovdbVoxelSize_mm = 0.1f;
     };
 
     /// Determine whether changing @p oldCfg → @p newCfg requires acceleration
@@ -127,7 +191,8 @@ namespace gladius
                                     MeshSdfEvaluationConfig const & newCfg) noexcept
     {
         return oldCfg.method != newCfg.method ||
-               oldCfg.voxelGridResolution != newCfg.voxelGridResolution;
+               oldCfg.voxelGridResolution != newCfg.voxelGridResolution ||
+               oldCfg.nanovdbVoxelSize_mm != newCfg.nanovdbVoxelSize_mm;
     }
 
 } // namespace gladius

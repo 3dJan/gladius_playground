@@ -38,7 +38,10 @@ namespace gladius
         if (m_ComputeContext.outputMethod() == OutputMethod::readpixel)
         {
             setupForReadPixel();
+            write();
         }
+
+        m_dirty = false;
     }
 
     GLImageBuffer::~GLImageBuffer()

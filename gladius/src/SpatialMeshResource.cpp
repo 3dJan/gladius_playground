@@ -5,14 +5,38 @@
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGrid.h"
 #include "Profiling.h"
+#include "io/vdb.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <fmt/format.h>
+#include <limits>
 
 namespace gladius
 {
     namespace
     {
+        constexpr std::size_t MEBIBYTE = 1024u * 1024u;
+        constexpr std::size_t DEFAULT_NANOVDB_BUDGET_BYTES = 1024u * MEBIBYTE;
+        constexpr double NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL = 12.0;
+        constexpr double NANOVDB_INDEX_GRID_BYTES_PER_VOXEL = 10.0;
+        constexpr double NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR = 1.35;
+        constexpr std::size_t NANOVDB_GRID_FIXED_OVERHEAD_BYTES = 8u * MEBIBYTE;
+        constexpr float NANOVDB_MIN_VOXEL_SIZE_MM = 0.01f;
+        constexpr float NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM = 2.0f;
+        constexpr float NANOVDB_SUGGESTION_GROWTH_FACTOR = 1.25f;
+        constexpr int NANOVDB_MAX_SUGGESTION_STEPS = 32;
+
+        struct NanoVdbWorkingSetEstimate
+        {
+            std::size_t totalBytes = 0u;
+            std::size_t flatMeshBytes = 0u;
+            std::size_t nearSdfBytes = 0u;
+            std::size_t farFaceIndexBytes = 0u;
+            std::size_t nearFaceIndexBytes = 0u;
+        };
+
         /// Convert int to float preserving bit pattern (for GPU interop)
         inline float intBitsToFloat(int value)
         {
@@ -20,23 +44,196 @@ namespace gladius
             std::memcpy(&result, &value, sizeof(float));
             return result;
         }
+
+        inline double bytesToMiB(std::size_t const bytes)
+        {
+            return static_cast<double>(bytes) / static_cast<double>(MEBIBYTE);
+        }
+
+        inline std::size_t saturatingByteEstimate(long double const value)
+        {
+            if (!std::isfinite(value) || value <= 0.0L)
+            {
+                return 0u;
+            }
+
+            long double const clamped =
+                std::min(value,
+                         static_cast<long double>(std::numeric_limits<std::size_t>::max()));
+            return static_cast<std::size_t>(std::ceil(clamped));
+        }
+
+        inline long double bboxExtent(float const minValue, float const maxValue)
+        {
+            return std::max<long double>(static_cast<long double>(maxValue) -
+                                           static_cast<long double>(minValue),
+                                         0.0L);
+        }
+
+        inline long double bboxSurfaceAreaMm2(BoundingBox const & boundingBox)
+        {
+            auto const dx = bboxExtent(boundingBox.min.x, boundingBox.max.x);
+            auto const dy = bboxExtent(boundingBox.min.y, boundingBox.max.y);
+            auto const dz = bboxExtent(boundingBox.min.z, boundingBox.max.z);
+            return 2.0L * (dx * dy + dx * dz + dy * dz);
+        }
+
+        inline long double triangleAreaMm2(MeshTriangle const & tri)
+        {
+            long double const ax = static_cast<long double>(tri.v1.x) - tri.v0.x;
+            long double const ay = static_cast<long double>(tri.v1.y) - tri.v0.y;
+            long double const az = static_cast<long double>(tri.v1.z) - tri.v0.z;
+            long double const bx = static_cast<long double>(tri.v2.x) - tri.v0.x;
+            long double const by = static_cast<long double>(tri.v2.y) - tri.v0.y;
+            long double const bz = static_cast<long double>(tri.v2.z) - tri.v0.z;
+
+            long double const crossX = ay * bz - az * by;
+            long double const crossY = az * bx - ax * bz;
+            long double const crossZ = ax * by - ay * bx;
+
+            return 0.5L * std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+        }
+
+        inline long double estimateMeshSurfaceAreaMm2(SpatialMeshData const & data)
+        {
+            long double surfaceArea = 0.0L;
+            for (auto const & tri : data.triangles)
+            {
+                surfaceArea += triangleAreaMm2(tri);
+            }
+
+            if (surfaceArea <= 0.0L)
+            {
+                surfaceArea = bboxSurfaceAreaMm2(data.boundingBox);
+            }
+
+            return surfaceArea;
+        }
+
+        /// Estimate one NanoVDB grid's peak host-side working set.
+        std::size_t estimateNanoVdbGridWorkingSetBytes(SpatialMeshData const & data,
+                                                       long double const meshSurfaceAreaMm2,
+                                                       float const voxelSize_mm,
+                                                       float const halfBandVoxels,
+                                                       double const bytesPerVoxel)
+        {
+            long double const voxelSize = std::max<long double>(
+              static_cast<long double>(voxelSize_mm), NANOVDB_MIN_VOXEL_SIZE_MM);
+            long double const bandWorld = static_cast<long double>(halfBandVoxels) * voxelSize;
+
+            long double const dx =
+              bboxExtent(data.boundingBox.min.x, data.boundingBox.max.x) + 2.0L * bandWorld;
+            long double const dy =
+              bboxExtent(data.boundingBox.min.y, data.boundingBox.max.y) + 2.0L * bandWorld;
+            long double const dz =
+              bboxExtent(data.boundingBox.min.z, data.boundingBox.max.z) + 2.0L * bandWorld;
+
+            long double const cellsX = std::max<long double>(std::ceil(dx / voxelSize), 1.0L);
+            long double const cellsY = std::max<long double>(std::ceil(dy / voxelSize), 1.0L);
+            long double const cellsZ = std::max<long double>(std::ceil(dz / voxelSize), 1.0L);
+            long double const denseVoxelCount = cellsX * cellsY * cellsZ;
+
+            long double const voxelVolumeMm3 = voxelSize * voxelSize * voxelSize;
+            long double const shellVolumeMm3 =
+              std::max(meshSurfaceAreaMm2 * (2.0L * bandWorld + voxelSize),
+                       bboxSurfaceAreaMm2(data.boundingBox) * voxelSize);
+            long double const shellVoxelCount = std::max<long double>(
+              (shellVolumeMm3 / voxelVolumeMm3) * NANOVDB_ACTIVE_VOXEL_SAFETY_FACTOR, 1.0L);
+            long double const activeVoxelCount = std::min(denseVoxelCount, shellVoxelCount);
+
+            return saturatingByteEstimate(
+              activeVoxelCount * bytesPerVoxel +
+              static_cast<long double>(NANOVDB_GRID_FIXED_OVERHEAD_BYTES));
+        }
+
+        NanoVdbWorkingSetEstimate estimateNanoVdbWorkingSet(SpatialMeshData const & data,
+                                                            float const voxelSize_mm,
+                                                            std::size_t const existingPayloadBytes)
+        {
+            NanoVdbWorkingSetEstimate estimate{};
+            long double const meshSurfaceAreaMm2 = estimateMeshSurfaceAreaMm2(data);
+
+            estimate.flatMeshBytes = data.triangles.size() * 9u * sizeof(float);
+            estimate.nearSdfBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, voxelSize_mm, 8.0f, NANOVDB_FLOAT_GRID_BYTES_PER_VOXEL);
+            estimate.farFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, 1.0f, 150.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
+            estimate.nearFaceIndexBytes = estimateNanoVdbGridWorkingSetBytes(
+              data, meshSurfaceAreaMm2, 0.2f, 50.0f, NANOVDB_INDEX_GRID_BYTES_PER_VOXEL);
+            estimate.totalBytes = existingPayloadBytes + estimate.flatMeshBytes +
+                                  estimate.nearSdfBytes + estimate.farFaceIndexBytes +
+                                  estimate.nearFaceIndexBytes;
+            return estimate;
+        }
+
+        std::size_t effectiveNanoVdbBudgetBytes(NanoVdbBuildPolicy const & buildPolicy)
+        {
+            return buildPolicy.budgetBytes != 0u ? buildPolicy.budgetBytes
+                                                 : DEFAULT_NANOVDB_BUDGET_BYTES;
+        }
+
+        float suggestNanoVdbVoxelSizeMm(SpatialMeshData const & data,
+                                        float const requestedVoxelSize_mm,
+                                        std::size_t const existingPayloadBytes,
+                                        std::size_t const budgetBytes)
+        {
+            if (budgetBytes == 0u)
+            {
+                return 0.0f;
+            }
+
+            float suggestedVoxelSize = std::max(requestedVoxelSize_mm, NANOVDB_MIN_VOXEL_SIZE_MM);
+
+            for (int step = 0; step < NANOVDB_MAX_SUGGESTION_STEPS; ++step)
+            {
+                auto const estimate =
+                  estimateNanoVdbWorkingSet(data, suggestedVoxelSize, existingPayloadBytes);
+                if (estimate.totalBytes <= budgetBytes)
+                {
+                    return suggestedVoxelSize;
+                }
+
+                if (suggestedVoxelSize >= NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM)
+                {
+                    break;
+                }
+
+                suggestedVoxelSize =
+                  std::min(NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM,
+                           suggestedVoxelSize * NANOVDB_SUGGESTION_GROWTH_FACTOR);
+            }
+
+            auto const maxEstimate = estimateNanoVdbWorkingSet(
+              data, NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM, existingPayloadBytes);
+            if (maxEstimate.totalBytes <= budgetBytes)
+            {
+                return NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM;
+            }
+
+            return 0.0f;
+        }
     }  // namespace
     // ========================================================================
     // Constructors
     // ========================================================================
 
-    SpatialMeshResource::SpatialMeshResource(ResourceKey key, SpatialMeshData && data)
+    SpatialMeshResource::SpatialMeshResource(ResourceKey key,
+                                             SpatialMeshData && data,
+                                             NanoVdbBuildPolicy const & nanovdbBuildPolicy)
         : MeshResourceBase(std::move(key))
         , m_data(std::move(data))
+        , m_nanovdbBuildPolicy(nanovdbBuildPolicy)
     {
         ResourceBase::load();
     }
 
     SpatialMeshResource::SpatialMeshResource(ResourceKey key,
                                              SpatialMeshData && data,
-                                             MeshSdfEvaluationConfig const & evaluationConfig)
+                                             MeshSdfEvaluationConfig const & evaluationConfig,
+                                             NanoVdbBuildPolicy const & nanovdbBuildPolicy)
         : MeshResourceBase(std::move(key))
         , m_data(std::move(data))
+        , m_nanovdbBuildPolicy(nanovdbBuildPolicy)
         , m_evaluationConfig(evaluationConfig)
     {
         ResourceBase::load();
@@ -44,8 +241,10 @@ namespace gladius
 
     SpatialMeshResource::SpatialMeshResource(ResourceKey key,
                                              std::span<float4 const> vertices,
-                                             std::span<TriangleIndices const> indices)
+                                             std::span<TriangleIndices const> indices,
+                                             NanoVdbBuildPolicy const & nanovdbBuildPolicy)
         : MeshResourceBase(std::move(key))
+        , m_nanovdbBuildPolicy(nanovdbBuildPolicy)
     {
         MeshBVHBuilder builder;
         MeshBVHBuildParams params;
@@ -56,6 +255,62 @@ namespace gladius
 
         m_data = builder.build(vertices, indices, params);
         ResourceBase::load();
+    }
+
+        std::string SpatialMeshResource::formatMeshQualityMessage(
+            std::string const & displayName) const
+        {
+                if (!hasMeshQualityIssues())
+                {
+                        return {};
+                }
+
+                auto const subject = displayName.empty() ? std::string{"mesh resource"}
+                                                                                                 : fmt::format("mesh '{}'", displayName);
+                auto const & quality = m_data.quality;
+                auto message = fmt::format(
+                    "Topology diagnostics for {}: {} boundary edges, {} non-manifold edges, "
+                    "{} degenerate triangles. Signed mesh SDF methods, including NanoVDB, are "
+                    "deterministic only for watertight, consistently oriented meshes.",
+                    subject,
+                    quality.boundaryEdgeCount,
+                    quality.nonManifoldEdgeCount,
+                    quality.degenerateTriangleCount);
+
+                message += " No repair or fallback was applied silently. Enable explicit repair-on-import "
+                                     "and re-import, or select Fast Winding Number when the input is an intentional "
+                                     "triangle soup.";
+                return message;
+        }
+
+    std::string SpatialMeshResource::formatNanoVdbBuildMessage(
+      std::string const & displayName) const
+    {
+        if (!hasNanoVdbBuildIssue())
+        {
+            return {};
+        }
+
+        auto const subject = displayName.empty() ? std::string{"mesh resource"}
+                                                 : fmt::format("mesh '{}'", displayName);
+        auto message = fmt::format("NanoVDB unavailable for {}: {} at voxel size {:.3f} mm.",
+                                   subject,
+                                   m_nanovdbBuildInfo.reason,
+                                   m_nanovdbBuildInfo.requestedVoxelSize_mm);
+
+        if (m_nanovdbBuildInfo.suggestedVoxelSize_mm >
+            m_nanovdbBuildInfo.requestedVoxelSize_mm)
+        {
+            message += fmt::format(" Suggested NanoVDB voxel size: {:.3f} mm.",
+                                   m_nanovdbBuildInfo.suggestedVoxelSize_mm);
+        }
+        else if (m_nanovdbBuildInfo.result == NanoVdbBuildResult::PreflightRejected)
+        {
+            message +=
+              " Try a larger NanoVDB voxel size or switch to Voxel-Accelerated, PureBVH, or FastWindingNumber.";
+        }
+
+        return message;
     }
 
     // ========================================================================
@@ -103,6 +358,16 @@ namespace gladius
                                     std::to_string(payloadHasFwnSupport) +
                                     " fwnBetaChanged=" + std::to_string(fwnBetaChanged));
         bool const newMethodSatisfied = [&]() {
+            // When the current payload has a NanoVDB companion (SDF_VDB meta entry) but the
+            // new method does not need one, the companion would cause the kernel to dispatch
+            // through the NanoVDB path even after the method switch. Force a rebuild to remove it.
+            bool const hasNanoVdbCompanion = (m_nanovdbGridOffset != 0u);
+            bool const newMethodNeedsNanoVdb = (cfg.method == MeshSdfMethod::NanoVDB);
+            if (hasNanoVdbCompanion && !newMethodNeedsNanoVdb)
+            {
+                return false;
+            }
+
             switch (cfg.method)
             {
             case MeshSdfMethod::PureBVH:
@@ -112,7 +377,7 @@ namespace gladius
             case MeshSdfMethod::VoxelAccelerated:
                 return m_voxelCount > 0;
             case MeshSdfMethod::NanoVDB:
-                return false;
+                return m_nanovdbGridOffset != 0u || isNanoVdbSatisfiedWithoutGrid();
             }
             return false;
         }();
@@ -200,6 +465,7 @@ namespace gladius
     static constexpr size_t kSignCacheOffsetSlot = 1;      // signCacheDataOffset (FWN coarse sign cache; 0 = not ready)
     static constexpr size_t kSignCacheResolutionSlot = 1;  // sign cache resolution per axis
     static constexpr size_t kSignCacheBetaSlot = 1;        // beta used to build the ready sign cache
+    static constexpr size_t kNanoVdbOffsetSlot = 1;        // local float offset of the NanoVDB grid (0 = none)
 
     /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells.
     /// Each cell stores a conservative 2-bit state (unknown/outside/inside), so
@@ -221,6 +487,7 @@ namespace gladius
     static constexpr size_t kSignCacheOffsetIndex = kFwnAggregatesOffsetIndex + kFwnAggregatesSlot;         // 30
     static constexpr size_t kSignCacheResolutionIndex = kSignCacheOffsetIndex + kSignCacheOffsetSlot;       // 31
     static constexpr size_t kSignCacheBetaIndex = kSignCacheResolutionIndex + kSignCacheResolutionSlot;     // 32
+    static constexpr size_t kNanoVdbOffsetIndex = kSignCacheBetaIndex + kSignCacheBetaSlot;                 // 33
 
     void SpatialMeshResource::resetSignCacheBuildProgress() noexcept
     {
@@ -274,6 +541,11 @@ namespace gladius
         m_payloadData.data[m_headerStart + kSignCacheResolutionIndex] =
             static_cast<float>(kSignCacheResolution);
         m_payloadData.data[m_headerStart + kSignCacheBetaIndex] = m_evaluationConfig.fwnBeta;
+        // Patch NanoVDB header slot to absolute offset (0 when NanoVDB is not active).
+        m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] =
+            (m_nanovdbGridOffset != 0u)
+                ? static_cast<float>(m_dataBaseOffset + m_nanovdbGridOffset)
+                : 0.0f;
         
         // Call base implementation to add data to primitives
         ResourceBase::write(primitives);
@@ -398,6 +670,8 @@ namespace gladius
             return;
         }
 
+        m_nanovdbBuildInfo = {};
+
         bool const useFwn = m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
         GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl FWN payload", useFwn);
         GLADIUS_FWN_PREP_LOG_IF(useFwn,
@@ -415,7 +689,7 @@ namespace gladius
         metaData.start = static_cast<int>(m_payloadData.data.size());
 
         // ====================================================================
-        // Header Layout (33 floats total):
+        // Header Layout (34 floats total):
         // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
         // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
         // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -426,6 +700,7 @@ namespace gladius
         // [30]:    FWN coarse sign-cache data offset (0 = not ready)
         // [31]:    FWN coarse sign-cache resolution per axis
         // [32]:    FWN beta used to build the ready sign cache
+        // [33]:    NanoVDB grid local float offset (0 = not built)
         // ====================================================================
         
         m_headerStart = m_payloadData.data.size();
@@ -491,6 +766,7 @@ namespace gladius
         m_payloadData.data.push_back(0.0f);  // FWN sign-cache data offset (0 = not ready)
         m_payloadData.data.push_back(static_cast<float>(kSignCacheResolution));
         m_payloadData.data.push_back(m_evaluationConfig.fwnBeta);
+        m_payloadData.data.push_back(0.0f);  // NanoVDB grid local float offset (0 = not built)
 
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
@@ -656,6 +932,242 @@ namespace gladius
             m_needsFwnAggregateBuild = false;
             m_needsSignCacheBuild = false;
             m_signCacheNextWord = 0;
+        }
+
+        // NanoVDB path: build a 3-layer VDB acceleration structure mirroring the proven
+        // VdbImporter::writeMesh() approach. Emits 4 companion primitives after this
+        // SDF_SPATIAL_MESH_ROOT entry (kernel uses companion types to detect the layout):
+        //   i+1: SDF_MESH_TRIANGLES  – flat 9-float/tri buffer for face-index triangle lookup
+        //   i+2: SDF_VDB             – near signed-distance field (nanovdbVoxelSize_mm)
+        //   i+3: SDF_VDB_FACE_INDICES – far face-index (fixed 1mm voxels, 150mm band)
+        //   i+4: SDF_VDB_FACE_INDICES – near face-index (fixed 0.2mm voxels, 50-voxel band)
+        //
+        // IMPORTANT: face-index grids use FIXED voxel sizes (1mm/0.2mm) regardless of the
+        // user-configured nanovdbVoxelSize_mm. Using the SDF voxel size for face-index grids
+        // explodes memory: at 0.1mm with a 50mm band, a benchy-sized part produces a ~3GB
+        // sparse grid. Only the near SDF (i+2) uses the user-configured resolution.
+        // Fixed sizes match VdbImporter::writeMesh() which is the proven reference.
+        m_nanovdbGridOffset = 0u;
+        bool const useNanovdb = (m_evaluationConfig.method == MeshSdfMethod::NanoVDB);
+        if (useNanovdb && !m_data.triangles.empty())
+        {
+            float const voxelSize_mm =
+              std::max(m_evaluationConfig.nanovdbVoxelSize_mm, NANOVDB_MIN_VOXEL_SIZE_MM);
+            std::size_t const existingPayloadBytes = m_payloadData.data.size() * sizeof(float);
+            auto const workingSetEstimate =
+              estimateNanoVdbWorkingSet(m_data, voxelSize_mm, existingPayloadBytes);
+            std::size_t const budgetBytes = effectiveNanoVdbBudgetBytes(m_nanovdbBuildPolicy);
+
+            m_nanovdbBuildInfo.requestedVoxelSize_mm = voxelSize_mm;
+            m_nanovdbBuildInfo.estimatedBytes = workingSetEstimate.totalBytes;
+            m_nanovdbBuildInfo.budgetBytes = budgetBytes;
+            m_nanovdbBuildInfo.suggestedVoxelSize_mm = suggestNanoVdbVoxelSizeMm(
+              m_data, voxelSize_mm, existingPayloadBytes, budgetBytes);
+
+            auto finalizeRootOnly = [&]() {
+                metaData.end = static_cast<int>(m_payloadData.data.size());
+                m_payloadData.meta.push_back(metaData);
+            };
+
+            if (workingSetEstimate.totalBytes > budgetBytes)
+            {
+                m_nanovdbBuildInfo.result = NanoVdbBuildResult::PreflightRejected;
+                m_nanovdbBuildInfo.reason = fmt::format(
+                  "estimated working set {:.1f} MiB exceeds NanoVDB budget {:.1f} MiB",
+                  bytesToMiB(workingSetEstimate.totalBytes),
+                  bytesToMiB(budgetBytes));
+                finalizeRootOnly();
+                return;
+            }
+
+            std::size_t const nanoPayloadStart = m_payloadData.data.size();
+
+            // Fixed face-index voxel sizes — match VdbImporter::writeMesh() exactly.
+            float constexpr kFarFiVoxelSize_mm  = 1.0f;   // far  face-index: 1mm voxels
+            float constexpr kNearFiVoxelSize_mm = 0.2f;   // near face-index: 0.2mm voxels (= 1/5 mm)
+            float constexpr kFarFiBandVoxels    = 150.0f; // 150mm world band
+            float constexpr kNearFiBandVoxels   = 50.0f;  // 50 voxels = 10mm world band
+
+            try
+            {
+                // Build flat (non-indexed) world-space vertex and triangle lists for OpenVDB.
+                std::vector<openvdb::Vec3s> verts;
+                std::vector<openvdb::Vec3I> tris;
+                verts.reserve(m_data.triangles.size() * 3u);
+                tris.reserve(m_data.triangles.size());
+                for (auto const & tri : m_data.triangles)
+                {
+                    auto const base = static_cast<openvdb::Index32>(verts.size());
+                    verts.emplace_back(tri.v0.x, tri.v0.y, tri.v0.z);
+                    verts.emplace_back(tri.v1.x, tri.v1.y, tri.v1.z);
+                    verts.emplace_back(tri.v2.x, tri.v2.y, tri.v2.z);
+                    tris.emplace_back(base, base + 1u, base + 2u);
+                }
+
+                // Helper: convert an OpenVDB grid to NanoVDB, append bytes (32-byte aligned)
+                // to m_payloadData.data, and return a PrimitiveMeta (not pushed yet).
+                constexpr size_t NANOVDB_ALIGN = 32u;
+                auto appendVdbGrid = [&](openvdb::GridBase::Ptr grid, float scaling,
+                                         PrimitiveType primType) -> PrimitiveMeta
+                {
+                    auto handle = nanovdb::openToNanoVDB(grid);
+                    size_t byteOffset = m_payloadData.data.size() * sizeof(float);
+                    size_t pad = (NANOVDB_ALIGN - (byteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+                    for (size_t k = 0; k < pad / sizeof(float); ++k)
+                        m_payloadData.data.push_back(0.0f);
+
+                    int const gridStart = static_cast<int>(m_payloadData.data.size());
+                    size_t const nFloats = static_cast<size_t>(
+                        std::ceil(static_cast<double>(handle.size()) / 4.0));
+                    m_payloadData.data.resize(m_payloadData.data.size() + nFloats);
+                    std::memcpy(&m_payloadData.data[gridStart], handle.data(), handle.size());
+
+                    byteOffset = m_payloadData.data.size() * sizeof(float);
+                    pad = (NANOVDB_ALIGN - (byteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
+                    for (size_t k = 0; k < pad / sizeof(float); ++k)
+                        m_payloadData.data.push_back(0.0f);
+
+                    PrimitiveMeta meta{};
+                    meta.primitiveType = primType;
+                    meta.scaling = scaling;
+                    meta.start = gridStart;
+                    meta.end = static_cast<int>(m_payloadData.data.size());
+                    return meta;
+                };
+
+                // Mesh adaptor: getIndexSpacePoint returns index-space coordinates
+                // (world_mm * invVoxelSize) as required by OpenVDB's meshToVolume.
+                struct IndexSpaceAdapter
+                {
+                    std::vector<openvdb::Vec3s> const & vertices;
+                    std::vector<openvdb::Vec3I> const & indices;
+                    float invVoxelSize;
+                    size_t polygonCount() const { return indices.size(); }
+                    size_t pointCount() const { return vertices.size(); }
+                    static size_t vertexCount(size_t) { return 3; }
+                    void getIndexSpacePoint(size_t faceIdx, size_t v, openvdb::Vec3d & pos) const
+                    {
+                        auto const idx = indices[faceIdx][v];
+                        auto const & pt = vertices[idx];
+                        pos = {static_cast<double>(pt.x()) * invVoxelSize,
+                               static_cast<double>(pt.y()) * invVoxelSize,
+                               static_cast<double>(pt.z()) * invVoxelSize};
+                    }
+                };
+
+                // -- Companion i+1: SDF_MESH_TRIANGLES (flat vertex buffer) --------------------
+                PrimitiveMeta flatMeshCompanion{};
+                flatMeshCompanion.primitiveType = SDF_MESH_TRIANGLES;
+                flatMeshCompanion.start = static_cast<int>(m_payloadData.data.size());
+                for (auto const & tri : m_data.triangles)
+                {
+                    m_payloadData.data.push_back(tri.v0.x);
+                    m_payloadData.data.push_back(tri.v0.y);
+                    m_payloadData.data.push_back(tri.v0.z);
+                    m_payloadData.data.push_back(tri.v1.x);
+                    m_payloadData.data.push_back(tri.v1.y);
+                    m_payloadData.data.push_back(tri.v1.z);
+                    m_payloadData.data.push_back(tri.v2.x);
+                    m_payloadData.data.push_back(tri.v2.y);
+                    m_payloadData.data.push_back(tri.v2.z);
+                }
+                flatMeshCompanion.end = static_cast<int>(m_payloadData.data.size());
+
+                // -- Companion i+2: SDF_VDB (near signed-distance field, user-configured res) --
+                // Keep the legacy VdbImporter value convention: build the SDF grid in
+                // voxel-scaled coordinates with an identity transform, then store
+                // PrimitiveMeta::scaling as the world_mm -> grid coordinate scale. The OpenCL
+                // vdbModel() sampler divides sampled grid values by the same scale to return
+                // millimetres. Building this grid directly in world space with a non-identity
+                // transform would store millimetre-valued distances and the kernel would scale
+                // them down a second time.
+                float const nearSdfScaling = 1.0f / voxelSize_mm;
+                auto nearSdfVerts = verts;
+                for (auto & vertex : nearSdfVerts)
+                {
+                    vertex *= nearSdfScaling;
+                }
+                auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(1.0);
+                float constexpr kNearHalfBandVoxels = 8.0f;
+                auto nearSdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+                    *nearSdfTransform, nearSdfVerts, tris, kNearHalfBandVoxels);
+                // Preserve OpenVDB's signed inactive tiles. The hybrid NanoVDB path uses this
+                // grid as its sign source while face-index grids provide the long-range
+                // magnitude. Replacing all inactive values with +max destroys the negative
+                // interior background and makes closed solids look outside once queries leave
+                // the active narrow band.
+                nearSdfGrid->pruneGrid();
+                PrimitiveMeta sdfVdbCompanion = appendVdbGrid(
+                    openvdb::GridBase::Ptr(nearSdfGrid), nearSdfScaling, SDF_VDB);
+                m_nanovdbGridOffset = static_cast<size_t>(sdfVdbCompanion.start);
+
+                // -- Companion i+3: SDF_VDB_FACE_INDICES (far face-index, fixed 1mm / 150 voxels) --
+                auto const farFiTransform = openvdb::math::Transform::createLinearTransform(
+                    static_cast<double>(kFarFiVoxelSize_mm));
+                IndexSpaceAdapter farAdaptor{verts, tris, 1.0f / kFarFiVoxelSize_mm};
+                openvdb::Int32Grid::Ptr farFaceIdxGrid = std::make_shared<openvdb::Int32Grid>();
+                farFaceIdxGrid->setTransform(farFiTransform);
+                openvdb::tools::meshToVolume<openvdb::FloatGrid, IndexSpaceAdapter>(
+                    farAdaptor, *farFiTransform, kFarFiBandVoxels, kFarFiBandVoxels, 0,
+                    farFaceIdxGrid.get());
+                openvdb::tools::changeBackground(farFaceIdxGrid->tree(), -1);
+                farFaceIdxGrid->setTransform(farFiTransform);
+                farFaceIdxGrid->pruneGrid();
+                PrimitiveMeta farFaceIdxCompanion = appendVdbGrid(
+                    openvdb::GridBase::Ptr(farFaceIdxGrid), 1.0f / kFarFiVoxelSize_mm,
+                    SDF_VDB_FACE_INDICES);
+
+                // -- Companion i+4: SDF_VDB_FACE_INDICES (near face-index, fixed 0.2mm / 50 voxels) --
+                auto const nearFiTransform = openvdb::math::Transform::createLinearTransform(
+                    static_cast<double>(kNearFiVoxelSize_mm));
+                IndexSpaceAdapter nearFiAdaptor{verts, tris, 1.0f / kNearFiVoxelSize_mm};
+                openvdb::Int32Grid::Ptr nearFaceIdxGrid = std::make_shared<openvdb::Int32Grid>();
+                nearFaceIdxGrid->setTransform(nearFiTransform);
+                openvdb::tools::meshToVolume<openvdb::FloatGrid, IndexSpaceAdapter>(
+                    nearFiAdaptor, *nearFiTransform, kNearFiBandVoxels, kNearFiBandVoxels, 0,
+                    nearFaceIdxGrid.get());
+                openvdb::tools::changeBackground(nearFaceIdxGrid->tree(), -1);
+                nearFaceIdxGrid->setTransform(nearFiTransform);
+                nearFaceIdxGrid->pruneGrid();
+                PrimitiveMeta nearFaceIdxCompanion = appendVdbGrid(
+                    openvdb::GridBase::Ptr(nearFaceIdxGrid), 1.0f / kNearFiVoxelSize_mm,
+                    SDF_VDB_FACE_INDICES);
+
+                m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] =
+                    static_cast<float>(m_nanovdbGridOffset);
+                m_nanovdbBuildInfo.result = NanoVdbBuildResult::Built;
+
+                metaData.end = static_cast<int>(m_payloadData.data.size());
+                m_payloadData.meta.push_back(metaData);             // i+0: SDF_SPATIAL_MESH_ROOT
+                m_payloadData.meta.push_back(flatMeshCompanion);    // i+1: SDF_MESH_TRIANGLES
+                m_payloadData.meta.push_back(sdfVdbCompanion);      // i+2: SDF_VDB
+                m_payloadData.meta.push_back(farFaceIdxCompanion);  // i+3: SDF_VDB_FACE_INDICES (far)
+                m_payloadData.meta.push_back(nearFaceIdxCompanion); // i+4: SDF_VDB_FACE_INDICES (near)
+                return;
+            }
+            catch (std::bad_alloc const & e)
+            {
+                m_payloadData.data.resize(nanoPayloadStart);
+                m_nanovdbGridOffset = 0u;
+                m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] = 0.0f;
+                m_nanovdbBuildInfo.result = NanoVdbBuildResult::BuildFailed;
+                m_nanovdbBuildInfo.reason =
+                  fmt::format("host allocation failed while building NanoVDB grids: {}",
+                              e.what());
+                finalizeRootOnly();
+                return;
+            }
+            catch (std::exception const & e)
+            {
+                m_payloadData.data.resize(nanoPayloadStart);
+                m_nanovdbGridOffset = 0u;
+                m_payloadData.data[m_headerStart + kNanoVdbOffsetIndex] = 0.0f;
+                m_nanovdbBuildInfo.result = NanoVdbBuildResult::BuildFailed;
+                m_nanovdbBuildInfo.reason =
+                  fmt::format("OpenVDB/NanoVDB build failed: {}", e.what());
+                finalizeRootOnly();
+                return;
+            }
         }
 
         metaData.end = static_cast<int>(m_payloadData.data.size());

@@ -17,6 +17,8 @@ namespace gladius
 {
     ResourceContext::ResourceContext(SharedComputeContext context)
         : m_ComputeContext(context)
+        , m_metricsBufferResource(m_ComputeContext->gpuAccessCoordinator().registerResource(
+            GpuResourceKind::Buffer, "RayMarchMetrics"))
     {
         m_renderingSettings = {};
         m_renderingSettings.z_mm = 1000.0f;
@@ -478,5 +480,10 @@ namespace gladius
                 sizeof(RayMarchMetrics));
         }
         return m_metricsBuffer.value();
+    }
+
+    GpuResourceHandle ResourceContext::getMetricsBufferGpuResource() const noexcept
+    {
+        return m_metricsBufferResource;
     }
 }

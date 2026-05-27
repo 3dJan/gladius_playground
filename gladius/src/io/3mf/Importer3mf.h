@@ -69,6 +69,12 @@ namespace gladius::io
             m_meshSdfEvaluationConfig = cfg;
         }
 
+        /// Configure the runtime NanoVDB build policy for spatial meshes created by this importer.
+        void setNanoVdbBuildPolicy(NanoVdbBuildPolicy const & policy)
+        {
+            m_nanovdbBuildPolicy = policy;
+        }
+
         void load(std::filesystem::path const & filename, Document & doc);
 
         void merge(std::filesystem::path const & filename, Document & doc);
@@ -266,6 +272,11 @@ namespace gladius::io
 
         BoundingBox computeBoundingBox(Lib3MF::PMeshObject mesh);
 
+        /// @brief Collects mesh resource IDs that are used exclusively as bounding boxes in level
+        ///        sets (meshbboxonly=true) and not also referenced as actual geometry.
+        /// @return Set of model resource IDs that should be skipped during mesh loading.
+        std::set<Lib3MF_uint32> collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const;
+
         Lib3MF::PWrapper m_wrapper{};
 
         MeshResources m_meshObjects;
@@ -276,6 +287,7 @@ namespace gladius::io
 
         mesh_repair::MeshRepairConfig m_meshRepairConfig{};
         MeshSdfEvaluationConfig m_meshSdfEvaluationConfig{};
+        NanoVdbBuildPolicy m_nanovdbBuildPolicy{};
     };
 
     void loadFrom3mfFile(std::filesystem::path filename, Document & doc);

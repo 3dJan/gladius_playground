@@ -108,11 +108,15 @@ namespace gladius::ui
         auto const speedFactor = 15.E-3f;
         // if (deltaTime_ms > 50.f)
         {
+            changed = fabs(m_pitchTarget - m_pitch) > tolerance ||
+                      fabs(m_yawTarget - m_yaw) > tolerance ||
+                      fabs(m_eyeDistTarget - m_eyeDist) > tolerance ||
+                      (m_lookAtTarget - m_lookAt).norm() > tolerance;
             m_pitch = m_pitchTarget;
             m_yaw = m_yawTarget;
             m_eyeDist = m_eyeDistTarget;
             m_lookAt = m_lookAtTarget;
-            return false;
+            return changed;
         }
         // deltaTime_ms = std::min(deltaTime_ms, 50.f);
 

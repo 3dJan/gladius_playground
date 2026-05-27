@@ -19,6 +19,7 @@
 #include "MeshBVH.h"
 #include "Parameter.h"
 #include "Profiling.h"
+#include "SpatialMeshResource.h"
 #include "VdbImporter.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/utils.h"
@@ -1169,15 +1170,71 @@ namespace gladius::io
         }
     }
 
+    std::set<Lib3MF_uint32> Importer3mf::collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const
+    {
+        std::set<Lib3MF_uint32> bboxOnlyIds;
+        std::set<Lib3MF_uint32> regularIds;
+
+        auto objectIterator = model->GetObjects();
+        while (objectIterator->MoveNext())
+        {
+            auto const object = objectIterator->GetCurrentObject();
+            if (!object->IsLevelSetObject())
+            {
+                continue;
+            }
+            auto levelSet = model->GetLevelSetByID(object->GetUniqueResourceID());
+            if (!levelSet)
+            {
+                continue;
+            }
+            auto mesh = levelSet->GetMesh();
+            if (!mesh)
+            {
+                continue;
+            }
+            auto const meshId = mesh->GetModelResourceID();
+            if (levelSet->GetMeshBBoxOnly())
+            {
+                bboxOnlyIds.insert(meshId);
+            }
+            else
+            {
+                regularIds.insert(meshId);
+            }
+        }
+
+        // Return only IDs that are exclusively used as bounding boxes (not also as real geometry)
+        std::set<Lib3MF_uint32> result;
+        for (auto const id : bboxOnlyIds)
+        {
+            if (regularIds.find(id) == regularIds.end())
+            {
+                result.insert(id);
+            }
+        }
+        return result;
+    }
+
     void Importer3mf::loadMeshes(Lib3MF::PModel model, Document & doc)
     {
-        ProfileFunction auto objectIterator = model->GetObjects();
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
 
             if (object->IsMeshObject())
             {
+                if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+                {
+                    // Skip meshes referenced only as bounding boxes in level sets;
+                    // loading them would waste memory and trigger expensive NanoVDB builds.
+                    continue;
+                }
                 auto const meshObj = model->GetMeshObjectByID(object->GetUniqueResourceID());
                 loadMeshIfNecessary(model, meshObj, doc);
             }
@@ -1192,13 +1249,25 @@ namespace gladius::io
                                  Document & doc,
                                  std::set<Lib3MF_uint32> const & resourceIds)
     {
-        ProfileFunction auto objectIterator = model->GetObjects();
+        ProfileFunction
+
+        auto const bboxOnlyMeshIds = collectBboxOnlyMeshIds(model);
+
+        auto objectIterator = model->GetObjects();
         while (objectIterator->MoveNext())
         {
             auto const object = objectIterator->GetCurrentObject();
 
             if (!object->IsMeshObject())
             {
+                continue;
+            }
+
+            if (bboxOnlyMeshIds.count(object->GetModelResourceID()) != 0u)
+            {
+                // Skip meshes referenced only as bounding boxes in level sets;
+                // they are needed only for domain AABBs and must never be
+                // instantiated as SpatialMeshResources.
                 continue;
             }
 
@@ -1317,8 +1386,48 @@ namespace gladius::io
             MeshBVHBuilder builder;
             spatialData = builder.build(vertices, indices);
         }
-                doc.getGeneratorContext().resourceManager.addResource(
-                    key, std::move(spatialData), m_meshSdfEvaluationConfig);
+        auto & resourceManager = doc.getGeneratorContext().resourceManager;
+        resourceManager.addResource(
+          key, std::move(spatialData), m_meshSdfEvaluationConfig, m_nanovdbBuildPolicy);
+
+        auto * resource = resourceManager.getResourcePtr(key);
+        auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+        if (spatialMesh != nullptr && spatialMesh->hasMeshQualityIssues())
+        {
+            auto const message = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            bool const strictNanoVdb = m_meshSdfEvaluationConfig.method == MeshSdfMethod::NanoVDB &&
+                                       m_nanovdbBuildPolicy.failurePolicy ==
+                                           NanoVdbFailurePolicy::Fail;
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({message,
+                                         strictNanoVdb ? gladius::events::Severity::Error
+                                                       : gladius::events::Severity::Warning});
+            }
+            if (strictNanoVdb)
+            {
+                resourceManager.deleteResource(key);
+                throw NanoVdbBuildRejectedError(message);
+            }
+        }
+        if (spatialMesh != nullptr && spatialMesh->hasNanoVdbBuildIssue())
+        {
+            auto const message = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({message,
+                                         m_nanovdbBuildPolicy.failurePolicy ==
+                                             NanoVdbFailurePolicy::Fail
+                                           ? gladius::events::Severity::Error
+                                           : gladius::events::Severity::Warning});
+            }
+
+            if (m_nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+            {
+                resourceManager.deleteResource(key);
+                throw NanoVdbBuildRejectedError(message);
+            }
+        }
 
         // Also load beam lattice if present
         loadBeamLatticeIfNecessary(model, meshObject, doc);
@@ -2224,6 +2333,7 @@ namespace gladius::io
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
         importer.setMeshRepairConfig(doc.getMeshRepairConfig());
         importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
         importer.load(filename, doc);
     }
 
@@ -2232,6 +2342,7 @@ namespace gladius::io
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
         importer.setMeshRepairConfig(doc.getMeshRepairConfig());
         importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
         importer.merge(filename, doc);
     }
 
@@ -2240,6 +2351,9 @@ namespace gladius::io
                               Document & doc)
     {
         ProfileFunction Importer3mf importer{doc.getSharedLogger()};
+        importer.setMeshRepairConfig(doc.getMeshRepairConfig());
+        importer.setMeshSdfEvaluationConfig(doc.getMeshSdfEvaluationConfig());
+        importer.setNanoVdbBuildPolicy(doc.getNanoVdbBuildPolicy());
         importer.merge(sourceModel, sourceFilename, doc);
     }
 } // namespace gladius::io

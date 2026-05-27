@@ -5,6 +5,9 @@
 #include "OrbitalCamera.h"
 #include "compute/ComputeCore.h"
 #include "render/AsyncRenderController.h"
+#include "render/PresentedFrameLedger.h"
+#include "render/RealtimeRaymarchController.h"
+#include "render/RenderUpdateCoordinator.h"
 #include <CL/cl_platform.h>
 #include <atomic>
 #include <chrono>
@@ -80,7 +83,13 @@ namespace gladius::ui
         /// scheduling round-trip through the UI thread.
         void startStreamingPreview();
         void stopStreamingPreview();
+        void refreshStreamingParameterInteraction();
         [[nodiscard]] bool isStreamingPreviewActive() const;
+        [[nodiscard]] async_rendering::RealtimeRaymarchMode realtimeRaymarchMode() const noexcept;
+        /// Returns true when the realtime learning controller has confirmed the GPU can
+        /// sustain realtime frames at the current resolution (Auto mode) or when Force mode
+        /// is active.  Mirrors @ref RenderUpdateCoordinator::isRealtimeSchedulingActive().
+        [[nodiscard]] bool isRealtimeActive() const noexcept;
 
         /// Cancel all in-flight async work (streaming preview, SDF, bbox, render jobs)
         /// by stopping streaming and bumping the epoch. Call before operations that
@@ -158,6 +167,8 @@ namespace gladius::ui
          */
         [[nodiscard]] bool isCameraMoving() const;
 
+        [[nodiscard]] bool isForceRealtimeMode() const noexcept;
+
       private:
         void render(RenderWindowState & state);
         void renderLoadingOverlay();
@@ -169,18 +180,43 @@ namespace gladius::ui
         void renderSync(RenderWindowState & state);
         void renderAsync(RenderWindowState & state);
         void processAsyncResults(RenderWindowState & state);
-        bool scheduleAsyncRenderJob(RenderWindowState & state);
+        bool scheduleAsyncRenderJob(
+          RenderWindowState & state,
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
+        bool scheduleFullFrameRenderJob(
+          RenderWindowState & state,
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr,
+          async_rendering::RenderJobType jobType =
+            async_rendering::RenderJobType::RealtimeHighQuality);
         coro::task<async_rendering::FrameResultMeta> executeAsyncRenderJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void notifyAsyncEpochIncrement();
+        void invalidateCameraView();
         void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
+        [[nodiscard]] async_rendering::RealtimeRaymarchConfig loadRealtimeRaymarchConfig() const;
+        void saveRealtimeRaymarchMode(async_rendering::RealtimeRaymarchMode mode) const;
+        void queueRenderDecision(async_rendering::RenderUpdateDecision decision);
+        [[nodiscard]] bool executeQueuedRenderCommands(RenderWindowState & state);
+        [[nodiscard]] bool executeRenderCommand(async_rendering::RenderCommand const & command,
+                                                RenderWindowState & state);
+        [[nodiscard]] bool scheduleCoordinatorTask(async_rendering::RenderTaskRequest const & task,
+                                                   RenderWindowState & state);
+        [[nodiscard]] bool isRealtimeRaymarchInteractionActive() const noexcept;
+        [[nodiscard]] bool scheduleAsyncSdfPrecomputation(
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
+        void completeCoordinatorTask(async_rendering::RenderTaskRequest const & request,
+                                     async_rendering::RenderTaskStatus status);
+        void completeCoordinatorTask(async_rendering::FrameResultMeta const & result,
+                                     bool producedDisplayFrame);
+        void completeCoordinatorPreviewTask(async_rendering::PreviewResultMeta const & result);
 
         [[nodiscard]] bool isAsyncBackendActive() const noexcept;
         [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
 
         // Async bounding box computation
-        void scheduleAsyncBboxUpdate();
+        void scheduleAsyncBboxUpdate(
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
         coro::task<async_rendering::FrameResultMeta> executeAsyncBboxUpdate(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
@@ -196,17 +232,32 @@ namespace gladius::ui
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
 
         // Async preview rendering (non-blocking low-res preview during camera movement)
-        bool scheduleAsyncPreviewJob();
+        bool scheduleAsyncPreviewJob(
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
         coro::task<async_rendering::FrameResultMeta> executeAsyncPreviewJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void processAsyncPreviewResults();
 
         // Streaming preview loop (tight render loop during parameter drag)
-        bool scheduleStreamingPreviewJob();
+        bool scheduleStreamingPreviewJob(
+          async_rendering::RenderTaskRequest const * coordinatorTask = nullptr);
         coro::task<async_rendering::FrameResultMeta> executeStreamingPreviewJob(
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
+        void finishParameterInteraction();
+
+        /// Render a single full-quality realtime frame synchronously on the UI thread.
+        /// Pushes the latest parameters to the GPU, submits the OpenCL render kernel,
+        /// blocks until the GPU is done, then immediately promotes the result to the
+        /// front buffer for display.  Returns true on success.
+        ///
+        /// Used when @ref RenderUpdateCoordinator::isRealtimeSchedulingActive() is true so
+        /// that both Force mode and Auto mode (once performance is proven) get direct,
+        /// zero-latency parameter feedback without going through the async job queue.
+        /// SDF precomputation and bounding-box updates remain asynchronous.
+        [[nodiscard]] bool tryRenderRealtimeFrameSync(
+          async_rendering::RenderTaskRequest const & task);
 
         GLView * m_view{};
 
@@ -235,6 +286,7 @@ namespace gladius::ui
         RenderWindowState m_renderWindowState{};
 
         bool m_centerViewRequested = false;
+        int m_cameraIdleFrames{0};
         bool m_enableHQRendering = true;
 
         ImVec2 m_contentAreaMin;
@@ -316,12 +368,21 @@ namespace gladius::ui
         void onCameraManuallyMoved();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
+        async_rendering::RenderUpdateCoordinator m_renderUpdateCoordinator{};
+        async_rendering::PresentedFrameLedger m_presentedFrames{};
+        std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};
         std::atomic<uint64_t> m_asyncCurrentEpoch{0};
+          std::atomic<uint64_t> m_asyncViewEpoch{0};
         std::atomic<uint64_t> m_asyncInFlightEpoch{0};
+          std::atomic<uint64_t> m_asyncInFlightViewEpoch{0};
         std::atomic<uint64_t> m_asyncFrameCounter{0};
         std::atomic<bool> m_asyncJobInFlight{false};
+        std::atomic<bool> m_asyncRealtimeJobInFlight{false};
+        /// Set when a StaticFullFrameProbe job is in-flight; used to suppress the progressive
+        /// buffer from display so the partial chunk content is not shown while the probe renders.
+        std::atomic<bool> m_asyncStaticFullFrameJobInFlight{false};
         std::atomic<bool> m_asyncBboxJobInFlight{false};
         std::atomic<bool> m_asyncBboxUpdatePending{
           false}; // Tracks if bbox needs update after current job
@@ -339,6 +400,7 @@ namespace gladius::ui
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
+        std::atomic<uint64_t> m_asyncProgressiveViewEpoch{0};
 
         // Async preview rendering state (separate from HQ progressive rendering)
         std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation

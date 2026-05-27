@@ -26,27 +26,12 @@ Gladius is a C++20 application and library for processing **3MF Volumetric / Imp
 - `gladius/vcpkg.json` — dependency manifest
 - `gladius/CMakePresets.json` — canonical configure + test presets
 
-## Prerequisites (Linux)
+## Prerequisites
 
-### Required tools
+For a full walkthrough of prerequisites and first-time setup (OS packages, compiler, OpenCL runtime, vcpkg, IDE configuration), see the platform build guides:
 
-- CMake + Ninja
-- Clang (`/usr/bin/clang` and `/usr/bin/clang++` per presets)
-- Git (including submodules)
-
-### Required runtimes / SDKs
-
-- **OpenCL** runtime + headers
-  - GPU OpenCL is ideal, but a CPU OpenCL runtime can work for some workflows.
-- OpenGL + X11 dev packages (Linux)
-
-### vcpkg
-
-The project uses **vcpkg** for dependencies. You need a working vcpkg install and an environment variable:
-
-- `VCPKG_ROOT` = path to your vcpkg checkout
-
-(Windows presets also rely on `VCPKG_DEFAULT_TRIPLET`; on Linux, the presets mostly rely on vcpkg manifest mode and overlays.)
+- **[Building on Linux](building-linux.md)**
+- **[Building on Windows](building-windows.md)**
 
 ## Build (recommended: VS Code tasks)
 

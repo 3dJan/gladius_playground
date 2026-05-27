@@ -363,9 +363,9 @@ namespace gladius
                 nodes::NodeId exprNodeId = parseAndBuildGraph(expr, model, variableNodes);
                 if (exprNodeId == 0)
                 {
-                    throw std::runtime_error(
-                      "Failed to parse expression '" + expr +
-                      "' in statement '" + cleanStmt + "'");
+                                        throw std::runtime_error(
+                                            "Failed to parse expression '" + expr +
+                                            "' in statement '" + cleanStmt + "'");
                 }
 
                 // Check if this assignment targets an output
@@ -373,18 +373,32 @@ namespace gladius
                 if (outputIt != outputNameMap.end())
                 {
                     auto const & matchedOutput = *outputIt->second;
+                    auto const cleanExpr = removeWhitespace(expr);
                     if (!validateOutputType(model, exprNodeId, matchedOutput.type))
                     {
-                        throw std::runtime_error(
-                          "Output type mismatch for '" + varName +
-                          "' in statement '" + cleanStmt + "'");
+                                                throw std::runtime_error(
+                                                    "Output type mismatch for '" + varName +
+                                                    "' in statement '" + cleanStmt + "'");
+                    }
+
+                    // validateOutputType() resolves the result port via getOutputPortName(),
+                    // which consumes the Begin-node variable context. Restore it before
+                    // connectToEndNode() so direct output assignments like
+                    // `center = in_pos;` connect the real Begin output (`pos`) instead of
+                    // falling back to the generic `value` port.
+                    auto exprNode = model.getNode(exprNodeId).value_or(nullptr);
+                    auto const variableIt = variableNodes.find(cleanExpr);
+                    if (dynamic_cast<nodes::Begin *>(exprNode) != nullptr &&
+                        variableIt != variableNodes.end() && variableIt->second == exprNodeId)
+                    {
+                        s_variableContextStack.push_back(cleanExpr);
                     }
 
                     if (!connectToEndNode(model, exprNodeId, matchedOutput))
                     {
-                        throw std::runtime_error(
-                          "Failed to connect output '" + varName +
-                          "' to end node in statement '" + cleanStmt + "'");
+                                                throw std::runtime_error(
+                                                    "Failed to connect output '" + varName +
+                                                    "' to end node in statement '" + cleanStmt + "'");
                     }
                 }
 

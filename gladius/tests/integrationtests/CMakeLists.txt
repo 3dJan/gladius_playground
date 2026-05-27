@@ -67,6 +67,9 @@ target_include_directories(${BINARY} PUBLIC ../../src ${CMAKE_CURRENT_BINDING_DI
 
 file(GLOB TEST_FILES CONFIGURE_DEPENDS
   "testdata/*.*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../unittests/testdata/SphereInACage_small.3mf"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../unittests/testdata/SphereInACage_small.imagestack.3mf"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../unittests/testdata/SphereInACageSimplifiedMesh.3mf"
 )
 
 file(COPY ${TEST_FILES} DESTINATION "testdata")

@@ -10,6 +10,10 @@
 #include "FunctionNavigationHistory.h"
 #include "LibraryBrowser.h"
 #include "LibraryDragPayload.h"
+#include "GamepadActionDispatcher.h"
+#include "GamepadHintBar.h"
+#include "GamepadState.h"
+#include "GamepadVisualFeedback.h"
 #include "LinkDragState.h"
 #include "NodeClipboard.h"
 #include "ValidationOverlay.h"
@@ -18,12 +22,16 @@
 #include "imguinodeeditor.h"
 
 #include <filesystem>
+#include <future>
+#include <optional>
 #include <string>
 #include <typeindex>
 #include <vector>
 
 #include "Outline.h"
 #include "ResourceView.h"
+#include "io/3mf/LibraryExampleExtractor.h"
+#include "io/VdbImporter.h"
 #include "Style.h"
 #include "compute/ComputeCore.h"
 #include "nodes/Assembly.h"
@@ -179,9 +187,28 @@ namespace gladius::ui
         // Extraction helper
         void extractSelectedNodesToFunction(const std::string & functionName);
 
-        // Copy/Paste helpers
+      public:
+        // Gamepad dispatcher helpers (public for GamepadActionDispatcher)
+        void undo();
+        void redo();
+        void processGamepadInput();
+
+        /// @brief Request the gamepad quick reference overlay to open.
+        void requestGamepadQuickReference();
+
+        /// @brief Check and consume a pending quick reference request.
+        [[nodiscard]] bool consumeGamepadQuickRefRequest();
+        
+        /// @brief Get currently selected nodes from the editor.
+        std::vector<ed::NodeId> getSelectedNodes();
+        
+        /// @brief Copy selected nodes to clipboard.
         void copySelectionToClipboard();
+        
+        /// @brief Paste clipboard content at mouse position.
         void pasteClipboardAtMouse();
+        
+        /// @brief Check if clipboard has content.
         bool hasClipboard() const;
 
         void readBackNodePositions();
@@ -223,14 +250,22 @@ namespace gladius::ui
         /// @brief Handle drag-and-drop from the library browser onto the node editor canvas.
         void handleLibraryDrop();
 
-        /// @brief Create a FunctionCall node at the current cursor position.
-        /// @param functionId The resource ID of the function to call.
-        /// @param sourceModel The model providing inputs/outputs for the FunctionCall.
-        void createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
-                                            nodes::SharedModel const & sourceModel);
+        /// @brief Import an STL file dropped onto the node editor canvas.
+        ///        The mesh is loaded on a background thread; once ready the Resource +
+        ///        SignedDistanceToMesh node pair is created at the given screen position.
+        /// @param path       Path to the dropped STL file.
+        /// @param screenPos  Drop position in ImGui screen coordinates.
+        void importStlDrop(std::filesystem::path const & path, ImVec2 screenPos);
 
-        void undo();
-        void redo();
+        /// @brief Create a FunctionCall node at the current cursor position.
+        /// @param functionId      The resource ID of the function to call.
+        /// @param sourceModel     The model providing inputs/outputs for the FunctionCall.
+        /// @param exampleConstants Optional constant nodes (with example values) to create and
+        ///                         wire to the FunctionCall arguments.
+        void createFunctionCallNodeAtCursor(
+          nodes::ResourceId functionId,
+          nodes::SharedModel const & sourceModel,
+          std::vector<io::ExampleConstantValue> const & exampleConstants = {});
 
         // Helper method to check if a string matches the current filter
         bool matchesNodeFilter(const std::string & text) const;
@@ -241,8 +276,17 @@ namespace gladius::ui
         /// Returns the editor context for the given function, creating one if needed.
         ed::EditorContext * getOrCreateEditorContext(nodes::ResourceId functionId);
 
-        /// Returns the editor context for the current model, or nullptr if no model is set.
+        /// Returns the editor context for the current model, creating it if needed.
+        /// Returns nullptr if no model is set.
         ed::EditorContext * getCurrentEditorContext();
+
+        /// @brief Poll m_pendingStlImports; for each finished future add the mesh resource
+        ///        and spawn the node pair.  Must be called inside an active ed::Begin/End block.
+        void processPendingStlImports();
+
+        /// @brief Create a Resource node linked to a SignedDistanceToMesh node at the given
+        ///        canvas position (matching the pattern used in meshResourceToolBox).
+        void createMeshSdfNodesAtCanvasPos(ResourceKey const & key, ImVec2 canvasPos);
 
         bool m_visible = false;
         std::unordered_map<nodes::ResourceId, ed::EditorContext *> m_editorContexts;
@@ -388,6 +432,23 @@ namespace gladius::ui
 
         // Code view for snippet editing
         CodeView m_codeView;
+
+        // Gamepad system
+        GamepadActionDispatcher m_gamepadDispatcher;
+        GamepadVisualFeedback m_gamepadVisualFeedback;
+        GamepadHintBar m_gamepadHintBar;
+        bool m_gamepadWasConnected{false}; ///< Tracks connection state for on-connect toast
+        bool m_gamepadQuickRefRequested{false}; ///< Set by dispatcher, consumed by MainWindow
+
+        // Async STL import
+        struct PendingStlImport
+        {
+            std::future<vdb::TriangleMesh> geometryFuture;
+            std::optional<ResourceKey> existingResourceKey;
+            std::string displayName;
+            ImVec2 dropScreenPos;
+        };
+        std::vector<PendingStlImport> m_pendingStlImports;
     };
 
     std::vector<ed::NodeId> selectedNodes(ed::EditorContext * editorContext);

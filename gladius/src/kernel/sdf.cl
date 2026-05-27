@@ -637,7 +637,7 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
         int3 coord = convert_int3(pos);
         pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
 
-        return pnanovdb_read_float_value(buf, &acc, coordCenter);
+        return pnanovdb_read_float_value(buf, &acc, coordCenter) / node.scaling;
     }
     // return boundingBox + bandwidth;
 }
@@ -1525,7 +1525,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
         {
             // Spatial mesh SDF using BVH traversal with optional voxel acceleration
             // ====================================================================
-            // Header Layout (33 floats total):
+            // Header Layout (34 floats total):
             // [0-7]:   Bounding box (8 floats: min.xyzw, max.xyzw)
             // [8-11]:  Counts (4 floats: nodeCount, triCount, vertexNormalCount, reserved)
             // [12-15]: BVH offsets (4 floats: nodesOffset, trianglesOffset, normalsOffset, indicesOffset)
@@ -1536,6 +1536,7 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
             // [30]:    FWN coarse sign-cache data offset (0 = not ready)
             // [31]:    FWN coarse sign-cache resolution per axis
             // [32]:    FWN beta used to build the ready sign cache
+            // [33]:    NanoVDB grid local float offset (0 = not built)
             // ====================================================================
 
             int const headerStart = primitive.start;
@@ -1571,6 +1572,54 @@ __attribute__((noinline)) float payload(float3 pos, int startIndex, int endIndex
                                 && (fwnAggregatesOffset > 0);
             
             float meshDist;
+#ifdef ENABLE_VDB
+            // NanoVDB 4-companion path: SDF_MESH_TRIANGLES (i+1) + SDF_VDB (i+2) +
+            // SDF_VDB_FACE_INDICES far (i+3) + SDF_VDB_FACE_INDICES near (i+4).
+            // Mirrors the SDF_MESH_TRIANGLES VDB evaluation logic (lines ~1431).
+            if (i + 4 < endIndex &&
+                primitives[i + 1].primitiveType == SDF_MESH_TRIANGLES &&
+                primitives[i + 2].primitiveType == SDF_VDB &&
+                primitives[i + 3].primitiveType == SDF_VDB_FACE_INDICES &&
+                primitives[i + 4].primitiveType == SDF_VDB_FACE_INDICES)
+            {
+                int const meshIndex          = i + 1;
+                int const sdfIndex           = i + 2;
+                int const faceIndexFarIndex  = i + 3;
+                int const faceIndexNearIndex = i + 4;
+
+                int faceIndicesFar[27];
+                float const distFar =
+                    closestFaceDist(pos, meshIndex, faceIndexFarIndex, faceIndicesFar,
+                                    PASS_PAYLOAD_ARGS);
+
+                if (renderingSettings.approximation & AM_DISABLE_INTERPOLATION)
+                {
+                    meshDist = vdbModelSimple(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+                else
+                {
+                    meshDist = vdbModel(pos, sdfIndex, PASS_PAYLOAD_ARGS);
+                }
+
+                float const signess = sign(meshDist);
+
+                if (distFar > 20.0f)
+                {
+                    meshDist = distFar * signess;
+                }
+                else if (fabs(distFar) > 0.5f)
+                {
+                    int faceIndicesNear[27];
+                    float const distNear =
+                        closestFaceDist(pos, meshIndex, faceIndexNearIndex, faceIndicesNear,
+                                        PASS_PAYLOAD_ARGS);
+                    meshDist = min(distNear, distFar) * signess;
+                }
+
+                i += 4; // consume all 4 companions
+            }
+            else
+#endif // ENABLE_VDB
             if (useFwn)
             {
                 // NOTE: voxel-magnitude reuse is disabled here even when a
