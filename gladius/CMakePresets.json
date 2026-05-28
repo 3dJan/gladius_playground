@@ -23,8 +23,10 @@
                 "VCPKG_TARGET_TRIPLET": "x64-windows-gladius",
                 "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
-                "CMAKE_BUILD_PARALLEL_LEVEL": "2",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            },
+            "environment": {
+                "CMAKE_BUILD_PARALLEL_LEVEL": "8"
             }
         },
         {
@@ -111,7 +113,9 @@
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "ENABLE_COVERAGE": "OFF",
-                "ENABLE_TRACY": "TRUE",
+                "ENABLE_TRACY": "TRUE"
+            },
+            "environment": {
                 "CMAKE_BUILD_PARALLEL_LEVEL": "8"
             }
         },
@@ -154,6 +158,58 @@
         }
     ],
     "version": 3,
+    "buildPresets": [
+        {
+            "name": "x64-debug",
+            "displayName": "x64 Debug",
+            "configurePreset": "x64-debug",
+            "jobs": 2
+        },
+        {
+            "name": "x64-release",
+            "displayName": "x64 Release",
+            "configurePreset": "x64-release",
+            "jobs": 2
+        },
+        {
+            "name": "x64-release-debug",
+            "displayName": "x64 Release with Debug",
+            "configurePreset": "x64-release-debug",
+            "jobs": 2
+        },
+        {
+            "name": "x64-release-debug-asan",
+            "displayName": "x64 Release with Debug and ASAN",
+            "configurePreset": "x64-release-debug-asan",
+            "jobs": 2
+        },
+        {
+            "name": "x64-release-debug-noOpenCL",
+            "displayName": "x64 Release with Debug (No OpenCL Tests)",
+            "configurePreset": "x64-release-debug-noOpenCL",
+            "jobs": 2
+        },
+        {
+            "name": "linux-debug",
+            "configurePreset": "linux-debug",
+            "jobs": 8
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release",
+            "jobs": 8
+        },
+        {
+            "name": "linux-releaseWithDebug",
+            "configurePreset": "linux-releaseWithDebug",
+            "jobs": 8
+        },
+        {
+            "name": "linux-releaseWithDebug-noOpenCL",
+            "configurePreset": "linux-releaseWithDebug-noOpenCL",
+            "jobs": 8
+        }
+    ],
     "testPresets": [
         {
             "name": "ReleaseWithDebug",

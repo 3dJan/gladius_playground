@@ -101,7 +101,21 @@ include(cmake/Coverage.cmake)
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY OFF)
 
 if (MSVC)
-    add_compile_options(/bigobj /utf-8 /Zc:__cplusplus)
+    # /Zm200 gives MSVC more internal compiler heap for large template-heavy translation units.
+    # Keep it global so executable-only sources such as the MCP tools get the same protection as libraries.
+    add_compile_options(/bigobj /utf-8 /Zc:__cplusplus /Zm200)
+
+    if(CMAKE_GENERATOR MATCHES "Ninja")
+      set(GLADIUS_MSVC_COMPILE_JOBS "2" CACHE STRING "Maximum concurrent MSVC compile jobs for Ninja builds")
+      set(GLADIUS_MSVC_HEAVY_COMPILE_JOBS "1" CACHE STRING "Maximum concurrent memory-heavy MSVC compile jobs for Ninja builds")
+
+      set_property(GLOBAL PROPERTY JOB_POOLS
+        gladius_msvc_compile_pool=${GLADIUS_MSVC_COMPILE_JOBS}
+        gladius_msvc_heavy_compile_pool=${GLADIUS_MSVC_HEAVY_COMPILE_JOBS}
+        gladius_msvc_link_pool=1)
+      set(CMAKE_JOB_POOL_COMPILE gladius_msvc_compile_pool)
+      set(CMAKE_JOB_POOL_LINK gladius_msvc_link_pool)
+    endif()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         add_compile_options(/RTC1) 
