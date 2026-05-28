@@ -131,6 +131,10 @@ namespace gladius
         void setModelSources(std::string optimizedSource,
                  std::optional<std::string> previewSource,
                  bool compileOptimizedRenderProgram);
+        void setPreviewModelSource(std::string previewSource);
+        void setOptimizedModelSource(std::string optimizedSource,
+                   bool compileOptimizedRenderProgram,
+                   bool compileSlicerProgram);
 
         void setVdbRequired(bool required);
         [[nodiscard]] bool isVdbSupported() const;

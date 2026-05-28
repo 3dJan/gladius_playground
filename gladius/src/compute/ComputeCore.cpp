@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -64,6 +66,7 @@ namespace gladius
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
+        (void) beginOptimizedSourceGeneration();
         m_boundingBox.reset();
         m_boundingBoxStale.store(false, std::memory_order_release);
         m_programs.reset();
@@ -966,7 +969,9 @@ namespace gladius
     {
         ProfileFunction
 
-          std::lock_guard<std::recursive_mutex>
+                pollOptimizedSourceGeneration();
+
+                std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
         m_programs.setVdbRequired(requiresNanoVdbLocked());
         m_programs.recompileIfRequired();
@@ -1248,6 +1253,108 @@ namespace gladius
         }
     }
 
+    std::uint64_t ComputeCore::beginOptimizedSourceGeneration()
+    {
+        return m_optimizedSourceGenerationEpoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    }
+
+    bool ComputeCore::isOptimizedSourceGenerationCurrent(std::uint64_t const generation) const
+    {
+        return m_optimizedSourceGenerationEpoch.load(std::memory_order_acquire) == generation;
+    }
+
+    void ComputeCore::startOptimizedSourceGeneration(nodes::SharedAssembly assembly,
+                                                     ParameterSignature parameterSignature,
+                                                     std::uint64_t const generation)
+    {
+        if (!assembly)
+        {
+            return;
+        }
+
+        logMsg(fmt::format("Starting optimized source generation job {}", generation));
+
+        auto job = std::async(std::launch::async,
+                              [assembly = std::move(assembly),
+                               parameterSignature = std::move(parameterSignature),
+                               generation]() mutable
+                              {
+                                  OptimizedSourceGenerationResult result;
+                                  result.generation = generation;
+                                  result.parameterSignature = std::move(parameterSignature);
+
+                                  try
+                                  {
+                                      std::stringstream optimizedKernelStream;
+                                      nodes::ToOclVisitor visitor;
+                                      assembly->visitNodes(visitor);
+                                      visitor.write(optimizedKernelStream);
+                                      result.source = optimizedKernelStream.str();
+                                  }
+                                  catch (std::exception const & e)
+                                  {
+                                      result.errorMessage = e.what();
+                                  }
+                                  catch (...)
+                                  {
+                                      result.errorMessage =
+                                        "Unknown error during optimized source generation";
+                                  }
+
+                                  return result;
+                              });
+
+        std::lock_guard<std::mutex> lock(m_optimizedSourceGenerationMutex);
+        m_optimizedSourceGenerationJobs.emplace_back(std::move(job));
+    }
+
+    void ComputeCore::pollOptimizedSourceGeneration()
+    {
+        std::vector<OptimizedSourceGenerationResult> completedResults;
+        {
+            std::lock_guard<std::mutex> lock(m_optimizedSourceGenerationMutex);
+            auto jobIt = m_optimizedSourceGenerationJobs.begin();
+            while (jobIt != m_optimizedSourceGenerationJobs.end())
+            {
+                if (jobIt->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                {
+                    completedResults.emplace_back(jobIt->get());
+                    jobIt = m_optimizedSourceGenerationJobs.erase(jobIt);
+                    continue;
+                }
+                ++jobIt;
+            }
+        }
+
+        for (auto & result : completedResults)
+        {
+            if (!isOptimizedSourceGenerationCurrent(result.generation))
+            {
+                logMsg(fmt::format("Discarding stale optimized source generation job {}",
+                                   result.generation));
+                continue;
+            }
+
+            if (!result.errorMessage.empty())
+            {
+                logMsg(fmt::format("Optimized source generation failed: {}", result.errorMessage));
+                continue;
+            }
+
+            if (result.source.empty())
+            {
+                logMsg("Optimized source generation produced an empty source");
+                continue;
+            }
+
+            logMsg(fmt::format("Optimized source generation job {} finished: {} bytes",
+                               result.generation,
+                               result.source.size()));
+            m_programs.setOptimizedModelSource(std::move(result.source), true, true);
+            m_programs.setCompiledParameterSignature(std::move(result.parameterSignature));
+        }
+    }
+
     void ComputeCore::refreshProgram(nodes::SharedAssembly assembly)
     {
         ProfileFunction;
@@ -1267,10 +1374,16 @@ namespace gladius
             return;
         }
 
+        auto const optimizedSourceGeneration = beginOptimizedSourceGeneration();
+        auto const parameterSignature = ParameterSignature::compute(*assembly);
+
         m_boundingBox.reset();
         invalidatePreCompSdf("refreshProgram");
         auto commandStreamKernel = std::optional<std::string>{};
         auto optimizedKernel = std::optional<std::string>{};
+        bool const generateOptimizedSourceAsync =
+          m_codeGenerator == CodeGenerator::Automatic &&
+          m_programs.isOptimizedRenderCompilationDeferred();
 
         if (m_codeGenerator == CodeGenerator::CommandStream ||
             m_codeGenerator == CodeGenerator::Automatic)
@@ -1296,7 +1409,8 @@ namespace gladius
             commandStreamKernel = modelKernel.str();
         }
 
-        if (m_codeGenerator == CodeGenerator::Code || m_codeGenerator == CodeGenerator::Automatic)
+        if (m_codeGenerator == CodeGenerator::Code ||
+            (m_codeGenerator == CodeGenerator::Automatic && !generateOptimizedSourceAsync))
         {
             std::stringstream optimizedKernelStream;
             nodes::ToOclVisitor visitor;
@@ -1308,7 +1422,26 @@ namespace gladius
 
         if (m_codeGenerator == CodeGenerator::Automatic)
         {
-            if (!commandStreamKernel.has_value() || !optimizedKernel.has_value())
+            if (!commandStreamKernel.has_value())
+            {
+                logMsg("Automatic code generation failed to create a command-stream render source");
+                return;
+            }
+
+            if (generateOptimizedSourceAsync)
+            {
+                m_programs.setPreviewModelSource(*commandStreamKernel);
+                m_programs.setCompiledParameterSignature(parameterSignature);
+                logMsg(fmt::format("Captured parameter signature: {}",
+                                   parameterSignature.toString()));
+                logMsg(fmt::format(
+                  "Published command-stream preview source: {} bytes; optimized source generation deferred",
+                  commandStreamKernel->size()));
+                startOptimizedSourceGeneration(assembly, parameterSignature, optimizedSourceGeneration);
+                return;
+            }
+
+            if (!optimizedKernel.has_value())
             {
                 logMsg("Automatic code generation failed to create both render sources");
                 return;
@@ -1335,12 +1468,8 @@ namespace gladius
         }
 
         // Capture parameter signature after code generation for fast-path validation
-        if (assembly)
-        {
-            auto const signature = ParameterSignature::compute(*assembly);
-            m_programs.setCompiledParameterSignature(signature);
-            logMsg(fmt::format("Captured parameter signature: {}", signature.toString()));
-        }
+        m_programs.setCompiledParameterSignature(parameterSignature);
+        logMsg(fmt::format("Captured parameter signature: {}", parameterSignature.toString()));
     }
 
     void ComputeCore::tryRefreshProgramProtected(nodes::SharedAssembly assembly)

@@ -18,14 +18,18 @@
 #include <nodes/nodesfwd.h>
 #include <ui/OrbitalCamera.h>
 
+#include <compute/ParameterSignature.h>
 #include <compute/ProgramManager.h>
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <future>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace cl
 {
@@ -764,6 +768,21 @@ namespace gladius
         void generateContourMarchingSquare(nodes::SliceParameter const & sliceParameter);
         void generateContourQuadtree(nodes::SliceParameter const & sliceParameter);
 
+        struct OptimizedSourceGenerationResult
+        {
+            std::uint64_t generation = 0u;
+            std::string source;
+            ParameterSignature parameterSignature;
+            std::string errorMessage;
+        };
+
+        [[nodiscard]] std::uint64_t beginOptimizedSourceGeneration();
+        [[nodiscard]] bool isOptimizedSourceGenerationCurrent(std::uint64_t generation) const;
+        void startOptimizedSourceGeneration(nodes::SharedAssembly assembly,
+                                            ParameterSignature parameterSignature,
+                                            std::uint64_t generation);
+        void pollOptimizedSourceGeneration();
+
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
 
         // Keep the OpenCL context before every member that owns buffers/images referencing it.
@@ -824,6 +843,10 @@ namespace gladius
         CodeGenerator m_codeGenerator = CodeGenerator::Automatic;
 
         SharedKernelReplacements m_kernelReplacements;
+
+        std::atomic<std::uint64_t> m_optimizedSourceGenerationEpoch{0u};
+        std::mutex m_optimizedSourceGenerationMutex;
+        std::vector<std::future<OptimizedSourceGenerationResult>> m_optimizedSourceGenerationJobs;
 
         ProgramManager m_programs;
     };

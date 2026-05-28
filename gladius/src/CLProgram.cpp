@@ -33,7 +33,28 @@ namespace gladius
         // --- Diagnostic helpers (OpenCL source/options dump) ---
         inline bool isOclDumpEnabled()
         {
-            return false;
+            auto isEnabled = [](char const * value)
+            {
+                if (value == nullptr)
+                {
+                    return false;
+                }
+
+                auto normalized = std::string{value};
+                std::transform(normalized.begin(),
+                               normalized.end(),
+                               normalized.begin(),
+                               [](unsigned char character)
+                               {
+                                   return static_cast<char>(std::tolower(character));
+                               });
+
+                return normalized == "1" || normalized == "true" || normalized == "yes" ||
+                       normalized == "on";
+            };
+
+            return isEnabled(std::getenv("GLADIUS_OCL_DUMP")) ||
+                   isEnabled(std::getenv("GLADIUS_OPENCL_DUMP"));
         }
 
         std::string toLowerCopy(std::string_view text)
