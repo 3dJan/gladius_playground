@@ -765,15 +765,19 @@ namespace gladius
         void generateContourQuadtree(nodes::SliceParameter const & sliceParameter);
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
+
+        // Keep the OpenCL context before every member that owns buffers/images referencing it.
+        // Members are destroyed in reverse declaration order; the context must therefore be
+        // declared first so GPU resources can release themselves while the context is still alive.
+        SharedComputeContext m_ComputeContext;
+
         SharedContourExtractor m_contour;
+        SharedResources m_resources;
         mutable std::atomic<SharedGLImageBuffer> m_resultImage;
         mutable std::atomic<SharedGLImageBuffer> m_lowResPreviewImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImage;
         std::shared_ptr<ImageRGBA> m_thumbnailImageHighRes;
-
         SharedPrimitives m_primitives;
-        SharedComputeContext m_ComputeContext;
-        SharedResources m_resources;
 
         double layerThickness_mm = 0.05;
         cl_float m_sliceHeight_mm{0.0f};

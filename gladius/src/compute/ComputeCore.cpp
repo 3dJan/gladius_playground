@@ -41,8 +41,8 @@ namespace gladius
     ComputeCore::ComputeCore(SharedComputeContext context,
                              RequiredCapabilities requiredCapabilities,
                              events::SharedLogger logger)
-        : m_contour(std::make_shared<ContourExtractor>(logger))
-        , m_ComputeContext(context)
+        : m_ComputeContext(context)
+        , m_contour(std::make_shared<ContourExtractor>(logger))
         , m_resources(std::make_shared<ResourceContext>(context))
         , m_capabilities(requiredCapabilities)
         , m_eventLogger(logger)
@@ -2510,7 +2510,9 @@ namespace gladius
 
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {
-        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        // The model-state object is created once in the constructor and is never replaced.
+        // Keep this getter lock-free so UI-frame status polling cannot block behind long-running
+        // mesh loading, GPU preparation, or compilation work that owns the compute token.
         return m_meshResourceState;
     }
 

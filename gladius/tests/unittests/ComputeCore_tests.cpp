@@ -413,6 +413,33 @@ namespace gladius_tests
         ASSERT_NE(primitives.get(), nullptr);
         ASSERT_NO_THROW(primitives->write());
 
+        auto const & primitiveMeta = primitives->primitives.getData();
+        auto const meshPrimitiveIt = std::find_if(
+          primitiveMeta.begin(),
+          primitiveMeta.end(),
+          [](PrimitiveMeta const & meta)
+          {
+              return meta.primitiveType == SDF_SPATIAL_MESH_ROOT;
+          });
+        ASSERT_NE(meshPrimitiveIt, primitiveMeta.end());
+
+        auto const & payload = primitives->data.getData();
+        auto const headerStart = static_cast<size_t>(meshPrimitiveIt->start);
+        ASSERT_GT(payload.size(), headerStart + 33u);
+
+        auto const nodesOffset = static_cast<int>(payload[headerStart + 12u]);
+        auto const trianglesOffset = static_cast<int>(payload[headerStart + 13u]);
+        auto const normalsOffset = static_cast<int>(payload[headerStart + 14u]);
+        auto const indicesOffset = static_cast<int>(payload[headerStart + 15u]);
+        auto const voxelDataOffset = static_cast<int>(payload[headerStart + 26u]);
+        auto const edgeNeighborsOffset = static_cast<int>(payload[headerStart + 28u]);
+        EXPECT_EQ(nodesOffset % 4, 0);
+        EXPECT_EQ(trianglesOffset % 4, 0);
+        EXPECT_EQ(normalsOffset % 4, 0);
+        EXPECT_EQ(indicesOffset % 4, 0);
+        EXPECT_EQ(voxelDataOffset % 2, 0);
+        EXPECT_EQ(edgeNeighborsOffset % 4, 0);
+
         constexpr size_t imageSize = 1u;
         ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
         ASSERT_NO_THROW(targetImage.allocateOnDevice());

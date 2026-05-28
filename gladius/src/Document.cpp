@@ -651,9 +651,30 @@ namespace gladius
     bool Document::refreshModelIfNoCompilationIsRunning()
     {
         ProfileFunction;
-        if (m_core->getBestRenderProgram()->isCompilationInProgress() ||
-            m_core->getSlicerProgram()->isCompilationInProgress() ||
-            !m_core->getMeshResourceState()->isModelUpToDate())
+
+        // This method is called from the UI frame loop. Only use non-blocking probes here;
+        // the background load/refresh worker can hold the compute token for several seconds
+        // while importing meshes and preparing GPU resources.
+        if (m_core->isAnyCompilationInProgressNonBlocking())
+        {
+            return false;
+        }
+
+        auto const meshResourceState = m_core->getMeshResourceState();
+        if (meshResourceState && !meshResourceState->isModelUpToDate())
+        {
+            return false;
+        }
+
+        {
+            auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                return false;
+            }
+        }
+
+        if (m_core->isAnyCompilationInProgressNonBlocking())
         {
             return false;
         }

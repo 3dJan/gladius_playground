@@ -838,6 +838,10 @@ namespace gladius::ui
         {
             // No image yet (early init / between resize and re-allocation).
             // Skip drawing this frame instead of dereferencing a null shared_ptr.
+            if (isFileLoading)
+            {
+                renderLoadingOverlay();
+            }
             return;
         }
 
@@ -1139,11 +1143,14 @@ namespace gladius::ui
         ImGui::PopStyleVar();
         displayImage->unbind();
 
+        if (isFileLoading)
+        {
+            showProgressSpinner(windowCenter, "loading", ImVec4(0.2f, 0.6f, 1.0f, 0.8f));
+        }
         // Show the progress indicator only when no renderable program is available.
         // In automatic mode the optimized OpenCL program may still compile in the
         // background while the command-stream preview program is already usable.
-        bool const showBusyIndicator = !m_core->tryIsRenderProgramReady().value_or(false);
-        if (showBusyIndicator)
+        else if (!m_core->tryIsRenderProgramReady().value_or(false))
         {
             m_view->startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -1161,7 +1168,7 @@ namespace gladius::ui
 
             if (ImGui::Begin("ProgressIndicator", &open, window_flags))
             {
-                // Red color for compilation (loading case is handled by early return)
+                // Red color for compilation; file loading keeps a blue spinner above.
                 ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
                 ui::loadingIndicatorCircle("compiling",
                                            30,
@@ -3841,7 +3848,9 @@ namespace gladius::ui
         }
     }
 
-    void RenderWindow::showProgressSpinner(ImVec2 const & windowCenter, char const * label)
+    void RenderWindow::showProgressSpinner(ImVec2 const & windowCenter,
+                                           char const * label,
+                                           ImVec4 const & indicatorColor)
     {
         m_view->startAnimationMode();
         ImGuiWindowFlags overlayFlags =
@@ -3858,7 +3867,6 @@ namespace gladius::ui
         if (ImGui::Begin("ProgressIndicator", &open, overlayFlags))
         {
             ImGui::SetWindowPos({windowCenter.x - 15.f, windowCenter.y - 15.f});
-            ImVec4 const indicatorColor = ImVec4(1.0f, 0.0f, 0.0f, 0.8f);
             ui::loadingIndicatorCircle(label,
                                        30,
                                        indicatorColor,

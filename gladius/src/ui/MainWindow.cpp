@@ -606,6 +606,10 @@ namespace gladius::ui
         if (m_computeAvailable && m_doc)
         {
             bool const loadingNow = m_doc->isLoadingInProgress();
+            if (loadingNow)
+            {
+                m_mainView.startAnimationMode();
+            }
             if (m_asyncLoadState != AsyncLoadState::Idle && !loadingNow)
             {
                 if (m_asyncLoadState == AsyncLoadState::LoadingWithReset)
@@ -2638,7 +2642,7 @@ namespace gladius::ui
     void MainWindow::updateModel()
     {
         // Avoid touching document/compute state while a file is being loaded on a background thread.
-        if (m_doc && m_doc->isLoadingInProgress())
+        if (m_doc && (m_doc->isLoadingInProgress() || m_asyncLoadState != AsyncLoadState::Idle))
         {
             return;
         }

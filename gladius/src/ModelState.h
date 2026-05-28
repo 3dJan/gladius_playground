@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 namespace gladius
 {
     enum class CompilationState
@@ -14,38 +16,38 @@ namespace gladius
       public:
         void signalCompilationRequired()
         {
-            m_compilationState = CompilationState::CompilationRequested;
+            m_compilationState.store(CompilationState::CompilationRequested,
+                                     std::memory_order_release);
         }
 
         void signalCompilationFinished()
         {
-            if (m_compilationState == CompilationState::CompilationInProgress)
-            {
-                m_compilationState = CompilationState::UpToDate;
-            }
+            auto expected = CompilationState::CompilationInProgress;
+            (void) m_compilationState.compare_exchange_strong(expected,
+                                                              CompilationState::UpToDate,
+                                                              std::memory_order_acq_rel,
+                                                              std::memory_order_acquire);
         }
 
         void signalCompilationStarted()
         {
-            m_compilationState = CompilationState::CompilationInProgress;
+            m_compilationState.store(CompilationState::CompilationInProgress,
+                                     std::memory_order_release);
         }
 
         [[nodiscard]] bool isCompilationRequired() const
         {
-            if (m_compilationState == CompilationState::CompilationRequested)
-            {
-                return true;
-            }
-
-            return false;
+            return m_compilationState.load(std::memory_order_acquire) ==
+                   CompilationState::CompilationRequested;
         }
 
         [[nodiscard]] bool isModelUpToDate() const
         {
-            return m_compilationState == CompilationState::UpToDate;
+            return m_compilationState.load(std::memory_order_acquire) ==
+                   CompilationState::UpToDate;
         }
 
       private:
-        CompilationState m_compilationState{CompilationState::UpToDate};
+        std::atomic<CompilationState> m_compilationState{CompilationState::UpToDate};
     };
 }
