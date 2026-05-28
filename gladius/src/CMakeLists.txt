@@ -157,8 +157,14 @@ set(GLADIUS_MCP_PCH_HEADERS
 target_precompile_headers(${BINARY}_lib PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 # _lib_mcp has GLADIUS_ENABLE_MCP defined so it gets its own PCH build
 target_precompile_headers(${BINARY}_lib_mcp PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
-# executables share the PCH from their corresponding library (same flags)
-target_precompile_headers(${BINARY} REUSE_FROM ${BINARY}_lib)
+# On non-Windows builds the static library uses -fPIC while executables use -fPIE.
+# Clang encodes that distinction in the PCH and rejects a -fPIC PCH consumed by
+# a -fPIE translation unit, so the executable needs its own PCH there.
+if (MSVC)
+    target_precompile_headers(${BINARY} REUSE_FROM ${BINARY}_lib)
+else()
+    target_precompile_headers(${BINARY} PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
+endif()
 
 # Enable AVX2 SIMD instructions for Phase 3 optimization
 # PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
