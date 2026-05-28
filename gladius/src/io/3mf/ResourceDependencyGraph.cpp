@@ -87,6 +87,15 @@ namespace gladius::io
                     continue;
                 }
 
+                                // BooleanObject
+                                Lib3MF::PBooleanObject booleanObject =
+                                    std::dynamic_pointer_cast<Lib3MF::CBooleanObject>(resource);
+                                if (booleanObject)
+                                {
+                                        processBooleanObject(booleanObject);
+                                        continue;
+                                }
+
                 // MeshObject
                 Lib3MF::PMeshObject meshObject =
                   std::dynamic_pointer_cast<Lib3MF::CMeshObject>(resource);
@@ -508,6 +517,61 @@ namespace gladius::io
                                                 componentsObjectId,
                                                 e.what()),
                                     gladius::events::Severity::Error});
+        }
+    }
+
+    void ResourceDependencyGraph::processBooleanObject(Lib3MF::PBooleanObject booleanObject)
+    {
+        if (!booleanObject)
+        {
+            return;
+        }
+
+        Lib3MF_uint32 const booleanObjectId = booleanObject->GetResourceID();
+
+        try
+        {
+            Lib3MF::PObject baseObject = booleanObject->GetBaseObject();
+            if (baseObject)
+            {
+                m_graph->addDependency(booleanObjectId, baseObject->GetResourceID());
+            }
+        }
+        catch (const std::exception & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Error processing BooleanObject base dependency {}: {}",
+                               booleanObjectId,
+                               e.what()),
+                   gladius::events::Severity::Error});
+            }
+        }
+
+        try
+        {
+            auto const operandCount = booleanObject->GetOperandCount();
+            for (Lib3MF_uint32 operandIndex = 0; operandIndex < operandCount; ++operandIndex)
+            {
+                Lib3MF::PMeshObject operandObject;
+                (void) booleanObject->GetOperand(operandIndex, operandObject);
+                if (operandObject)
+                {
+                    m_graph->addDependency(booleanObjectId, operandObject->GetResourceID());
+                }
+            }
+        }
+        catch (const std::exception & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Error processing BooleanObject operand dependency {}: {}",
+                               booleanObjectId,
+                               e.what()),
+                   gladius::events::Severity::Error});
+            }
         }
     }
 

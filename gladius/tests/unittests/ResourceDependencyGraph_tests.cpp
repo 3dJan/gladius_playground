@@ -73,6 +73,15 @@ namespace gladius_tests
         gladius::events::SharedLogger m_logger;
     };
 
+    Lib3MF::sTransform createIdentityTransform()
+    {
+        Lib3MF::sTransform transform{};
+        transform.m_Fields[0][0] = 1.0f;
+        transform.m_Fields[1][1] = 1.0f;
+        transform.m_Fields[2][2] = 1.0f;
+        return transform;
+    }
+
     TEST_F(ResourceDependencyGraphTest, BuildGraph_EmptyModel_NoVerticesInGraph)
     {
         // Arrange
@@ -129,6 +138,59 @@ namespace gladius_tests
             }
         }
     }
+
+    TEST_F(ResourceDependencyGraphTest,
+           BuildGraph_BooleanObjectDependsOnBaseAndOperandMeshes_DependencyExists)
+    {
+        // Arrange
+        auto baseMesh = m_model->AddMeshObject();
+        auto operandMesh = m_model->AddMeshObject();
+        auto booleanObject = m_model->AddBooleanObject();
+        auto const transform = createIdentityTransform();
+        booleanObject->SetBaseObject(baseMesh.get(), transform);
+        booleanObject->AddOperand(operandMesh.get(), transform);
+
+                io::ResourceDependencyGraph dependencyGraph(m_model, m_logger);
+
+                // Act
+                dependencyGraph.buildGraph();
+
+                // Assert
+                auto const & graph = dependencyGraph.getGraph();
+                EXPECT_TRUE(hasDependency(graph, booleanObject->GetResourceID(), baseMesh->GetResourceID()))
+                    << "Boolean object should depend on its base mesh";
+                EXPECT_TRUE(
+                    hasDependency(graph, booleanObject->GetResourceID(), operandMesh->GetResourceID()))
+                    << "Boolean object should depend on its operand mesh";
+        }
+
+    TEST_F(ResourceDependencyGraphTest,
+           GetAllRequiredResourceIdsForBuildItems_BooleanBuildItem_IncludesMeshes)
+    {
+        // Arrange
+        auto baseMesh = m_model->AddMeshObject();
+        auto operandMesh = m_model->AddMeshObject();
+        auto booleanObject = m_model->AddBooleanObject();
+        auto const transform = createIdentityTransform();
+        booleanObject->SetBaseObject(baseMesh.get(), transform);
+        booleanObject->AddOperand(operandMesh.get(), transform);
+        m_model->AddBuildItem(booleanObject.get(), transform);
+
+                io::ResourceDependencyGraph dependencyGraph(m_model, m_logger);
+
+                // Act
+                dependencyGraph.buildGraph();
+                auto const requiredResourceIds =
+                    dependencyGraph.getAllRequiredResourceIdsForBuildItems();
+
+                // Assert
+                EXPECT_TRUE(requiredResourceIds.count(booleanObject->GetResourceID()) != 0u)
+                    << "Required IDs should include the boolean build item resource";
+                EXPECT_TRUE(requiredResourceIds.count(baseMesh->GetResourceID()) != 0u)
+                    << "Required IDs should include the boolean base mesh";
+                EXPECT_TRUE(requiredResourceIds.count(operandMesh->GetResourceID()) != 0u)
+                    << "Required IDs should include the boolean operand mesh";
+        }
 
     TEST_F(ResourceDependencyGraphTest, BuildGraph_NullModel_GraphRemainsEmpty)
     {
