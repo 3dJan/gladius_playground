@@ -2245,12 +2245,18 @@ namespace gladius::ui
             // view stuck on the low-res preview until the next camera move forces a
             // notifyCameraInteractionEnded() transition. Driving the settle from here makes
             // the transition independent of which interactive feedback path is active.
-            if (m_renderUpdateCoordinator.interactionState() ==
-                  async_rendering::RenderInteractionState::ParameterInteracting &&
-                m_core->isBoundingBoxStale() &&
-                !m_asyncBboxJobInFlight.load(std::memory_order_acquire) &&
-                !m_asyncSdfJobInFlight.load(std::memory_order_acquire) &&
-                (std::chrono::steady_clock::now() - m_lastParameterChangeTime >= kBboxDebounceDelay))
+            bool const paramInteracting =
+              m_renderUpdateCoordinator.interactionState() ==
+              async_rendering::RenderInteractionState::ParameterInteracting;
+            bool const bboxStaleForSettle = m_core->isBoundingBoxStale();
+            bool const bboxJobForSettle = m_asyncBboxJobInFlight.load(std::memory_order_acquire);
+            bool const sdfJobForSettle = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
+            auto const sinceParamChange =
+              std::chrono::steady_clock::now() - m_lastParameterChangeTime;
+            bool const debounceElapsedForSettle = sinceParamChange >= kBboxDebounceDelay;
+
+            if (paramInteracting && bboxStaleForSettle && !bboxJobForSettle && !sdfJobForSettle &&
+                debounceElapsedForSettle)
             {
                 // Parameter drag has ended. This is a semantic interaction transition,
                 // independent of whether the active feedback path used streaming preview
@@ -2268,7 +2274,9 @@ namespace gladius::ui
             }
 
             queueRenderDecision(m_renderUpdateCoordinator.tick());
-            if (executeQueuedRenderCommands(state))
+            bool const queuedWorkStarted = executeQueuedRenderCommands(state);
+
+            if (queuedWorkStarted)
             {
                 return;
             }
@@ -2869,6 +2877,12 @@ namespace gladius::ui
                     // DON'T force state.isMoving = false - let camera update control this
                     // If camera is still animating, it will set isMoving=true on next frame
                     state.currentLine = 0; // Reset for next frame
+                    // A complete HQ frame for the current view+size is now ready. If partial HQ
+                    // display was suppressed because this frame was seeded from a stale-view
+                    // preview (see scheduleAsyncRenderJob), re-enable HQ display so the finished,
+                    // view-consistent frame swaps in cleanly instead of staying on the low-res
+                    // preview.
+                    m_suppressHQDisplay.store(false, std::memory_order_release);
                     if (isExactRealtimeJob)
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
@@ -2945,6 +2959,19 @@ namespace gladius::ui
                 if (isOutdated || isViewOutdated || isTargetSizeOutdated)
                 {
                     state.isRendering = false;
+
+                    // An HQ progressive job that was scheduled for an older epoch (typical
+                    // during a window resize, where the epoch bumps several times as low-res
+                    // previews are re-issued) is discarded here without advancing currentLine
+                    // or producing a completed frame. Nothing else re-triggers the HQ render
+                    // for the now-current epoch: the coordinator's static catch-up only fires
+                    // on viewport change, and after the resize settles m_dirty is false so the
+                    // render loop early-returns before reaching the HQ-gate. Keep the loop
+                    // alive so the HQ-gate reschedules HQ once the low-res preview is current.
+                    if (isHqRenderJob)
+                    {
+                        m_dirty = true;
+                    }
                 }
             }
 
@@ -3047,6 +3074,21 @@ namespace gladius::ui
             (!m_asyncProgressiveBuffer ||
              m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch))
         {
+            // The progressive HQ buffer is seeded by resampling the result image (the low-res
+            // preview) so lines not yet rendered at high quality still show content. If the
+            // result image still holds a *previous* view — which happens during rapid window
+            // resizing, where the view epoch advances faster than the low-res preview can
+            // refresh — the stale-view seed (unrendered region) would mix with the freshly
+            // rendered current-view top band, producing torn frames that show different states
+            // of the view. Detect that here and suppress partial HQ display for this job so the
+            // clean low-res result image is shown until the full HQ frame completes and swaps in.
+            bool const seedViewIsStale =
+              m_lastLowResPreviewViewEpoch.load(std::memory_order_acquire) != job.viewEpoch;
+            if (seedViewIsStale)
+            {
+                m_suppressHQDisplay.store(true, std::memory_order_release);
+            }
+
             auto * seedBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
             bool const seedSourceFits = image->getWidth() >= width && image->getHeight() >= height;
@@ -4650,6 +4692,7 @@ namespace gladius::ui
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
+        m_lastLowResPreviewViewEpoch.store(meta.viewEpoch, std::memory_order_release);
         auto presentedMeta = meta;
         if (acceptance.presentAsRequiredStamp)
         {

@@ -409,6 +409,11 @@ namespace gladius::ui
         std::atomic<uint64_t> m_asyncSdfInFlightEpoch{0};
         std::atomic<bool> m_lowResFeedbackPending{false};
         std::atomic<uint64_t> m_lastLowResPreviewEpoch{0};
+        /// View epoch of the content currently held by the result image (the low-res preview
+        /// that seeds the progressive HQ buffer). Used to avoid seeding an HQ frame from a
+        /// stale-view preview, which would produce torn (mixed-view) progressive frames during
+        /// rapid window resizing.
+        std::atomic<uint64_t> m_lastLowResPreviewViewEpoch{0};
         bool m_asyncInitialized{false};
         bool m_compilationInvalidated{false};
 
