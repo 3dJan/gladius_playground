@@ -2274,6 +2274,25 @@ namespace gladius::ui
                 }
             }
 
+            // HQ progressive render progress bar - lets the user see the progressive
+            // rendering advancing and, when the view is invalidated (camera move, model
+            // update, resize), the bar resets, making aborts and restarts visible.
+            auto const hqProgress = m_renderWindow.hqProgressiveRenderProgress();
+            if (hqProgress.active)
+            {
+                ImGui::SameLine();
+                float const barHeight = ImGui::GetTextLineHeight();
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.3f, 0.7f, 0.9f, 1.0f));
+                ImGui::ProgressBar(hqProgress.fraction,
+                                   ImVec2(120.0f, barHeight),
+                                   fmt::format("HQ {:.0f}%", hqProgress.fraction * 100.0f).c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("High-quality progressive render progress");
+                }
+            }
+
             auto const statusText = fmt::format("{:.0f} FPS | {}{} | Render: {}",
                                                 ImGui::GetIO().Framerate,
                                                 renderModeStr,

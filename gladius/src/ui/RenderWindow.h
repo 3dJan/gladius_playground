@@ -66,9 +66,22 @@ namespace gladius::ui
         /// an export is in progress to avoid GPU contention.
         void setExportState(ExportState const * exportState);
 
+        /// @brief Snapshot of high-quality progressive render progress for status display.
+        struct HqProgressiveRenderProgress
+        {
+            bool active = false;   ///< true while an HQ progressive render is advancing
+            float fraction = 0.0f; ///< completion in [0, 1]
+        };
+
         void renderWindow();
         void updateCamera();
         bool isRenderingInProgress() const;
+
+        /// @brief Returns a snapshot of the current HQ progressive render progress.
+        ///
+        /// Used by the status bar to visualize progressive rendering, including when a
+        /// render is aborted and restarted (the fraction jumps back toward zero).
+        [[nodiscard]] HqProgressiveRenderProgress hqProgressiveRenderProgress() const;
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
         void invalidateViewDueToParameterChange();

@@ -1195,6 +1195,40 @@ namespace gladius::ui
         return m_renderWindowState.isRendering;
     }
 
+    RenderWindow::HqProgressiveRenderProgress RenderWindow::hqProgressiveRenderProgress() const
+    {
+        HqProgressiveRenderProgress progress;
+
+        // HQ progressive rendering only advances while the camera is still. While the
+        // camera is moving we show low-res previews or realtime frames instead, so there
+        // is no meaningful progressive progress to report.
+        if (!m_renderWindowState.isRendering || m_renderWindowState.isMoving)
+        {
+            return progress;
+        }
+
+        size_t totalHeight = 0;
+        if (m_core)
+        {
+            if (auto const image = m_core->getResultImage())
+            {
+                totalHeight = static_cast<size_t>(image->getHeight());
+            }
+        }
+
+        if (totalHeight == 0)
+        {
+            return progress;
+        }
+
+        progress.active = true;
+        progress.fraction = std::clamp(
+          static_cast<float>(m_renderWindowState.currentLine) / static_cast<float>(totalHeight),
+          0.0f,
+          1.0f);
+        return progress;
+    }
+
     void RenderWindow::invalidateView()
     {
         ProfileFunction;
@@ -2953,6 +2987,26 @@ namespace gladius::ui
         job.type = async_rendering::RenderJobType::HighQuality;
         job.width = static_cast<uint32_t>(width);
         job.height = static_cast<uint32_t>(height);
+
+        // A non-zero start line means we intend to CONTINUE filling a progressive buffer that was
+        // already seeded with a full-frame resample at line 0. If that buffer is gone or no longer
+        // matches the current epoch/size — which happens when a stale-size/stale-view discard or a
+        // window resize released it without rewinding state.currentLine — the worker would acquire
+        // a fresh, unseeded buffer and render only [startLine, height). The untouched top band
+        // [0, startLine) would then be promoted as a "completed" frame, producing the partial /
+        // half-updated HQ image seen after resizing. Restart from line 0 so the buffer is re-seeded
+        // and every horizontal line is rendered.
+        bool const hasSeededProgressiveContinuation =
+          m_asyncProgressiveBuffer != nullptr &&
+          m_asyncProgressiveEpoch.load(std::memory_order_acquire) == job.epoch &&
+          m_asyncProgressiveBuffer->image &&
+          static_cast<size_t>(m_asyncProgressiveBuffer->image->getWidth()) >= width &&
+          static_cast<size_t>(m_asyncProgressiveBuffer->image->getHeight()) >= height;
+        if (state.currentLine > 0 && !hasSeededProgressiveContinuation)
+        {
+            state.currentLine = 0;
+        }
+
         job.startLine = std::min(state.currentLine, height);
         if (job.startLine == 0)
         {
@@ -4506,7 +4560,15 @@ namespace gladius::ui
             // Update the last displayed frame ID for ordering
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
 
-            if (!m_streamingPreviewActive.load(std::memory_order_acquire) &&
+            // Adaptive preview-resolution tuning is an interaction-time optimization and must
+            // only run while the camera is actively moving (mirrors the sync path's PID guard).
+            // Otherwise a stray preview result arriving after the camera has settled would keep
+            // resizing the low-res buffer and set m_lowResFeedbackPending, which renderAsync()
+            // turns into an epoch bump that needlessly restarts the in-progress HQ render. A
+            // fast-preview resolution change is NOT a view invalidation (unlike a window resize),
+            // so it must never abort progressive HQ rendering.
+            if (m_renderWindowState.isMoving &&
+                !m_streamingPreviewActive.load(std::memory_order_acquire) &&
                 !m_streamingJobInFlight.load(std::memory_order_acquire) && meta.latencyNs > 0)
             {
                 float const executionDurationMs =
