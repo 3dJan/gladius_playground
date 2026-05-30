@@ -1776,9 +1776,18 @@ namespace gladius::ui
         {
             // Discard any pending async preview so the streaming worker doesn't
             // stall waiting for m_streamingFrameConsumed.
-            if (m_asyncController && m_asyncController->tryConsumePreviewResult().has_value())
+            if (m_asyncController)
             {
-                m_streamingFrameConsumed.store(true, std::memory_order_release);
+                if (auto preview = m_asyncController->tryConsumePreviewResult())
+                {
+                    // The result references old-size CL images and cannot be presented, but the
+                    // coordinator still has this preview marked in-flight. Release it (cancelled)
+                    // so its interactive task slot does not leak — otherwise preview scheduling
+                    // stays blocked until the next camera move reclaims it.
+                    preview->cancelled = true;
+                    completeCoordinatorPreviewTask(*preview);
+                    m_streamingFrameConsumed.store(true, std::memory_order_release);
+                }
             }
             return;
         }

@@ -291,6 +291,39 @@ namespace gladius
         m_backupManager.initialize();
     }
 
+    Document::~Document()
+    {
+        // Join in-flight async workers before any member is destroyed. The workers
+        // (refreshWorker / file-load) capture `this` and touch members such as
+        // m_isLoading, m_loadingError and m_buildItems that are declared after the
+        // future members. Relying on the implicit std::future destructors to join
+        // would do so only after those later-declared members are already gone,
+        // producing a use-after-free during shutdown.
+        try
+        {
+            if (m_futureModelRefresh.valid())
+            {
+                m_futureModelRefresh.wait();
+            }
+        }
+        catch (...)
+        {
+            // Never throw from a destructor.
+        }
+
+        try
+        {
+            if (m_futureFileLoad.valid())
+            {
+                m_futureFileLoad.wait();
+            }
+        }
+        catch (...)
+        {
+            // Never throw from a destructor.
+        }
+    }
+
     bool Document::refreshModelAsync()
     {
         if (!m_assembly || !m_core)

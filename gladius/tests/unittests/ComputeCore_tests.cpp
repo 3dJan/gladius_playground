@@ -513,4 +513,30 @@ namespace gladius_tests
       EXPECT_NEAR(bBox->max.y, 74.136703491210938f, tolerance);
       EXPECT_NEAR(bBox->max.z, 50.00640869140625f, tolerance);
     }
+
+    // Regression test for the Document lifecycle fix (review: F7).
+    // Destroying a Document while an asynchronous model refresh is in flight must join the
+    // worker before any member is torn down. Previously the implicit std::future destructors
+    // joined the worker only after later-declared members were already gone (use-after-free).
+    TEST_F(ComputeCore_Test, DocumentDestruction_WithInFlightModelRefresh_JoinsWorkerWithoutCrash)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto document = std::make_unique<Document>(core);
+
+        // Launch the background refresh worker (sets m_futureModelRefresh).
+        static_cast<void>(document->refreshModelIfNoCompilationIsRunning());
+
+        // Destroy while the worker may still be running. Run the teardown on a separate
+        // thread guarded by a watchdog so a regression that deadlocks fails the test
+        // instead of hanging the whole suite.
+        auto teardown = std::async(std::launch::async,
+                                   [doc = std::move(document)]() mutable { doc.reset(); });
+
+        ASSERT_EQ(teardown.wait_for(std::chrono::seconds(30)), std::future_status::ready)
+          << "Document destruction deadlocked while joining the async refresh worker";
+        ASSERT_NO_THROW(teardown.get());
+    }
 }
+

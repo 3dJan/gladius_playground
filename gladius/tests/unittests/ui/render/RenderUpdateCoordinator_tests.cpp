@@ -807,4 +807,49 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_TRUE(retry.has_value());
         EXPECT_NE(retry->requestId, bbox->requestId);
     }
+
+    TEST(RenderUpdateCoordinator, Tick_WithOrphanedStaleTask_ReclaimsAndReschedules)
+    {
+        RenderUpdateCoordinator coordinator;
+
+        // Start a parameter upload and "leak" it: the translation layer never drives it back to a
+        // terminal completeTask()/failTask(). This models a missed completion on one of
+        // RenderWindow's many early-return paths.
+        auto decision = coordinator.notifyParameterChanged(false);
+        auto orphan = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(orphan.has_value());
+
+        // A second parameter change makes the orphan stale and resets the upload requirement, but
+        // the stamp-agnostic hasAnyInFlight() guard lets the orphan block a fresh upload.
+        decision = coordinator.notifyParameterChanged(false);
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+
+        // tick() reconciles the stale orphan and reschedules the upload for the latest stamp,
+        // instead of staying wedged until some unrelated event clears the orphan.
+        decision = coordinator.tick();
+        auto rescheduled = findStartedTask(decision, RenderTaskType::ParameterUpload);
+        ASSERT_TRUE(rescheduled.has_value());
+        EXPECT_NE(rescheduled->requestId, orphan->requestId);
+        EXPECT_TRUE(
+          matches(rescheduled->stamp, coordinator.latestStamp(), RenderStampMask::heavyGeometryTask()));
+    }
+
+    TEST(RenderUpdateCoordinator, Tick_WithCurrentInFlightHeavyTask_DoesNotReclaimOrDuplicate)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.tick();
+        auto bbox = findStartedTask(decision, RenderTaskType::BoundingBoxUpdate);
+        ASSERT_TRUE(bbox.has_value());
+
+        // The bbox is current and still legitimately running; reconciliation must leave it alone
+        // and must not start a duplicate.
+        decision = coordinator.tick();
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::BoundingBoxUpdate));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+
+        // Completing it still advances the pipeline, proving the entry was never reclaimed.
+        decision = coordinator.completeTask(completed(*bbox));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::SdfPrecomputation));
+    }
 }

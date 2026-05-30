@@ -248,6 +248,9 @@ namespace gladius::ui::async_rendering
         {
             RenderUpdateDecision decision{};
             m_realtime.beginFrame();
+            // Self-heal: reclaim any in-flight task the translation layer failed to complete and
+            // that is already stale, so a single orphaned entry cannot wedge the catch-up pipeline.
+            reconcileStaleInFlight();
             if (m_interactionState == RenderInteractionState::Static)
             {
                 scheduleStaticCatchUp(decision);
@@ -377,6 +380,42 @@ namespace gladius::ui::async_rendering
                                                           !matches(task.stamp,
                                                                    m_latestStamp,
                                                                    RenderStampMask::displayFrame());
+                                               });
+            m_inFlight.erase(newEnd, oldEnd);
+        }
+
+        /// Drops every in-flight heavy/static task whose stamp is already stale under that task's
+        /// own freshness mask, i.e. a task whose eventual result would be discarded by
+        /// completeTask() anyway.
+        ///
+        /// This is the self-healing counterpart to the strict StartTask/completeTask pairing the
+        /// translation layer (RenderWindow) must otherwise guarantee across many early-return and
+        /// atomic code paths. If any one of those paths ever fails to drive a started task back to a
+        /// terminal completeTask()/failTask(), the orphaned entry would block all future tasks of
+        /// that type forever (hasAnyInFlight() is stamp-agnostic), stalling the static catch-up
+        /// pipeline. Reclaiming stale entries at every tick keeps the scheduler from getting wedged.
+        /// It is safe because a stale task can never become current again, and the translation layer
+        /// guards in-flight GPU jobs separately, so reclaiming here cannot cause duplicate execution.
+        ///
+        /// Interactive frame tasks (RealtimeFullFrame / LowResolutionPreview / StreamingPreview) are
+        /// intentionally excluded: stale interactive frames are retained as backpressure so only one
+        /// interactive frame is ever in flight (latest-wins on completion). Those are reclaimed by
+        /// releaseStaleInteractiveInFlight() at the appropriate interaction transitions instead.
+        void reconcileStaleInFlight()
+        {
+            auto const oldEnd = m_inFlight.end();
+            auto const newEnd = std::remove_if(m_inFlight.begin(),
+                                               m_inFlight.end(),
+                                               [this](InFlightTask const & task)
+                                               {
+                                                   bool const interactiveFrameTask =
+                                                     task.type == RenderTaskType::RealtimeFullFrame ||
+                                                     task.type == RenderTaskType::LowResolutionPreview ||
+                                                     task.type == RenderTaskType::StreamingPreview;
+                                                   return !interactiveFrameTask &&
+                                                          !matches(task.stamp,
+                                                                   m_latestStamp,
+                                                                   freshnessMaskFor(task.type));
                                                });
             m_inFlight.erase(newEnd, oldEnd);
         }

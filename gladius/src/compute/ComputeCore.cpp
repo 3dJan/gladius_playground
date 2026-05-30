@@ -2138,7 +2138,16 @@ namespace gladius
         throwIfNoOpenGL();
         recompileIfRequired();
 
-        if (getBestRenderProgram()->isCompilationInProgress())
+        // Use the non-blocking variant: getBestRenderProgram() would block on
+        // ProgramManager::m_modelSourceMutex while a background compile/model-source
+        // swap holds it, stalling the UI frame. Keep the previous frame instead.
+        auto renderProgram = tryGetBestRenderProgram();
+        if (!renderProgram.has_value())
+        {
+            return false;
+        }
+
+        if ((*renderProgram)->isCompilationInProgress())
         {
             LOG_LOCATION
             return false;
@@ -2154,7 +2163,7 @@ namespace gladius
         m_resources->getRenderingSettings().approximation = AM_HYBRID;
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
-        getBestRenderProgram()->renderScene(
+        (*renderProgram)->renderScene(
           *m_primitives, *resultImage, m_sliceHeight_mm, startLine, endLine);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
 
@@ -2188,7 +2197,13 @@ namespace gladius
         // Don't call throwIfNoOpenGL() - we don't need GL for pure compute!
         recompileIfRequired();
 
-        if (getBestRenderProgram()->isCompilationInProgress())
+        auto renderProgram = tryGetBestRenderProgram();
+        if (!renderProgram.has_value())
+        {
+            return false;
+        }
+
+        if ((*renderProgram)->isCompilationInProgress())
         {
             LOG_LOCATION
             return false;
@@ -2199,7 +2214,7 @@ namespace gladius
         m_lastUsedHQApproximation = AM_HYBRID;
 
         // Render directly to the target CL image buffer (no GL involved)
-        cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
+        cl::Event const renderEvent = (*renderProgram)->renderSceneAsync(
           commandQueue, *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
 
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
@@ -2237,7 +2252,13 @@ namespace gladius
 
         recompileIfRequired();
 
-        if (getBestRenderProgram()->isCompilationInProgress())
+        auto renderProgram = tryGetBestRenderProgram();
+        if (!renderProgram.has_value())
+        {
+            return false;
+        }
+
+        if ((*renderProgram)->isCompilationInProgress())
         {
             LOG_LOCATION
             return false;
@@ -2247,7 +2268,7 @@ namespace gladius
         m_lastUsedHQApproximation = settings.approximation;
         m_lastUsedPreviewApproximation = settings.approximation;
 
-        cl::Event const renderEvent = getBestRenderProgram()->renderSceneAsync(
+        cl::Event const renderEvent = (*renderProgram)->renderSceneAsync(
           commandQueue, *m_primitives, targetImage, settings, m_sliceHeight_mm, startLine, endLine);
 
         if (completionEvent != nullptr)
@@ -2286,6 +2307,14 @@ namespace gladius
 
         throwIfNoOpenGL();
 
+        // Use the non-blocking variant so a background compile holding
+        // ProgramManager::m_modelSourceMutex cannot stall the UI frame.
+        auto renderProgram = tryGetBestRenderProgram();
+        if (!renderProgram.has_value())
+        {
+            return LowResPreviewRenderStatus::Skipped;
+        }
+
         glFinish();
         auto lowResPreviewImage =
           m_lowResPreviewImage.load(std::memory_order_acquire);
@@ -2303,14 +2332,14 @@ namespace gladius
         // and avoids expensive shadow rays and AO samples during interactive editing
         m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
-        getBestRenderProgram()->renderScene(*m_primitives,
-                                            *lowResPreviewImage,
-                                            m_sliceHeight_mm,
-                                            0,
-                                            lowResPreviewImage->getHeight());
+        (*renderProgram)->renderScene(*m_primitives,
+                                      *lowResPreviewImage,
+                                      m_sliceHeight_mm,
+                                      0,
+                                      lowResPreviewImage->getHeight());
         m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
-        getBestRenderProgram()->resample(
+        (*renderProgram)->resample(
           *lowResPreviewImage, *resultImage, 0, resultImage->getHeight());
         resultImage->invalidateContent();
 

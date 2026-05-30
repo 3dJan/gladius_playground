@@ -129,6 +129,14 @@ namespace gladius
 
         void resetGeneratorContext();
         explicit Document(std::shared_ptr<ComputeCore> core);
+
+        /// Blocks until any in-flight asynchronous file-load / model-refresh worker
+        /// has finished before member teardown begins. Without this, the implicit
+        /// std::future destructors join the workers only after members declared after
+        /// them (e.g. m_isLoading, m_buildItems) are already destroyed, which is a
+        /// use-after-free hazard while the worker is still running.
+        ~Document();
+
         [[nodiscard]] bool refreshModelIfNoCompilationIsRunning();
 
         /// Signal that a structural graph edit occurred.
