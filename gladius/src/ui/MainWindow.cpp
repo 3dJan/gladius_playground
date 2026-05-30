@@ -1352,13 +1352,15 @@ namespace gladius::ui
         {
             return; // skip rendering UI when compute is disabled
         }
-        // Process render window shortcuts
-        if (m_renderWindow.isVisible() && m_renderWindow.isHovered() && m_renderWindow.isFocused())
+
+        m_renderWindow.renderWindow();
+
+        // Process render window shortcuts after rendering so current-frame hover/focus state is
+        // available. This lets mouse-wheel zoom work as soon as the cursor is over the preview.
+        if (m_renderWindow.isVisible() && m_renderWindow.isHovered())
         {
             processShortcuts(ShortcutContext::RenderWindow);
         }
-
-        m_renderWindow.renderWindow();
     }
 
     void MainWindow::mainMenu()

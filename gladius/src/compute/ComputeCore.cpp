@@ -2725,10 +2725,10 @@ namespace gladius
 
         thumbnailCamera.setAngle(0.6f, -2.0f);
         thumbnailCamera.centerView(bb);
-        thumbnailCamera.update(10000.f);
+        thumbnailCamera.snapToTarget();
         thumbnailCamera.adjustDistanceToTarget(bb, thumbnailSize, thumbnailSize);
 
-        thumbnailCamera.update(10000.f);
+        thumbnailCamera.snapToTarget();
 
         applyCamera(thumbnailCamera);
 

@@ -273,14 +273,14 @@ namespace gladius::tests
         ui::OrbitalCamera camera;
         camera.setAngle(0.6f, -2.0f);  // Same as thumbnail
         camera.centerView(*bbox);
-        camera.update(10000.f);
+        camera.snapToTarget();
         
         // Use a fixed resolution for metrics test
         constexpr size_t width = 512;
         constexpr size_t height = 512;
         
         camera.adjustDistanceToTarget(*bbox, static_cast<int>(width), static_cast<int>(height));
-        camera.update(10000.f);
+        camera.snapToTarget();
 
         // Apply camera to resources
         auto resources = bundle.core->getResourceContext();
@@ -363,13 +363,13 @@ namespace gladius::tests
         ui::OrbitalCamera camera;
         camera.setAngle(0.6f, -2.0f);
         camera.centerView(*bbox);
-        camera.update(10000.f);
+        camera.snapToTarget();
         
         constexpr size_t width = 512;
         constexpr size_t height = 512;
         
         camera.adjustDistanceToTarget(*bbox, static_cast<int>(width), static_cast<int>(height));
-        camera.update(10000.f);
+        camera.snapToTarget();
 
         auto resources = bundle.core->getResourceContext();
         resources->setEyePosition(camera.getEyePosition());
@@ -477,13 +477,13 @@ namespace gladius::tests
         ui::OrbitalCamera camera;
         camera.setAngle(0.6f, -2.0f);
         camera.centerView(*bbox);
-        camera.update(10000.f);
+        camera.snapToTarget();
         
         constexpr size_t width = 512;
         constexpr size_t height = 512;
         
         camera.adjustDistanceToTarget(*bbox, static_cast<int>(width), static_cast<int>(height));
-        camera.update(10000.f);
+        camera.snapToTarget();
 
         auto resources = bundle.core->getResourceContext();
         resources->setEyePosition(camera.getEyePosition());

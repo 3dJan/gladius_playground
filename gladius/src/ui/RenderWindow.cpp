@@ -856,7 +856,11 @@ namespace gladius::ui
 
         // Cache window state for isHovered() and isFocused() methods
         m_isWindowHovered = ImGui::IsWindowHovered();
-        m_isWindowFocused = ImGui::IsWindowFocused();
+        if (m_isWindowHovered && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+        {
+            ImGui::SetWindowFocus();
+        }
+        m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
         // if has focus, but not any item has focus, handle key input and content area is hovered
         if (ImGui::IsWindowFocused() && !ImGui::IsAnyItemFocused() &&
@@ -2229,6 +2233,40 @@ namespace gladius::ui
                 queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
             }
 
+            // Parameter-drag settle: once no parameter change has arrived for the debounce
+            // window, end the parameter interaction so the coordinator's static catch-up
+            // (bbox -> SDF -> high-quality) resumes and the static view shows full detail.
+            //
+            // This MUST run here, before the early-returning executeQueuedRenderCommands()
+            // below. In Auto mode that is not yet proven fast (and in any streaming-preview
+            // case) an interactive low-res preview frame is scheduled on every tick, so
+            // executeQueuedRenderCommands() returns true and renderAsync() returns early.
+            // The legacy settle path further down would then never be reached, leaving the
+            // view stuck on the low-res preview until the next camera move forces a
+            // notifyCameraInteractionEnded() transition. Driving the settle from here makes
+            // the transition independent of which interactive feedback path is active.
+            if (m_renderUpdateCoordinator.interactionState() ==
+                  async_rendering::RenderInteractionState::ParameterInteracting &&
+                m_core->isBoundingBoxStale() &&
+                !m_asyncBboxJobInFlight.load(std::memory_order_acquire) &&
+                !m_asyncSdfJobInFlight.load(std::memory_order_acquire) &&
+                (std::chrono::steady_clock::now() - m_lastParameterChangeTime >= kBboxDebounceDelay))
+            {
+                // Parameter drag has ended. This is a semantic interaction transition,
+                // independent of whether the active feedback path used streaming preview
+                // (Force mode does not start streaming preview at all).
+                finishParameterInteraction();
+
+                m_core->recomputeStaleBoundingBox();
+                m_core->setSdfValid(false);
+                m_preComputedSdfDirty.store(true, std::memory_order_release);
+
+                // Bump epoch to invalidate the stale HQ/preview front buffer from before the
+                // drag so the fresh bbox -> SDF -> HQ pipeline starts clean.
+                notifyAsyncEpochIncrement();
+                m_suppressHQDisplay.store(false, std::memory_order_release);
+            }
+
             queueRenderDecision(m_renderUpdateCoordinator.tick());
             if (executeQueuedRenderCommands(state))
             {
@@ -2296,29 +2334,10 @@ namespace gladius::ui
                 scheduleAsyncBboxUpdate();
             }
 
-            // Debounce: recompute stale bounding box after slider drag stops.
-            // recomputeStaleBoundingBox() clears the cached bbox so the next SDF job
-            // does a full bbox recompute with the current parameters.
-            if (m_core->isBoundingBoxStale() && !bboxJobActive && !sdfJobActive)
-            {
-                auto const now = std::chrono::steady_clock::now();
-                if (now - m_lastParameterChangeTime >= kBboxDebounceDelay)
-                {
-                    // Parameter drag has ended. This is a semantic interaction transition,
-                    // independent of whether the active feedback path used streaming preview
-                    // (Force mode does not start streaming preview at all).
-                    finishParameterInteraction();
-
-                    m_core->recomputeStaleBoundingBox();
-                    m_core->setSdfValid(false);
-                    m_preComputedSdfDirty = true;
-
-                    // Parameter drag has stopped — bump epoch to invalidate the stale
-                    // HQ front buffer from before the drag and start fresh.
-                    notifyAsyncEpochIncrement();
-                    m_suppressHQDisplay.store(false, std::memory_order_release);
-                }
-            }
+            // Note: the parameter-drag settle transition (finishParameterInteraction +
+            // stale-bbox recompute + epoch bump) now runs earlier, in the coordinator block
+            // above, so it cannot be skipped by the early return when an interactive preview
+            // frame is scheduled. See the ParameterInteracting settle block in this function.
 
             if (lowResPending)
             {
@@ -3867,7 +3886,11 @@ namespace gladius::ui
 
         // Cache window state
         m_isWindowHovered = ImGui::IsWindowHovered();
-        m_isWindowFocused = ImGui::IsWindowFocused();
+        if (m_isWindowHovered && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+        {
+            ImGui::SetWindowFocus();
+        }
+        m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
         // Handle key input if focused
         if (ImGui::IsWindowFocused() && !ImGui::IsAnyItemFocused() &&
@@ -4560,15 +4583,7 @@ namespace gladius::ui
             // Update the last displayed frame ID for ordering
             m_asyncPreviewFrameId.store(meta.frameId, std::memory_order_release);
 
-            // Adaptive preview-resolution tuning is an interaction-time optimization and must
-            // only run while the camera is actively moving (mirrors the sync path's PID guard).
-            // Otherwise a stray preview result arriving after the camera has settled would keep
-            // resizing the low-res buffer and set m_lowResFeedbackPending, which renderAsync()
-            // turns into an epoch bump that needlessly restarts the in-progress HQ render. A
-            // fast-preview resolution change is NOT a view invalidation (unlike a window resize),
-            // so it must never abort progressive HQ rendering.
-            if (m_renderWindowState.isMoving &&
-                !m_streamingPreviewActive.load(std::memory_order_acquire) &&
+            if (!m_streamingPreviewActive.load(std::memory_order_acquire) &&
                 !m_streamingJobInFlight.load(std::memory_order_acquire) && meta.latencyNs > 0)
             {
                 float const executionDurationMs =

@@ -861,9 +861,9 @@ namespace gladius::tests
         ui::OrbitalCamera camera;
         camera.setAngle(0.6f, -2.0f);
         camera.centerView(*bbox);
-        camera.update(10000.f);
+        camera.snapToTarget();
         camera.adjustDistanceToTarget(*bbox, static_cast<int>(kWidth), static_cast<int>(kHeight));
-        camera.update(10000.f);
+        camera.snapToTarget();
 
         auto resources = bundle.core->getResourceContext();
         resources->setEyePosition(camera.getEyePosition());

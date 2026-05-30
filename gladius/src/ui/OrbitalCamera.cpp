@@ -1,5 +1,6 @@
 #include "OrbitalCamera.h"
 #include <CL/cl_platform.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <eigen3/Eigen/Core>
@@ -106,19 +107,7 @@ namespace gladius::ui
         bool changed = false;
         auto constexpr tolerance = 0.0001f;
         auto const speedFactor = 15.E-3f;
-        // if (deltaTime_ms > 50.f)
-        {
-            changed = fabs(m_pitchTarget - m_pitch) > tolerance ||
-                      fabs(m_yawTarget - m_yaw) > tolerance ||
-                      fabs(m_eyeDistTarget - m_eyeDist) > tolerance ||
-                      (m_lookAtTarget - m_lookAt).norm() > tolerance;
-            m_pitch = m_pitchTarget;
-            m_yaw = m_yawTarget;
-            m_eyeDist = m_eyeDistTarget;
-            m_lookAt = m_lookAtTarget;
-            return changed;
-        }
-        // deltaTime_ms = std::min(deltaTime_ms, 50.f);
+        deltaTime_ms = std::min(deltaTime_ms, 50.f);
 
         auto const pitchDelta = (m_pitchTarget - m_pitch);
         if (fabs(pitchDelta) > tolerance)
@@ -149,6 +138,14 @@ namespace gladius::ui
         }
 
         return changed;
+    }
+
+    void OrbitalCamera::snapToTarget()
+    {
+        m_pitch = m_pitchTarget;
+        m_yaw = m_yawTarget;
+        m_eyeDist = m_eyeDistTarget;
+        m_lookAt = m_lookAtTarget;
     }
 
     void OrbitalCamera::centerView(BoundingBox const & bbox)
