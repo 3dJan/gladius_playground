@@ -16,18 +16,23 @@ endif()
 
 
 
-add_library(${BINARY}_lib STATIC ${SOURCES})
+add_library(${BINARY}_lib ${SOURCES})
+# Exported package name should be Gladius::gladius
+set_target_properties(${BINARY}_lib PROPERTIES EXPORT_NAME gladius)
+add_library(Gladius::gladius ALIAS ${BINARY}_lib)
 # MCP-enabled variant of the core library so Application.cpp and others are built with MCP code
 add_library(${BINARY}_lib_mcp STATIC ${SOURCES})
 target_compile_definitions(${BINARY}_lib_mcp PUBLIC GLADIUS_ENABLE_MCP)
 
 
+if (GLADIUS_BUILD_APP)
 if (MSVC)
     add_executable(${BINARY} WIN32 ${SOURCES} )
     set_property(TARGET ${BINARY} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     set_property(TARGET ${BINARY}_lib PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 else()
     add_executable(${BINARY} ${SOURCES} )
+endif()
 endif()
 
 # Add include paths
@@ -44,21 +49,28 @@ include_directories(
 )
 
 set (INCLUDE_PATHS
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui
-    ${CMAKE_CURRENT_SOURCE_DIR}/io
-    ${CMAKE_CURRENT_SOURCE_DIR}/contour
-    ${CMAKE_CURRENT_SOURCE_DIR}/nodes
-    ${CMAKE_CURRENT_SOURCE_DIR}/compute
-    ${CMAKE_CURRENT_SOURCE_DIR}/slicer
-    ${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders
-    ${CMAKE_CURRENT_SOURCE_DIR}/components
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/_cmrc/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ui>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/io>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/contour>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/nodes>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/compute>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/slicer>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/IconFontCppHeaders>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/psimpl>
     ${OPENMESH_INCLUDE_DIRS}
-    ${AdditionalIncludes}
 )
 target_include_directories(${BINARY}_lib PUBLIC ${INCLUDE_PATHS})
 target_include_directories(${BINARY}_lib_mcp PUBLIC ${INCLUDE_PATHS})
-target_include_directories(${BINARY} PUBLIC ${INCLUDE_PATHS})
+target_include_directories(${BINARY}_lib PRIVATE ${AdditionalIncludes})
+target_include_directories(${BINARY}_lib_mcp PRIVATE ${AdditionalIncludes})
+if(TARGET ${BINARY})
+    target_include_directories(${BINARY} PUBLIC ${INCLUDE_PATHS})
+    target_include_directories(${BINARY} PRIVATE ${AdditionalIncludes})
+endif()
 
 find_package(NLopt CONFIG REQUIRED)
 
@@ -66,30 +78,33 @@ find_package(NLopt CONFIG REQUIRED)
 set(DEPENDENCIES_CORE
     OpenCL::OpenCL
     ${X11_LIBRARIES}
-    ${OPENGL_LIBRARIES}
-    glfw
-    glad::glad
     fmt::fmt-header-only
     Eigen3::Eigen
-    tinyfiledialogs::tinyfiledialogs
     Threads::Threads
     sago::platform_folders
     OpenVDB::openvdb
     ZLIB::ZLIB
-    gladius::rc
     lodepng
     pugixml::pugixml
     ${OPENMESH_LIBRARIES}
     lib3mf::lib3mf
     unofficial::minizip::minizip
-    imgui::imgui
-    unofficial::imgui-node-editor::imgui-node-editor
-    PkgConfig::Clipper2
+    Clipper2::Clipper2
     NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
     OpenMP::OpenMP_CXX
 )
+
+if(GLADIUS_BUILD_UI)
+    list(APPEND DEPENDENCIES_CORE
+        ${OPENGL_LIBRARIES}
+        glfw
+        glad::glad
+        tinyfiledialogs::tinyfiledialogs
+        imgui::imgui
+        unofficial::imgui-node-editor::imgui-node-editor)
+endif()
 
 # MCP-only dependencies
 set(DEPENDENCIES_MCP
@@ -110,7 +125,13 @@ endif()
 
 target_link_libraries(${BINARY}_lib PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
-target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
+target_link_libraries(${BINARY}_lib PUBLIC gladius_iconfont_headers gladius_psimpl_headers)
+target_link_libraries(${BINARY}_lib_mcp PUBLIC gladius_iconfont_headers gladius_psimpl_headers)
+target_link_libraries(${BINARY}_lib PRIVATE gladius::rc)
+target_link_libraries(${BINARY}_lib_mcp PRIVATE gladius::rc)
+if(TARGET ${BINARY})
+    target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
+endif()
 
 # Precompiled headers: keep the Windows PCH deliberately lean. Large template-heavy
 # dependencies such as OpenVDB/Boost/Eigen/ImGui can raise the baseline heap for every
@@ -160,9 +181,9 @@ target_precompile_headers(${BINARY}_lib_mcp PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 # On non-Windows builds the static library uses -fPIC while executables use -fPIE.
 # Clang encodes that distinction in the PCH and rejects a -fPIC PCH consumed by
 # a -fPIE translation unit, so the executable needs its own PCH there.
-if (MSVC)
+if (MSVC AND TARGET ${BINARY})
     target_precompile_headers(${BINARY} REUSE_FROM ${BINARY}_lib)
-else()
+elseif(TARGET ${BINARY})
     target_precompile_headers(${BINARY} PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 endif()
 
@@ -172,41 +193,54 @@ endif()
 if (NOT WIN32)
     target_compile_options(${BINARY}_lib PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY}_lib_mcp PUBLIC -mavx2 -mfma)
-    target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
+    if(TARGET ${BINARY})
+        target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
+    endif()
 endif()
 
-install(TARGETS ${BINARY} RUNTIME DESTINATION ${INSTALL_PREFIX}/)
+install(TARGETS ${BINARY}_lib
+    EXPORT gladiusTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TARGET ${BINARY})
+    install(TARGETS ${BINARY} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 #
 # gladiusmcp: gladius with MCP server support
 #
 # Build gladiusmcp by linking the MCP-enabled core library and MCP sources
-add_executable(gladiusmcp ${MCP_SOURCES} ${MCP_TOOLS_SOURCES} main.cpp)
-target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/io
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui
-    ${CMAKE_CURRENT_SOURCE_DIR}/contour
-    ${CMAKE_CURRENT_SOURCE_DIR}/nodes
-    ${CMAKE_CURRENT_SOURCE_DIR}/mcp
-)
-target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
-if(ENABLE_UI_TESTING)
-    target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+if(GLADIUS_BUILD_MCP_SERVER)
+    add_executable(gladiusmcp ${MCP_SOURCES} ${MCP_TOOLS_SOURCES} main.cpp)
+    target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/io
+        ${CMAKE_CURRENT_SOURCE_DIR}/ui
+        ${CMAKE_CURRENT_SOURCE_DIR}/contour
+        ${CMAKE_CURRENT_SOURCE_DIR}/nodes
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp
+    )
+    target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
+    if(ENABLE_UI_TESTING)
+        target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    endif()
+    target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
+    # Ensure the MCP-enabled static library is built before linking the executable
+    add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
+    # Use an MCP-specific PCH instead of reusing the core/UI PCH; the MCP tools mostly need
+    # standard library + JSON, not the full Eigen/ImGui-heavy core baseline.
+    target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
+    if (NOT WIN32)
+        target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
+    endif()
+    install(TARGETS gladiusmcp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
-target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
-# Ensure the MCP-enabled static library is built before linking the executable
-add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
-# Use an MCP-specific PCH instead of reusing the core/UI PCH; the MCP tools mostly need
-# standard library + JSON, not the full Eigen/ImGui-heavy core baseline.
-target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
-if (NOT WIN32)
-    target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
-endif()
-# Install MCP variant if it was built in this build tree; do not fail packaging if absent
-install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)
 
 if (ENABLE_UI_TESTING)
     target_compile_definitions(${BINARY}_lib PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
     target_compile_definitions(${BINARY}_lib_mcp PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
-    target_compile_definitions(${BINARY} PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    if(TARGET ${BINARY})
+        target_compile_definitions(${BINARY} PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    endif()
 endif()

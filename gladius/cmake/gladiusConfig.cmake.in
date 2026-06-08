@@ -1,0 +1,39 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(OpenCL REQUIRED)
+find_dependency(CMakeRC CONFIG REQUIRED)
+find_dependency(fmt REQUIRED)
+find_dependency(Eigen3 REQUIRED)
+find_dependency(OpenMesh REQUIRED)
+find_dependency(platform_folders REQUIRED)
+find_dependency(OpenMP REQUIRED COMPONENTS CXX)
+find_dependency(OpenVDB CONFIG REQUIRED)
+find_dependency(blosc CONFIG REQUIRED)
+find_dependency(ZLIB REQUIRED)
+find_dependency(lodepng CONFIG REQUIRED)
+find_dependency(pugixml CONFIG REQUIRED)
+find_dependency(lib3mf CONFIG REQUIRED)
+find_dependency(unofficial-minizip CONFIG REQUIRED)
+find_dependency(NLopt CONFIG REQUIRED)
+find_dependency(muparser CONFIG REQUIRED)
+find_dependency(Clipper2 CONFIG REQUIRED)
+find_dependency(PkgConfig REQUIRED)
+
+if(NOT TARGET PkgConfig::libcoro)
+  pkg_check_modules(libcoro REQUIRED IMPORTED_TARGET libcoro)
+endif()
+
+if(@GLADIUS_PACKAGE_NEEDS_UI_DEPENDENCIES@)
+  find_dependency(OpenGL REQUIRED)
+  find_dependency(glad CONFIG REQUIRED)
+  find_dependency(glfw3 CONFIG REQUIRED)
+  find_dependency(tinyfiledialogs CONFIG REQUIRED)
+  find_dependency(imgui CONFIG REQUIRED)
+  find_dependency(unofficial-imgui-node-editor CONFIG REQUIRED)
+endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/gladiusTargets.cmake)
+
+check_required_components(gladius)

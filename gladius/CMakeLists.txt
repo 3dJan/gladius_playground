@@ -11,9 +11,26 @@ endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 # Options
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
 option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
+option(GLADIUS_BUILD_UI "Build UI/OpenGL-dependent modules" OFF)
+option(GLADIUS_BUILD_APP "Build the standalone Gladius desktop application" OFF)
+option(GLADIUS_BUILD_MCP_SERVER "Build the Gladius MCP server executable" OFF)
+option(GLADIUS_BUILD_TESTS "Build Gladius test targets" ON)
+option(GLADIUS_BUILD_BINDINGS "Build Gladius language bindings/examples" OFF)
+
+if(GLADIUS_BUILD_TESTS AND NOT GLADIUS_BUILD_UI)
+  message(STATUS "GLADIUS_BUILD_TESTS=ON requires UI/OpenGL modules; enabling GLADIUS_BUILD_UI automatically.")
+  set(GLADIUS_BUILD_UI ON CACHE BOOL "Build UI/OpenGL-dependent modules" FORCE)
+endif()
+
+if(GLADIUS_BUILD_APP AND NOT GLADIUS_BUILD_UI)
+  message(FATAL_ERROR "GLADIUS_BUILD_APP=ON requires GLADIUS_BUILD_UI=ON")
+endif()
 
 # Allow the environment variable GLADIUS_ENABLE_UI_TESTING to override the cmake option
 if(DEFINED ENV{GLADIUS_ENABLE_UI_TESTING})
@@ -91,7 +108,7 @@ if(_change_MSVC_flags)
     CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 endif()
 
-project(gladius)
+project(gladius VERSION ${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH})
 
 # Include coverage support after project declaration so compiler info is available
 include(cmake/Coverage.cmake)
@@ -167,15 +184,10 @@ if(UNIX)
 endif()
 
 find_package(CMakeRC CONFIG REQUIRED)
-find_package(GTest CONFIG REQUIRED)
-find_package(OpenGL REQUIRED)
-find_package(glad CONFIG REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
 find_package(OpenCL REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenMesh REQUIRED)
-find_package(tinyfiledialogs CONFIG REQUIRED)
 find_package(platform_folders REQUIRED)
 if(UNIX)
 find_package(X11 REQUIRED)
@@ -193,13 +205,22 @@ find_package(unofficial-minizip CONFIG REQUIRED)
 if (ENABLE_TRACY)
   find_package(Tracy CONFIG REQUIRED)
 endif()
-find_package(imgui CONFIG REQUIRED)
-find_package(unofficial-imgui-node-editor CONFIG REQUIRED)
+if(GLADIUS_BUILD_TESTS)
+  find_package(GTest CONFIG REQUIRED)
+endif()
+if(GLADIUS_BUILD_UI)
+  find_package(OpenGL REQUIRED)
+  find_package(glad CONFIG REQUIRED)
+  find_package(glfw3 CONFIG REQUIRED)
+  find_package(tinyfiledialogs CONFIG REQUIRED)
+  find_package(imgui CONFIG REQUIRED)
+  find_package(unofficial-imgui-node-editor CONFIG REQUIRED)
+endif()
 find_package(PkgConfig REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(muparser CONFIG REQUIRED)
 find_package(httplib CONFIG REQUIRED)
-pkg_check_modules(Clipper2 REQUIRED IMPORTED_TARGET Clipper2)
+find_package(Clipper2 CONFIG REQUIRED)
 pkg_check_modules(libcoro REQUIRED IMPORTED_TARGET libcoro)
 
 
@@ -221,19 +242,29 @@ set(AdditionalIncludes
  ${CMAKE_CURRENT_SOURCE_DIR}/components/
 )
 
+add_library(gladius_iconfont_headers INTERFACE)
+target_include_directories(gladius_iconfont_headers
+  INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/IconFontCppHeaders>)
+add_library(Gladius::iconfont_headers ALIAS gladius_iconfont_headers)
+
+add_library(gladius_psimpl_headers INTERFACE)
+target_include_directories(gladius_psimpl_headers
+  INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/components/psimpl>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/psimpl>)
+add_library(Gladius::psimpl_headers ALIAS gladius_psimpl_headers)
+
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 set(GLADIUSLOCATION GladiusLib)
 message("GLADIUSLOCATION=${GLADIUSLOCATION}")
 
 # Determine the installation directories based on the platform
-if(WIN32)
-    set(INSTALL_PREFIX .)
-else()
-    set(INSTALL_PREFIX /opt/gladius/${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH})
-    set(INSTALL_BIN_DIR ${INSTALL_PREFIX})
-    set(SYMLINK_BIN_DIR /usr/bin)
-endif()
+set(INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
+set(INSTALL_BIN_DIR ${CMAKE_INSTALL_BINDIR})
+set(SYMLINK_BIN_DIR ${CMAKE_INSTALL_BINDIR})
 
 # Bundle lib3mf runtime shared objects on Linux so the app runs out-of-the-box
 if(UNIX)
@@ -262,16 +293,22 @@ if(UNIX)
   endif()
 endif()
 
-add_subdirectory(tests)
+if(GLADIUS_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
 add_subdirectory(src)
 add_subdirectory(src/compute)
-add_subdirectory(src/ui)
+if(GLADIUS_BUILD_UI)
+  add_subdirectory(src/ui)
+endif()
 add_subdirectory(src/nodes)
 add_subdirectory(src/io)
 add_subdirectory(src/contour)
 add_subdirectory(src/slicer)
-add_subdirectory(src/api)
-add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
+if(GLADIUS_BUILD_BINDINGS)
+  add_subdirectory(src/api)
+  add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
+endif()
 
 configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
 configure_file(src/kernel/sdf.h src/kernel/sdf.h COPYONLY)
@@ -308,6 +345,62 @@ file(COPY components/licenses DESTINATION "src/")
 
 
 
+
+install(TARGETS gladius_iconfont_headers gladius_psimpl_headers
+  EXPORT gladiusTargets)
+
+install(TARGETS gladius_resources
+  EXPORT gladiusTargets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TARGET cmrc-base)
+  install(TARGETS cmrc-base
+    EXPORT gladiusTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gladius
+  FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp")
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/components/IconFontCppHeaders/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/IconFontCppHeaders
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/components/psimpl/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gladius/thirdparty/psimpl
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+
+set(GLADIUS_INSTALL_CMAKEDIR "share/gladius")
+set(GLADIUS_PACKAGE_NEEDS_UI_DEPENDENCIES ${GLADIUS_BUILD_UI})
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gladiusConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/gladiusConfig.cmake
+  INSTALL_DESTINATION ${GLADIUS_INSTALL_CMAKEDIR})
+
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/gladiusConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion)
+
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/gladiusConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/gladiusConfigVersion.cmake
+  DESTINATION ${GLADIUS_INSTALL_CMAKEDIR})
+
+install(EXPORT gladiusTargets
+  FILE gladiusTargets.cmake
+  NAMESPACE Gladius::
+  DESTINATION ${GLADIUS_INSTALL_CMAKEDIR})
+
+if(GLADIUS_BUILD_APP)
 
 # Install fonts
 install(DIRECTORY components/fonts/fontawesome-free-5.14.0-web/ DESTINATION ${INSTALL_PREFIX}/misc/fonts/)
@@ -465,4 +558,6 @@ add_custom_target(Generate_Installer
   # Make sure both desktop app variants are built before packaging
   DEPENDS gladius gladiusmcp gladius_lib gladiuslib
   COMMENT "Running CPack. Please wait...")
+
+endif()
 

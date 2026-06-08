@@ -14,6 +14,10 @@
             },
             "cacheVariables": {
                 "ENABLE_UI_TESTING": "$env{GLADIUS_ENABLE_UI_TESTING}",
+                "GLADIUS_BUILD_UI": "ON",
+                "GLADIUS_BUILD_APP": "ON",
+                "GLADIUS_BUILD_MCP_SERVER": "ON",
+                "GLADIUS_BUILD_TESTS": "ON",
                 "CMAKE_TOOLCHAIN_FILE": {
                     "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                     "type": "FILEPATH"
@@ -106,6 +110,10 @@
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
                 "ENABLE_UI_TESTING": "$env{GLADIUS_ENABLE_UI_TESTING}",
+                "GLADIUS_BUILD_UI": "ON",
+                "GLADIUS_BUILD_APP": "ON",
+                "GLADIUS_BUILD_MCP_SERVER": "ON",
+                "GLADIUS_BUILD_TESTS": "ON",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
                 "CMAKE_C_COMPILER": "/usr/bin/clang",
                 "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
