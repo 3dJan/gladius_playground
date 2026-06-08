@@ -421,6 +421,10 @@ namespace gladius::ui
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
         std::atomic<uint64_t> m_asyncProgressiveViewEpoch{0};
+        /// GPU parameter-buffer generation the progressive buffer's HQ lines were rendered with.
+        /// A mismatch against the live generation means a parameter upload landed mid-fill, so the
+        /// buffer must be re-seeded to avoid a torn (old-params top / new-params bottom) frame.
+        std::atomic<uint64_t> m_asyncProgressiveParamGeneration{0};
 
         // Async preview rendering state (separate from HQ progressive rendering)
         std::atomic<uint64_t> m_asyncPreviewEpoch{0};       ///< Current preview epoch for cancellation

@@ -701,6 +701,17 @@ namespace gladius
         [[nodiscard]] bool tryToupdateParameter(nodes::Assembly & assembly);
         [[nodiscard]] bool updateParameterBlocking(nodes::Assembly & assembly);
 
+        /// @brief Monotonic counter of GPU parameter-buffer uploads that actually changed the
+        /// model parameters. Incremented inside updateParameterBlocking() right after the new
+        /// values are written to the parameter buffer. Progressive HQ rendering uses this to
+        /// detect a parameter upload that lands mid-fill (which would otherwise leave the upper
+        /// band rendered with the old parameters and the lower band with the new ones).
+        /// @return The current parameter generation.
+        [[nodiscard]] std::uint64_t getParameterGeneration() const
+        {
+            return m_parameterGeneration.load(std::memory_order_acquire);
+        }
+
         /// Check if parameter structure matches compiled signature (fast path possible)
         [[nodiscard]] bool isParameterSignatureCompatible(nodes::Assembly const & assembly) const;
 
@@ -847,6 +858,9 @@ namespace gladius
         std::atomic<std::uint64_t> m_optimizedSourceGenerationEpoch{0u};
         std::mutex m_optimizedSourceGenerationMutex;
         std::vector<std::future<OptimizedSourceGenerationResult>> m_optimizedSourceGenerationJobs;
+
+        /// Monotonic generation of GPU parameter-buffer uploads that changed the parameters.
+        std::atomic<std::uint64_t> m_parameterGeneration{1u};
 
         ProgramManager m_programs;
     };

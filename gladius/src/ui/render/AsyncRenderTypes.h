@@ -64,6 +64,7 @@ namespace gladius::ui::async_rendering
     {
         uint64_t epoch{0};
         uint64_t viewEpoch{0};
+        uint64_t paramGeneration{0}; ///< GPU parameter-buffer generation captured when scheduled.
         uint64_t frameHint{0};
         RenderJobType type{RenderJobType::HighQuality};
         uint32_t width{0};

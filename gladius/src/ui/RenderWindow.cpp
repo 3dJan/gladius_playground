@@ -26,6 +26,7 @@
 #include "compute/ComputeCore.h"
 #include "imgui.h"
 #include "render/DisplayFrameSelector.h"
+#include "render/ProgressiveBufferPolicy.h"
 #include "render/RenderModeUpdatePolicy.h"
 #include "render/PreviewBackendPolicy.h"
 #include "render/PreviewResultAcceptancePolicy.h"
@@ -3029,6 +3030,7 @@ namespace gladius::ui
         }
         m_asyncController->setLatestEpoch(job.epoch);
         job.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+        job.paramGeneration = m_core->getParameterGeneration();
         job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         job.type = async_rendering::RenderJobType::HighQuality;
         job.width = static_cast<uint32_t>(width);
@@ -3036,18 +3038,37 @@ namespace gladius::ui
 
         // A non-zero start line means we intend to CONTINUE filling a progressive buffer that was
         // already seeded with a full-frame resample at line 0. If that buffer is gone or no longer
-        // matches the current epoch/size — which happens when a stale-size/stale-view discard or a
-        // window resize released it without rewinding state.currentLine — the worker would acquire
-        // a fresh, unseeded buffer and render only [startLine, height). The untouched top band
-        // [0, startLine) would then be promoted as a "completed" frame, producing the partial /
-        // half-updated HQ image seen after resizing. Restart from line 0 so the buffer is re-seeded
-        // and every horizontal line is rendered.
+        // matches the current epoch/view/size — which happens when a stale-size/stale-view discard,
+        // a window resize released it without rewinding state.currentLine, or a parameter change
+        // advanced only the view epoch — the worker would acquire a fresh, unseeded buffer and
+        // render only [startLine, height). The untouched top band [0, startLine) would then be
+        // promoted as a "completed" frame, producing the partial / half-updated HQ image seen
+        // after resizing. The view epoch is essential here: a parameter change bumps ONLY the view
+        // epoch (not the scene epoch), yet it changes the model content of every pixel — continuing
+        // a buffer whose un-overwritten region still holds the previous parameters yields the torn
+        // fresh-top / stale-bottom frame. Restart from line 0 in any of these cases so the buffer
+        // is re-seeded and every horizontal line is rendered for the current state.
+        async_rendering::ProgressiveBufferState const progressiveBufferState{
+          .hasImage =
+            m_asyncProgressiveBuffer != nullptr && m_asyncProgressiveBuffer->image != nullptr,
+          .epoch = m_asyncProgressiveEpoch.load(std::memory_order_acquire),
+          .viewEpoch = m_asyncProgressiveViewEpoch.load(std::memory_order_acquire),
+          .paramGeneration = m_asyncProgressiveParamGeneration.load(std::memory_order_acquire),
+          .width = (m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
+                     ? static_cast<uint32_t>(m_asyncProgressiveBuffer->image->getWidth())
+                     : 0u,
+          .height = (m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
+                      ? static_cast<uint32_t>(m_asyncProgressiveBuffer->image->getHeight())
+                      : 0u};
+        async_rendering::ProgressiveJobTarget const progressiveJobTarget{
+          .epoch = job.epoch,
+          .viewEpoch = job.viewEpoch,
+          .paramGeneration = job.paramGeneration,
+          .width = job.width,
+          .height = job.height};
         bool const hasSeededProgressiveContinuation =
-          m_asyncProgressiveBuffer != nullptr &&
-          m_asyncProgressiveEpoch.load(std::memory_order_acquire) == job.epoch &&
-          m_asyncProgressiveBuffer->image &&
-          static_cast<size_t>(m_asyncProgressiveBuffer->image->getWidth()) >= width &&
-          static_cast<size_t>(m_asyncProgressiveBuffer->image->getHeight()) >= height;
+          async_rendering::isProgressiveBufferContinuable(progressiveBufferState,
+                                                          progressiveJobTarget);
         if (state.currentLine > 0 && !hasSeededProgressiveContinuation)
         {
             state.currentLine = 0;
@@ -3070,9 +3091,7 @@ namespace gladius::ui
             job.coordinatorStamp = coordinatorTask->stamp;
         }
 
-        if (job.startLine == 0 &&
-            (!m_asyncProgressiveBuffer ||
-             m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch))
+        if (job.startLine == 0 && !hasSeededProgressiveContinuation)
         {
             // The progressive HQ buffer is seeded by resampling the result image (the low-res
             // preview) so lines not yet rendered at high quality still show content. If the
@@ -3102,6 +3121,9 @@ namespace gladius::ui
                 seedBuffer->image->invalidateContent();
                 m_asyncProgressiveBuffer = seedBuffer;
                 m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
+                m_asyncProgressiveViewEpoch.store(job.viewEpoch, std::memory_order_release);
+                m_asyncProgressiveParamGeneration.store(job.paramGeneration,
+                                                        std::memory_order_release);
             }
             else if (seedBuffer)
             {
@@ -3317,6 +3339,7 @@ namespace gladius::ui
             m_asyncProgressiveBuffer = nullptr;
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
             m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+            m_asyncProgressiveParamGeneration.store(0, std::memory_order_release);
         }
 
         async_rendering::RenderJob job{};
@@ -3329,6 +3352,7 @@ namespace gladius::ui
         m_asyncController->setLatestEpoch(job.epoch);
 
         job.viewEpoch = m_asyncViewEpoch.load(std::memory_order_acquire);
+        job.paramGeneration = m_core->getParameterGeneration();
         job.frameHint = m_asyncFrameCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         job.type = jobType;
         job.width = static_cast<uint32_t>(width);
@@ -3428,6 +3452,7 @@ namespace gladius::ui
                 m_asyncProgressiveBuffer = nullptr;
                 m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                 m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
+                m_asyncProgressiveParamGeneration.store(0, std::memory_order_release);
             }
 
             writeBuffer = nullptr;
@@ -3458,8 +3483,26 @@ namespace gladius::ui
                 }
             }
         }
-        else if (!m_asyncProgressiveBuffer ||
-            m_asyncProgressiveEpoch.load(std::memory_order_acquire) != job.epoch)
+        else if (!async_rendering::isProgressiveBufferContinuable(
+                   async_rendering::ProgressiveBufferState{
+                     .hasImage = m_asyncProgressiveBuffer != nullptr &&
+                                 m_asyncProgressiveBuffer->image != nullptr,
+                     .epoch = m_asyncProgressiveEpoch.load(std::memory_order_acquire),
+                     .viewEpoch = m_asyncProgressiveViewEpoch.load(std::memory_order_acquire),
+                     .paramGeneration =
+                       m_asyncProgressiveParamGeneration.load(std::memory_order_acquire),
+                     .width = (m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
+                                ? static_cast<uint32_t>(m_asyncProgressiveBuffer->image->getWidth())
+                                : 0u,
+                     .height =
+                       (m_asyncProgressiveBuffer && m_asyncProgressiveBuffer->image)
+                         ? static_cast<uint32_t>(m_asyncProgressiveBuffer->image->getHeight())
+                         : 0u},
+                   async_rendering::ProgressiveJobTarget{.epoch = job.epoch,
+                                                         .viewEpoch = job.viewEpoch,
+                                                         .paramGeneration = job.paramGeneration,
+                                                         .width = job.width,
+                                                         .height = job.height}))
         {
             writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             if (!writeBuffer)
@@ -3482,6 +3525,8 @@ namespace gladius::ui
             m_asyncProgressiveBuffer = writeBuffer;
             m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
             m_asyncProgressiveViewEpoch.store(job.viewEpoch, std::memory_order_release);
+            m_asyncProgressiveParamGeneration.store(job.paramGeneration,
+                                                    std::memory_order_release);
         }
         else
         {

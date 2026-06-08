@@ -461,6 +461,13 @@ namespace gladius
         }
         parameter = std::move(updatedParameter);
         paramBuf.write();
+        if (parameterChanged)
+        {
+            // The GPU parameter buffer now holds new values. Advancing the generation lets
+            // progressive HQ rendering detect a parameter upload that landed mid-fill and restart,
+            // instead of presenting a frame whose upper band used the previous parameters.
+            m_parameterGeneration.fetch_add(1u, std::memory_order_acq_rel);
+        }
         // NOTE: Do NOT call invalidatePreCompSdf() here!
         // We want to keep the old SDF valid for preview rendering during interactive
         // parameter editing. The UI-side m_preComputedSdfDirty flag will trigger new
