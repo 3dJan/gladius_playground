@@ -105,7 +105,7 @@ namespace gladius::ui
     bool OrbitalCamera::update(float deltaTime_ms)
     {
         bool changed = false;
-        auto constexpr tolerance = 0.0001f;
+        auto constexpr tolerance = 0.1f;
         auto const speedFactor = 15.E-3f;
         deltaTime_ms = std::min(deltaTime_ms, 50.f);
 
@@ -312,19 +312,3 @@ namespace gladius::ui
         m_lookAtTarget = lookAt;
     }
 }
-// Alternative MVP-based approach (for reference):
-// We could also use a proper 4x4 view matrix and transform the corners:
-//
-// Eigen::Matrix4f viewMatrix;
-// viewMatrix.setIdentity();
-// viewMatrix.block<3,1>(0,0) = uu;  // right
-// viewMatrix.block<3,1>(0,1) = vv;  // up
-// viewMatrix.block<3,1>(0,2) = ww;  // forward
-// viewMatrix.block<3,1>(0,3) = -(viewMatrix.block<3,3>(0,0) * eyePos);  // translation
-//
-// Then for each corner:
-// Eigen::Vector4f homogeneousCorner(corner.x(), corner.y(), corner.z(), 1.0f);
-// Eigen::Vector4f cameraSpaceCorner = viewMatrix * homogeneousCorner;
-// float cameraX = cameraSpaceCorner.x();
-// float cameraY = cameraSpaceCorner.y();
-// float cameraZ = cameraSpaceCorner.z();
