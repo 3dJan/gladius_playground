@@ -157,7 +157,7 @@ namespace gladius::ui
         constexpr float kAdaptivePreviewMinQuality = 0.05f;
         constexpr float kAdaptivePreviewMinDimension = 1.0f;
         constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
-        constexpr float kAdaptivePreviewResizeThresholdPercent = 5.0f;
+        constexpr float kAdaptivePreviewResizeThresholdPercent = 0.5f;
 
         struct AsyncPreviewLaunch
         {
