@@ -42,7 +42,6 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
-#include <tracy/Tracy.hpp>
 #include <utility>
 
 #include <cmrc/cmrc.hpp>

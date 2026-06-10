@@ -369,7 +369,7 @@ namespace gladius::vdb
     {
         try
         {
-            auto handle = nanovdb::openToNanoVDB(m_grid);
+            auto handle = nanovdb::tools::openToNanoVDB(m_grid);
             std::vector<nanovdb::GridHandle<>> handles;
             handles.push_back(std::move(handle));
             nanovdb::io::writeGrids<nanovdb::HostBuffer, std::vector>(m_fileName.string(), handles);

@@ -1039,7 +1039,7 @@ namespace gladius
                 auto appendVdbGrid = [&](openvdb::GridBase::Ptr grid, float scaling,
                                          PrimitiveType primType) -> PrimitiveMeta
                 {
-                    auto handle = nanovdb::openToNanoVDB(grid);
+                    auto handle = nanovdb::tools::openToNanoVDB(grid);
                     size_t byteOffset = m_payloadData.data.size() * sizeof(float);
                     size_t pad = (NANOVDB_ALIGN - (byteOffset % NANOVDB_ALIGN)) % NANOVDB_ALIGN;
                     for (size_t k = 0; k < pad / sizeof(float); ++k)

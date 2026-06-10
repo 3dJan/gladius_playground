@@ -23,6 +23,7 @@
 
 #include "../CLMath.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
+#include "../Profiling.h"
 #include "BeamLatticeView.h"
 #include "ComponentsObjectView.h"
 #include "Document.h"
@@ -47,7 +48,6 @@
 #include <nodes/Assembly.h>
 #include <nodes/FunctionDeduplicator.h>
 #include <nodes/Model.h>
-#include <tracy/Tracy.hpp>
 
 namespace gladius::ui
 {

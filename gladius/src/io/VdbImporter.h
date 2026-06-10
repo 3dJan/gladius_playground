@@ -177,7 +177,7 @@ namespace gladius::vdb
         //     return importFromGridUint8<T>(sdfGrid, primitives, scaling);
         // }
 
-        auto handle = nanovdb::openToNanoVDB(sdfGrid);
+        auto handle = nanovdb::tools::openToNanoVDB(sdfGrid);
         auto * grid = handle.grid<T>();
 
         if (!grid)

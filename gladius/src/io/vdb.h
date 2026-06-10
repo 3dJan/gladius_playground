@@ -17,10 +17,20 @@
 #undef isActive
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4146)
+#endif
+
 #include <nanovdb/NanoVDB.h>
-#include <nanovdb/util/HostBuffer.h>
-#include <nanovdb/util/IO.h>
-#include <nanovdb/util/OpenToNanoVDB.h>
+#include <nanovdb/HostBuffer.h>
+#include <nanovdb/io/IO.h>
+#include <nanovdb/tools/CreateNanoGrid.h>
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 #include <openvdb/Grid.h>
 #include <openvdb/io/File.h>
 #include <openvdb/openvdb.h>

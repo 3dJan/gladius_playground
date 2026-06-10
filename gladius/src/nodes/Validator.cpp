@@ -1,9 +1,9 @@
 
 #include "Validator.h"
 #include "DerivedNodes.h"
+#include "../Profiling.h"
 #include "graph/GraphAlgorithms.h"
 #include <fmt/format.h>
-#include <tracy/Tracy.hpp>
 
 namespace gladius::nodes
 {

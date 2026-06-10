@@ -5,8 +5,36 @@
 #include <string>
 #include <syncstream>
 #include <thread>
-#include <tracy/Tracy.hpp>
 #include <utility>
+
+#if defined(ENABLE_TRACY) && ENABLE_TRACY && __has_include(<tracy/Tracy.hpp>)
+#include <tracy/Tracy.hpp>
+#else
+#ifndef ZoneScoped
+#define ZoneScoped ((void) 0)
+#endif
+#ifndef ZoneScopedN
+#define ZoneScopedN(name) ((void) 0)
+#endif
+#ifndef ZoneName
+#define ZoneName(name, size) ((void) 0)
+#endif
+#ifndef ZoneText
+#define ZoneText(text, len) ((void) 0)
+#endif
+#ifndef ZoneValue
+#define ZoneValue(value) ((void) 0)
+#endif
+#ifndef FrameMark
+#define FrameMark ((void) 0)
+#endif
+#ifndef FrameMarkStart
+#define FrameMarkStart(name) ((void) 0)
+#endif
+#ifndef FrameMarkEnd
+#define FrameMarkEnd(name) ((void) 0)
+#endif
+#endif
 
 // Optional detailed FWN preparation timings. These logs intentionally
 // use std::clog (stderr) instead of std::cout so MCP stdio framing on stdout
