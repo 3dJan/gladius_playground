@@ -913,6 +913,10 @@ namespace gladius::ui
                             m_shellGenerationMode =
                                 i == 1 ? io::ShellGenerationMode::OpenVdbColorThickness
                                        : io::ShellGenerationMode::LegacyManifoldDualContouring;
+                            if (m_shellGenerationMode == io::ShellGenerationMode::OpenVdbColorThickness)
+                            {
+                                m_useSurfaceColorSampling = false;
+                            }
                         }
                         if (selected)
                         {
@@ -925,26 +929,30 @@ namespace gladius::ui
                 {
                     ImGui::SetTooltip(
                         "Choose the shell geometry backend.\n"
-                        "The OpenVDB mode is the new implementation path and is currently scaffolded only.");
+                        "The OpenVDB mode is the new implementation path.\n"
+                        "Current scope is constant-thickness shell bands; surface-color propagation follows next.");
                 }
                 if (m_shellGenerationMode == io::ShellGenerationMode::OpenVdbColorThickness)
                 {
                     ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
-                                       "Preview mode: export currently stops after preparing shell intervals.");
+                                       "Current scope: constant-thickness shell bands; surface-color propagation comes next.");
                 }
                 ImGui::Unindent();
                 ImGui::EndDisabled();
 
                 // Surface color sampling option (nested under shell export)
-                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                bool const surfaceSamplingSupported =
+                    m_shellGenerationMode != io::ShellGenerationMode::OpenVdbColorThickness;
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport || !surfaceSamplingSupported);
                 ImGui::Indent();
                 ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 {
-                        ImGui::SetTooltip(
-                            "Sample colors at the model surface (SDF=0) instead of interior.\n"
-                            "This fixes color accuracy for projected images and textures.\n"
-                            "Recommended for HueForge-style multi-color prints.");
+                        ImGui::SetTooltip(surfaceSamplingSupported
+                            ? "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                              "This fixes color accuracy for projected images and textures.\n"
+                              "Recommended for HueForge-style multi-color prints."
+                            : "Surface-color propagation for the OpenVDB backend is not implemented yet.");
                 }
                 ImGui::Unindent();
                 ImGui::EndDisabled();
