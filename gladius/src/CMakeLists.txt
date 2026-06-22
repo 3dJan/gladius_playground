@@ -1,6 +1,11 @@
 set(BINARY ${CMAKE_PROJECT_NAME})
 file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 
+list(APPEND SOURCES
+    io/3mf/ShellThicknessPartition.h
+    io/3mf/ShellThicknessPartition.cpp
+)
+
 # MCP sources are intentionally NOT part of the core targets (gladius, gladius_lib)
 # They will be added to the dedicated gladiusmcp target below
 file(GLOB MCP_SOURCES LIST_DIRECTORIES true mcp/*.h mcp/*.cpp)

@@ -81,6 +81,10 @@ namespace gladius::ui
             "Ultra Fine",
             "Custom"};
 
+        constexpr std::array<char const *, 2> SHELL_GENERATION_MODE_LABELS{
+            "Legacy manifold dual contouring",
+            "OpenVDB color-thickness shells (preview)"};
+
         std::vector<Eigen::Vector3f> defaultThicknessPalette()
         {
             return {
@@ -891,6 +895,46 @@ namespace gladius::ui
                 ImGui::TextDisabled("One build item per shell with solid colors.");
                 ImGui::EndDisabled();
 
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::Indent();
+                int shellModeIndex =
+                    m_shellGenerationMode == io::ShellGenerationMode::OpenVdbColorThickness ? 1 : 0;
+                if (ImGui::BeginCombo("Shell generation backend",
+                                      SHELL_GENERATION_MODE_LABELS[static_cast<std::size_t>(shellModeIndex)]))
+                {
+                    for (int i = 0; i < static_cast<int>(SHELL_GENERATION_MODE_LABELS.size()); ++i)
+                    {
+                        bool const selected = (i == shellModeIndex);
+                        if (ImGui::Selectable(
+                                SHELL_GENERATION_MODE_LABELS[static_cast<std::size_t>(i)],
+                                selected))
+                        {
+                            shellModeIndex = i;
+                            m_shellGenerationMode =
+                                i == 1 ? io::ShellGenerationMode::OpenVdbColorThickness
+                                       : io::ShellGenerationMode::LegacyManifoldDualContouring;
+                        }
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Choose the shell geometry backend.\n"
+                        "The OpenVDB mode is the new implementation path and is currently scaffolded only.");
+                }
+                if (m_shellGenerationMode == io::ShellGenerationMode::OpenVdbColorThickness)
+                {
+                    ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
+                                       "Preview mode: export currently stops after preparing shell intervals.");
+                }
+                ImGui::Unindent();
+                ImGui::EndDisabled();
+
                 // Surface color sampling option (nested under shell export)
                 ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
                 ImGui::Indent();
@@ -1189,6 +1233,7 @@ namespace gladius::ui
 
         // Build shell export config
         io::ShellExportConfig config;
+        config.generationMode = m_shellGenerationMode;
         config.filamentStack = std::move(stack);
         config.precomputedLuts = precomputedLuts;
         config.lutResolution = lutResolution;

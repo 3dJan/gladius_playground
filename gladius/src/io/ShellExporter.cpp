@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 
 #include <chrono>
+#include <sstream>
 #include <utility>
 
 namespace gladius::io
@@ -191,6 +192,22 @@ namespace gladius::io
 
         m_progress.store(0.05, std::memory_order_release);
 
+        auto const shellIntervals = ShellThicknessPartition::buildIntervals(solution);
+        if (shellIntervals.empty())
+        {
+            throw std::runtime_error("Shell export requires at least one non-zero shell thickness");
+        }
+
+        if (m_config.generationMode == ShellGenerationMode::OpenVdbColorThickness)
+        {
+            std::ostringstream message;
+            message << "OpenVDB color-thickness shell export is not implemented yet. Prepared "
+                    << shellIntervals.size() << " shell intervals spanning "
+                    << ShellThicknessPartition::computeMaxDepth(solution.thicknesses)
+                    << " mm.";
+            throw std::runtime_error(message.str());
+        }
+
         if (isCancellationRequested())
         {
             m_state.store(State::Idle, std::memory_order_release);
@@ -200,7 +217,7 @@ namespace gladius::io
         // Phase 2: Shell generation (5% - 85%)
         {
             std::lock_guard lock(m_statusMutex);
-            m_statusMessage = fmt::format("Generating {} shells...", numLayers);
+            m_statusMessage = fmt::format("Generating {} shells...", shellIntervals.size());
         }
 
         ShellGenerator shellGenerator(generator, *const_cast<Document*>(m_document));
