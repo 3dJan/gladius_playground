@@ -1129,12 +1129,12 @@ namespace gladius::ui
             return;
         }
 
-        // Only support manifold dual contouring for palette derivation (matches color export path)
-        if (m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring)
+                if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
         {
             m_colorToThicknessDialog.notifyPaletteDeriveFailed(
-              "Palette derivation is only available with manifold dual contouring.");
-            m_statusMessage = "Palette derivation currently supported only for Manifold dual contouring.";
+                            "Palette derivation is not implemented for dual contouring.");
+                        m_statusMessage =
+                            "Palette derivation currently supports OpenVDB and manifold dual contouring.";
             m_statusIsError = true;
             return;
         }
@@ -1160,6 +1160,8 @@ namespace gladius::ui
 
         auto * core = m_computeCore;
         io::PaletteExtractionOptions paletteOptions{};
+        paletteOptions.method = m_selectedMethod;
+        paletteOptions.marchingCubesQualityLevel = m_marchingCubesQuality;
         paletteOptions.manifoldOptions = options;
         paletteOptions.convertToSrgb = m_convertToSrgb;
 

@@ -64,4 +64,29 @@ namespace gladius_tests::palette_extractor
             EXPECT_LE(c.z(), 1.0F);
         }
     }
+
+    TEST_F(PaletteExtractorTest, WebcamMountColor_DerivesPaletteWithLayeredMarchingCubes)
+    {
+        auto core = loadCoreWithDocument("testdata/webcam_mount_color.3mf");
+        ASSERT_NE(core, nullptr);
+
+        PaletteExtractionOptions opts{};
+        opts.method = SurfaceExtractionMethod::LayeredMarchingCubes;
+        opts.marchingCubesQualityLevel = 1U;
+        opts.convertToSrgb = true;
+
+        auto palette = derivePaletteFromMesh(*core, opts);
+
+        EXPECT_FALSE(palette.empty());
+        EXPECT_GT(palette.size(), 4U);
+        for (auto const & c : palette)
+        {
+            EXPECT_GE(c.x(), 0.0F);
+            EXPECT_LE(c.x(), 1.0F);
+            EXPECT_GE(c.y(), 0.0F);
+            EXPECT_LE(c.y(), 1.0F);
+            EXPECT_GE(c.z(), 0.0F);
+            EXPECT_LE(c.z(), 1.0F);
+        }
+    }
 }
