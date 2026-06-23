@@ -1,0 +1,107 @@
+#include "ShellMaterialOrdering.h"
+
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+
+namespace gladius::io
+{
+    float ShellMaterialOrdering::translucencyScore(FilamentOpticalProperties const& filament) noexcept
+    {
+        float sum = 0.0F;
+        int count = 0;
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            float const td = filament.transmissionDistance[channel];
+            if (td > 0.0F)
+            {
+                sum += td;
+                ++count;
+            }
+        }
+
+        if (count > 0)
+        {
+            return sum / static_cast<float>(count);
+        }
+
+        if (filament.opacity <= 0.0F)
+        {
+            return std::numeric_limits<float>::infinity();
+        }
+
+        if (filament.opacity >= 1.0F)
+        {
+            return 0.0F;
+        }
+
+        float const safeReferenceThickness = std::max(filament.referenceThickness, 1e-6F);
+        float const oneMinusOpacity = std::max(1.0F - filament.opacity, 1e-6F);
+        float const alpha = -std::log(oneMinusOpacity) / safeReferenceThickness;
+        if (alpha <= 0.0F)
+        {
+            return std::numeric_limits<float>::infinity();
+        }
+
+        return 1.0F / alpha;
+    }
+
+    OrderedShellMaterials ShellMaterialOrdering::reorderForShells(
+        FilamentStack const& stack,
+        std::size_t backgroundIndex,
+        IlluminationMode mode)
+    {
+        OrderedShellMaterials ordered;
+        std::size_t const count = stack.size();
+        ordered.originalToOrdered.resize(count, 0U);
+
+        if (count == 0U)
+        {
+            return ordered;
+        }
+
+        std::vector<std::size_t> indices(count);
+        std::iota(indices.begin(), indices.end(), 0U);
+
+        bool const hasBackground = backgroundIndex < count;
+        if (hasBackground)
+        {
+            std::stable_sort(indices.begin(), indices.end(), [backgroundIndex](std::size_t lhs, std::size_t rhs) {
+                if (lhs == backgroundIndex)
+                {
+                    return true;
+                }
+                if (rhs == backgroundIndex)
+                {
+                    return false;
+                }
+                return false;
+            });
+        }
+
+        auto reorderBegin = indices.begin() + (hasBackground ? 1 : 0);
+        if (mode == IlluminationMode::Frontlit)
+        {
+            std::stable_sort(reorderBegin, indices.end(), [&stack](std::size_t lhs, std::size_t rhs) {
+                return translucencyScore(stack[lhs]) < translucencyScore(stack[rhs]);
+            });
+        }
+
+        ordered.stack.filaments.reserve(count);
+        ordered.orderedToOriginal.reserve(count);
+        for (std::size_t orderedIndex = 0; orderedIndex < count; ++orderedIndex)
+        {
+            std::size_t const originalIndex = indices[orderedIndex];
+            ordered.stack.push_back(stack[originalIndex]);
+            ordered.orderedToOriginal.push_back(originalIndex);
+            ordered.originalToOrdered[originalIndex] = orderedIndex;
+        }
+
+        if (hasBackground)
+        {
+            ordered.backgroundIndex = 0U;
+        }
+
+        return ordered;
+    }
+} // namespace gladius::io

@@ -4,6 +4,8 @@ file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 list(APPEND SOURCES
     io/3mf/OpenVdbShellGenerator.h
     io/3mf/OpenVdbShellGenerator.cpp
+    io/3mf/ShellMaterialOrdering.h
+    io/3mf/ShellMaterialOrdering.cpp
     io/3mf/ShellThicknessPartition.h
     io/3mf/ShellThicknessPartition.cpp
 )

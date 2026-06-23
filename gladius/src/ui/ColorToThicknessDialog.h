@@ -3,6 +3,7 @@
 #include "FileDialogService.h"
 #include "io/3mf/FilamentOpticalProperties.h"
 #include "io/3mf/FrontlitThicknessSolver.h"
+#include "io/3mf/ShellMaterialOrdering.h"
 
 #include <eigen3/Eigen/Core>
 #include <nlohmann/json.hpp>
@@ -68,10 +69,7 @@ namespace gladius::ui
         bool ensurePrecomputedLuts();
 
         /// Get the filament stack (bottom-to-top) currently defined in the dialog
-        [[nodiscard]] io::FilamentStack getFilamentStack() const
-        {
-            return io::FilamentStack{m_materials};
-        }
+        [[nodiscard]] io::FilamentStack getFilamentStack() const;
 
         /// Get the thickness constraints used to build LUTs
         [[nodiscard]] io::ThicknessConstraints const & getConstraints() const
@@ -94,6 +92,12 @@ namespace gladius::ui
         void handleFileDialogResult();
 
         void computePrecomputedLuts();
+        [[nodiscard]] io::OrderedShellMaterials getOrderedShellMaterials() const;
+        [[nodiscard]] static std::vector<float> remapThicknessesToUiOrder(
+          std::vector<float> const& orderedThicknesses,
+          std::vector<std::size_t> const& orderedToOriginal,
+          std::size_t materialCount);
+        void invalidateComputedData(bool clearPaletteStatus = false);
 
         void loadMaterialsFromFile(std::filesystem::path const & path);
         void saveMaterialsToFile(std::filesystem::path const & path) const;
