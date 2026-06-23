@@ -36,4 +36,30 @@ namespace gladius::io::tests
         EXPECT_FLOAT_EQ(OpenVdbShellGenerator::evaluateShellSignedDistance(-0.6F, interval), 0.0F);
         EXPECT_GT(OpenVdbShellGenerator::evaluateShellSignedDistance(-0.8F, interval), 0.0F);
     }
+
+    TEST(OpenVdbShellGenerator_Test, EvaluateVariableShellSignedDistance_IsNegativeInsideVariableBand)
+    {
+        EXPECT_LT(OpenVdbShellGenerator::evaluateVariableShellSignedDistance(
+                      -0.35F,
+                      0.2F,
+                      0.6F,
+                      false),
+                  0.0F);
+    }
+
+    TEST(OpenVdbShellGenerator_Test, EvaluateVariableShellSignedDistance_InnermostUsesOnlyOuterBoundary)
+    {
+        EXPECT_FLOAT_EQ(OpenVdbShellGenerator::evaluateVariableShellSignedDistance(
+                            -0.2F,
+                            0.2F,
+                            0.7F,
+                            true),
+                        0.0F);
+        EXPECT_LT(OpenVdbShellGenerator::evaluateVariableShellSignedDistance(
+                      -0.5F,
+                      0.2F,
+                      0.7F,
+                      true),
+                  0.0F);
+    }
 } // namespace gladius::io::tests

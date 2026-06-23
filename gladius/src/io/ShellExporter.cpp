@@ -214,11 +214,23 @@ namespace gladius::io
         if (m_config.generationMode == ShellGenerationMode::OpenVdbColorThickness)
         {
             OpenVdbShellGenerator shellGenerator(generator);
-            shells = shellGenerator.generateUniformShells(
-                m_config.filamentStack,
-                solution,
-                m_config.mdcOptions,
-                [this]() { return isCancellationRequested(); });
+            if (m_config.useSurfaceColorSampling)
+            {
+                shells = shellGenerator.generateSurfaceDrivenShells(
+                    m_config.filamentStack,
+                    m_config.mdcOptions,
+                    m_config.lutResolution,
+                    m_config.thicknessConstraints,
+                    [this]() { return isCancellationRequested(); });
+            }
+            else
+            {
+                shells = shellGenerator.generateUniformShells(
+                    m_config.filamentStack,
+                    solution,
+                    m_config.mdcOptions,
+                    [this]() { return isCancellationRequested(); });
+            }
         }
         else
         {

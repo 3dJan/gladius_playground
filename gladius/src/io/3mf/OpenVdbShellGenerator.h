@@ -2,6 +2,7 @@
 
 #include "ShellGenerator.h"
 #include "ShellThicknessPartition.h"
+#include "SurfaceThicknessField.h"
 
 #include "../vdb.h"
 
@@ -30,6 +31,13 @@ namespace gladius::io
             ManifoldDualContouringOptions const& options,
             std::function<bool()> cancellationCheck = {});
 
+        [[nodiscard]] std::vector<ShellGenerator::ShellMesh> generateSurfaceDrivenShells(
+            FilamentStack const& stack,
+            ManifoldDualContouringOptions const& options,
+            int lutResolution,
+            ThicknessConstraints const& thicknessConstraints,
+            std::function<bool()> cancellationCheck = {});
+
         /// @brief Signed-distance for a shell band derived from a model SDF.
         ///
         /// The original model SDF is negative inside the solid. A shell occupies the inward depth
@@ -39,12 +47,39 @@ namespace gladius::io
             float modelSdf,
             ShellLayerDepthInterval const& interval) noexcept;
 
+        [[nodiscard]] static float evaluateVariableShellSignedDistance(
+            float modelSdf,
+            float outerDepth,
+            float innerDepth,
+            bool isInnermostLayer) noexcept;
+
       private:
         [[nodiscard]] openvdb::FloatGrid::Ptr createShellGrid(
             PreComputedSdf& sdf,
             BoundingBox const& bbox,
             ShellLayerDepthInterval const& interval,
             float narrowBandWidth) const;
+
+        [[nodiscard]] openvdb::FloatGrid::Ptr createVariableShellGrid(
+            PreComputedSdf& sdf,
+            BoundingBox const& bbox,
+            SurfaceThicknessField const& outerField,
+            SurfaceThicknessField const* innerField,
+            float narrowBandWidth) const;
+
+        [[nodiscard]] bool sampleSurfaceColors(
+            std::vector<Eigen::Vector3f> const& surfaceVertices,
+            std::vector<Eigen::Vector3f>& surfaceColors) const;
+
+        [[nodiscard]] std::vector<Eigen::Vector3f> extractSurfaceVertices(
+            PreComputedSdf& sdf,
+            BoundingBox const& bbox,
+            float narrowBandWidth) const;
+
+        [[nodiscard]] std::vector<std::vector<float>> buildCumulativeLuts(
+            FilamentStack const& stack,
+            ThicknessConstraints const& constraints,
+            int lutResolution) const;
 
         [[nodiscard]] ShellGenerator::ShellMesh meshToShellMesh(
             Mesh& mesh,

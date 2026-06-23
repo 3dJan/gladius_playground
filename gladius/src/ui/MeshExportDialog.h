@@ -136,8 +136,6 @@ namespace gladius::ui
         bool m_modelHasVolumetricColor = false;  ///< Cached: does model have color output?
         bool m_enableShellBasedExport = false; ///< Use shell-based export with LUTs when available
         bool m_useSurfaceColorSampling = true;  ///< Sample colors at surface instead of interior
-        io::ShellGenerationMode m_shellGenerationMode =
-          io::ShellGenerationMode::LegacyManifoldDualContouring;
 
         // Compatibility tuning options
         io::QuantizationMode m_quantizationMode = io::QuantizationMode::Adaptive;
