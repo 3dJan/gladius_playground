@@ -1,6 +1,7 @@
 #include "ColorToThicknessDialog.h"
 
 #include "Widgets.h"
+#include "io/3mf/FaceThicknessMapper.h"
 
 #include <imgui.h>
 
@@ -458,10 +459,14 @@ namespace gladius::ui
                 ImGui::Text("%zu", row + 1);
 
                 ImGui::TableSetColumnIndex(1);
-                ImVec4 targetColor{solution.targetColor.x(), solution.targetColor.y(), solution.targetColor.z(), 1.0F};
+                Eigen::Vector3f const targetDisplay = io::linearToSrgb(
+                    solution.targetColor.cwiseMax(0.0F).cwiseMin(1.0F));
+                ImVec4 targetColor{targetDisplay.x(), targetDisplay.y(), targetDisplay.z(), 1.0F};
                 colorButtonWithTooltip(("##target" + std::to_string(row)).c_str(), targetColor, "Target color");
                 ImGui::SameLine();
-                ImVec4 achievedColor{solution.achievedColor.x(), solution.achievedColor.y(), solution.achievedColor.z(), 1.0F};
+                Eigen::Vector3f const achievedDisplay = io::linearToSrgb(
+                    solution.achievedColor.cwiseMax(0.0F).cwiseMin(1.0F));
+                ImVec4 achievedColor{achievedDisplay.x(), achievedDisplay.y(), achievedDisplay.z(), 1.0F};
                 colorButtonWithTooltip(("##achieved" + std::to_string(row)).c_str(), achievedColor, "Achieved color");
 
                 for (std::size_t orderedIndex = 0; orderedIndex < orderedMaterials.stack.size(); ++orderedIndex)
@@ -745,7 +750,7 @@ namespace gladius::ui
         m_solutions.reserve(m_palette.size());
         for (auto const & color : m_palette)
         {
-            auto solution = solver.solve(color);
+            auto solution = solver.solve(io::srgbToLinear(color.cwiseMax(0.0F).cwiseMin(1.0F)));
             solution.thicknesses = remapThicknessesToUiOrder(
                 solution.thicknesses,
                 orderedMaterials.orderedToOriginal,

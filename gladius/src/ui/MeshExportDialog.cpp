@@ -1163,7 +1163,7 @@ namespace gladius::ui
         paletteOptions.method = m_selectedMethod;
         paletteOptions.marchingCubesQualityLevel = m_marchingCubesQuality;
         paletteOptions.manifoldOptions = options;
-        paletteOptions.convertToSrgb = m_convertToSrgb;
+        paletteOptions.convertToSrgb = true;
 
         m_paletteDeriveInProgress = true;
         m_colorToThicknessDialog.notifyPaletteDeriveStarted();
