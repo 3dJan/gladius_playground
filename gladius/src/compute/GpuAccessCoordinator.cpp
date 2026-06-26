@@ -343,12 +343,13 @@ namespace gladius
                               [this](GpuEventId const eventId)
                               { return !isCompletedLocked(eventId); });
 
+                auto & resRef = resource;
                 bool const hasActiveAccess =
                   std::any_of(m_activeAccesses.begin(),
                               m_activeAccesses.end(),
-                              [&resource, &generation](auto const & entry)
+                              [&resRef, &generation](auto const & entry)
                               {
-                                  return entry.second.resource.resourceId == resource.resourceId &&
+                                  return entry.second.resource.resourceId == resRef.resourceId &&
                                          entry.second.resource.generation == generation.generation;
                               });
 
