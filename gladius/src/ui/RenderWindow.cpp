@@ -1098,6 +1098,8 @@ namespace gladius::ui
         if (cameraActuallyMoving) {
             m_cameraIdleFrames = 0;
             m_renderWindowState.isMoving = true;
+            // Reset idle timer when camera starts moving again
+            m_lastCameraIdleTime = TimeStamp{};
         } else {
             m_cameraIdleFrames++;
             // Keep isMoving true for 10 frames after last movement to debounce fast refresh rates
@@ -2227,11 +2229,28 @@ namespace gladius::ui
                 .streamingJobInFlight = m_streamingJobInFlight.load(std::memory_order_acquire),
                 .resizePending = m_deferredResizePending || screenResizeRequired});
 
+            // Defer transition from CameraInteracting to Static state until camera has been idle
+            // for at least 1 second. This prevents HQ progressive rendering from starting and
+            // getting aborted repeatedly during stop-and-go camera movements.
             if (!state.isMoving &&
                 m_renderUpdateCoordinator.interactionState() ==
                   async_rendering::RenderInteractionState::CameraInteracting)
             {
-                queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
+                auto const now = std::chrono::system_clock::now();
+                if (m_lastCameraIdleTime == TimeStamp{})
+                {
+                    // First frame idle — record the time
+                    m_lastCameraIdleTime = now;
+                }
+                else
+                {
+                    auto const timeSinceIdle = now - m_lastCameraIdleTime;
+                    if (timeSinceIdle >= std::chrono::seconds(1))
+                    {
+                        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
+                        m_lastCameraIdleTime = TimeStamp{}; // Reset for next interaction
+                    }
+                }
             }
 
             // Parameter-drag settle: once no parameter change has arrived for the debounce
@@ -2492,7 +2511,16 @@ namespace gladius::ui
             if (lowResPending && hadActiveProgressive &&
                 !m_streamingPreviewActive.load(std::memory_order_acquire))
             {
-                notifyAsyncEpochIncrement();
+                // Do not bump the global epoch here.
+                //
+                // lowResPending is also used by adaptive preview quality tuning and
+                // camera/preview handoffs. Incrementing the epoch on every such handoff
+                // repeatedly invalidates HQ work and can cause visible restart churn.
+                //
+                // Semantic invalidation (parameter/model changes) already bumps epoch in
+                // dedicated paths (e.g. settle/finish transitions). Here we only reset the
+                // local progressive state so preview can take over without forcing another
+                // global invalidation cycle.
                 state.currentLine = 0;
                 state.renderingStepSize = kInitialProgressiveStepSize;
                 state.isRendering = false;

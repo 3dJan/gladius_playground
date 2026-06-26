@@ -308,6 +308,7 @@ namespace gladius::ui
         ImVec2 m_contentAreaMax;
 
         TimeStamp m_lastLowResRenderTime;
+        TimeStamp m_lastCameraIdleTime; ///< When camera last became idle (for interaction end debounce)
 
         float m_uiScale = 1.0f;
 
