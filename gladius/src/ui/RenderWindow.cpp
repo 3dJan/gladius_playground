@@ -157,7 +157,7 @@ namespace gladius::ui
         constexpr float kAdaptivePreviewMinQuality = 0.05f;
         constexpr float kAdaptivePreviewMinDimension = 1.0f;
         constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
-        constexpr float kAdaptivePreviewResizeThresholdPercent = 0.5f;
+        constexpr float kAdaptivePreviewResizeThresholdPercent = 20.0f;
 
         struct AsyncPreviewLaunch
         {
@@ -4743,8 +4743,8 @@ namespace gladius::ui
                           std::abs(newHeight - static_cast<int>(currentHeight)) /
                           static_cast<float>(currentHeight) * 100.0f;
 
-                        if (widthChangePercent > kAdaptivePreviewResizeThresholdPercent ||
-                            heightChangePercent > kAdaptivePreviewResizeThresholdPercent)
+                        if (widthChangePercent >= kAdaptivePreviewResizeThresholdPercent ||
+                            heightChangePercent >= kAdaptivePreviewResizeThresholdPercent)
                         {
                             if (m_core->setLowResPreviewResolution(
                                   static_cast<size_t>(newWidth), static_cast<size_t>(newHeight)))
