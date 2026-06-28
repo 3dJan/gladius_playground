@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numeric>
 
 namespace gladius::io
@@ -103,5 +104,93 @@ namespace gladius::io
         }
 
         return ordered;
+    }
+
+    OrderedShellMaterials ShellMaterialOrdering::optimizeGlobalOrderForShells(
+        FilamentStack const& stack,
+        std::size_t backgroundIndex,
+        IlluminationMode mode,
+        std::function<float(FilamentStack const&, std::size_t)> const& scorer,
+        std::size_t exhaustiveSearchLimit)
+    {
+        OrderedShellMaterials const heuristic = reorderForShells(stack, backgroundIndex, mode);
+
+        if (!scorer || stack.size() <= 1U || mode != IlluminationMode::Frontlit)
+        {
+            return heuristic;
+        }
+
+        std::size_t const count = stack.size();
+        bool const hasBackground = backgroundIndex < count;
+        std::size_t const permutableCount = count - (hasBackground ? 1U : 0U);
+
+        if (permutableCount <= 1U || count > exhaustiveSearchLimit)
+        {
+            return heuristic;
+        }
+
+        std::vector<std::size_t> indices(count);
+        std::iota(indices.begin(), indices.end(), 0U);
+
+        std::vector<std::size_t> fixedPrefix;
+        std::vector<std::size_t> permutableIndices;
+        fixedPrefix.reserve(hasBackground ? 1U : 0U);
+        permutableIndices.reserve(permutableCount);
+
+        for (std::size_t index : indices)
+        {
+            if (hasBackground && index == backgroundIndex)
+            {
+                fixedPrefix.push_back(index);
+            }
+            else
+            {
+                permutableIndices.push_back(index);
+            }
+        }
+
+        std::sort(permutableIndices.begin(), permutableIndices.end());
+
+        auto makeOrdered = [&](std::vector<std::size_t> const& orderedIndices) {
+            OrderedShellMaterials ordered;
+            ordered.originalToOrdered.resize(count, 0U);
+            ordered.stack.filaments.reserve(count);
+            ordered.orderedToOriginal.reserve(count);
+
+            for (std::size_t orderedIndex = 0; orderedIndex < orderedIndices.size(); ++orderedIndex)
+            {
+                std::size_t const originalIndex = orderedIndices[orderedIndex];
+                ordered.stack.push_back(stack[originalIndex]);
+                ordered.orderedToOriginal.push_back(originalIndex);
+                ordered.originalToOrdered[originalIndex] = orderedIndex;
+            }
+
+            if (hasBackground)
+            {
+                ordered.backgroundIndex = 0U;
+            }
+
+            return ordered;
+        };
+
+        float bestScore = scorer(heuristic.stack, heuristic.backgroundIndex);
+        OrderedShellMaterials bestOrdered = heuristic;
+
+        do
+        {
+            std::vector<std::size_t> orderedIndices = fixedPrefix;
+            orderedIndices.insert(orderedIndices.end(), permutableIndices.begin(), permutableIndices.end());
+
+            OrderedShellMaterials candidate = makeOrdered(orderedIndices);
+            float const score = scorer(candidate.stack, candidate.backgroundIndex);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestOrdered = std::move(candidate);
+            }
+        }
+        while (std::next_permutation(permutableIndices.begin(), permutableIndices.end()));
+
+        return bestOrdered;
     }
 } // namespace gladius::io

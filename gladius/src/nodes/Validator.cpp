@@ -108,6 +108,12 @@ namespace gladius::nodes
                                  Assembly & assembly,
                                  IssueList & issueList)
     {
+      if (auto * functionCall = dynamic_cast<FunctionCall *>(&node); functionCall != nullptr)
+      {
+        validateNode(*functionCall, model, assembly, issueList);
+        return;
+      }
+
         validateNodeImpl(node, model, issueList);
     }
 

@@ -331,8 +331,14 @@ namespace gladius
             return false;
         }
 
-        // Validation moved to refreshWorker() to avoid blocking the UI thread.
-        // The worker validates first and exits early if the model is invalid.
+        // Run a lightweight graph sync + validation pass before scheduling any
+        // background refresh work. This keeps invalid graphs from entering the
+        // expensive payload/compile path and avoids transient "compiling"
+        // states while the user is still resolving graph issues.
+        if (!prepareAssemblyForRefresh())
+        {
+            return false;
+        }
 
         // Signal compilation started on the UI thread BEFORE launching the worker.
         // This ensures isRendererReady() returns false immediately, preventing
@@ -369,6 +375,52 @@ namespace gladius
         return true;
     }
 
+    bool Document::prepareAssemblyForRefresh(nodes::ValidationContext const context)
+    {
+        if (!m_assembly)
+        {
+            return false;
+        }
+
+        std::optional<std::string> syncError;
+        try
+        {
+            m_assembly->updateInputsAndOutputs();
+        }
+        catch (std::exception const & e)
+        {
+            syncError = e.what();
+        }
+
+        markValidationDirty();
+        bool const graphValid = validateAssemblyIfDirty(context);
+
+        if (!syncError.has_value())
+        {
+            return graphValid;
+        }
+
+        nodes::ValidationIssue issue{};
+        issue.message = *syncError;
+        issue.type = nodes::IssueType::FunctionNotFound;
+        issue.severity = nodes::IssueSeverity::Error;
+        issue.fixSuggestion = nodes::getFixSuggestion(nodes::IssueType::FunctionNotFound);
+        issue.modelId = 0u;
+        issue.nodeId = {};
+        m_issueList.add(std::move(issue));
+
+        if (context != nodes::ValidationContext::Interactive)
+        {
+            auto logger = getSharedLogger();
+            if (logger)
+            {
+                logger->addEvent({*syncError, events::Severity::Error});
+            }
+        }
+
+        return false;
+    }
+
     void Document::loadAllMeshResources()
     {
         io::Importer3mf importer{getSharedLogger()};
@@ -402,13 +454,8 @@ namespace gladius
     void Document::refreshWorker(RefreshMode const refreshMode)
     {
         ProfileFunction;
-        auto computeToken = m_core->waitForComputeToken();
-        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
-          *m_core,
-          refreshMode == RefreshMode::InteractiveFirst};
 
         auto meshResourceState = m_core->getMeshResourceState();
-        meshResourceState->signalCompilationStarted();
 
         // Capture the structural edit epoch at the start of this worker run.
         // If a new structural edit arrives while we're working, the epoch will
@@ -419,10 +466,15 @@ namespace gladius
             return m_structuralEditEpoch.load(std::memory_order_acquire) != startEpoch;
         };
 
-        // Validate early: skip expensive compilation if model is in an invalid
-        // state (e.g. nodes with missing connections during graph editing).
-        // This used to run on the UI thread; running here avoids blocking it.
-        if (!validateAssembly())
+        if (isStale())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
+        // Validate before taking the compute token so invalid graphs can fail
+        // fast without waiting on in-flight GPU work.
+        if (!prepareAssemblyForRefresh())
         {
             meshResourceState->signalCompilationFinished();
             return;
@@ -434,7 +486,12 @@ namespace gladius
             return;
         }
 
-        m_assembly->updateInputsAndOutputs();
+        auto computeToken = m_core->waitForComputeToken();
+        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
+          *m_core,
+          refreshMode == RefreshMode::InteractiveFirst};
+
+        meshResourceState->signalCompilationStarted();
 
         // Build the lightweight 3MF resource dependency graph before extracting
         // mesh geometry, so loadAllMeshResources() can skip meshes that are not
@@ -2796,6 +2853,11 @@ namespace gladius
 
     bool Document::dispatchStructuralUpdate()
     {
+        if (!prepareAssemblyForRefresh())
+        {
+            return false;
+        }
+
         if (refreshModelIfNoCompilationIsRunning())
         {
             return true;

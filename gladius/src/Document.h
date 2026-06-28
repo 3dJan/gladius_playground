@@ -493,6 +493,8 @@ namespace gladius
         void loadImpl(const std::filesystem::path & filename);
         void mergeImpl(const std::filesystem::path & filename);
         [[nodiscard]] bool refreshModelAsync();
+                [[nodiscard]] bool prepareAssemblyForRefresh(
+                    nodes::ValidationContext context = nodes::ValidationContext::Interactive);
         void loadAllMeshResources();
         void refreshWorker(RefreshMode refreshMode = RefreshMode::Normal);
         [[nodiscard]] std::optional<MeshSdfEvaluationConfig> takePendingMeshSdfEvaluationConfig();

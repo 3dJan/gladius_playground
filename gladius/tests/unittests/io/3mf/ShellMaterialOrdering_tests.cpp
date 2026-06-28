@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 namespace gladius::io::tests
 {
     TEST(ShellMaterialOrdering_Test, ReorderForShells_MovesBackgroundToInnermost)
@@ -50,5 +52,30 @@ namespace gladius::io::tests
         EXPECT_EQ(ordered.stack[0].name, "Background");
         EXPECT_EQ(ordered.stack[1].name, "First");
         EXPECT_EQ(ordered.stack[2].name, "Second");
+    }
+
+    TEST(ShellMaterialOrdering_Test, OptimizeGlobalOrderForShells_FindsBestPermutationForSmallFrontlitStack)
+    {
+        FilamentStack stack;
+        stack.push_back(FilamentOpticalProperties{"Background", Eigen::Vector3f::Zero(), 0.8F, 0.4F, Eigen::Vector3f{0.5F, 0.5F, 0.5F}});
+        stack.push_back(FilamentOpticalProperties{"A", Eigen::Vector3f::UnitX(), 0.5F, 0.4F, Eigen::Vector3f{3.0F, 3.0F, 3.0F}});
+        stack.push_back(FilamentOpticalProperties{"B", Eigen::Vector3f::UnitY(), 0.5F, 0.4F, Eigen::Vector3f{1.0F, 1.0F, 1.0F}});
+        stack.push_back(FilamentOpticalProperties{"C", Eigen::Vector3f::UnitZ(), 0.5F, 0.4F, Eigen::Vector3f{2.0F, 2.0F, 2.0F}});
+
+        auto ordered = ShellMaterialOrdering::optimizeGlobalOrderForShells(
+            stack,
+            0U,
+            IlluminationMode::Frontlit,
+            [](FilamentStack const& candidate, std::size_t backgroundIdx) {
+                std::string signature = candidate[backgroundIdx + 1U].name + candidate[backgroundIdx + 2U].name + candidate[backgroundIdx + 3U].name;
+                return (signature == "CAB") ? 0.0F : 10.0F;
+            });
+
+        ASSERT_EQ(ordered.stack.size(), 4U);
+        EXPECT_EQ(ordered.backgroundIndex, 0U);
+        EXPECT_EQ(ordered.stack[0].name, "Background");
+        EXPECT_EQ(ordered.stack[1].name, "C");
+        EXPECT_EQ(ordered.stack[2].name, "A");
+        EXPECT_EQ(ordered.stack[3].name, "B");
     }
 } // namespace gladius::io::tests
