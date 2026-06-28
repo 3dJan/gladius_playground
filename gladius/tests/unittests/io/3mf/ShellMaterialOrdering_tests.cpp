@@ -78,4 +78,61 @@ namespace gladius::io::tests
         EXPECT_EQ(ordered.stack[2].name, "A");
         EXPECT_EQ(ordered.stack[3].name, "B");
     }
+
+    TEST(ShellMaterialOrdering_Test, OptimizeGlobalOrderForPalette_FallsBackToHeuristicForEmptyPalette)
+    {
+        FilamentStack stack;
+        stack.push_back(FilamentOpticalProperties{"Background", Eigen::Vector3f::Zero(), 0.8F, 0.4F, Eigen::Vector3f{0.5F, 0.5F, 0.5F}});
+        stack.push_back(FilamentOpticalProperties{"LeastTranslucent", Eigen::Vector3f::Ones(), 0.5F, 0.4F, Eigen::Vector3f{0.5F, 0.5F, 0.5F}});
+        stack.push_back(FilamentOpticalProperties{"MostTranslucent", Eigen::Vector3f::Ones(), 0.5F, 0.4F, Eigen::Vector3f{3.0F, 3.0F, 3.0F}});
+
+        ThicknessConstraints constraints;
+        std::vector<Eigen::Vector3f> const emptyPalette;
+
+        auto ordered = ShellMaterialOrdering::optimizeGlobalOrderForPalette(
+            stack,
+            0U,
+            IlluminationMode::Frontlit,
+            constraints,
+            emptyPalette);
+
+        ASSERT_EQ(ordered.stack.size(), 3U);
+        EXPECT_EQ(ordered.backgroundIndex, 0U);
+        EXPECT_EQ(ordered.stack[0].name, "Background");
+        EXPECT_EQ(ordered.stack[1].name, "LeastTranslucent");
+        EXPECT_EQ(ordered.stack[2].name, "MostTranslucent");
+    }
+
+    TEST(ShellMaterialOrdering_Test, OptimizeGlobalOrderForPalette_PicksLowerErrorOrderForKnownPalette)
+    {
+        // Two printable layers over a background. The palette is pure red.
+        // Layer "Red" has a red reflectance; layer "Cyan" has a cyan reflectance.
+        // The optimizer should prefer the order that lets the red layer sit closer
+        // to the visible surface for the red-dominant target.
+        FilamentStack stack;
+        stack.push_back(FilamentOpticalProperties{"Background", Eigen::Vector3f::Zero(), 0.8F, 0.4F, Eigen::Vector3f{0.5F, 0.5F, 0.5F}});
+        stack.push_back(FilamentOpticalProperties{"Cyan", Eigen::Vector3f{0.1F, 0.7F, 0.8F}, 0.5F, 0.4F, Eigen::Vector3f{2.0F, 2.0F, 2.0F}});
+        stack.push_back(FilamentOpticalProperties{"Red", Eigen::Vector3f{0.9F, 0.1F, 0.1F}, 0.5F, 0.4F, Eigen::Vector3f{2.0F, 2.0F, 2.0F}});
+
+        ThicknessConstraints constraints;
+        constraints.minThickness = 0.0F;
+        constraints.maxThickness = 4.0F;
+
+        std::vector<Eigen::Vector3f> const palette = {Eigen::Vector3f{0.9F, 0.1F, 0.1F}};
+
+        auto ordered = ShellMaterialOrdering::optimizeGlobalOrderForPalette(
+            stack,
+            0U,
+            IlluminationMode::Frontlit,
+            constraints,
+            palette);
+
+        ASSERT_EQ(ordered.stack.size(), 3U);
+        EXPECT_EQ(ordered.backgroundIndex, 0U);
+        EXPECT_EQ(ordered.stack[0].name, "Background");
+
+        // The red layer should be the outermost printable layer so it can dominate
+        // the visible color for a red target.
+        EXPECT_EQ(ordered.stack[2].name, "Red");
+    }
 } // namespace gladius::io::tests

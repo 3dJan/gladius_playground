@@ -193,4 +193,39 @@ namespace gladius::io
 
         return bestOrdered;
     }
+
+    OrderedShellMaterials ShellMaterialOrdering::optimizeGlobalOrderForPalette(
+        FilamentStack const& stack,
+        std::size_t backgroundIndex,
+        IlluminationMode mode,
+        ThicknessConstraints const& constraints,
+        std::vector<Eigen::Vector3f> const& targetColors,
+        std::size_t exhaustiveSearchLimit)
+    {
+        if (targetColors.empty())
+        {
+            return reorderForShells(stack, backgroundIndex, mode);
+        }
+
+        auto paletteScorer = [&constraints, &targetColors, mode](FilamentStack const& candidateStack,
+                                                                 std::size_t candidateBackgroundIndex) {
+            FrontlitThicknessSolver solver{candidateStack, constraints, mode, candidateBackgroundIndex};
+
+            float totalError = 0.0F;
+            for (Eigen::Vector3f const& target : targetColors)
+            {
+                ThicknessSolution const solution = solver.solve(target);
+                totalError += solution.colorError;
+            }
+
+            return totalError / static_cast<float>(targetColors.size());
+        };
+
+        return optimizeGlobalOrderForShells(
+            stack,
+            backgroundIndex,
+            mode,
+            paletteScorer,
+            exhaustiveSearchLimit);
+    }
 } // namespace gladius::io

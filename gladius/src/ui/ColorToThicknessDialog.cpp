@@ -762,6 +762,23 @@ namespace gladius::ui
     io::OrderedShellMaterials ColorToThicknessDialog::getOrderedShellMaterials() const
     {
         io::FilamentStack stack{m_materials};
+
+        // For small frontlit stacks with a known palette, prefer the palette-optimized
+        // global order over the generic translucency heuristic. The exhaustive search is
+        // cheap for small material counts and the benchmark showed it meaningfully
+        // reduces reproduction error for typical CMY-style stacks.
+        if (m_illuminationMode == io::IlluminationMode::Frontlit
+            && !m_palette.empty()
+            && m_materials.size() <= 6U)
+        {
+            return io::ShellMaterialOrdering::optimizeGlobalOrderForPalette(
+                stack,
+                m_backgroundIndex,
+                m_illuminationMode,
+                m_constraints,
+                m_palette);
+        }
+
         return io::ShellMaterialOrdering::reorderForShells(stack, m_backgroundIndex, m_illuminationMode);
     }
 
