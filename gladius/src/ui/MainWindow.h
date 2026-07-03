@@ -217,6 +217,7 @@ namespace gladius::ui
         void showExitPopUp();
         void showExportInProgressWarning();
         void showSaveBeforeFileOperationPopUp();
+        void showSaveAsOverwriteConfirmation();
         void logViewer();
         void renderStatusBar();
         void renderComputeErrorModal();
@@ -235,7 +236,8 @@ namespace gladius::ui
         void resetEditorState();
         void save();
         void updateModel();
-        void saveAs();
+        void saveAs(std::filesystem::path defaultPath = {});
+        void executeSaveAs(std::filesystem::path const & savePath);
         void saveCurrentFunction();
         void importImageStack();
 
@@ -383,6 +385,11 @@ namespace gladius::ui
         // Async file dialog for non-blocking file/directory selection
         AsyncFileDialog m_asyncFileDialog;
         AsyncDialogOperation m_asyncDialogOp{AsyncDialogOperation::None};
+
+        /// @brief Path selected by Save As that already exists and waits for overwrite confirmation
+        std::optional<std::filesystem::path> m_pendingSaveAsPath;
+        /// @brief Whether to show the Save As overwrite confirmation modal
+        bool m_showSaveAsOverwriteConfirmation{false};
 
         /// @brief Process async file dialog results and execute pending operations
         void processAsyncFileDialog();

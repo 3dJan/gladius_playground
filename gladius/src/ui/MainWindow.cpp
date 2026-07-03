@@ -965,6 +965,7 @@ namespace gladius::ui
                 showExitPopUp();
                 showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
+                showSaveAsOverwriteConfirmation();
 
                 // Render library browser only when the model editor is visible.
                 if (m_modelEditor.isVisible())
@@ -1119,12 +1120,15 @@ namespace gladius::ui
         {
             auto savePath = filename;
             savePath.replace_extension(".3mf");
-            bool writeThumbnail = m_computeAvailable && m_core;
-            m_doc->saveAs(savePath, writeThumbnail);
-            // No invalidation needed — saving doesn't change the model.
-            m_fileChanged = false;
-            m_currentAssemblyFileName = savePath;
-            addToRecentFiles(savePath);
+            if (std::filesystem::exists(savePath))
+            {
+                m_pendingSaveAsPath = savePath;
+                m_showSaveAsOverwriteConfirmation = true;
+            }
+            else
+            {
+                executeSaveAs(savePath);
+            }
             break;
         }
         case AsyncDialogOperation::SaveCurrentFunction:
@@ -1860,16 +1864,33 @@ namespace gladius::ui
         addToRecentFiles(m_currentAssemblyFileName.value());
     }
 
-    void MainWindow::saveAs()
+    void MainWindow::saveAs(std::filesystem::path defaultPath)
     {
         // Allow saving even if compute is disabled; just skip thumbnail generation.
         if (!m_doc || m_asyncFileDialog.isActive())
         {
             return;
         }
+        if (defaultPath.empty())
+        {
+            defaultPath = m_currentAssemblyFileName.value_or(std::filesystem::path{});
+        }
         m_asyncDialogOp = AsyncDialogOperation::SaveAs;
-        m_asyncFileDialog.saveFile({"*.implicit.3mf"},
-                                   m_currentAssemblyFileName.value_or(std::filesystem::path{}));
+        m_asyncFileDialog.saveFile({"*.implicit.3mf"}, defaultPath);
+    }
+
+    void MainWindow::executeSaveAs(std::filesystem::path const & savePath)
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+        bool writeThumbnail = m_computeAvailable && m_core;
+        m_doc->saveAs(savePath, writeThumbnail);
+        // No invalidation needed — saving doesn't change the model.
+        m_fileChanged = false;
+        m_currentAssemblyFileName = savePath;
+        addToRecentFiles(savePath);
     }
 
     void MainWindow::saveCurrentFunction()
@@ -2070,6 +2091,76 @@ namespace gladius::ui
                 m_showExportInProgressWarning = false;
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::EndPopup();
+        }
+    }
+
+    void MainWindow::showSaveAsOverwriteConfirmation()
+    {
+        if (!m_showSaveAsOverwriteConfirmation || !m_pendingSaveAsPath)
+        {
+            return;
+        }
+
+        auto constexpr windowTitle = "File Already Exists";
+        if (!ImGui::IsPopupOpen(windowTitle))
+        {
+            ImGui::OpenPopup(windowTitle);
+        }
+        ImGuiWindowFlags const windowFlags =
+          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+        if (ImGui::BeginPopupModal(windowTitle, nullptr, windowFlags))
+        {
+            ImGui::NewLine();
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
+            ImGui::TextUnformatted(
+              reinterpret_cast<const char *>(ICON_FA_EXCLAMATION_TRIANGLE " Warning"));
+            ImGui::PopStyleColor();
+
+            ImGui::TextWrapped("A file with this name already exists:");
+            ImGui::TextUnformatted(m_pendingSaveAsPath->string().c_str());
+            ImGui::TextWrapped("If you overwrite it, the existing file will be permanently lost. "
+                               "We suggest selecting another file name.");
+
+            ImGui::NewLine();
+
+            // Safe action is the default / leftmost to prevent accidental overwrites.
+            if (ImGui::Button(
+                  reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tChoose Different Name"),
+                  ImVec2(220, 0)))
+            {
+                auto const fallbackPath = *m_pendingSaveAsPath;
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+                saveAs(fallbackPath);
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0)))
+            {
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.0f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.0f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+            if (ImGui::Button(
+                  reinterpret_cast<const char *>(ICON_FA_TRASH "\tOverwrite Existing File"),
+                  ImVec2(220, 0)))
+            {
+                executeSaveAs(*m_pendingSaveAsPath);
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopStyleColor(3);
+
             ImGui::EndPopup();
         }
     }

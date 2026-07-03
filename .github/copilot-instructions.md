@@ -1,4 +1,4 @@
-
+No explanations, just the code.
 
 # C++ Coding Guidelines
 
