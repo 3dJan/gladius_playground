@@ -103,7 +103,7 @@ set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY OFF)
 if (MSVC)
     # /Zm200 gives MSVC more internal compiler heap for large template-heavy translation units.
     # Keep it global so executable-only sources such as the MCP tools get the same protection as libraries.
-    add_compile_options(/bigobj /utf-8 /Zc:__cplusplus /Zm200)
+    add_compile_options(/bigobj /utf-8 /Zc:__cplusplus /Zm200 /WX)
 
     if(CMAKE_GENERATOR MATCHES "Ninja")
       set(GLADIUS_MSVC_COMPILE_JOBS "2" CACHE STRING "Maximum concurrent MSVC compile jobs for Ninja builds")
@@ -137,6 +137,9 @@ if (MSVC)
 
     # no console
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+else()
+    # Treat all compiler warnings as errors on GCC/Clang to keep the Linux build clean.
+    add_compile_options(-Werror)
 endif()
 add_definitions(-DTBB_SUPPRESS_DEPRECATED_MESSAGES -DNOMINMAX)
 
