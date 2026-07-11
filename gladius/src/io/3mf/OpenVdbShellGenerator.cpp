@@ -2,9 +2,11 @@
 
 #include "../MeshExporter.h"
 #include "DualContouringSamplingProgram.h"
+#include "ResourceContext.h"
 #include "compute/ComputeCore.h"
 
 #include <algorithm>
+#include <unordered_map>
 
 namespace gladius::io
 {
@@ -34,6 +36,56 @@ namespace gladius::io
                 static_cast<double>(bbox.min.z)});
             return transform;
         }
+
+        /// Releases the precomputed SDF buffer when the guard goes out of scope.
+        /// This ensures cleanup on all exit paths, including exceptions.
+        class PreCompSdfReleaseGuard
+        {
+          public:
+            explicit PreCompSdfReleaseGuard(SharedResources resources)
+                : m_resources(std::move(resources))
+            {
+            }
+
+            ~PreCompSdfReleaseGuard()
+            {
+                if (m_resources != nullptr)
+                {
+                    m_resources->releasePreComputedSdf();
+                }
+            }
+
+            PreCompSdfReleaseGuard(PreCompSdfReleaseGuard const&) = delete;
+            PreCompSdfReleaseGuard& operator=(PreCompSdfReleaseGuard const&) = delete;
+            PreCompSdfReleaseGuard(PreCompSdfReleaseGuard&&) = delete;
+            PreCompSdfReleaseGuard& operator=(PreCompSdfReleaseGuard&&) = delete;
+
+          private:
+            SharedResources m_resources;
+        };
+
+        struct Vector3fHash
+        {
+            [[nodiscard]] std::size_t operator()(Eigen::Vector3f const& value) const noexcept
+            {
+                std::uint32_t const x = std::bit_cast<std::uint32_t>(value.x());
+                std::uint32_t const y = std::bit_cast<std::uint32_t>(value.y());
+                std::uint32_t const z = std::bit_cast<std::uint32_t>(value.z());
+                std::size_t const h1 = std::hash<std::uint32_t>{}(x);
+                std::size_t const h2 = std::hash<std::uint32_t>{}(y);
+                std::size_t const h3 = std::hash<std::uint32_t>{}(z);
+                return h1 ^ (h2 + 0x9e3779b9U + (h1 << 6) + (h1 >> 2)) ^
+                       (h3 + 0x9e3779b97f4a7c15ULL + (h2 << 6) + (h2 >> 2));
+            }
+        };
+
+        struct Vector3fEqual
+        {
+            [[nodiscard]] bool operator()(Eigen::Vector3f const& lhs, Eigen::Vector3f const& rhs) const noexcept
+            {
+                return lhs.x() == rhs.x() && lhs.y() == rhs.y() && lhs.z() == rhs.z();
+            }
+        };
     }
 
     OpenVdbShellGenerator::OpenVdbShellGenerator(ComputeCore& core)
@@ -81,6 +133,7 @@ namespace gladius::io
             return shells;
         }
 
+        PreCompSdfReleaseGuard const sdfGuard{resources};
         auto& sdfBuffer = resources->getPrecompSdfBuffer();
 
         float const totalDepth = ShellThicknessPartition::computeMaxDepth(solution.thicknesses);
@@ -122,7 +175,6 @@ namespace gladius::io
                 static_cast<int>(interval.layerIndex)));
         }
 
-        resources->releasePreComputedSdf();
         return shells;
     }
 
@@ -186,9 +238,9 @@ namespace gladius::io
                     }
                 }
             }
-            grid->pruneGrid();
         }
 
+        grid->pruneGrid();
         grid->setTransform(createGridTransform(bbox, width, height, depth));
         return grid;
     }
@@ -196,7 +248,7 @@ namespace gladius::io
     openvdb::FloatGrid::Ptr OpenVdbShellGenerator::createVariableShellGrid(
         PreComputedSdf& sdf,
         BoundingBox const& bbox,
-        SurfaceThicknessField const& outerField,
+        SurfaceThicknessField const* outerField,
         SurfaceThicknessField const* innerField,
         float narrowBandWidth) const
     {
@@ -219,6 +271,7 @@ namespace gladius::io
         float const voxelZ = depth > 1U ? (bbox.max.z - bbox.min.z) / static_cast<float>(depth - 1U) : 1.0F;
 
         bool const isInnermostLayer = innerField == nullptr;
+        bool const isOutermostLayer = outerField == nullptr;
 
         for (int z = 0; z < static_cast<int>(depth); ++z)
         {
@@ -232,7 +285,7 @@ namespace gladius::io
                     Eigen::Vector3f const worldPos{worldX, worldY, worldZ};
 
                     float const modelSdf = sdf.getValue(x, y, z).s[3];
-                    float const outerDepth = outerField.sampleAt(worldPos);
+                    float const outerDepth = isOutermostLayer ? 0.0F : outerField->sampleAt(worldPos);
                     float const innerDepth = isInnermostLayer
                         ? outerDepth
                         : innerField->sampleAt(worldPos);
@@ -249,9 +302,9 @@ namespace gladius::io
                     }
                 }
             }
-            grid->pruneGrid();
         }
 
+        grid->pruneGrid();
         grid->setTransform(createGridTransform(bbox, width, height, depth));
         return grid;
     }
@@ -289,13 +342,21 @@ namespace gladius::io
         auto mesh = vdb::gridToMesh(grid, *m_core.getComputeContext());
 
         std::size_t const faceCount = mesh.getNumberOfFaces();
-        surfaceVertices.reserve(faceCount * 3U);
+        std::unordered_map<Eigen::Vector3f, std::uint32_t, Vector3fHash, Vector3fEqual> indexMap;
+        indexMap.reserve(faceCount * 3U);
+        surfaceVertices.reserve(faceCount);
+
         for (std::size_t faceIndex = 0; faceIndex < faceCount; ++faceIndex)
         {
             auto const face = mesh.getFace(faceIndex);
             for (int vertexIndex = 0; vertexIndex < 3; ++vertexIndex)
             {
-                surfaceVertices.push_back(face.vertices[vertexIndex]);
+                auto const& vertex = face.vertices[vertexIndex];
+                auto const [it, inserted] = indexMap.emplace(vertex, static_cast<std::uint32_t>(surfaceVertices.size()));
+                if (inserted)
+                {
+                    surfaceVertices.push_back(vertex);
+                }
             }
         }
 
@@ -357,11 +418,11 @@ namespace gladius::io
             return shells;
         }
 
+        PreCompSdfReleaseGuard const sdfGuard{resources};
         auto& sdfBuffer = resources->getPrecompSdfBuffer();
         auto const cumulativeLuts = buildCumulativeLuts(stack, thicknessConstraints, lutResolution);
         if (cumulativeLuts.empty())
         {
-            resources->releasePreComputedSdf();
             return shells;
         }
 
@@ -381,14 +442,12 @@ namespace gladius::io
         auto const surfaceVertices = extractSurfaceVertices(sdfBuffer, *bbox, narrowBandWidth);
         if (surfaceVertices.empty())
         {
-            resources->releasePreComputedSdf();
             return shells;
         }
 
         std::vector<Eigen::Vector3f> surfaceColors;
         if (!sampleSurfaceColors(surfaceVertices, surfaceColors))
         {
-            resources->releasePreComputedSdf();
             return shells;
         }
 
@@ -402,7 +461,6 @@ namespace gladius::io
         {
             if (cancellationCheck && cancellationCheck())
             {
-                resources->releasePreComputedSdf();
                 return {};
             }
 
@@ -423,19 +481,10 @@ namespace gladius::io
                 break;
             }
 
-            SurfaceThicknessField zeroField;
-            SurfaceThicknessField const* outerFieldPtr = nullptr;
-            if (layerIndex == static_cast<int>(stack.size()) - 1)
-            {
-                std::vector<Eigen::Vector3f> zeroColors(surfaceColors.size(), Eigen::Vector3f::Zero());
-                std::vector<float> zeroLut(static_cast<std::size_t>(lutResolution) * lutResolution * lutResolution, 0.0F);
-                zeroField.build(surfaceVertices, zeroColors, zeroLut, lutResolution, *bbox, fieldConfig);
-                outerFieldPtr = &zeroField;
-            }
-            else
-            {
-                outerFieldPtr = &fields[static_cast<std::size_t>(layerIndex + 1)];
-            }
+            SurfaceThicknessField const* outerFieldPtr =
+                (layerIndex == static_cast<int>(stack.size()) - 1)
+                ? nullptr
+                : &fields[static_cast<std::size_t>(layerIndex + 1)];
 
             SurfaceThicknessField const* innerFieldPtr =
                 (layerIndex == 0) ? nullptr : &fields[static_cast<std::size_t>(layerIndex)];
@@ -443,7 +492,7 @@ namespace gladius::io
             auto shellGrid = createVariableShellGrid(
                 sdfBuffer,
                 *bbox,
-                *outerFieldPtr,
+                outerFieldPtr,
                 innerFieldPtr,
                 narrowBandWidth);
             if (!shellGrid)
@@ -463,7 +512,6 @@ namespace gladius::io
                 layerIndex));
         }
 
-        resources->releasePreComputedSdf();
         return shells;
     }
 

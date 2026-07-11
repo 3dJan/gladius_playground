@@ -67,17 +67,7 @@ namespace gladius::io
         bool const hasBackground = backgroundIndex < count;
         if (hasBackground)
         {
-            std::stable_sort(indices.begin(), indices.end(), [backgroundIndex](std::size_t lhs, std::size_t rhs) {
-                if (lhs == backgroundIndex)
-                {
-                    return true;
-                }
-                if (rhs == backgroundIndex)
-                {
-                    return false;
-                }
-                return false;
-            });
+            std::swap(indices.front(), indices[backgroundIndex]);
         }
 
         auto reorderBegin = indices.begin() + (hasBackground ? 1 : 0);

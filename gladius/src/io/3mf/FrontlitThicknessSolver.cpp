@@ -117,7 +117,6 @@ namespace gladius::io
                 std::vector<float> xf;
                 xf.reserve(x.size());
                 std::transform(x.begin(), x.end(), std::back_inserter(xf), [](double v) { return static_cast<float>(v); });
-                quantizeClampThicknesses(c->solver->m_constraints, xf);
                 Eigen::Vector3f const predicted = c->solver->predictColor(xf);
                 double err = static_cast<double>((predicted - c->targetColor).squaredNorm());
 
@@ -176,7 +175,7 @@ namespace gladius::io
         };
 
         auto refineWithGradient = [this, &target](std::vector<float>& thicknesses,
-                                                  ProgressCallback const& callback) {
+                                                  ProgressCallback const& callback) -> bool {
             float prevError = std::numeric_limits<float>::max();
 
             for (int iter = 0; iter < m_maxIterations; ++iter)
@@ -191,7 +190,7 @@ namespace gladius::io
 
                 if (std::abs(prevError - error) < m_convergenceTolerance)
                 {
-                    return;
+                    return true;
                 }
                 prevError = error;
 
@@ -222,9 +221,11 @@ namespace gladius::io
 
                 if (!improved)
                 {
-                    return;
+                    return false;
                 }
             }
+
+            return false;
         };
 
         std::vector<std::vector<float>> candidates;
@@ -273,21 +274,25 @@ namespace gladius::io
         std::vector<float> thicknesses = candidates.front();
         float bestError = std::numeric_limits<float>::max();
 
+        bool converged = false;
         for (std::size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
         {
             std::vector<float> candidate = candidates[candidateIndex];
             refineWithNlopt(candidate, false);
-            refineWithGradient(candidate, nullptr);
+            bool const candidateConverged = refineWithGradient(candidate, nullptr);
 
             float const error = evaluateCandidate(candidate);
             if (error < bestError)
             {
                 bestError = error;
                 thicknesses = std::move(candidate);
+                converged = candidateConverged;
             }
         }
 
-        refineWithGradient(thicknesses, progressCallback);
+        converged = refineWithGradient(thicknesses, progressCallback) && converged;
+
+        quantizeClampThicknesses(m_constraints, thicknesses);
 
         Eigen::Vector3f const predicted = predictColor(thicknesses);
         ThicknessSolution solution(n);
@@ -295,7 +300,7 @@ namespace gladius::io
         solution.achievedColor = predicted;
         solution.thicknesses = thicknesses;
         solution.colorError = std::sqrt(computeError(predicted, targetColor));
-        solution.converged = std::isfinite(solution.colorError);
+        solution.converged = converged && std::isfinite(solution.colorError);
         return solution;
     }
 
@@ -440,8 +445,9 @@ namespace gladius::io
             return gradient;
         }
 
-        float const h = std::max(1e-4f,
-                     m_constraints.layerHeight > 0.0f ? m_constraints.layerHeight * 0.25f : 1e-4f);
+        float const h = m_constraints.layerHeight > 0.0f
+            ? std::min(1e-4f, m_constraints.layerHeight * 0.25f)
+            : 1e-4f;
 
         for (std::size_t i = 0; i < n; ++i)
         {

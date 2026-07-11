@@ -382,6 +382,8 @@ namespace gladius
             return false;
         }
 
+        std::lock_guard<std::mutex> const lock(m_assemblyMutex);
+
         std::optional<std::string> syncError;
         try
         {
@@ -402,9 +404,14 @@ namespace gladius
 
         nodes::ValidationIssue issue{};
         issue.message = *syncError;
-        issue.type = nodes::IssueType::FunctionNotFound;
+        issue.type = nodes::IssueType::GraphSyncError;
+        if (syncError->find("function") != std::string::npos ||
+            syncError->find("Function") != std::string::npos)
+        {
+            issue.type = nodes::IssueType::FunctionNotFound;
+        }
         issue.severity = nodes::IssueSeverity::Error;
-        issue.fixSuggestion = nodes::getFixSuggestion(nodes::IssueType::FunctionNotFound);
+        issue.fixSuggestion = nodes::getFixSuggestion(issue.type);
         issue.modelId = 0u;
         issue.nodeId = {};
         m_issueList.add(std::move(issue));

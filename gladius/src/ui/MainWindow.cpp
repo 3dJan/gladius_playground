@@ -2115,8 +2115,7 @@ namespace gladius::ui
             ImGui::NewLine();
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
-            ImGui::TextUnformatted(
-              reinterpret_cast<const char *>(ICON_FA_EXCLAMATION_TRIANGLE " Warning"));
+            ImGui::TextUnformatted(ICON_FA_EXCLAMATION_TRIANGLE " Warning");
             ImGui::PopStyleColor();
 
             ImGui::TextWrapped("A file with this name already exists:");
@@ -2127,9 +2126,7 @@ namespace gladius::ui
             ImGui::NewLine();
 
             // Safe action is the default / leftmost to prevent accidental overwrites.
-            if (ImGui::Button(
-                  reinterpret_cast<const char *>(ICON_FA_FOLDER_OPEN "\tChoose Different Name"),
-                  ImVec2(220, 0)))
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN "\tChoose Different Name", ImVec2(220, 0)))
             {
                 auto const fallbackPath = *m_pendingSaveAsPath;
                 m_pendingSaveAsPath.reset();
@@ -2150,9 +2147,7 @@ namespace gladius::ui
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.0f, 0.0f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.0f, 0.0f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
-            if (ImGui::Button(
-                  reinterpret_cast<const char *>(ICON_FA_TRASH "\tOverwrite Existing File"),
-                  ImVec2(220, 0)))
+            if (ImGui::Button(ICON_FA_TRASH "\tOverwrite Existing File", ImVec2(220, 0)))
             {
                 executeSaveAs(*m_pendingSaveAsPath);
                 m_pendingSaveAsPath.reset();

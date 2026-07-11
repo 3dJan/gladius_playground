@@ -933,15 +933,15 @@ namespace gladius::ui
                 ImGui::EndDisabled();
 
                 // Surface color sampling option (nested under shell export)
-                                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
                 ImGui::Indent();
                 ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 {
-                                                ImGui::SetTooltip(
-                                                        "Sample colors at the model surface (SDF=0) instead of interior.\n"
-                                                        "This fixes color accuracy for projected images and textures.\n"
-                                                        "Recommended for HueForge-style multi-color prints.");
+                    ImGui::SetTooltip(
+                        "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                        "This fixes color accuracy for projected images and textures.\n"
+                        "Recommended for HueForge-style multi-color prints.");
                 }
                 ImGui::Unindent();
                 ImGui::EndDisabled();

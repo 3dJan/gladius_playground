@@ -63,7 +63,7 @@ namespace gladius::io
         [[nodiscard]] openvdb::FloatGrid::Ptr createVariableShellGrid(
             PreComputedSdf& sdf,
             BoundingBox const& bbox,
-            SurfaceThicknessField const& outerField,
+            SurfaceThicknessField const* outerField,
             SurfaceThicknessField const* innerField,
             float narrowBandWidth) const;
 

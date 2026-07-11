@@ -23,6 +23,9 @@ namespace gladius::nodes
         case IssueType::FunctionNotFound:
             return "Ensure the referenced function exists or create a new function with the "
                    "expected name.";
+        case IssueType::GraphSyncError:
+            return "Review the graph for invalid nodes or broken references, then save or "
+                   "reload the model.";
         }
         return "Review and fix this issue.";
     }

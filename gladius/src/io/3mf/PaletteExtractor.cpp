@@ -127,7 +127,10 @@ namespace gladius::io
                 throw std::runtime_error("No distance maps available for OpenVDB palette derivation");
             }
 
-            qualityLevel = std::min<std::size_t>(qualityLevel, distanceMipMaps.size() - 1U);
+            if (qualityLevel >= distanceMipMaps.size())
+            {
+                qualityLevel = distanceMipMaps.size() - 1U;
+            }
 
             auto const clippingArea = resources->getClippingArea();
             auto const resX = distanceMipMaps[qualityLevel]->getWidth();
