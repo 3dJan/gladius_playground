@@ -5,7 +5,7 @@ include(CTest) # Add this line
 enable_testing()
 
 set(BINARY ${CMAKE_PROJECT_NAME}_test)
-file(GLOB_RECURSE TEST_SOURCES LIST_DIRECTORIES false *.h *.cpp)
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS LIST_DIRECTORIES false *.h *.cpp)
 
 # Remove OpenCL-requiring tests if disabled
 if(NOT ENABLE_OPENCL_TESTS)

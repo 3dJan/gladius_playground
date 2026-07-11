@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+
+#include "io/3mf/Writer3mf.h"
 #include "Theme.h"
 
 #include <algorithm>
@@ -597,6 +599,8 @@ namespace gladius::ui
     {
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
+
+        pollNativeSave();
 
         // Poll for async compute initialization completion
         pollComputeInit();
@@ -1855,13 +1859,7 @@ namespace gladius::ui
             saveAs();
             return;
         }
-        bool writeThumbnail = m_computeAvailable && m_core;
-        m_doc->saveAs(m_currentAssemblyFileName.value(), writeThumbnail);
-        m_renderWindow.invalidateViewDuetoModelUpdate();
-        m_fileChanged = false;
-
-        // Add to recent files list
-        addToRecentFiles(m_currentAssemblyFileName.value());
+        enqueueNativeSave(m_currentAssemblyFileName.value());
     }
 
     void MainWindow::saveAs(std::filesystem::path defaultPath)
@@ -1885,12 +1883,143 @@ namespace gladius::ui
         {
             return;
         }
-        bool writeThumbnail = m_computeAvailable && m_core;
-        m_doc->saveAs(savePath, writeThumbnail);
-        // No invalidation needed — saving doesn't change the model.
-        m_fileChanged = false;
-        m_currentAssemblyFileName = savePath;
-        addToRecentFiles(savePath);
+        enqueueNativeSave(savePath);
+    }
+
+    void MainWindow::enqueueNativeSave(std::filesystem::path filename)
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+
+        try
+        {
+            PendingNativeSave save{std::move(filename), m_doc->createSaveSnapshot(), m_doc};
+            if (m_nativeSaveInProgress)
+            {
+                m_pendingNativeSave = std::move(save);
+                return;
+            }
+            startNativeSave(std::move(save));
+        }
+        catch (std::exception const & e)
+        {
+            m_logger->addEvent({fmt::format("Could not capture native 3MF save snapshot: {}",
+                                            e.what()),
+                                events::Severity::Error});
+        }
+    }
+
+    void MainWindow::startNativeSave(PendingNativeSave save)
+    {
+        auto const tempFilename = makeNativeSaveTempPath(save.filename);
+        auto snapshot = std::move(save.snapshot);
+        auto const filename = save.filename;
+        auto const snapshotVersion = snapshot.version;
+        auto const sourceDocument = save.sourceDocument;
+        auto logger = m_logger;
+
+        m_nativeSaveInProgress = true;
+        m_nativeSaveFuture = std::async(
+          std::launch::async,
+          [filename,
+           tempFilename,
+           snapshotVersion,
+           sourceDocument,
+           snapshot = std::move(snapshot),
+           logger]() mutable
+          {
+              NativeSaveResult result{filename, snapshotVersion, false, {}, sourceDocument};
+              try
+              {
+                  io::Writer3mf writer(logger);
+                  if (!writer.save(tempFilename, snapshot, false))
+                  {
+                      result.error = "The 3MF writer rejected the save snapshot.";
+                  }
+                  else
+                  {
+                      std::error_code renameError;
+                      std::filesystem::rename(tempFilename, filename, renameError);
+                      if (renameError)
+                      {
+                          result.error = fmt::format("Could not publish saved file: {}",
+                                                    renameError.message());
+                      }
+                      else
+                      {
+                          result.success = true;
+                      }
+                  }
+              }
+              catch (std::exception const & e)
+              {
+                  result.error = e.what();
+              }
+
+              if (!result.success)
+              {
+                  std::error_code cleanupError;
+                  std::filesystem::remove(tempFilename, cleanupError);
+              }
+              return result;
+          });
+    }
+
+    void MainWindow::pollNativeSave()
+    {
+        if (!m_nativeSaveInProgress || !m_nativeSaveFuture.valid() ||
+            m_nativeSaveFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+
+        auto result = m_nativeSaveFuture.get();
+        m_nativeSaveInProgress = false;
+
+        if (result.success)
+        {
+            bool currentDocumentWasSaved = false;
+            auto sourceDocument = result.sourceDocument.lock();
+            bool isCurrentDocument = sourceDocument && sourceDocument.get() == m_doc.get();
+            if (isCurrentDocument)
+            {
+                currentDocumentWasSaved = m_doc->completeSave(result.filename,
+                                                               result.snapshotVersion);
+                if (currentDocumentWasSaved)
+                {
+                    m_fileChanged = false;
+                    m_currentAssemblyFileName = result.filename;
+                }
+            }
+
+            if (isCurrentDocument && !currentDocumentWasSaved)
+            {
+                m_fileChanged = true;
+            }
+            addToRecentFiles(result.filename);
+        }
+        else
+        {
+            m_logger->addEvent({fmt::format("Native 3MF save failed: {}", result.error),
+                                events::Severity::Error});
+        }
+
+        if (m_pendingNativeSave)
+        {
+            auto nextSave = std::move(*m_pendingNativeSave);
+            m_pendingNativeSave.reset();
+            startNativeSave(std::move(nextSave));
+        }
+    }
+
+        std::filesystem::path MainWindow::makeNativeSaveTempPath(
+            std::filesystem::path const & filename)
+    {
+        auto tempFilename = filename;
+        tempFilename += fmt::format(".gladius-save-{}.tmp", ++m_nativeSaveSequence);
+        return tempFilename;
     }
 
     void MainWindow::saveCurrentFunction()

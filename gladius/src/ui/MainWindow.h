@@ -32,6 +32,8 @@
 #include "GamepadQuickRef.h"
 
 #include <chrono>
+#include <string>
+#include <vector>
 
 namespace ed = ax::NodeEditor;
 
@@ -394,6 +396,28 @@ namespace gladius::ui
         /// @brief Process async file dialog results and execute pending operations
         void processAsyncFileDialog();
 
+                struct NativeSaveResult
+                {
+                        std::filesystem::path filename;
+                        uint64_t snapshotVersion{0};
+                        bool success{false};
+                        std::string error;
+                    std::weak_ptr<Document> sourceDocument;
+                };
+
+                struct PendingNativeSave
+                {
+                        std::filesystem::path filename;
+                        io::SaveSnapshot snapshot;
+                        std::weak_ptr<Document> sourceDocument;
+                };
+
+                void enqueueNativeSave(std::filesystem::path filename);
+                void startNativeSave(PendingNativeSave save);
+                void pollNativeSave();
+                [[nodiscard]] std::filesystem::path makeNativeSaveTempPath(
+                    std::filesystem::path const & filename);
+
         // Export state for blocking UI modifications during mesh export
         ExportState m_exportState;
 
@@ -418,6 +442,12 @@ namespace gladius::ui
 
         /// @brief Future for async compute initialization
         std::future<ComputeEnumResult> m_computeInitFuture;
+
+        /// @brief Active background native 3MF save. The worker owns only snapshot data.
+        std::future<NativeSaveResult> m_nativeSaveFuture;
+        std::optional<PendingNativeSave> m_pendingNativeSave;
+        uint64_t m_nativeSaveSequence{0};
+        bool m_nativeSaveInProgress{false};
 
         /// @brief Start async compute initialization
         void startAsyncComputeInit();

@@ -1,5 +1,7 @@
 #include "Document.h"
 
+#include "io/3mf/Lib3mfLoader.h"
+
 #include "BackupManager.h"
 #include "CliReader.h"
 #include "CliWriter.h"
@@ -1157,6 +1159,7 @@ namespace gladius
     void Document::markFileAsChanged()
     {
         m_fileChanged = true;
+        m_saveVersion.fetch_add(1, std::memory_order_release);
         m_validationDirty = true;
     }
 
@@ -1377,6 +1380,55 @@ namespace gladius
 
             m_assembly->setFilename(filename);
         }
+    }
+
+    io::SaveSnapshot Document::createSaveSnapshot() const
+    {
+        auto assemblyToken = waitForAssemblyToken();
+        if (!m_assembly)
+        {
+            throw std::runtime_error("Cannot create save snapshot without an assembly");
+        }
+        if (!m_3mfmodel)
+        {
+            throw std::runtime_error("Cannot create save snapshot without a 3MF model");
+        }
+
+        auto const wrapper = io::loadLib3mfScoped();
+        auto const writer = m_3mfmodel->QueryWriter("3mf");
+        std::vector<Lib3MF_uint8> buffer;
+        writer->WriteToBuffer(buffer);
+
+        auto modelCopy = wrapper->CreateModel();
+        auto reader = modelCopy->QueryReader("3mf");
+        reader->ReadFromBuffer(buffer);
+
+        io::SaveSnapshot snapshot;
+        snapshot.assembly = std::make_shared<nodes::Assembly>(*m_assembly);
+        snapshot.model = std::move(modelCopy);
+        snapshot.version = saveVersion();
+        return snapshot;
+    }
+
+    uint64_t Document::saveVersion() const
+    {
+        return m_saveVersion.load(std::memory_order_acquire);
+    }
+
+    bool Document::completeSave(std::filesystem::path filename, uint64_t snapshotVersion)
+    {
+        m_currentAssemblyFileName = filename;
+        if (saveVersion() != snapshotVersion)
+        {
+            return false;
+        }
+
+        m_fileChanged = false;
+        if (m_assembly)
+        {
+            m_assembly->setFilename(filename);
+        }
+        return true;
     }
 
     nodes::SharedAssembly Document::getAssembly() const

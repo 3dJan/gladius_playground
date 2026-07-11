@@ -8,6 +8,7 @@
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
+#include "io/3mf/SaveSnapshot.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
@@ -184,6 +185,21 @@ namespace gladius
          */
         [[nodiscard]] std::string getLoadingError() const;
         void saveAs(std::filesystem::path filename, bool writeThumbnail = true);
+
+        /**
+         * @brief Captures independent document data for background native 3MF serialization.
+         * @throws std::runtime_error if the document has no assembly or Lib3MF model.
+         */
+        [[nodiscard]] io::SaveSnapshot createSaveSnapshot() const;
+
+        /// @return Monotonically increasing version of persisted document changes.
+        [[nodiscard]] uint64_t saveVersion() const;
+
+        /**
+         * @brief Applies bookkeeping for a completed background save.
+         * @return true when the saved snapshot is still the current document version.
+         */
+        bool completeSave(std::filesystem::path filename, uint64_t snapshotVersion);
 
         void newModel();
         void newEmptyModel();
@@ -516,6 +532,7 @@ namespace gladius
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
         std::shared_ptr<ComputeCore> m_core;
         bool m_fileChanged{false};
+        std::atomic<uint64_t> m_saveVersion{0};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
 

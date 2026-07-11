@@ -8,6 +8,7 @@
 
 #include "EventLogger.h"
 #include "io/3mf/Writer3mfBase.h"
+#include "io/3mf/SaveSnapshot.h"
 #include "nodes/types.h"
 
 #include <lib3mf_implicit.hpp>
@@ -73,6 +74,14 @@ namespace gladius::io
                   bool writeThumbnail = true);
 
         /**
+         * @brief Saves an independent snapshot without accessing the live document.
+         * @return true when the package was written successfully.
+         */
+        bool save(std::filesystem::path const & filename,
+            SaveSnapshot const & snapshot,
+            bool writeThumbnail = false);
+
+        /**
          * @brief Saves the function to a 3MF file with the specified filename.
          * @param filename The path to the output 3MF file.
          * @param function The function to be saved.
@@ -84,6 +93,9 @@ namespace gladius::io
          * @param doc The document to be updated.
          */
         void updateModel(Document const & doc);
+
+        /// @brief Updates a Lib3MF model from an independent save snapshot.
+        void updateModel(SaveSnapshot const & snapshot);
 
       private:
         /**
@@ -102,6 +114,8 @@ namespace gladius::io
         void fillFunction(Lib3MF::PImplicitFunction function,
                           gladius::nodes::Model & model,
                           Lib3MF::PModel model3mf);
+
+        void updateModel(Lib3MF::PModel model3mf, nodes::Assembly const & assembly);
     };
 
     /**
