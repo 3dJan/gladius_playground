@@ -81,6 +81,13 @@ namespace gladius::io
             SaveSnapshot const & snapshot,
             bool writeThumbnail = false);
 
+        /// @brief Attaches PNG bytes to a snapshot-owned Lib3MF model.
+        bool attachThumbnail(Lib3MF::PModel model3mf,
+                             std::vector<Lib3MF_uint8> const & pngData)
+        {
+            return Writer3mfBase::attachThumbnail(model3mf, pngData);
+        }
+
         /**
          * @brief Saves the function to a 3MF file with the specified filename.
          * @param filename The path to the output 3MF file.

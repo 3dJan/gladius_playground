@@ -399,6 +399,7 @@ namespace gladius::ui
                 struct NativeSaveResult
                 {
                         std::filesystem::path filename;
+                    io::DocumentIdentity snapshotDocumentIdentity{0};
                         uint64_t snapshotVersion{0};
                         bool success{false};
                         std::string error;

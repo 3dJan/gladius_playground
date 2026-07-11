@@ -195,11 +195,16 @@ namespace gladius
         /// @return Monotonically increasing version of persisted document changes.
         [[nodiscard]] uint64_t saveVersion() const;
 
+        /// @return Identity of the logical document contents currently loaded in this object.
+        [[nodiscard]] io::DocumentIdentity documentIdentity() const;
+
         /**
          * @brief Applies bookkeeping for a completed background save.
          * @return true when the saved snapshot is still the current document version.
          */
-        bool completeSave(std::filesystem::path filename, uint64_t snapshotVersion);
+        bool completeSave(std::filesystem::path filename,
+                  io::DocumentIdentity snapshotDocumentIdentity,
+                  uint64_t snapshotVersion);
 
         void newModel();
         void newEmptyModel();
@@ -533,6 +538,7 @@ namespace gladius
         std::shared_ptr<ComputeCore> m_core;
         bool m_fileChanged{false};
         std::atomic<uint64_t> m_saveVersion{0};
+        std::atomic<io::DocumentIdentity> m_documentIdentity{0};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
 

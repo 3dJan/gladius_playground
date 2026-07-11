@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "ComputeContext.h"
 #include "io/3mf/Writer3mf.h"
 #include "Theme.h"
 
@@ -1728,6 +1729,10 @@ namespace gladius::ui
     void MainWindow::markFileAsChanged()
     {
         m_fileChanged = true;
+        if (m_doc)
+        {
+            m_doc->markFileAsChanged();
+        }
     }
 
     void MainWindow::open()
@@ -1916,6 +1921,7 @@ namespace gladius::ui
         auto const tempFilename = makeNativeSaveTempPath(save.filename);
         auto snapshot = std::move(save.snapshot);
         auto const filename = save.filename;
+        auto const snapshotDocumentIdentity = snapshot.documentIdentity;
         auto const snapshotVersion = snapshot.version;
         auto const sourceDocument = save.sourceDocument;
         auto logger = m_logger;
@@ -1925,31 +1931,78 @@ namespace gladius::ui
           std::launch::async,
           [filename,
            tempFilename,
+           snapshotDocumentIdentity,
            snapshotVersion,
            sourceDocument,
            snapshot = std::move(snapshot),
            logger]() mutable
           {
-              NativeSaveResult result{filename, snapshotVersion, false, {}, sourceDocument};
+              NativeSaveResult result{filename,
+                                      snapshotDocumentIdentity,
+                                      snapshotVersion,
+                                      false,
+                                      {},
+                                      sourceDocument};
+              auto thumbnailInput = tempFilename;
+              thumbnailInput.replace_extension(".3mf");
               try
               {
                   io::Writer3mf writer(logger);
-                  if (!writer.save(tempFilename, snapshot, false))
+                  if (!writer.save(thumbnailInput, snapshot, false))
                   {
                       result.error = "The 3MF writer rejected the save snapshot.";
                   }
                   else
                   {
-                      std::error_code renameError;
-                      std::filesystem::rename(tempFilename, filename, renameError);
-                      if (renameError)
+                      auto thumbnailContext =
+                        std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+                      if (!thumbnailContext->isValid())
                       {
-                          result.error = fmt::format("Could not publish saved file: {}",
-                                                    renameError.message());
+                          result.error = "No valid compute context is available for thumbnail "
+                                         "generation.";
                       }
                       else
                       {
-                          result.success = true;
+                          auto thumbnailCore = std::make_shared<ComputeCore>(
+                            thumbnailContext, RequiredCapabilities::ComputeOnly, logger);
+                          auto thumbnailDocument = std::make_shared<Document>(thumbnailCore);
+                          thumbnailDocument->setUiMode(false);
+                          thumbnailDocument->load(thumbnailInput);
+
+                          if (!thumbnailCore->prepareImageRendering())
+                          {
+                              result.error = "The isolated thumbnail renderer could not prepare "
+                                             "the snapshot model.";
+                          }
+                          else
+                          {
+                              auto thumbnail = thumbnailCore->createThumbnailPng();
+                              if (!writer.attachThumbnail(snapshot.model, thumbnail.data))
+                              {
+                                  result.error = "The generated thumbnail could not be attached "
+                                                 "to the 3MF package.";
+                              }
+                              else if (!writer.save(tempFilename, snapshot, false))
+                              {
+                                  result.error = "The 3MF writer rejected the thumbnail package.";
+                              }
+                              else
+                              {
+                                  std::error_code renameError;
+                                  std::filesystem::rename(tempFilename,
+                                                          filename,
+                                                          renameError);
+                                  if (renameError)
+                                  {
+                                      result.error = fmt::format(
+                                        "Could not publish saved file: {}", renameError.message());
+                                  }
+                                  else
+                                  {
+                                      result.success = true;
+                                  }
+                              }
+                          }
                       }
                   }
               }
@@ -1958,11 +2011,9 @@ namespace gladius::ui
                   result.error = e.what();
               }
 
-              if (!result.success)
-              {
-                  std::error_code cleanupError;
-                  std::filesystem::remove(tempFilename, cleanupError);
-              }
+              std::error_code cleanupError;
+              std::filesystem::remove(tempFilename, cleanupError);
+              std::filesystem::remove(thumbnailInput, cleanupError);
               return result;
           });
     }
@@ -1986,6 +2037,7 @@ namespace gladius::ui
             if (isCurrentDocument)
             {
                 currentDocumentWasSaved = m_doc->completeSave(result.filename,
+                                                               result.snapshotDocumentIdentity,
                                                                result.snapshotVersion);
                 if (currentDocumentWasSaved)
                 {

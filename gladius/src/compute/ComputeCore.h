@@ -20,6 +20,7 @@
 
 #include <compute/ParameterSignature.h>
 #include <compute/ProgramManager.h>
+#include <compute/RenderSceneState.h>
 
 #include <array>
 #include <atomic>
@@ -630,6 +631,13 @@ namespace gladius
 
         [[nodiscard]] SharedComputeContext getComputeContext() const;
 
+        /// @brief Retain the current context-bound scene state for a background render session.
+        ///
+        /// The returned owner keeps scene resources and OpenCL programs alive. It is currently
+        /// used as the materialization boundary; published render generations will add a
+        /// const-facing session view without exposing these mutable construction APIs.
+        [[nodiscard]] SharedRenderSceneState getRenderSceneState() const;
+
         void compileSlicerProgramBlocking();
 
         void logMsg(std::string msg) const;
@@ -801,6 +809,10 @@ namespace gladius
         // declared first so GPU resources can release themselves while the context is still alive.
         SharedComputeContext m_ComputeContext;
 
+        /// Owns the context-bound scene resources and programs. The aliases below preserve the
+        /// existing ComputeCore API while the render-session refactor is completed.
+        SharedRenderSceneState m_sceneState;
+
         SharedContourExtractor m_contour;
         SharedResources m_resources;
         mutable std::atomic<SharedGLImageBuffer> m_resultImage;
@@ -862,6 +874,6 @@ namespace gladius
         /// Monotonic generation of GPU parameter-buffer uploads that changed the parameters.
         std::atomic<std::uint64_t> m_parameterGeneration{1u};
 
-        ProgramManager m_programs;
+        ProgramManager & m_programs;
     };
 }

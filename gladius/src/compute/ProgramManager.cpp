@@ -442,11 +442,13 @@ namespace gladius
         m_slicerState.signalCompilationFinished();
     }
 
-    void ProgramManager::setComputeContext(std::shared_ptr<ComputeContext> context)
+    void ProgramManager::setComputeContext(std::shared_ptr<ComputeContext> context,
+                                           SharedResources resources)
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
 
         m_ComputeContext = std::move(context);
+        m_resources = std::move(resources);
         reset();
         init();
     }

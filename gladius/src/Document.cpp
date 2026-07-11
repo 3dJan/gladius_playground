@@ -784,6 +784,7 @@ namespace gladius
     void Document::newModel()
     {
         ProfileFunction;
+        m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
 
             m_assembly = std::make_shared<nodes::Assembly>();
@@ -804,6 +805,7 @@ namespace gladius
     void Document::newEmptyModel()
     {
         ProfileFunction;
+        m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
 
             m_assembly = std::make_shared<nodes::Assembly>();
@@ -1406,6 +1408,7 @@ namespace gladius
         io::SaveSnapshot snapshot;
         snapshot.assembly = std::make_shared<nodes::Assembly>(*m_assembly);
         snapshot.model = std::move(modelCopy);
+        snapshot.documentIdentity = documentIdentity();
         snapshot.version = saveVersion();
         return snapshot;
     }
@@ -1415,14 +1418,21 @@ namespace gladius
         return m_saveVersion.load(std::memory_order_acquire);
     }
 
-    bool Document::completeSave(std::filesystem::path filename, uint64_t snapshotVersion)
+    io::DocumentIdentity Document::documentIdentity() const
     {
-        m_currentAssemblyFileName = filename;
-        if (saveVersion() != snapshotVersion)
+        return m_documentIdentity.load(std::memory_order_acquire);
+    }
+
+    bool Document::completeSave(std::filesystem::path filename,
+                                io::DocumentIdentity snapshotDocumentIdentity,
+                                uint64_t snapshotVersion)
+    {
+        if (documentIdentity() != snapshotDocumentIdentity || saveVersion() != snapshotVersion)
         {
             return false;
         }
 
+        m_currentAssemblyFileName = filename;
         m_fileChanged = false;
         if (m_assembly)
         {
@@ -1946,6 +1956,7 @@ namespace gladius
 
         if (filename.extension() == ".3mf")
         {
+            m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
             {
 
                 m_assembly = {};

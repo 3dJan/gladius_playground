@@ -44,11 +44,13 @@ namespace gladius
                              RequiredCapabilities requiredCapabilities,
                              events::SharedLogger logger)
         : m_ComputeContext(context)
+        , m_sceneState(std::make_shared<RenderSceneState>(context, requiredCapabilities, logger))
         , m_contour(std::make_shared<ContourExtractor>(logger))
-        , m_resources(std::make_shared<ResourceContext>(context))
+        , m_resources(m_sceneState->getResourceContext())
+        , m_primitives(m_sceneState->getPrimitives())
         , m_capabilities(requiredCapabilities)
         , m_eventLogger(logger)
-        , m_programs(context, requiredCapabilities, logger, m_resources)
+        , m_programs(m_sceneState->getProgramManager())
         , m_meshResourceState(std::make_shared<ModelState>())
     {
         init();
@@ -59,7 +61,6 @@ namespace gladius
         LOG_LOCATION
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         createBuffer();
-        m_programs.init();
     }
 
     void ComputeCore::reset()
@@ -98,9 +99,6 @@ namespace gladius
         const auto height = size_t{256};
 
         LOG_LOCATION
-
-        m_primitives = std::make_shared<Primitives>(*m_ComputeContext);
-        m_primitives->create();
 
         if (m_capabilities == RequiredCapabilities::OpenGLInterop)
         {
@@ -1097,11 +1095,20 @@ namespace gladius
         return m_ComputeContext;
     }
 
+    SharedRenderSceneState ComputeCore::getRenderSceneState() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        return m_sceneState;
+    }
+
     void ComputeCore::setComputeContext(std::shared_ptr<ComputeContext> context)
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
+        m_sceneState->setComputeContext(context);
         m_ComputeContext = std::move(context);
+        m_resources = m_sceneState->getResourceContext();
+        m_primitives = m_sceneState->getPrimitives();
         reset();
         init();
     }
