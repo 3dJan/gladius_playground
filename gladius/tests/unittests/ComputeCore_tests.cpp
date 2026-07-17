@@ -27,9 +27,7 @@ namespace gladius_tests
     class ComputeCore_Test : public ::testing::Test
     {
         void SetUp() override
-        {
-            m_logger = std::make_shared<events::Logger>();
-        }
+        { m_logger = std::make_shared<events::Logger>(); }
 
       protected:
         std::shared_ptr<ComputeCore> createCore()
@@ -42,7 +40,8 @@ namespace gladius_tests
                   "Failed to create OpenCL Context. Did you install proper GPU drivers?");
             }
 
-            return std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
+            return std::make_shared<ComputeCore>(
+              context, RequiredCapabilities::ComputeOnly, m_logger);
         }
 
         std::shared_ptr<ComputeCore> load3mf(std::filesystem::path const & path)
@@ -68,6 +67,7 @@ namespace gladius_tests
       private:
         std::shared_ptr<ComputeCore> m_core;
         std::shared_ptr<Document> m_doc;
+
       protected:
         events::SharedLogger m_logger;
     };
@@ -88,7 +88,8 @@ namespace gladius_tests
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
-    TEST_F(ComputeCore_Test, RefreshProgram_WithAutomaticCodeGenerator_SelectsPreviewUntilOptimizedIsReady)
+    TEST_F(ComputeCore_Test,
+           RefreshProgram_WithAutomaticCodeGenerator_SelectsPreviewUntilOptimizedIsReady)
     {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
@@ -117,7 +118,8 @@ namespace gladius_tests
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
-    TEST_F(ComputeCore_Test, RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
+    TEST_F(ComputeCore_Test,
+           RecompileIfRequired_WithDeferredOptimizedRender_KeepsInteractiveBackend)
     {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
@@ -166,8 +168,8 @@ namespace gladius_tests
         EXPECT_EQ(core->getSelectedRenderBackend(), RenderBackend::Optimized);
     }
 
-      TEST_F(ComputeCore_Test, TryRenderProgramAccess_WithProgramManagerLockHeld_ReturnsCachedPreview)
-      {
+    TEST_F(ComputeCore_Test, TryRenderProgramAccess_WithProgramManagerLockHeld_ReturnsCachedPreview)
+    {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
         auto core = createCore();
@@ -184,7 +186,7 @@ namespace gladius_tests
         core->recompileIfRequired();
         for (auto attempts = 0; attempts < 500 && core->isCompilationInProgress(); ++attempts)
         {
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         ASSERT_FALSE(core->isCompilationInProgress());
         core->recompileIfRequired();
@@ -203,22 +205,22 @@ namespace gladius_tests
            &lockAcquired,
            releaseLockFuture = std::move(releaseLockFuture)]() mutable
           {
-            auto computeToken = programManager.waitForComputeToken();
-            lockAcquired.set_value();
-            releaseLockFuture.wait();
+              auto computeToken = programManager.waitForComputeToken();
+              lockAcquired.set_value();
+              releaseLockFuture.wait();
           });
 
-        auto const lockWasAcquired = lockAcquiredFuture.wait_for(std::chrono::seconds(2)) ==
-                       std::future_status::ready;
+        auto const lockWasAcquired =
+          lockAcquiredFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
 
         auto tryReady = std::optional<bool>{};
         auto tryBackend = std::optional<RenderBackend>{};
         auto tryProgram = std::optional<SharedRenderProgram>{};
         if (lockWasAcquired)
         {
-          tryReady = core->tryIsRenderProgramReady();
-          tryBackend = core->tryGetSelectedRenderBackend();
-          tryProgram = core->tryGetBestRenderProgram();
+            tryReady = core->tryIsRenderProgramReady();
+            tryBackend = core->tryGetSelectedRenderBackend();
+            tryProgram = core->tryGetBestRenderProgram();
         }
 
         releaseLock.set_value();
@@ -231,7 +233,7 @@ namespace gladius_tests
         EXPECT_EQ(*tryBackend, RenderBackend::CommandStream);
         ASSERT_TRUE(tryProgram.has_value());
         EXPECT_EQ(tryProgram->get(), previewProgram.get());
-      }
+    }
 
     TEST_F(ComputeCore_Test, IsRenderProgramReady_WithModelRefreshInProgress_UsesCompiledPreview)
     {
@@ -256,7 +258,8 @@ namespace gladius_tests
         core->getMeshResourceState()->signalCompilationFinished();
     }
 
-    TEST_F(ComputeCore_Test, RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
+    TEST_F(ComputeCore_Test,
+           RefreshProgram_WithCommandStreamCodeGenerator_CompilesAndRunsRenderKernel)
     {
         SKIP_IF_OPENCL_UNAVAILABLE();
 
@@ -282,11 +285,9 @@ namespace gladius_tests
                                    box->parameter()[nodes::FieldNames::Min].getId()));
         ASSERT_TRUE(model->addLink(maxCorner->getOutputs().at(nodes::FieldNames::Vector).getId(),
                                    box->parameter()[nodes::FieldNames::Max].getId()));
-        ASSERT_TRUE(model->addLink(box->getOutputs().at(nodes::FieldNames::Shape).getId(),
-                                   model->getEndNode()
-                                     ->parameter()
-                                     .at(nodes::FieldNames::Shape)
-                                     .getId()));
+        ASSERT_TRUE(
+          model->addLink(box->getOutputs().at(nodes::FieldNames::Shape).getId(),
+                         model->getEndNode()->parameter().at(nodes::FieldNames::Shape).getId()));
         model->updateGraphAndOrderIfNeeded();
 
         core->setCodeGenerator(CodeGenerator::CommandStream);
@@ -315,12 +316,8 @@ namespace gladius_tests
         ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
         ASSERT_NO_THROW(targetImage.allocateOnDevice());
 
-        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
-                                                    *primitives,
-                                                    targetImage,
-                                                    0.0f,
-                                                    0u,
-                                                    imageSize));
+        ASSERT_NO_THROW(previewProgram->renderScene(
+          core->getComputeContext()->GetQueue(), *primitives, targetImage, 0.0f, 0u, imageSize));
         ASSERT_NO_THROW(targetImage.read());
 
         auto const & pixels = targetImage.getData();
@@ -329,10 +326,8 @@ namespace gladius_tests
                                 pixels.end(),
                                 [](cl_float4 const & pixel)
                                 {
-                                    return std::isfinite(pixel.s[0]) &&
-                                           std::isfinite(pixel.s[1]) &&
-                                           std::isfinite(pixel.s[2]) &&
-                                           std::isfinite(pixel.s[3]);
+                                    return std::isfinite(pixel.s[0]) && std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) && std::isfinite(pixel.s[3]);
                                 }));
     }
 
@@ -352,9 +347,10 @@ namespace gladius_tests
         mesh.addFace(b, c, d);
         mesh.addFace(c, a, d);
 
-        auto const meshPath = std::filesystem::temp_directory_path() /
-                              fmt::format("gladius-command-stream-mesh-{}.3mf",
-                                          std::chrono::steady_clock::now().time_since_epoch().count());
+        auto const meshPath =
+          std::filesystem::temp_directory_path() /
+          fmt::format("gladius-command-stream-mesh-{}.3mf",
+                      std::chrono::steady_clock::now().time_since_epoch().count());
 
         io::MeshWriter3mf writer(m_logger);
         ASSERT_NO_THROW(writer.exportMesh(meshPath, mesh, "TinyTetrahedron"));
@@ -378,15 +374,15 @@ namespace gladius_tests
         SpatialMeshResource const * importedMesh = nullptr;
         for (auto const & [key, resource] : document->getResourceManager().getResourceMap())
         {
-          if (key.getResourceType() != ResourceType::Mesh)
-          {
-            continue;
-          }
-          importedMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
-          if (importedMesh != nullptr)
-          {
-            break;
-          }
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+            importedMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (importedMesh != nullptr)
+            {
+                break;
+            }
         }
         ASSERT_NE(importedMesh, nullptr);
         EXPECT_EQ(importedMesh->evaluationConfig().method, MeshSdfMethod::PureBVH);
@@ -417,10 +413,7 @@ namespace gladius_tests
         auto const meshPrimitiveIt = std::find_if(
           primitiveMeta.begin(),
           primitiveMeta.end(),
-          [](PrimitiveMeta const & meta)
-          {
-              return meta.primitiveType == SDF_SPATIAL_MESH_ROOT;
-          });
+          [](PrimitiveMeta const & meta) { return meta.primitiveType == SDF_SPATIAL_MESH_ROOT; });
         ASSERT_NE(meshPrimitiveIt, primitiveMeta.end());
 
         auto const & payload = primitives->data.getData();
@@ -444,12 +437,8 @@ namespace gladius_tests
         ImageRGBA targetImage(*core->getComputeContext(), imageSize, imageSize);
         ASSERT_NO_THROW(targetImage.allocateOnDevice());
 
-        ASSERT_NO_THROW(previewProgram->renderScene(core->getComputeContext()->GetQueue(),
-                                                    *primitives,
-                                                    targetImage,
-                                                    0.0f,
-                                                    0u,
-                                                    imageSize));
+        ASSERT_NO_THROW(previewProgram->renderScene(
+          core->getComputeContext()->GetQueue(), *primitives, targetImage, 0.0f, 0u, imageSize));
         ASSERT_NO_THROW(targetImage.read());
 
         auto const & pixels = targetImage.getData();
@@ -458,60 +447,58 @@ namespace gladius_tests
                                 pixels.end(),
                                 [](cl_float4 const & pixel)
                                 {
-                                    return std::isfinite(pixel.s[0]) &&
-                                           std::isfinite(pixel.s[1]) &&
-                                           std::isfinite(pixel.s[2]) &&
-                                           std::isfinite(pixel.s[3]);
+                                    return std::isfinite(pixel.s[0]) && std::isfinite(pixel.s[1]) &&
+                                           std::isfinite(pixel.s[2]) && std::isfinite(pixel.s[3]);
                                 }));
     }
 
     TEST_F(ComputeCore_Test, DISABLED_PreComputeSDF_LoadedAssembly_EqualsExpectedResult)
     {
-      auto core = load3mf("testdata/ImplicitGyroid.3mf");
-      auto primitives = core->getPrimitives();
-      auto const & payloadData = primitives->data.getData();
-      auto const payloadDataHash = helper::computeHash(payloadData.cbegin(), payloadData.cend());
-      EXPECT_EQ(payloadDataHash, 0u);
+        auto core = load3mf("testdata/ImplicitGyroid.3mf");
+        auto primitives = core->getPrimitives();
+        auto const & payloadData = primitives->data.getData();
+        auto const payloadDataHash = helper::computeHash(payloadData.cbegin(), payloadData.cend());
+        EXPECT_EQ(payloadDataHash, 0u);
 
-      auto resources = core->getResourceContext();
-      auto const parameter = resources->getParameterBuffer().getData();
-      for (auto const & param : parameter)
-      {
-        std::cout << param << std::endl;
-      }
+        auto resources = core->getResourceContext();
+        auto const parameter = resources->getParameterBuffer().getData();
+        for (auto const & param : parameter)
+        {
+            std::cout << param << std::endl;
+        }
 
-      auto const parameterHash = helper::computeHash(parameter.cbegin(), parameter.cend());
-      constexpr auto expectedHash = 6494502327630714298u;
-      EXPECT_EQ(parameterHash, expectedHash);
-      EXPECT_TRUE(core->precomputeSdfForWholeBuildPlatform());
+        auto const parameterHash = helper::computeHash(parameter.cbegin(), parameter.cend());
+        constexpr auto expectedHash = 6494502327630714298u;
+        EXPECT_EQ(parameterHash, expectedHash);
+        EXPECT_TRUE(core->precomputeSdfForWholeBuildPlatform());
 
-      // Reuse the previously defined resources variable instead of redefining it
-      auto & preComp = resources->getPrecompSdfBuffer();
-      preComp.read();
-      auto const bufSize = preComp.getData().size();
-      EXPECT_EQ(bufSize, 16777216u);
+        // Reuse the previously defined resources variable instead of redefining it
+        auto & preComp = resources->getPrecompSdfBuffer();
+        preComp.read();
+        auto const bufSize = preComp.getData().size();
+        EXPECT_EQ(bufSize, 16777216u);
 
-      auto const & data = preComp.getData();
-      std::vector<float> distances;
-      distances.reserve(data.size());
-      for (auto const & sample : data)
-      {
-        distances.push_back(sample.s[3]);
-      }
-      auto const hash = helper::computeHash(distances.cbegin(), distances.cend());
-      EXPECT_EQ(hash, 13095517456146691086u);
+        auto const & data = preComp.getData();
+        std::vector<float> distances;
+        distances.reserve(data.size());
+        for (auto const & sample : data)
+        {
+            distances.push_back(sample.s[3]);
+        }
+        auto const hash = helper::computeHash(distances.cbegin(), distances.cend());
+        EXPECT_EQ(hash, 13095517456146691086u);
 
-      auto bBox = core->getBoundingBox();
-      EXPECT_TRUE(bBox.has_value());
+        auto bBox = core->getBoundingBox();
+        EXPECT_TRUE(bBox.has_value());
 
-      auto const tolerance = 1E-3f;
-      EXPECT_NEAR(bBox->min.x, -7.6475257873535156f, tolerance);
-      EXPECT_NEAR(bBox->min.y, -1.9666776657104492f, tolerance);
-      EXPECT_NEAR(bBox->min.z, -0.00098828284535557032f, tolerance);
+        auto const tolerance = 1E-3f;
+        EXPECT_NEAR(bBox->min.x, -7.6475257873535156f, tolerance);
+        EXPECT_NEAR(bBox->min.y, -1.9666776657104492f, tolerance);
+        EXPECT_NEAR(bBox->min.z, -0.00098828284535557032f, tolerance);
 
-      EXPECT_NEAR(bBox->max.x, 64.728408813476562f, tolerance);
-      EXPECT_NEAR(bBox->max.y, 74.136703491210938f, tolerance);
-      EXPECT_NEAR(bBox->max.z, 50.00640869140625f, tolerance);
+        EXPECT_NEAR(bBox->max.x, 64.728408813476562f, tolerance);
+        EXPECT_NEAR(bBox->max.y, 74.136703491210938f, tolerance);
+        EXPECT_NEAR(bBox->max.z, 50.00640869140625f, tolerance);
     }
 
     // Regression test for the Document lifecycle fix (review: F7).
@@ -531,12 +518,101 @@ namespace gladius_tests
         // Destroy while the worker may still be running. Run the teardown on a separate
         // thread guarded by a watchdog so a regression that deadlocks fails the test
         // instead of hanging the whole suite.
-        auto teardown = std::async(std::launch::async,
-                                   [doc = std::move(document)]() mutable { doc.reset(); });
+        auto teardown =
+          std::async(std::launch::async, [doc = std::move(document)]() mutable { doc.reset(); });
 
         ASSERT_EQ(teardown.wait_for(std::chrono::seconds(30)), std::future_status::ready)
           << "Document destruction deadlocked while joining the async refresh worker";
         ASSERT_NO_THROW(teardown.get());
     }
-}
 
+    TEST_F(ComputeCore_Test, RenderSession_RetainsPreviousSceneAcrossContextReplacement)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto session = core->createRenderSession();
+        ASSERT_NE(session, nullptr);
+
+        auto const previousContext = session->getComputeContext();
+        ASSERT_NE(previousContext, nullptr);
+        ASSERT_TRUE(session->isPayloadCurrent());
+
+        auto replacementContext = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+        ASSERT_TRUE(replacementContext->isValid());
+        core->setComputeContext(replacementContext);
+
+        EXPECT_NE(core->getComputeContext().get(), previousContext.get());
+        EXPECT_EQ(session->getComputeContext().get(), previousContext.get());
+        EXPECT_TRUE(session->isPayloadCurrent());
+    }
+
+    TEST_F(ComputeCore_Test, PublishRenderSceneGeneration_RetainsExistingSessionGeneration)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto session = core->createRenderSession();
+        ASSERT_NE(session, nullptr);
+
+        auto const previousGenerationContext = session->getComputeContext();
+        ASSERT_NE(previousGenerationContext, nullptr);
+
+        auto replacement = std::make_shared<RenderSceneGeneration>(
+          previousGenerationContext, RequiredCapabilities::ComputeOnly, m_logger);
+
+        core->publishRenderSceneGeneration(replacement);
+
+        auto currentSession = core->createRenderSession();
+        ASSERT_NE(currentSession, nullptr);
+        EXPECT_EQ(currentSession->getComputeContext().get(), previousGenerationContext.get());
+        EXPECT_NE(currentSession->getPayloadSnapshot().primitiveMeta.resourceId,
+                  session->getPayloadSnapshot().primitiveMeta.resourceId);
+        EXPECT_EQ(session->getComputeContext().get(), previousGenerationContext.get());
+        EXPECT_TRUE(session->isPayloadCurrent());
+    }
+
+    TEST_F(ComputeCore_Test, CreateRenderSession_WithMatchingRevision_ReturnsTaggedGeneration)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto const context = core->getComputeContext();
+        RenderSceneRevision const revision{.documentIdentity = 41, .documentVersion = 7};
+        auto generation = std::make_shared<RenderSceneGeneration>(
+          context, RequiredCapabilities::ComputeOnly, m_logger, revision);
+        core->publishRenderSceneGeneration(std::move(generation));
+
+        auto session = core->createRenderSession(revision);
+
+        ASSERT_TRUE(session.has_value());
+        ASSERT_NE(*session, nullptr);
+        EXPECT_EQ((*session)->getRevision(), revision);
+    }
+
+    TEST_F(ComputeCore_Test, CreateRenderSession_WithDifferentRevision_RejectsGeneration)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto const context = core->getComputeContext();
+        RenderSceneRevision const publishedRevision{.documentIdentity = 41, .documentVersion = 7};
+        auto generation = std::make_shared<RenderSceneGeneration>(
+          context, RequiredCapabilities::ComputeOnly, m_logger, publishedRevision);
+        core->publishRenderSceneGeneration(std::move(generation));
+
+        EXPECT_FALSE(
+          core->createRenderSession({.documentIdentity = 41, .documentVersion = 8}).has_value());
+        EXPECT_FALSE(
+          core->createRenderSession({.documentIdentity = 42, .documentVersion = 7}).has_value());
+    }
+
+    TEST_F(ComputeCore_Test, CreateRenderSession_WithUntaggedRevision_RejectsGeneration)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+
+        EXPECT_FALSE(core->createRenderSession({}).has_value());
+    }
+}

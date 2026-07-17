@@ -12,8 +12,10 @@ namespace gladius
      * resource payload buffers, primitive buffers, and compiled OpenCL programs stay alive as one
      * unit while render sessions use them.
      *
-     * The state is mutable while a document refresh materializes a new scene. Future render-session
-     * APIs must expose it only after publication and must not mutate it during rendering.
+     * The state is materialized once and is never rebound to another compute context. During this
+     * migration, the payload buffers and program manager remain mutable for normal model updates;
+     * retained render sessions must therefore treat this owner as a lifetime boundary, not yet as
+     * a fully immutable generation.
      */
     class RenderSceneState
     {
@@ -23,9 +25,6 @@ namespace gladius
                          events::SharedLogger logger);
 
         [[nodiscard]] SharedComputeContext getComputeContext() const;
-
-        /// @brief Rebuild all context-local scene resources for a replacement context.
-        void setComputeContext(SharedComputeContext context);
 
         [[nodiscard]] SharedResources & getResourceContext();
         [[nodiscard]] SharedResources getResourceContext() const;

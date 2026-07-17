@@ -4,10 +4,11 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -15,7 +16,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <iostream>
 
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -44,17 +44,16 @@ namespace gladius
                              RequiredCapabilities requiredCapabilities,
                              events::SharedLogger logger)
         : m_ComputeContext(context)
-        , m_sceneState(std::make_shared<RenderSceneState>(context, requiredCapabilities, logger))
+        , m_sceneState(
+            std::make_shared<RenderSceneGeneration>(context, requiredCapabilities, logger))
         , m_contour(std::make_shared<ContourExtractor>(logger))
-        , m_resources(m_sceneState->getResourceContext())
+        , m_resources(m_sceneState->getResources())
         , m_primitives(m_sceneState->getPrimitives())
         , m_capabilities(requiredCapabilities)
         , m_eventLogger(logger)
-        , m_programs(m_sceneState->getProgramManager())
+        , m_programs(&m_sceneState->getProgramManager())
         , m_meshResourceState(std::make_shared<ModelState>())
-    {
-        init();
-    }
+    { init(); }
 
     void ComputeCore::init()
     {
@@ -70,14 +69,12 @@ namespace gladius
         (void) beginOptimizedSourceGeneration();
         m_boundingBox.reset();
         m_boundingBoxStale.store(false, std::memory_order_release);
-        m_programs.reset();
+        m_programs->reset();
         setSliceHeight(0.f);
     }
 
     ComputeToken ComputeCore::waitForComputeToken()
-    {
-        return ComputeToken(m_computeMutex);
-    }
+    { return ComputeToken(m_computeMutex); }
 
     OptionalComputeToken ComputeCore::requestComputeToken()
     {
@@ -147,8 +144,8 @@ namespace gladius
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         m_resources->requestSliceBuffer();
         m_primitives->write();
-        m_programs.getSlicerProgram()->computeMarchingSquareState(*m_primitives,
-                                                                  sliceParameter.zHeight_mm);
+        m_programs->getSlicerProgram()->computeMarchingSquareState(*m_primitives,
+                                                                   sliceParameter.zHeight_mm);
         m_contour->addIsoLineFromMarchingSquare(m_resources->getMarchingSquareStates(),
                                                 m_resources->getClippingArea());
 
@@ -169,7 +166,7 @@ namespace gladius
 
                 auto verticesOut = verticesIn;
 
-                m_programs.getSlicerProgram()->adoptVertexPositions2d(
+                m_programs->getSlicerProgram()->adoptVertexPositions2d(
                   *m_primitives, verticesIn, verticesOut, sliceParameter.zHeight_mm);
                 int i = 0;
                 for (auto & vertex : contour.vertices)
@@ -189,8 +186,9 @@ namespace gladius
     {
         ProfileFunction
 
-        // --- GPU phase: acquire compute mutex, render SDF, copy data to local buffers ---
-        std::vector<cl_float2> localSdfData;
+          // --- GPU phase: acquire compute mutex, render SDF, copy data to local buffers ---
+          std::vector<cl_float2>
+            localSdfData;
         int sdfWidth = 0;
         int sdfHeight = 0;
         float xMin = 0.0f, yMin = 0.0f, xMax = 0.0f, yMax = 0.0f;
@@ -201,8 +199,8 @@ namespace gladius
             m_resources->requestDistanceMaps();
             m_primitives->write();
 
-            m_programs.getSlicerProgram()->renderLayers(
-                *m_primitives, 0.0f, sliceParameter.zHeight_mm);
+            m_programs->getSlicerProgram()->renderLayers(
+              *m_primitives, 0.0f, sliceParameter.zHeight_mm);
 
             auto const & sdfImage = *m_resources->getDistanceMipMaps().back();
             sdfWidth = static_cast<int>(sdfImage.getWidth());
@@ -238,26 +236,27 @@ namespace gladius
             float const px = (pos.x() - xMin) / domainW * static_cast<float>(sdfWidth - 1);
             float const py = (pos.y() - yMin) / domainH * static_cast<float>(sdfHeight - 1);
 
-            int const ix  = std::clamp(static_cast<int>(px), 0, sdfWidth - 1);
-            int const iy  = std::clamp(static_cast<int>(py), 0, sdfHeight - 1);
+            int const ix = std::clamp(static_cast<int>(px), 0, sdfWidth - 1);
+            int const iy = std::clamp(static_cast<int>(py), 0, sdfHeight - 1);
             int const ix1 = std::min(ix + 1, sdfWidth - 1);
             int const iy1 = std::min(iy + 1, sdfHeight - 1);
 
             float const tx = px - static_cast<float>(ix);
             float const ty = py - static_cast<float>(iy);
 
-            auto const idx = [&](int x, int y) {
+            auto const idx = [&](int x, int y)
+            {
                 return static_cast<std::size_t>(y) * static_cast<std::size_t>(sdfWidth) +
                        static_cast<std::size_t>(x);
             };
 
-            float const v00 = localSdfData[idx(ix,  iy )].x;
-            float const v10 = localSdfData[idx(ix1, iy )].x;
-            float const v01 = localSdfData[idx(ix,  iy1)].x;
+            float const v00 = localSdfData[idx(ix, iy)].x;
+            float const v10 = localSdfData[idx(ix1, iy)].x;
+            float const v01 = localSdfData[idx(ix, iy1)].x;
             float const v11 = localSdfData[idx(ix1, iy1)].x;
 
             return v00 * (1.0f - tx) * (1.0f - ty) + v10 * tx * (1.0f - ty) +
-                   v01 * (1.0f - tx) * ty           + v11 * tx * ty;
+                   v01 * (1.0f - tx) * ty + v11 * tx * ty;
         };
 
         // Compute max depth so that the finest cells match the native GPU resolution
@@ -267,8 +266,7 @@ namespace gladius
           std::max(sliceParameter.minFeatureSize_mm, nativeCellSize * 2.0f);
         float const domainSize = std::max(domainW, domainH);
         std::size_t maxDepth = 3U;
-        while (maxDepth < 14U &&
-               (domainSize / static_cast<float>(1U << maxDepth)) > targetCellSize)
+        while (maxDepth < 14U && (domainSize / static_cast<float>(1U << maxDepth)) > targetCellSize)
         {
             ++maxDepth;
         }
@@ -277,13 +275,13 @@ namespace gladius
                                                Eigen::Vector2f{xMax, yMax}};
 
         slicer::MortonQuadtreeConfig cfg;
-        cfg.initialDepth        = 3U;
-        cfg.maxDepth            = maxDepth;
-        cfg.isoValue            = 0.0f;
-        cfg.minFeatureSize      = sliceParameter.minFeatureSize_mm;
+        cfg.initialDepth = 3U;
+        cfg.maxDepth = maxDepth;
+        cfg.isoValue = 0.0f;
+        cfg.minFeatureSize = sliceParameter.minFeatureSize_mm;
         cfg.enableAdaptiveRefinement = false;
-        cfg.maxNodes            = 2000000U;
-        cfg.refinementPasses    = 1U;
+        cfg.maxNodes = 2000000U;
+        cfg.refinementPasses = 1U;
 
         slicer::MortonQuadtree quadtree(quadBounds);
         quadtree.build(cfg);
@@ -316,13 +314,12 @@ namespace gladius
 
         // Self-intersection check for manufacturing safety
         auto const selfIntersectionCount =
-            slicer::QuadtreeContourExtractor::detectSelfIntersections(sparsePolyLines);
+          slicer::QuadtreeContourExtractor::detectSelfIntersections(sparsePolyLines);
         if (selfIntersectionCount > 0U)
         {
-            logMsg(fmt::format(
-                "WARNING: Adaptive contour has {} self-intersection(s). "
-                "Result may not be watertight — do not use for manufacturing.",
-                selfIntersectionCount));
+            logMsg(fmt::format("WARNING: Adaptive contour has {} self-intersection(s). "
+                               "Result may not be watertight — do not use for manufacturing.",
+                               selfIntersectionCount));
         }
 
         // Check for unclosed polylines
@@ -336,10 +333,9 @@ namespace gladius
         }
         if (openCount > 0U)
         {
-            logMsg(fmt::format(
-                "WARNING: Adaptive contour has {} open polyline(s). "
-                "Result may not be watertight — do not use for manufacturing.",
-                openCount));
+            logMsg(fmt::format("WARNING: Adaptive contour has {} open polyline(s). "
+                               "Result may not be watertight — do not use for manufacturing.",
+                               openCount));
         }
 
         // Convert SparsePolyLine → PolyLine and insert into ContourExtractor
@@ -477,41 +473,34 @@ namespace gladius
     }
 
     bool ComputeCore::isParameterSignatureCompatible(nodes::Assembly const & assembly) const
-    {
-        return m_programs.isParameterSignatureCompatible(assembly);
-    }
+    { return m_programs->isParameterSignatureCompatible(assembly); }
 
     ParameterSignature const & ComputeCore::getCompiledParameterSignature() const
-    {
-        return m_programs.getCompiledParameterSignature();
-    }
+    { return m_programs->getCompiledParameterSignature(); }
 
     void ComputeCore::setPreCompSdfSize(size_t size)
-    {
-        m_preCompSdfSize = size;
-    }
+    { m_preCompSdfSize = size; }
 
-    size_t ComputeCore::buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams)
+    size_t
+    ComputeCore::buildMeshVoxelGrids(std::vector<MeshVoxelGridBuildParams> const & buildParams)
     {
         ProfileFunction
 
-        if (buildParams.empty())
-        {
-            return 0;
-        }
+          if (buildParams.empty())
+        { return 0; }
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-        
+
         // Ensure primitives are uploaded to GPU
         m_primitives->write();
-        
-        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+
+        auto meshPreparationProgram = m_programs->getMeshPreparationProgram();
         if (!meshPreparationProgram)
         {
             logMsg("Cannot build voxel grids: mesh preparation program not available");
             return 0;
         }
-        
+
         size_t successCount = 0;
         for (auto const & params : buildParams)
         {
@@ -520,7 +509,7 @@ namespace gladius
                 ++successCount;
             }
         }
-        
+
         // Wait for all builds to complete
         CL_ERROR(m_ComputeContext->GetQueue().finish());
 
@@ -531,16 +520,17 @@ namespace gladius
             // not upload the original zero-filled cache again.
             m_primitives->data.read();
         }
-        
+
         logMsg(fmt::format("Built {} voxel grids", successCount));
-        
+
         return successCount;
     }
 
-    size_t ComputeCore::buildMeshFwnAggregates(std::vector<MeshFwnAggregateBuildParams> const & buildParams)
+    size_t ComputeCore::buildMeshFwnAggregates(
+      std::vector<MeshFwnAggregateBuildParams> const & buildParams)
     {
-        ProfileFunction
-        GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshFwnAggregates total", !buildParams.empty());
+        ProfileFunction GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshFwnAggregates total",
+                                                  !buildParams.empty());
 
         if (buildParams.empty())
         {
@@ -552,7 +542,7 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        auto meshPreparationProgram = m_programs->getMeshPreparationProgram();
         if (!meshPreparationProgram)
         {
             logMsg("Cannot build mesh FWN aggregates: mesh preparation program not available");
@@ -591,10 +581,11 @@ namespace gladius
         return successCount;
     }
 
-    size_t ComputeCore::buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams)
+    size_t
+    ComputeCore::buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams)
     {
-        ProfileFunction
-        GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshSignCaches queue steps", !buildParams.empty());
+        ProfileFunction GLADIUS_FWN_PREP_SCOPE_IF("ComputeCore::buildMeshSignCaches queue steps",
+                                                  !buildParams.empty());
 
         if (buildParams.empty())
         {
@@ -606,7 +597,7 @@ namespace gladius
 
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        auto meshPreparationProgram = m_programs.getMeshPreparationProgram();
+        auto meshPreparationProgram = m_programs->getMeshPreparationProgram();
         if (!meshPreparationProgram)
         {
             logMsg("Cannot build mesh sign caches: mesh preparation program not available");
@@ -639,39 +630,27 @@ namespace gladius
         m_primitives->write();
 
         auto inputVertices = vertices;
-        m_programs.getSlicerProgram()->adoptVertexOfMeshToSurface(
+        m_programs->getSlicerProgram()->adoptVertexOfMeshToSurface(
           *m_primitives, inputVertices, vertices);
     }
 
     void ComputeCore::setAutoUpdateBoundingBox(bool autoUpdateBoundingBox)
-    {
-        m_autoUpdateBoundingBox = autoUpdateBoundingBox;
-    }
+    { m_autoUpdateBoundingBox = autoUpdateBoundingBox; }
 
     bool ComputeCore::isAutoUpdateBoundingBoxEnabled() const
-    {
-        return m_autoUpdateBoundingBox;
-    }
+    { return m_autoUpdateBoundingBox; }
 
     bool ComputeCore::isSdfComputationInProgress() const noexcept
-    {
-        return m_sdfComputationInProgress.load();
-    }
+    { return m_sdfComputationInProgress.load(); }
 
     bool ComputeCore::isBoundingBoxComputationInProgress() const noexcept
-    {
-        return m_boundingBoxComputationInProgress.load();
-    }
+    { return m_boundingBoxComputationInProgress.load(); }
 
     ProgramManager & ComputeCore::getProgramManager()
-    {
-        return m_programs;
-    }
+    { return *m_programs; }
 
     ProgramManager const & ComputeCore::getProgramManager() const
-    {
-        return m_programs;
-    }
+    { return *m_programs; }
 
     void ComputeCore::generateContours(nodes::SliceParameter sliceParameter)
     {
@@ -701,7 +680,7 @@ namespace gladius
             lock(m_computeMutex);
 
         m_primitives->write();
-        m_programs.getSlicerProgram()->renderLayers(*m_primitives, 0.0f, m_sliceHeight_mm);
+        m_programs->getSlicerProgram()->renderLayers(*m_primitives, 0.0f, m_sliceHeight_mm);
     }
 
     std::optional<BoundingBox> ComputeCore::getBoundingBox() const
@@ -711,23 +690,19 @@ namespace gladius
 
     bool ComputeCore::isBoundingBoxMeaningful(BoundingBox const & box)
     {
-        auto const values = std::array<float, 6>{box.min.x,
-                                                 box.min.y,
-                                                 box.min.z,
-                                                 box.max.x,
-                                                 box.max.y,
-                                                 box.max.z};
+        auto const values =
+          std::array<float, 6>{box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z};
 
-        auto const finite =
-          std::all_of(values.begin(), values.end(), [](float value) { return std::isfinite(value); });
+        auto const finite = std::all_of(
+          values.begin(), values.end(), [](float value) { return std::isfinite(value); });
 
         if (!finite)
         {
             return false;
         }
 
-        bool const ordered = (box.min.x <= box.max.x) && (box.min.y <= box.max.y) &&
-                              (box.min.z <= box.max.z);
+        bool const ordered =
+          (box.min.x <= box.max.x) && (box.min.y <= box.max.y) && (box.min.z <= box.max.z);
 
         return ordered;
     }
@@ -796,9 +771,7 @@ namespace gladius
         ProfileFunction
 
           if (!m_boundingBox)
-        {
-            throw std::runtime_error("Bounding box is not available");
-        }
+        { throw std::runtime_error("Bounding box is not available"); }
 
         cl_float4 const newClippingArea{
           {m_boundingBox->min.x, m_boundingBox->min.y, m_boundingBox->max.x, m_boundingBox->max.y}};
@@ -830,14 +803,14 @@ namespace gladius
             return true;
         }
 
-        if (!m_programs.getSlicerState().isModelUpToDate())
+        if (!m_programs->getSlicerState().isModelUpToDate())
         {
             try
             {
                 logMsg("updateBoundingBoxFast: slicer state not up to date, requesting recompile");
                 recompileIfRequired();
                 logMsg("updateBoundingBoxFast: after recompileIfRequired: " +
-                       m_programs.getDebugStateSummary());
+                       m_programs->getDebugStateSummary());
             }
             catch (...)
             {
@@ -852,7 +825,7 @@ namespace gladius
 
         m_boundingBox = BoundingBox{};
 
-        if (!m_programs.getSlicerProgram()->isValid())
+        if (!m_programs->getSlicerProgram()->isValid())
         {
             try
             {
@@ -868,7 +841,7 @@ namespace gladius
 
         try
         {
-            m_programs.getSlicerProgram()->movePointsToSurface(
+            m_programs->getSlicerProgram()->movePointsToSurface(
               *m_primitives,
               m_resources->getConvexHullInitialVertices(),
               m_resources->getConvexHullVertices());
@@ -974,29 +947,27 @@ namespace gladius
     {
         ProfileFunction
 
-                pollOptimizedSourceGeneration();
+        pollOptimizedSourceGeneration();
 
-                std::lock_guard<std::recursive_mutex>
-            lock(m_computeMutex);
-        m_programs.setVdbRequired(requiresNanoVdbLocked());
-        m_programs.recompileIfRequired();
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+        m_programs->setVdbRequired(requiresNanoVdbLocked());
+        m_programs->recompileIfRequired();
         LOG_LOCATION;
     }
 
     bool ComputeCore::isCompilationInProgress() const
-    {
-        return m_programs.isBlockingCompilationInProgress();
-    }
+    { return m_programs->isBlockingCompilationInProgress(); }
 
     void ComputeCore::recompileBlockingNoLock()
     {
-        bool const requiresVdb = [&]() {
+        bool const requiresVdb = [&]()
+        {
             std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
             return requiresNanoVdbLocked();
         }();
 
-        m_programs.setVdbRequired(requiresVdb);
-        m_programs.recompileBlockingNoLock();
+        m_programs->setVdbRequired(requiresVdb);
+        m_programs->recompileBlockingNoLock();
     }
 
     void ComputeCore::resetBoundingBox()
@@ -1006,14 +977,10 @@ namespace gladius
     }
 
     void ComputeCore::markBoundingBoxStale()
-    {
-        m_boundingBoxStale.store(true, std::memory_order_release);
-    }
+    { m_boundingBoxStale.store(true, std::memory_order_release); }
 
     bool ComputeCore::isBoundingBoxStale() const
-    {
-        return m_boundingBoxStale.load(std::memory_order_acquire);
-    }
+    { return m_boundingBoxStale.load(std::memory_order_acquire); }
 
     void ComputeCore::recomputeStaleBoundingBox()
     {
@@ -1047,7 +1014,7 @@ namespace gladius
         downSkinBuffer.setWidth(size.x);
         downSkinBuffer.setHeight(size.y);
         downSkinBuffer.allocateOnDevice();
-        m_programs.getSlicerProgram()->renderDownSkinDistance(
+        m_programs->getSlicerProgram()->renderDownSkinDistance(
           downSkinBuffer, *m_primitives, m_sliceHeight_mm);
 
         downSkinMap.pixelSize = pixelSize_mm;
@@ -1079,7 +1046,7 @@ namespace gladius
         upSkinBuffer.setWidth(size.x);
         upSkinBuffer.setHeight(size.y);
         upSkinBuffer.allocateOnDevice();
-        m_programs.getSlicerProgram()->renderUpSkinDistance(
+        m_programs->getSlicerProgram()->renderUpSkinDistance(
           upSkinBuffer, *m_primitives, m_sliceHeight_mm);
 
         upSkinMap.pixelSize = pixelSize_mm;
@@ -1095,20 +1062,63 @@ namespace gladius
         return m_ComputeContext;
     }
 
-    SharedRenderSceneState ComputeCore::getRenderSceneState() const
+    SharedRenderSession ComputeCore::createRenderSession() const
     {
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-        return m_sceneState;
+
+        RenderSessionInputs inputs{m_resources->getRenderingSettings(),
+                                   m_resources->getEyePosition(),
+                                   m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.time_s = m_resources->getTime_s();
+        return std::make_shared<RenderSession>(m_sceneState, std::move(inputs));
+    }
+
+    std::optional<SharedRenderSession>
+    ComputeCore::createRenderSession(RenderSceneRevision revision) const
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        if (!revision.isSpecified() || !m_sceneState || m_sceneState->getRevision() != revision)
+        {
+            return std::nullopt;
+        }
+
+        RenderSessionInputs inputs{m_resources->getRenderingSettings(),
+                                   m_resources->getEyePosition(),
+                                   m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.time_s = m_resources->getTime_s();
+        return std::make_shared<RenderSession>(m_sceneState, std::move(inputs));
+    }
+
+    void ComputeCore::publishRenderSceneGeneration(SharedRenderSceneGeneration generation)
+    {
+        if (!generation)
+        {
+            throw std::invalid_argument("Cannot publish an empty render scene generation");
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
+
+        auto generationContext = generation->getComputeContext();
+        if (!generationContext)
+        {
+            throw std::invalid_argument("Cannot publish a render scene without a compute context");
+        }
+
+        m_sceneState = std::move(generation);
+        m_ComputeContext = std::move(generationContext);
+        m_resources = m_sceneState->getResources();
+        m_primitives = m_sceneState->getPrimitives();
+        m_programs = &m_sceneState->getProgramManager();
     }
 
     void ComputeCore::setComputeContext(std::shared_ptr<ComputeContext> context)
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
 
-        m_sceneState->setComputeContext(context);
-        m_ComputeContext = std::move(context);
-        m_resources = m_sceneState->getResourceContext();
-        m_primitives = m_sceneState->getPrimitives();
+        auto newSceneState =
+          std::make_shared<RenderSceneGeneration>(context, m_capabilities, m_eventLogger);
+        publishRenderSceneGeneration(std::move(newSceneState));
         reset();
         init();
     }
@@ -1117,7 +1127,8 @@ namespace gladius
     {
         ProfileFunction
 
-        std::lock_guard<std::mutex> lockSliceFuture(m_sliceFutureMutex);
+          std::lock_guard<std::mutex>
+            lockSliceFuture(m_sliceFutureMutex);
 
         if (m_slicingInProgress.load(std::memory_order_acquire))
         {
@@ -1155,9 +1166,7 @@ namespace gladius
               {
                   ComputeCore & core;
                   ~SlicingGuard()
-                  {
-                      core.m_slicingInProgress.store(false, std::memory_order_release);
-                  }
+                  { core.m_slicingInProgress.store(false, std::memory_order_release); }
               } slicingGuard{*this};
 
               FrameMarkEnd("Slicing");
@@ -1186,15 +1195,10 @@ namespace gladius
     }
 
     bool ComputeCore::isSlicingInProgress() const
-    {
-        ProfileFunction
-        return m_slicingInProgress.load(std::memory_order_acquire);
-    }
+    { ProfileFunction return m_slicingInProgress.load(std::memory_order_acquire); }
 
     std::mutex & ComputeCore::getContourExtractorMutex()
-    {
-        return m_contourExtractorMutex;
-    }
+    { return m_contourExtractorMutex; }
 
     void ComputeCore::throwIfNoOpenGL() const
     {
@@ -1228,14 +1232,10 @@ namespace gladius
     }
 
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgress() const
-    {
-        return m_programs.isAnyCompilationInProgress();
-    }
+    { return m_programs->isAnyCompilationInProgress(); }
 
     [[nodiscard]] bool ComputeCore::isAnyCompilationInProgressNonBlocking() const noexcept
-    {
-        return m_programs.isAnyCompilationInProgressNonBlocking();
-    }
+    { return m_programs->isAnyCompilationInProgressNonBlocking(); }
 
     bool ComputeCore::ensureSlicerProgramReady()
     {
@@ -1244,8 +1244,8 @@ namespace gladius
         try
         {
             std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-            m_programs.setVdbRequired(requiresNanoVdbLocked());
-            return m_programs.ensureSlicerProgramCompiled();
+            m_programs->setVdbRequired(requiresNanoVdbLocked());
+            return m_programs->ensureSlicerProgramCompiled();
         }
         catch (std::exception const & e)
         {
@@ -1255,27 +1255,19 @@ namespace gladius
     }
 
     bool ComputeCore::updateBBox()
-    {
-        return updateBoundingBoxFast();
-    }
+    { return updateBoundingBoxFast(); }
 
     void ComputeCore::updateBBoxOrThrow()
     {
         ProfileFunction if (!updateBBox())
-        {
-            throw std::runtime_error("Bounding box computation failed");
-        }
+        { throw std::runtime_error("Bounding box computation failed"); }
     }
 
     std::uint64_t ComputeCore::beginOptimizedSourceGeneration()
-    {
-        return m_optimizedSourceGenerationEpoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    }
+    { return m_optimizedSourceGenerationEpoch.fetch_add(1u, std::memory_order_acq_rel) + 1u; }
 
     bool ComputeCore::isOptimizedSourceGenerationCurrent(std::uint64_t const generation) const
-    {
-        return m_optimizedSourceGenerationEpoch.load(std::memory_order_acquire) == generation;
-    }
+    { return m_optimizedSourceGenerationEpoch.load(std::memory_order_acquire) == generation; }
 
     void ComputeCore::startOptimizedSourceGeneration(nodes::SharedAssembly assembly,
                                                      ParameterSignature parameterSignature,
@@ -1364,8 +1356,8 @@ namespace gladius
             logMsg(fmt::format("Optimized source generation job {} finished: {} bytes",
                                result.generation,
                                result.source.size()));
-            m_programs.setOptimizedModelSource(std::move(result.source), true, true);
-            m_programs.setCompiledParameterSignature(std::move(result.parameterSignature));
+            m_programs->setOptimizedModelSource(std::move(result.source), true, true);
+            m_programs->setCompiledParameterSignature(std::move(result.parameterSignature));
         }
     }
 
@@ -1397,7 +1389,7 @@ namespace gladius
         auto optimizedKernel = std::optional<std::string>{};
         bool const generateOptimizedSourceAsync =
           m_codeGenerator == CodeGenerator::Automatic &&
-          m_programs.isOptimizedRenderCompilationDeferred();
+          m_programs->isOptimizedRenderCompilationDeferred();
 
         if (m_codeGenerator == CodeGenerator::CommandStream ||
             m_codeGenerator == CodeGenerator::Automatic)
@@ -1444,14 +1436,15 @@ namespace gladius
 
             if (generateOptimizedSourceAsync)
             {
-                m_programs.setPreviewModelSource(*commandStreamKernel);
-                m_programs.setCompiledParameterSignature(parameterSignature);
-                logMsg(fmt::format("Captured parameter signature: {}",
-                                   parameterSignature.toString()));
-                logMsg(fmt::format(
-                  "Published command-stream preview source: {} bytes; optimized source generation deferred",
-                  commandStreamKernel->size()));
-                startOptimizedSourceGeneration(assembly, parameterSignature, optimizedSourceGeneration);
+                m_programs->setPreviewModelSource(*commandStreamKernel);
+                m_programs->setCompiledParameterSignature(parameterSignature);
+                logMsg(
+                  fmt::format("Captured parameter signature: {}", parameterSignature.toString()));
+                logMsg(fmt::format("Published command-stream preview source: {} bytes; optimized "
+                                   "source generation deferred",
+                                   commandStreamKernel->size()));
+                startOptimizedSourceGeneration(
+                  assembly, parameterSignature, optimizedSourceGeneration);
                 return;
             }
 
@@ -1460,7 +1453,7 @@ namespace gladius
                 logMsg("Automatic code generation failed to create both render sources");
                 return;
             }
-            m_programs.setModelSources(*optimizedKernel, *commandStreamKernel, true);
+            m_programs->setModelSources(*optimizedKernel, *commandStreamKernel, true);
         }
         else if (m_codeGenerator == CodeGenerator::CommandStream)
         {
@@ -1469,7 +1462,7 @@ namespace gladius
                 logMsg("Command-stream code generation failed to create a render source");
                 return;
             }
-            m_programs.setModelSources(*commandStreamKernel, *commandStreamKernel, false);
+            m_programs->setModelSources(*commandStreamKernel, *commandStreamKernel, false);
         }
         else if (m_codeGenerator == CodeGenerator::Code)
         {
@@ -1478,11 +1471,11 @@ namespace gladius
                 logMsg("Optimized code generation failed to create a render source");
                 return;
             }
-            m_programs.setModelSource(*optimizedKernel);
+            m_programs->setModelSource(*optimizedKernel);
         }
 
         // Capture parameter signature after code generation for fast-path validation
-        m_programs.setCompiledParameterSignature(parameterSignature);
+        m_programs->setCompiledParameterSignature(parameterSignature);
         logMsg(fmt::format("Captured parameter signature: {}", parameterSignature.toString()));
     }
 
@@ -1503,9 +1496,7 @@ namespace gladius
     }
 
     std::optional<bool> ComputeCore::tryIsRenderProgramReady() const
-    {
-        return m_programs.tryIsBestRenderProgramReady();
-    }
+    { return m_programs->tryIsBestRenderProgramReady(); }
 
     [[nodiscard]] bool ComputeCore::isRendererReady() const
     {
@@ -1523,8 +1514,8 @@ namespace gladius
     void ComputeCore::compileSlicerProgramBlocking()
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-        m_programs.setVdbRequired(requiresNanoVdbLocked());
-        m_programs.recompileBlockingNoLock();
+        m_programs->setVdbRequired(requiresNanoVdbLocked());
+        m_programs->recompileBlockingNoLock();
 
         updateBBox();
     }
@@ -1541,7 +1532,7 @@ namespace gladius
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
         mesh.write();
-        m_programs.getSlicerProgram()->calculateNormals(*m_primitives, mesh);
+        m_programs->getSlicerProgram()->calculateNormals(*m_primitives, mesh);
         mesh.read();
     }
 
@@ -1555,9 +1546,7 @@ namespace gladius
     }
 
     std::string ComputeCore::getProgramStateSummary() const
-    {
-        return m_programs.getDebugStateSummary();
-    }
+    { return m_programs->getDebugStateSummary(); }
 
     cl_int2 ComputeCore::determineBufferSize(float2 pixelSize_mm) const
     {
@@ -1599,33 +1588,33 @@ namespace gladius
     {
         ProfileFunction
 
-                    logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: begin");
+          logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: begin");
 
-        if (!m_programs.getSlicerState().isModelUpToDate())
+        if (!m_programs->getSlicerState().isModelUpToDate())
         {
             recompileIfRequired();
-                        logMsg(fmt::format(
-                            "ComputeCore::precomputeSdfForWholeBuildPlatform: post-recompile state {}",
-                            m_programs.getDebugStateSummary()));
+            logMsg(fmt::format(
+              "ComputeCore::precomputeSdfForWholeBuildPlatform: post-recompile state {}",
+              m_programs->getDebugStateSummary()));
             return false;
         }
 
-        if (!m_programs.getSlicerProgram()->isValid())
+        if (!m_programs->getSlicerProgram()->isValid())
         {
-                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: slicer program invalid");
+            logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: slicer program invalid");
             return false;
         }
 
         if (m_precompSdfIsValid.load(std::memory_order_acquire))
         {
-                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: SDF already valid");
+            logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: SDF already valid");
             return true;
         }
         updateBBox();
 
         if (!m_boundingBox.has_value())
         {
-                        logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: no bounding box available");
+            logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: no bounding box available");
             return false;
         }
 
@@ -1644,7 +1633,7 @@ namespace gladius
 
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(prevCompSdfBBox);
-        m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, prevCompSdfBBox);
+        m_programs->getSlicerProgram()->precomputeSdf(*m_primitives, prevCompSdfBBox);
         m_precompSdfIsValid.store(true, std::memory_order_release);
         logMsg("ComputeCore::precomputeSdfForWholeBuildPlatform: completed successfully");
         return true;
@@ -1659,7 +1648,7 @@ namespace gladius
 
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(boundingBox);
-        m_programs.getSlicerProgram()->precomputeSdf(*m_primitives, boundingBox);
+        m_programs->getSlicerProgram()->precomputeSdf(*m_primitives, boundingBox);
     }
 
     cl::Event ComputeCore::precomputeSdfAsync(cl::CommandQueue const & queue)
@@ -1670,29 +1659,33 @@ namespace gladius
 
         // No mutex lock for async operation - caller must ensure thread safety
         // Validate preconditions
-        if (!m_programs.getSlicerState().isModelUpToDate())
+        if (!m_programs->getSlicerState().isModelUpToDate())
         {
-            logMsg("ComputeCore::precomputeSdfAsync: model not up to date, requesting recompilation");
+            logMsg(
+              "ComputeCore::precomputeSdfAsync: model not up to date, requesting recompilation");
             recompileIfRequired();
 
-            if (!m_programs.getSlicerState().isModelUpToDate())
+            if (!m_programs->getSlicerState().isModelUpToDate())
             {
-                logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after recompilation");
+                logMsg("ComputeCore::precomputeSdfAsync: model still not up to date after "
+                       "recompilation");
                 m_sdfComputationInProgress.store(false);
                 return cl::Event{};
             }
             else
             {
-                logMsg("ComputeCore::precomputeSdfAsync: model marked up to date after recompilation");
+                logMsg(
+                  "ComputeCore::precomputeSdfAsync: model marked up to date after recompilation");
             }
         }
 
-        if (!m_programs.getSlicerProgram()->isValid())
+        if (!m_programs->getSlicerProgram()->isValid())
         {
-            logMsg("ComputeCore::precomputeSdfAsync: slicer program invalid, requesting recompilation");
+            logMsg(
+              "ComputeCore::precomputeSdfAsync: slicer program invalid, requesting recompilation");
             recompileIfRequired();
 
-            if (!m_programs.getSlicerProgram()->isValid())
+            if (!m_programs->getSlicerProgram()->isValid())
             {
                 logMsg("ComputeCore::precomputeSdfAsync: slicer program remained invalid");
                 m_sdfComputationInProgress.store(false);
@@ -1700,7 +1693,8 @@ namespace gladius
             }
             else
             {
-                logMsg("ComputeCore::precomputeSdfAsync: slicer program became valid after recompilation");
+                logMsg("ComputeCore::precomputeSdfAsync: slicer program became valid after "
+                       "recompilation");
             }
         }
 
@@ -1727,14 +1721,14 @@ namespace gladius
         }
 
         auto const & bbox = m_boundingBox.value();
-        logMsg(fmt::format(
-          "ComputeCore::precomputeSdfAsync: using bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f})",
-          bbox.min.x,
-          bbox.min.y,
-          bbox.min.z,
-          bbox.max.x,
-          bbox.max.y,
-          bbox.max.z));
+        logMsg(fmt::format("ComputeCore::precomputeSdfAsync: using bbox min=({:.3f},{:.3f},{:.3f}) "
+                           "max=({:.3f},{:.3f},{:.3f})",
+                           bbox.min.x,
+                           bbox.min.y,
+                           bbox.min.z,
+                           bbox.max.x,
+                           bbox.max.y,
+                           bbox.max.z));
 
         // Expand bounding box with margin
         // When bbox is stale (parameter changed but not yet recomputed), use a larger
@@ -1760,19 +1754,19 @@ namespace gladius
         m_resources->allocatePreComputedSdf(m_preCompSdfSize, m_preCompSdfSize, m_preCompSdfSize);
         m_resources->setPreCompSdfBBox(sdfBBox);
 
-                logMsg(fmt::format(
-                    "ComputeCore::precomputeSdfAsync: launching kernel with bbox min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f}) size={}",
-                    sdfBBox.min.x,
-                    sdfBBox.min.y,
-                    sdfBBox.min.z,
-                    sdfBBox.max.x,
-                    sdfBBox.max.y,
-                    sdfBBox.max.z,
-                    m_preCompSdfSize));
+        logMsg(fmt::format("ComputeCore::precomputeSdfAsync: launching kernel with bbox "
+                           "min=({:.3f},{:.3f},{:.3f}) max=({:.3f},{:.3f},{:.3f}) size={}",
+                           sdfBBox.min.x,
+                           sdfBBox.min.y,
+                           sdfBBox.min.z,
+                           sdfBBox.max.x,
+                           sdfBBox.max.y,
+                           sdfBBox.max.z,
+                           m_preCompSdfSize));
 
         // Launch async SDF kernel
         cl::Event sdfEvent =
-          m_programs.getSlicerProgram()->precomputeSdfAsync(*m_primitives, sdfBBox, queue);
+          m_programs->getSlicerProgram()->precomputeSdfAsync(*m_primitives, sdfBBox, queue);
 
         if (sdfEvent())
         {
@@ -1805,26 +1799,26 @@ namespace gladius
                    << " precompValid="
                    << (m_precompSdfIsValid.load(std::memory_order_acquire) ? 1 : 0)
                    << " renderProgValid="
-                   << (m_programs.getBestRenderProgram() &&
-                       !m_programs.getBestRenderProgram()->isCompilationInProgress())
+                   << (m_programs->getBestRenderProgram() &&
+                       !m_programs->getBestRenderProgram()->isCompilationInProgress())
                    << " slicerValid="
-                   << (m_programs.getSlicerProgram() && m_programs.getSlicerProgram()->isValid());
+                   << (m_programs->getSlicerProgram() && m_programs->getSlicerProgram()->isValid());
                 logMsg(ss.str());
             }
             catch (...)
             {
             }
             // Ensure model is compiled and up to date
-            if (!m_programs.getSlicerState().isModelUpToDate())
+            if (!m_programs->getSlicerState().isModelUpToDate())
             {
                 // Add explicit debug about model source and states
                 try
                 {
                     logMsg(std::string(
                              "prepareThumbnailGeneration: slicer not up to date; hasModelSource=") +
-                           (m_programs.hasModelSource() ? "1" : "0"));
+                           (m_programs->hasModelSource() ? "1" : "0"));
                     logMsg("prepareThumbnailGeneration: before recompile: " +
-                           m_programs.getDebugStateSummary());
+                           m_programs->getDebugStateSummary());
                 }
                 catch (...)
                 {
@@ -1833,7 +1827,7 @@ namespace gladius
                 recompileIfRequired();
 
                 // Check again after recompilation
-                if (!m_programs.getSlicerState().isModelUpToDate())
+                if (!m_programs->getSlicerState().isModelUpToDate())
                 {
                     // Try a blocking compile as a last resort in headless mode
                     try
@@ -1843,9 +1837,9 @@ namespace gladius
                     catch (...)
                     {
                     }
-                    m_programs.setVdbRequired(requiresNanoVdbLocked());
-                    m_programs.recompileBlockingNoLock();
-                    if (!m_programs.getSlicerState().isModelUpToDate())
+                    m_programs->setVdbRequired(requiresNanoVdbLocked());
+                    m_programs->recompileBlockingNoLock();
+                    if (!m_programs->getSlicerState().isModelUpToDate())
                     {
                         logMsg("Model compilation failed during thumbnail preparation (blocking)");
                         return false;
@@ -1854,7 +1848,7 @@ namespace gladius
                 try
                 {
                     logMsg("prepareThumbnailGeneration: after compile: " +
-                           m_programs.getDebugStateSummary());
+                           m_programs->getDebugStateSummary());
                 }
                 catch (...)
                 {
@@ -1907,14 +1901,10 @@ namespace gladius
     }
 
     SharedGLImageBuffer ComputeCore::getResultImage() const
-    {
-        return m_resultImage.load(std::memory_order_acquire);
-    }
+    { return m_resultImage.load(std::memory_order_acquire); }
 
     SharedGLImageBuffer ComputeCore::getLowResPreviewImage() const
-    {
-        return m_lowResPreviewImage.load(std::memory_order_acquire);
-    }
+    { return m_lowResPreviewImage.load(std::memory_order_acquire); }
 
     SharedContourExtractor ComputeCore::getContour() const
     {
@@ -1933,9 +1923,7 @@ namespace gladius
     }
 
     cl_float ComputeCore::getSliceHeight() const
-    {
-        return m_sliceHeight_mm;
-    }
+    { return m_sliceHeight_mm; }
 
     void ComputeCore::setSliceHeight(cl_float z_mm)
     {
@@ -1945,18 +1933,18 @@ namespace gladius
     }
     SharedSlicerProgram ComputeCore::getSlicerProgram() const
     {
-        return std::shared_ptr<SlicerProgram>(m_programs.getSlicerProgram(),
+        return std::shared_ptr<SlicerProgram>(m_programs->getSlicerProgram(),
                                               [](SlicerProgram *) {}); // Non-owning shared_ptr
     }
     SharedRenderProgram ComputeCore::getBestRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getBestRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs->getBestRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
 
     std::optional<SharedRenderProgram> ComputeCore::tryGetBestRenderProgram() const
     {
-        auto renderProgram = m_programs.tryGetBestRenderProgram();
+        auto renderProgram = m_programs->tryGetBestRenderProgram();
         if (!renderProgram.has_value() || *renderProgram == nullptr)
         {
             return std::nullopt;
@@ -1965,30 +1953,25 @@ namespace gladius
     }
 
     RenderBackend ComputeCore::getSelectedRenderBackend() const
-    {
-        return m_programs.getSelectedRenderBackend();
-    }
+    { return m_programs->getSelectedRenderBackend(); }
 
     std::optional<RenderBackend> ComputeCore::tryGetSelectedRenderBackend() const
-    {
-        return m_programs.tryGetSelectedRenderBackend();
-    }
+    { return m_programs->tryGetSelectedRenderBackend(); }
 
     SharedRenderProgram ComputeCore::getPreviewRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getPreviewRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs->getPreviewRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
     SharedRenderProgram ComputeCore::getOptimzedRenderProgram() const
     {
-        return std::shared_ptr<RenderProgram>(m_programs.getOptimizedRenderProgram(),
+        return std::shared_ptr<RenderProgram>(m_programs->getOptimizedRenderProgram(),
                                               [](RenderProgram *) {}); // Non-owning shared_ptr
     }
 
     bool ComputeCore::setScreenResolution(size_t width, size_t height)
     {
-        ProfileFunction auto const currentImage =
-          m_resultImage.load(std::memory_order_acquire);
+        ProfileFunction auto const currentImage = m_resultImage.load(std::memory_order_acquire);
         if (currentImage && (width == currentImage->getWidth()) &&
             (height == currentImage->getHeight()))
         {
@@ -2015,8 +1998,7 @@ namespace gladius
 
     bool ComputeCore::setLowResPreviewResolution(size_t width, size_t height)
     {
-        auto const currentImage =
-          m_lowResPreviewImage.load(std::memory_order_acquire);
+        auto const currentImage = m_lowResPreviewImage.load(std::memory_order_acquire);
         if (currentImage && (width == currentImage->getWidth()) &&
             (height == currentImage->getHeight()))
         {
@@ -2028,8 +2010,7 @@ namespace gladius
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
-        auto const latestImage =
-          m_lowResPreviewImage.load(std::memory_order_acquire);
+        auto const latestImage = m_lowResPreviewImage.load(std::memory_order_acquire);
         if (latestImage && (width == latestImage->getWidth()) &&
             (height == latestImage->getHeight()))
         {
@@ -2044,8 +2025,7 @@ namespace gladius
 
     std::pair<size_t, size_t> ComputeCore::getLowResPreviewResolution() const
     {
-        auto const image =
-          m_lowResPreviewImage.load(std::memory_order_acquire);
+        auto const image = m_lowResPreviewImage.load(std::memory_order_acquire);
         if (!image)
         {
             return {0u, 0u};
@@ -2054,14 +2034,10 @@ namespace gladius
     }
 
     SharedPrimitives ComputeCore::getPrimitives() const
-    {
-        return m_primitives;
-    }
+    { return m_primitives; }
 
     SharedResources ComputeCore::getResourceContext() const
-    {
-        return m_resources;
-    }
+    { return m_resources; }
 
     void ComputeCore::renderResultImageInterOp(DistanceMap & sourceImage,
                                                GLImageBuffer & targetImage) const
@@ -2100,7 +2076,7 @@ namespace gladius
           std::lock_guard<std::recursive_mutex>
             lock(m_computeMutex);
         throwIfNoOpenGL();
-        m_programs.getSlicerProgram()->renderResultImageReadPixel(sourceImage, targetImage);
+        m_programs->getSlicerProgram()->renderResultImageReadPixel(sourceImage, targetImage);
     }
 
     void ComputeCore::renderImage(DistanceMap & sourceImage) const
@@ -2145,9 +2121,7 @@ namespace gladius
         ProfileFunction
 
           if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
+        { return false; }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
         throwIfNoOpenGL();
         recompileIfRequired();
@@ -2174,12 +2148,21 @@ namespace gladius
             return false;
         }
 
-        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        auto inputs = RenderSessionInputs{m_resources->getRenderingSettings(),
+                                          m_resources->getEyePosition(),
+                                          m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.approximation = AM_HYBRID;
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
-        (*renderProgram)->renderScene(
-          *m_primitives, *resultImage, m_sliceHeight_mm, startLine, endLine);
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        (*renderProgram)
+          ->renderScene(m_ComputeContext->GetQueue(),
+                        *m_primitives,
+                        *resultImage,
+                        std::move(inputs),
+                        startLine,
+                        endLine);
 
         resultImage->invalidateContent();
 
@@ -2203,9 +2186,7 @@ namespace gladius
           // It does NOT require GL context and does NOT call GL functions
 
           if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
+        { return false; }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         // Don't call throwIfNoOpenGL() - we don't need GL for pure compute!
@@ -2223,15 +2204,20 @@ namespace gladius
             return false;
         }
 
-        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        auto inputs = RenderSessionInputs{m_resources->getRenderingSettings(),
+                                          m_resources->getEyePosition(),
+                                          m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.approximation = AM_HYBRID;
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
 
         // Render directly to the target CL image buffer (no GL involved)
-        cl::Event const renderEvent = (*renderProgram)->renderSceneAsync(
-          commandQueue, *m_primitives, targetImage, m_sliceHeight_mm, startLine, endLine);
-
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        cl::Event const renderEvent =
+          (*renderProgram)
+            ->renderSceneAsync(
+              commandQueue, *m_primitives, targetImage, std::move(inputs), startLine, endLine);
 
         if (completionEvent != nullptr)
         {
@@ -2259,9 +2245,7 @@ namespace gladius
         ProfileFunction
 
           if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
+        { return false; }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         recompileIfRequired();
@@ -2282,8 +2266,14 @@ namespace gladius
         m_lastUsedHQApproximation = settings.approximation;
         m_lastUsedPreviewApproximation = settings.approximation;
 
-        cl::Event const renderEvent = (*renderProgram)->renderSceneAsync(
-          commandQueue, *m_primitives, targetImage, settings, m_sliceHeight_mm, startLine, endLine);
+        RenderSessionInputs inputs{
+          settings, m_resources->getEyePosition(), m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
+        cl::Event const renderEvent =
+          (*renderProgram)
+            ->renderSceneAsync(
+              commandQueue, *m_primitives, targetImage, std::move(inputs), startLine, endLine);
 
         if (completionEvent != nullptr)
         {
@@ -2305,10 +2295,8 @@ namespace gladius
     {
         ProfileFunction
 
-        if (!m_computeMutex.try_lock())
-        {
-            return LowResPreviewRenderStatus::Skipped;
-        }
+          if (!m_computeMutex.try_lock())
+        { return LowResPreviewRenderStatus::Skipped; }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         // Low-res preview must stay cheap and independent of mesh complexity.
@@ -2330,31 +2318,34 @@ namespace gladius
         }
 
         glFinish();
-        auto lowResPreviewImage =
-          m_lowResPreviewImage.load(std::memory_order_acquire);
+        auto lowResPreviewImage = m_lowResPreviewImage.load(std::memory_order_acquire);
         auto resultImage = m_resultImage.load(std::memory_order_acquire);
         if (!lowResPreviewImage || !resultImage)
         {
             return LowResPreviewRenderStatus::Failed;
         }
 
-        m_resources->getRenderingSettings().approximation = AM_ONLY_PRECOMPSDF;
+        auto inputs = RenderSessionInputs{m_resources->getRenderingSettings(),
+                                          m_resources->getEyePosition(),
+                                          m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.approximation = AM_ONLY_PRECOMPSDF;
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
         m_lastUsedApproximation = AM_ONLY_PRECOMPSDF;
         m_lastUsedPreviewApproximation = AM_ONLY_PRECOMPSDF;
 
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         // and avoids expensive shadow rays and AO samples during interactive editing
-        m_resources->getRenderingSettings().flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
+        inputs.settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
-        (*renderProgram)->renderScene(*m_primitives,
-                                      *lowResPreviewImage,
-                                      m_sliceHeight_mm,
-                                      0,
-                                      lowResPreviewImage->getHeight());
-        m_resources->getRenderingSettings().flags &= ~(RF_DISABLE_SHADOWS | RF_DISABLE_AO);
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
-        (*renderProgram)->resample(
-          *lowResPreviewImage, *resultImage, 0, resultImage->getHeight());
+        (*renderProgram)
+          ->renderScene(m_ComputeContext->GetQueue(),
+                        *m_primitives,
+                        *lowResPreviewImage,
+                        std::move(inputs),
+                        0,
+                        lowResPreviewImage->getHeight());
+        (*renderProgram)->resample(*lowResPreviewImage, *resultImage, 0, resultImage->getHeight());
         resultImage->invalidateContent();
 
         // Ensure GL texture is updated (especially important for readpixel mode)
@@ -2368,13 +2359,11 @@ namespace gladius
     {
         ProfileFunction
 
-        // Note: No mutex lock - caller is responsible for thread safety
-        // Note: No glFinish() - this is async, caller handles sync via returned event
+          // Note: No mutex lock - caller is responsible for thread safety
+          // Note: No glFinish() - this is async, caller handles sync via returned event
 
-        if (!m_precompSdfIsValid.load(std::memory_order_acquire))
-        {
-            return cl::Event{};
-        }
+          if (!m_precompSdfIsValid.load(std::memory_order_acquire))
+        { return cl::Event{}; }
 
         // Work with a local copy of settings to avoid mutating shared state
         // across threads (the worker thread calls this during streaming preview)
@@ -2387,13 +2376,12 @@ namespace gladius
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
-        cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(queue,
-                                                                         *m_primitives,
-                                                                         targetImage,
-                                                                         settings,
-                                                                         m_sliceHeight_mm,
-                                                                         0,
-                                                                         targetImage.getHeight());
+        RenderSessionInputs inputs{
+          settings, m_resources->getEyePosition(), m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
+        cl::Event renderEvent = getBestRenderProgram()->renderSceneAsync(
+          queue, *m_primitives, targetImage, std::move(inputs), 0, targetImage.getHeight());
 
         // Flush to ensure commands are submitted to the GPU before returning
         // This is important for proper event completion signaling
@@ -2402,14 +2390,14 @@ namespace gladius
         return renderEvent;
     }
 
-    cl::Event ComputeCore::renderLowResPreviewWithDistanceOutputAsync(
-        cl::CommandQueue const & queue,
-        ImageRGBA & targetImage) const
+    cl::Event
+    ComputeCore::renderLowResPreviewWithDistanceOutputAsync(cl::CommandQueue const & queue,
+                                                            ImageRGBA & targetImage) const
     {
         ProfileFunction
 
-        // Ensure distance buffer is allocated for low-res dimensions
-        auto * distanceBuffer = m_resources->getDistanceInitBuffer();
+          // Ensure distance buffer is allocated for low-res dimensions
+          auto * distanceBuffer = m_resources->getDistanceInitBuffer();
         if (!distanceBuffer)
         {
             // Buffer not allocated yet - fall back to regular preview
@@ -2431,34 +2419,34 @@ namespace gladius
         // Disable shadows and AO for low-res preview — consistent with precomp-SDF path
         settings.flags |= RF_DISABLE_SHADOWS | RF_DISABLE_AO;
 
-        cl::Event renderEvent = getBestRenderProgram()->renderSceneWithDistanceOutputAsync(
-            queue,
-            *m_primitives,
-            targetImage,
-            *distanceBuffer,
-            settings,
-            m_sliceHeight_mm,
-            0,
-            targetImage.getHeight());
+        RenderSessionInputs inputs{
+          settings, m_resources->getEyePosition(), m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
+        cl::Event renderEvent =
+          getBestRenderProgram()->renderSceneWithDistanceOutputAsync(queue,
+                                                                     *m_primitives,
+                                                                     targetImage,
+                                                                     *distanceBuffer,
+                                                                     std::move(inputs),
+                                                                     0,
+                                                                     targetImage.getHeight());
 
         queue.flush();
 
         return renderEvent;
     }
 
-    bool ComputeCore::renderSceneWithDistanceInit(
-        cl::CommandQueue const & commandQueue,
-        size_t startLine,
-        size_t endLine,
-        ImageRGBA & targetImage,
-        cl::Event * completionEvent)
+    bool ComputeCore::renderSceneWithDistanceInit(cl::CommandQueue const & commandQueue,
+                                                  size_t startLine,
+                                                  size_t endLine,
+                                                  ImageRGBA & targetImage,
+                                                  cl::Event * completionEvent)
     {
         ProfileFunction
 
-        if (!m_computeMutex.try_lock())
-        {
-            return false;
-        }
+          if (!m_computeMutex.try_lock())
+        { return false; }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         recompileIfRequired();
@@ -2473,21 +2461,25 @@ namespace gladius
         if (!distanceBuffer || !m_distanceInitBufferValid.load(std::memory_order_acquire))
         {
             // Fall back to standard rendering if distance buffer not available
-            return renderSceneComputeOnly(commandQueue, startLine, endLine, targetImage, completionEvent);
+            return renderSceneComputeOnly(
+              commandQueue, startLine, endLine, targetImage, completionEvent);
         }
 
-        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        RenderSessionInputs inputs{m_resources->getRenderingSettings(),
+                                   m_resources->getEyePosition(),
+                                   m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.approximation = AM_HYBRID;
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
 
-        cl::Event const renderEvent = getBestRenderProgram()->renderSceneWithDistanceInitAsync(
-            commandQueue,
-            *m_primitives,
-            targetImage,
-            *distanceBuffer,
-            m_sliceHeight_mm,
-            startLine,
-            endLine);
-
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        cl::Event const renderEvent =
+          getBestRenderProgram()->renderSceneWithDistanceInitAsync(commandQueue,
+                                                                   *m_primitives,
+                                                                   targetImage,
+                                                                   *distanceBuffer,
+                                                                   std::move(inputs),
+                                                                   startLine,
+                                                                   endLine);
 
         if (completionEvent != nullptr)
         {
@@ -2512,21 +2504,16 @@ namespace gladius
     }
 
     void ComputeCore::invalidateDistanceInitBuffer()
-    {
-        m_distanceInitBufferValid.store(false, std::memory_order_release);
-    }
+    { m_distanceInitBufferValid.store(false, std::memory_order_release); }
 
     void ComputeCore::setDistanceInitBufferValid()
-    {
-        m_distanceInitBufferValid.store(true, std::memory_order_release);
-    }
+    { m_distanceInitBufferValid.store(true, std::memory_order_release); }
 
-    bool ComputeCore::renderSceneWithMetrics(
-        cl::CommandQueue const & commandQueue,
-        size_t startLine,
-        size_t endLine,
-        ImageRGBA & targetImage,
-        cl::Event * completionEvent)
+    bool ComputeCore::renderSceneWithMetrics(cl::CommandQueue const & commandQueue,
+                                             size_t startLine,
+                                             size_t endLine,
+                                             ImageRGBA & targetImage,
+                                             cl::Event * completionEvent)
     {
         ProfileFunction;
 
@@ -2547,18 +2534,21 @@ namespace gladius
         // Get the metrics buffer from ResourceContext
         auto & metricsBuffer = m_resources->getMetricsBuffer();
 
-        m_resources->getRenderingSettings().approximation = AM_HYBRID;
+        RenderSessionInputs inputs{m_resources->getRenderingSettings(),
+                                   m_resources->getEyePosition(),
+                                   m_resources->getModelViewPerspectiveMat()};
+        inputs.settings.approximation = AM_HYBRID;
+        inputs.settings.z_mm = m_sliceHeight_mm;
+        inputs.settings.time_s = m_resources->getTime_s();
 
-        cl::Event const renderEvent = getBestRenderProgram()->renderSceneWithMetricsAsync(
-            commandQueue,
-            *m_primitives,
-            targetImage,
-            metricsBuffer,
-            m_sliceHeight_mm,
-            startLine,
-            endLine);
-
-        m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        cl::Event const renderEvent =
+          getBestRenderProgram()->renderSceneWithMetricsAsync(commandQueue,
+                                                              *m_primitives,
+                                                              targetImage,
+                                                              metricsBuffer,
+                                                              std::move(inputs),
+                                                              startLine,
+                                                              endLine);
 
         if (completionEvent != nullptr)
         {
@@ -2581,12 +2571,11 @@ namespace gladius
 
         auto & metricsBuffer = m_resources->getMetricsBuffer();
         RayMarchMetrics zeroMetrics{};
-        cl_int err = m_ComputeContext->GetQueue().enqueueWriteBuffer(
-            metricsBuffer,
-            CL_TRUE,  // blocking write
-            0,
-            sizeof(RayMarchMetrics),
-            &zeroMetrics);
+        cl_int err = m_ComputeContext->GetQueue().enqueueWriteBuffer(metricsBuffer,
+                                                                     CL_TRUE, // blocking write
+                                                                     0,
+                                                                     sizeof(RayMarchMetrics),
+                                                                     &zeroMetrics);
         CL_ERROR(err);
     }
 
@@ -2598,12 +2587,11 @@ namespace gladius
         RayMarchMetrics metrics{};
         auto & metricsBuffer = m_resources->getMetricsBuffer();
 
-        cl_int err = m_ComputeContext->GetQueue().enqueueReadBuffer(
-            metricsBuffer,
-            CL_TRUE,  // blocking read
-            0,
-            sizeof(RayMarchMetrics),
-            &metrics);
+        cl_int err = m_ComputeContext->GetQueue().enqueueReadBuffer(metricsBuffer,
+                                                                    CL_TRUE, // blocking read
+                                                                    0,
+                                                                    sizeof(RayMarchMetrics),
+                                                                    &metrics);
         CL_ERROR(err);
 
         return metrics;
@@ -2625,60 +2613,40 @@ namespace gladius
     }
 
     bool ComputeCore::isSdfValid() const
-    {
-        return m_precompSdfIsValid.load(std::memory_order_acquire);
-    }
+    { return m_precompSdfIsValid.load(std::memory_order_acquire); }
 
     ApproximationMode ComputeCore::getLastUsedApproximation() const
-    {
-        return m_lastUsedApproximation;
-    }
+    { return m_lastUsedApproximation; }
 
     ApproximationMode ComputeCore::getLastUsedPreviewApproximation() const
-    {
-        return m_lastUsedPreviewApproximation;
-    }
+    { return m_lastUsedPreviewApproximation; }
 
     ApproximationMode ComputeCore::getLastUsedHQApproximation() const
-    {
-        return m_lastUsedHQApproximation;
-    }
+    { return m_lastUsedHQApproximation; }
 
     events::SharedLogger ComputeCore::getSharedLogger() const
-    {
-        return m_eventLogger;
-    }
+    { return m_eventLogger; }
 
     CodeGenerator ComputeCore::getCodeGenerator() const
-    {
-        return m_codeGenerator;
-    }
+    { return m_codeGenerator; }
 
     void ComputeCore::setCodeGenerator(CodeGenerator generator)
     {
         m_codeGenerator = generator;
-        m_programs.setCodeGenerator(generator);
+        m_programs->setCodeGenerator(generator);
     }
 
     void ComputeCore::setOptimizedRenderCompilationDeferred(bool const deferred)
-    {
-        m_programs.setOptimizedRenderCompilationDeferred(deferred);
-    }
+    { m_programs->setOptimizedRenderCompilationDeferred(deferred); }
 
     bool ComputeCore::isOptimizedRenderCompilationDeferred() const
-    {
-        return m_programs.isOptimizedRenderCompilationDeferred();
-    }
+    { return m_programs->isOptimizedRenderCompilationDeferred(); }
 
     void ComputeCore::setSlicerCompilationDeferred(bool const deferred)
-    {
-        m_programs.setSlicerCompilationDeferred(deferred);
-    }
+    { m_programs->setSlicerCompilationDeferred(deferred); }
 
     bool ComputeCore::isSlicerCompilationDeferred() const
-    {
-        return m_programs.isSlicerCompilationDeferred();
-    }
+    { return m_programs->isSlicerCompilationDeferred(); }
 
     std::shared_ptr<ModelState> ComputeCore::getMeshResourceState() const
     {
@@ -2699,7 +2667,7 @@ namespace gladius
         }
 
         if (m_codeGenerator != CodeGenerator::CommandStream &&
-            !m_programs.getRendererState().isModelUpToDate())
+            !m_programs->getRendererState().isModelUpToDate())
         {
             logMsg("ComputeCore.createThumbnail: renderer state not up to date");
             throw std::runtime_error("Model is not up to date");
