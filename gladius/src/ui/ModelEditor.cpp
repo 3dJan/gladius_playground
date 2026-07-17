@@ -2351,8 +2351,10 @@ namespace gladius::ui
             constexpr float kConstantSpacingY = 80.0f;
 
             int constantIndex = 0;
-            for (auto const & [argName, argParam] : arguments)
+            for (auto const & argument : arguments)
             {
+                auto const & argName = argument.first;
+                auto const & argParam = argument.second;
                 auto it = std::find_if(
                   exampleConstants.begin(),
                   exampleConstants.end(),
