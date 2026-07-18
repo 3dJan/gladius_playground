@@ -12,10 +12,19 @@ if(NOT ENABLE_OPENCL_TESTS)
   list(REMOVE_ITEM TEST_SOURCES 
     "${CMAKE_CURRENT_SOURCE_DIR}/Assembly_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ComputeCore_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ComputeContext_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CliReader_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ToCommandStreamVisitor_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Builder_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeOpenCL_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/DocumentSaveIdentity_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/File3mfRoundTrip_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Importer3mfMerge_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/MeshSDF_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/MeshWriter3mfColor_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/MmuSegmentation_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/io/3mf/MeshSamplingGeometry_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/io/3mf/MeshWriter3mf_tests.cpp"
   )
   message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring unit tests")
 endif()

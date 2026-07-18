@@ -13,12 +13,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(GLADIUS_ENABLE_OPENCL "Build the OpenCL compute backend" ON)
-option(GLADIUS_ENABLE_WEBGPU "Build the native Dawn/WebGPU compute backend" OFF)
-option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
+option(GLADIUS_ENABLE_WEBGPU "Build the native Dawn/WebGPU compute backend" ON)
+option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" OFF)
 option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
 
 if(NOT GLADIUS_ENABLE_OPENCL AND NOT GLADIUS_ENABLE_WEBGPU)
   message(FATAL_ERROR "At least one Gladius compute backend must be enabled.")
+endif()
+
+# OpenCL-dependent tests cannot be compiled or linked without the OpenCL backend
+# and its loader. Keep the test option useful for OpenCL-enabled builds, while
+# making a WebGPU-only configuration self-consistent even when it inherits the
+# default test setting or an older cache value.
+if(NOT GLADIUS_ENABLE_OPENCL AND ENABLE_OPENCL_TESTS)
+  message(STATUS "OpenCL backend disabled - forcing ENABLE_OPENCL_TESTS=OFF")
+  set(ENABLE_OPENCL_TESTS OFF CACHE BOOL "Enable tests that require OpenCL" FORCE)
 endif()
 
 # Allow the environment variable GLADIUS_ENABLE_UI_TESTING to override the cmake option
@@ -180,9 +189,12 @@ find_package(GTest CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
-if(GLADIUS_ENABLE_OPENCL)
-  find_package(OpenCL REQUIRED)
-endif()
+# The current application and ComputeCore sources still contain the legacy
+# OpenCL host pipeline even when WebGPU is the selected backend. Keep the
+# loader available until those production sources are split behind the backend
+# abstraction; otherwise merely disabling GLADIUS_ENABLE_OPENCL produces
+# undefined clRelease*/clGet* references at link time.
+find_package(OpenCL REQUIRED)
 if(GLADIUS_ENABLE_WEBGPU)
   find_package(Dawn CONFIG REQUIRED)
 endif()

@@ -99,9 +99,11 @@ set(DEPENDENCIES_CORE
     OpenMP::OpenMP_CXX
 )
 
-if(GLADIUS_ENABLE_OPENCL)
-    list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)
-endif()
+# ComputeContext, ComputeCore, and the current UI/export implementation still
+# compile the legacy OpenCL host pipeline in WebGPU builds. Link the loader for
+# that compatibility code until the remaining production paths are migrated to
+# IComputeRenderer/RenderBackendSession.
+list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)
 
 if(GLADIUS_ENABLE_WEBGPU)
     list(APPEND DEPENDENCIES_CORE dawn::webgpu_dawn)

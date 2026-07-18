@@ -9,7 +9,9 @@ set(CMAKE_CURRENT_BINDING_DIR ${CMAKE_SOURCE_DIR}/src/api/GladiusLib_component/B
 set(BINARY ${CMAKE_PROJECT_NAME}_integrationtest)
 file(GLOB_RECURSE TEST_SOURCES LIST_DIRECTORIES false *.h *.cpp)
 
-# Remove OpenCL-requiring tests if disabled
+# Remove OpenCL-requiring tests if disabled. This is also required for a
+# WebGPU-only build because these sources include OpenCL C++ wrappers and use
+# OpenCL-only ComputeCore APIs.
 if(NOT ENABLE_OPENCL_TESTS)
     list(REMOVE_ITEM TEST_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/GladiusLib_tests.cpp"
@@ -30,6 +32,9 @@ if(NOT ENABLE_OPENCL_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/GlobalMortonOctree_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/NodeLayoutEngine_tests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/PaletteExtractor_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/RayMarchPerf_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/SlicerProgramCompilation_tests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Writer3mf_SaveAs_tests.cpp"
     )
     message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring integration tests")
 endif()
