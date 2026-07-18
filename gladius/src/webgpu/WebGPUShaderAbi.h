@@ -30,11 +30,12 @@ namespace gladius::webgpu
     struct alignas(16) FrameUniforms
     {
         std::array<float, 4> eyeAndMaxDistance{};
-        std::array<float, 4> forwardAndFieldOfView{};
+        std::array<float, 4> forwardAndHorizontalScale{};
         std::array<float, 4> rightAndWidth{};
         std::array<float, 4> upAndHeight{};
+        std::array<float, 4> verticalScaleAndMaxSteps{};
     };
 
     static_assert(alignof(FrameUniforms) == 16u);
-    static_assert(sizeof(FrameUniforms) == 64u);
+    static_assert(sizeof(FrameUniforms) == 80u);
 }

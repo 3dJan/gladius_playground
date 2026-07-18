@@ -334,7 +334,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("Invalid WebGPU frame dimensions");
                 }
-                if (request.verticalFieldOfViewRadians <= 0.0f || request.maxDistance <= 0.0f)
+                if (request.horizontalScale <= 0.0f || request.verticalScale <= 0.0f || request.maxRaySteps == 0u ||
+                    request.maxTravelDistance <= 0.0f)
                 {
                     throw std::invalid_argument("WebGPU frame camera values must be positive");
                 }
@@ -345,11 +346,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                   FrameUniforms{.eyeAndMaxDistance = {request.eyePosition[0],
                                                       request.eyePosition[1],
                                                       request.eyePosition[2],
-                                                      request.maxDistance},
-                                .forwardAndFieldOfView = {request.forwardDirection[0],
-                                                          request.forwardDirection[1],
-                                                          request.forwardDirection[2],
-                                                          request.verticalFieldOfViewRadians},
+                                                          request.maxTravelDistance},
+                                            .forwardAndHorizontalScale = {request.forwardDirection[0],
+                                                              request.forwardDirection[1],
+                                                              request.forwardDirection[2],
+                                                              request.horizontalScale},
                                 .rightAndWidth = {request.rightDirection[0],
                                                   request.rightDirection[1],
                                                   request.rightDirection[2],
@@ -357,7 +358,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                 .upAndHeight = {request.upDirection[0],
                                                 request.upDirection[1],
                                                 request.upDirection[2],
-                                                static_cast<float>(request.height)}});
+                                                static_cast<float>(request.height)},
+                                .verticalScaleAndMaxSteps = {request.verticalScale,
+                                                              static_cast<float>(request.maxRaySteps),
+                                                              0.0f,
+                                                              0.0f}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())

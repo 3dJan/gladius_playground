@@ -55,8 +55,10 @@ namespace gladius::compute
         std::array<float, 3> forwardDirection{0.0f, 0.0f, -1.0f};
         std::array<float, 3> rightDirection{1.0f, 0.0f, 0.0f};
         std::array<float, 3> upDirection{0.0f, 1.0f, 0.0f};
-        float verticalFieldOfViewRadians{1.0f};
-        float maxDistance{1000.0f};
+        float horizontalScale{0.5f};
+        float verticalScale{0.5f};
+        std::uint32_t maxRaySteps{2000u};
+        float maxTravelDistance{100000.0f};
         std::string shaderSource;
         std::vector<float> parameterValues;
     };

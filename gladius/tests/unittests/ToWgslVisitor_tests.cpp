@@ -643,7 +643,7 @@ namespace gladius::nodes::tests
           compute::FrameRequest{.width = 33u,
                                 .height = 33u,
                                 .eyePosition = {0.0f, 0.0f, 2.0f},
-                                .maxDistance = 10.0f});
+                                .maxTravelDistance = 10.0f});
         EXPECT_NE(request.shaderSource.find("fn estimate_normal"), std::string::npos);
                     EXPECT_NE(request.shaderSource.find("length("), std::string::npos);
 

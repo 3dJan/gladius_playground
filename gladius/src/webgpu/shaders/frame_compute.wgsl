@@ -1,8 +1,9 @@
 struct FrameUniforms {
     eye_and_max_distance: vec4<f32>,
-    forward_and_field_of_view: vec4<f32>,
+    forward_and_horizontal_scale: vec4<f32>,
     right_and_width: vec4<f32>,
     up_and_height: vec4<f32>,
+    vertical_scale_and_max_steps: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -44,20 +45,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let aspect_ratio = f32(width) / f32(height);
-    let screen = ((vec2<f32>(global_id.xy) + vec2<f32>(0.5)) / vec2<f32>(f32(width), f32(height))) * 2.0 - 1.0;
-    let half_height = tan(frame.forward_and_field_of_view.w * 0.5);
+    let screen = vec2<f32>(
+        f32(global_id.x) / f32(width - 1u) - 0.5,
+        0.5 - f32(global_id.y) / f32(height - 1u));
     let ray_direction = normalize(
-        frame.forward_and_field_of_view.xyz +
-        frame.right_and_width.xyz * (screen.x * aspect_ratio * half_height) +
-        frame.up_and_height.xyz * (-screen.y * half_height));
+        frame.forward_and_horizontal_scale.xyz +
+        frame.right_and_width.xyz * (screen.x * frame.forward_and_horizontal_scale.w) +
+        frame.up_and_height.xyz * (-screen.y * frame.vertical_scale_and_max_steps.x));
     let eye = frame.eye_and_max_distance.xyz;
     let max_distance = frame.eye_and_max_distance.w;
 
     var traveled = 0.0f;
     var hit = false;
     var model = vec4<f32>(0.0);
-    for (var step = 0u; step < 256u; step++) {
+    let max_ray_steps = u32(frame.vertical_scale_and_max_steps.y);
+    for (var step = 0u; step < max_ray_steps; step++) {
         let position = eye + ray_direction * traveled;
         model = evaluateModel(position);
         if (abs(model.w) < 0.001f) {

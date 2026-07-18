@@ -1,6 +1,7 @@
 #include "Document.h"
 #include "Mesh.h"
 #include "SpatialMeshResource.h"
+#include "compute/OpenCLRenderRequestFactory.h"
 #include "opencl_test_helper.h"
 #include "testhelper.h"
 #include <compute/ComputeCore.h>
@@ -615,4 +616,60 @@ namespace gladius_tests
 
         EXPECT_FALSE(core->createRenderSession({}).has_value());
     }
+
+      TEST_F(ComputeCore_Test, OpenCLRenderRequestFactory_WithResourceState_CreatesNeutralRenderRequest)
+      {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto resources = core->getResourceContext();
+        ASSERT_NE(resources, nullptr);
+
+        resources->setEyePosition({1.0f, 2.0f, 3.0f});
+        cl_float16 matrix{};
+        matrix.s0 = 1.0f;
+        matrix.s1 = 2.0f;
+        matrix.s2 = 3.0f;
+        matrix.s4 = 4.0f;
+        matrix.s5 = 5.0f;
+        matrix.s6 = 6.0f;
+        matrix.s8 = 7.0f;
+        matrix.s9 = 8.0f;
+        matrix.sa = 9.0f;
+        resources->setModelViewPerspectiveMat(matrix);
+
+        auto & settings = resources->getRenderingSettings();
+        settings.z_mm = 4.0f;
+        settings.flags = RF_DISABLE_SHADOWS;
+        settings.approximation = static_cast<ApproximationMode>(AM_HYBRID | AM_USE_DISTANCE_INIT);
+        settings.quality = 0.75f;
+        settings.normalOffset = 0.002f;
+        settings.earlyExitDistanceSq = 3.0f;
+        settings.meshInflationDistance = 0.25f;
+        settings.meshFwnBeta = 4.0f;
+        settings.meshFwnFarFieldFactor = 0.5f;
+        settings.weightDistToNb = 0.1f;
+        settings.weightMidPoint = 0.2f;
+
+        auto const request = compute::OpenCLRenderRequestFactory::create(
+          *resources,
+          compute::RenderViewport{.width = 200u, .height = 100u, .firstRow = 10u, .endRow = 20u},
+          compute::RenderFreshnessStamp{.sceneGeneration = 11u, .viewGeneration = 12u, .parameterGeneration = 13u});
+
+        ASSERT_TRUE(request.isValid());
+        EXPECT_EQ(request.camera.eyePosition, (std::array<float, 3>{1.0f, 2.0f, 3.0f}));
+        EXPECT_EQ(request.camera.rightDirection, (std::array<float, 3>{1.0f, 2.0f, 3.0f}));
+        EXPECT_EQ(request.camera.upDirection, (std::array<float, 3>{4.0f, 5.0f, 6.0f}));
+        EXPECT_EQ(request.camera.forwardDirection, (std::array<float, 3>{7.0f, 8.0f, 9.0f}));
+        EXPECT_FLOAT_EQ(request.frustum.horizontalScale, 0.5f);
+        EXPECT_FLOAT_EQ(request.frustum.verticalScale, 0.25f);
+        EXPECT_EQ(request.settings.mode, compute::RenderMode::DistanceInitialized);
+        EXPECT_EQ(request.settings.flags, static_cast<std::uint32_t>(RF_DISABLE_SHADOWS));
+        EXPECT_FLOAT_EQ(request.settings.quality, 0.75f);
+        EXPECT_FLOAT_EQ(request.settings.normalOffset, 0.002f);
+        EXPECT_EQ(request.freshness,
+              (compute::RenderFreshnessStamp{.sceneGeneration = 11u,
+                              .viewGeneration = 12u,
+                              .parameterGeneration = 13u}));
+      }
 }

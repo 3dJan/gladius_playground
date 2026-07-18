@@ -73,6 +73,17 @@ namespace gladius::compute::tests
         EXPECT_EQ(offsetof(webgpu::SliceUniforms, scale), 12u);
     }
 
+    TEST(WebGPUShaderAbi, FrameUniforms_HasWebGpuCompatibleLayout)
+    {
+        EXPECT_EQ(sizeof(webgpu::FrameUniforms), 80u);
+        EXPECT_EQ(alignof(webgpu::FrameUniforms), 16u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, eyeAndMaxDistance), 0u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, forwardAndHorizontalScale), 16u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, rightAndWidth), 32u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, upAndHeight), 48u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, verticalScaleAndMaxSteps), 64u);
+    }
+
     TEST(WebGPUDispatchPolicy, CalculateSliceDispatchSize_WithPartialWorkgroups_RoundsUp)
     {
         auto const dispatchSize = webgpu::calculateSliceDispatchSize(17u, 33u);
@@ -141,7 +152,7 @@ namespace gladius::compute::tests
         auto submission = backend->submitFrame(FrameRequest{.width = 33u,
                                                              .height = 33u,
                                                              .eyePosition = {0.0f, 0.0f, 2.0f},
-                                                             .maxDistance = 10.0f});
+                                                             .maxTravelDistance = 10.0f});
         submission->wait();
 
         ASSERT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
