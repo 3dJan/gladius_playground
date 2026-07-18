@@ -34,8 +34,9 @@ namespace gladius::webgpu
         std::array<float, 4> rightAndWidth{};
         std::array<float, 4> upAndHeight{};
         std::array<float, 4> verticalScaleAndMaxSteps{};
+        std::array<float, 4> firstRowAndCount{};
     };
 
     static_assert(alignof(FrameUniforms) == 16u);
-    static_assert(sizeof(FrameUniforms) == 80u);
+    static_assert(sizeof(FrameUniforms) == 96u);
 }

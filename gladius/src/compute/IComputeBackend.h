@@ -51,6 +51,8 @@ namespace gladius::compute
     {
         std::uint32_t width{};
         std::uint32_t height{};
+        std::uint32_t firstRow{};
+        std::uint32_t endRow{};
         std::array<float, 3> eyePosition{};
         std::array<float, 3> forwardDirection{0.0f, 0.0f, -1.0f};
         std::array<float, 3> rightDirection{1.0f, 0.0f, 0.0f};

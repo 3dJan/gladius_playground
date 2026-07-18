@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/IComputeBackend.h"
+#include "compute/RenderSceneSnapshot.h"
 
 #include <cstdint>
 
@@ -44,5 +45,13 @@ namespace gladius::webgpu
          */
         [[nodiscard]] static compute::FrameRequest createFrame(nodes::Assembly const & assembly,
                                     compute::FrameRequest frameRequest);
+
+        /// @brief Builds an immutable analytic scene snapshot from a supported model.
+        [[nodiscard]] static compute::RenderSceneSnapshot createScene(nodes::Model & model,
+                                         std::uint64_t sceneGeneration);
+
+        /// @brief Builds an immutable analytic scene snapshot after flattening assembly calls.
+        [[nodiscard]] static compute::RenderSceneSnapshot createScene(nodes::Assembly const & assembly,
+                                         std::uint64_t sceneGeneration);
     };
 }

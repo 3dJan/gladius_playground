@@ -330,9 +330,14 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::runtime_error("WebGPU compute context is unavailable");
                 }
-                if (!calculateSliceDispatchSize(request.width, request.height).has_value())
+                if (request.endRow == 0u)
                 {
-                    throw std::invalid_argument("Invalid WebGPU frame dimensions");
+                    request.endRow = request.height;
+                }
+                if (request.firstRow >= request.endRow || request.endRow > request.height ||
+                    !calculateSliceDispatchSize(request.width, request.endRow - request.firstRow).has_value())
+                {
+                    throw std::invalid_argument("Invalid WebGPU frame row range");
                 }
                 if (request.horizontalScale <= 0.0f || request.verticalScale <= 0.0f || request.maxRaySteps == 0u ||
                     request.maxTravelDistance <= 0.0f)
@@ -340,7 +345,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     throw std::invalid_argument("WebGPU frame camera values must be positive");
                 }
 
-                m_buffers.resize(m_context->getDevice(), request.width, request.height, request.parameterValues.size());
+                auto const rowCount = request.endRow - request.firstRow;
+                m_buffers.resize(m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
                 m_buffers.writeUniforms(
                   m_context->getQueue(),
                   FrameUniforms{.eyeAndMaxDistance = {request.eyePosition[0],
@@ -362,7 +368,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                 .verticalScaleAndMaxSteps = {request.verticalScale,
                                                               static_cast<float>(request.maxRaySteps),
                                                               0.0f,
-                                                              0.0f}});
+                                                              0.0f},
+                                .firstRowAndCount = {static_cast<float>(request.firstRow),
+                                                     static_cast<float>(rowCount),
+                                                     0.0f,
+                                                     0.0f}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())
@@ -423,7 +433,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindGroupDescriptor.entries = bindGroupEntries;
                 auto const bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
 
-                auto const dispatchSize = *calculateSliceDispatchSize(request.width, request.height);
+                auto const dispatchSize = *calculateSliceDispatchSize(request.width, rowCount);
                 auto const encoder = m_context->getDevice().CreateCommandEncoder();
                 auto const computePass = encoder.BeginComputePass();
                 computePass.SetPipeline(pipeline);

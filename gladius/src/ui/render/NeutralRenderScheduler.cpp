@@ -37,6 +37,32 @@ namespace gladius::ui::async_rendering
         }
     }
 
+    bool NeutralRenderScheduler::submit(RenderTaskRequest const & task,
+                                        compute::IComputeRenderer & renderer,
+                                        compute::IRenderScene const & scene)
+    {
+        if (!isSupportedDisplayTask(task.type) || !renderer.isAvailable() ||
+            scene.getBackendKind() != renderer.getBackendKind())
+        {
+            return false;
+        }
+
+        auto request = m_requestFactory(task);
+        if (!request.has_value() || !request->isValid())
+        {
+            return false;
+        }
+
+        try
+        {
+            return m_submissions.track(task, renderer.submitFrame(scene, std::move(*request)));
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     void NeutralRenderScheduler::requestCancellationForStale() noexcept
     {
         m_submissions.requestCancellationForStale(m_workflow.latestStamp());

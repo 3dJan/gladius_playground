@@ -34,6 +34,9 @@ namespace gladius::ui::async_rendering
         explicit NeutralRenderScheduler(RequestFactory requestFactory);
 
         [[nodiscard]] bool submit(RenderTaskRequest const & task, compute::IComputeRenderer & renderer);
+        [[nodiscard]] bool submit(RenderTaskRequest const & task,
+                compute::IComputeRenderer & renderer,
+                compute::IRenderScene const & scene);
         void requestCancellationForStale() noexcept;
         [[nodiscard]] std::vector<AcceptedNeutralFrame> poll();
 

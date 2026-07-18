@@ -17,6 +17,12 @@ namespace gladius::webgpu
 {
     namespace
     {
+        struct AnalyticSceneData
+        {
+            std::string evaluatorWgsl;
+            std::vector<float> parameterValues;
+        };
+
         void writeParameterValues(nodes::IParameter const & parameter,
                                   std::vector<float> & parameterValues,
                                   std::vector<bool> & assignedValues)
@@ -81,6 +87,27 @@ namespace gladius::webgpu
 
             throw std::runtime_error("WebGPU slice request supports only float, float3, and Matrix4x4 modifiable parameters");
         }
+
+        [[nodiscard]] AnalyticSceneData createAnalyticSceneData(nodes::Model & model)
+        {
+            nodes::ToWgslVisitor visitor;
+            model.visitNodes(visitor);
+
+            std::ostringstream evaluator;
+            visitor.write(evaluator);
+
+            std::vector<float> parameterValues(visitor.getRequiredParameterCount(), 0.0f);
+            std::vector<bool> assignedValues(parameterValues.size(), false);
+            for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
+            {
+                if (parameter != nullptr && parameter->getId() == parameterId && visitor.usesParameter(parameterId))
+                {
+                    writeParameterValues(*parameter, parameterValues, assignedValues);
+                }
+            }
+
+            return {.evaluatorWgsl = evaluator.str(), .parameterValues = std::move(parameterValues)};
+        }
     }
 
     compute::SliceRequest WebGPUModelSliceRequestFactory::create(nodes::Model & model,
@@ -89,28 +116,14 @@ namespace gladius::webgpu
                                                                   float const sliceZ,
                                                                   float const scale)
     {
-        nodes::ToWgslVisitor visitor;
-        model.visitNodes(visitor);
-
-        std::ostringstream evaluator;
-        visitor.write(evaluator);
-
-        std::vector<float> parameterValues(visitor.getRequiredParameterCount(), 0.0f);
-        std::vector<bool> assignedValues(parameterValues.size(), false);
-        for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
-        {
-            if (parameter != nullptr && parameter->getId() == parameterId && visitor.usesParameter(parameterId))
-            {
-                writeParameterValues(*parameter, parameterValues, assignedValues);
-            }
-        }
+        auto sceneData = createAnalyticSceneData(model);
 
         return compute::SliceRequest{.width = width,
                                      .height = height,
                                      .sliceZ = sliceZ,
                                      .scale = scale,
-                                     .shaderSource = WebGPUSliceShaderComposer::compose(evaluator.str()),
-                                     .parameterValues = std::move(parameterValues)};
+                                     .shaderSource = WebGPUSliceShaderComposer::compose(sceneData.evaluatorWgsl),
+                                     .parameterValues = std::move(sceneData.parameterValues)};
     }
 
     compute::SliceRequest WebGPUModelSliceRequestFactory::create(nodes::Assembly const & assembly,
@@ -133,24 +146,10 @@ namespace gladius::webgpu
     compute::FrameRequest WebGPUModelSliceRequestFactory::createFrame(nodes::Model & model,
                                                                        compute::FrameRequest frameRequest)
     {
-        nodes::ToWgslVisitor visitor;
-        model.visitNodes(visitor);
+        auto sceneData = createAnalyticSceneData(model);
 
-        std::ostringstream evaluator;
-        visitor.write(evaluator);
-
-        std::vector<float> parameterValues(visitor.getRequiredParameterCount(), 0.0f);
-        std::vector<bool> assignedValues(parameterValues.size(), false);
-        for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
-        {
-            if (parameter != nullptr && parameter->getId() == parameterId && visitor.usesParameter(parameterId))
-            {
-                writeParameterValues(*parameter, parameterValues, assignedValues);
-            }
-        }
-
-        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(evaluator.str());
-        frameRequest.parameterValues = std::move(parameterValues);
+        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(sceneData.evaluatorWgsl);
+        frameRequest.parameterValues = std::move(sceneData.parameterValues);
         return frameRequest;
     }
 
@@ -166,5 +165,29 @@ namespace gladius::webgpu
         }
 
         return createFrame(*flattenedModel, std::move(frameRequest));
+    }
+
+    compute::RenderSceneSnapshot WebGPUModelSliceRequestFactory::createScene(nodes::Model & model,
+                                                                               std::uint64_t const sceneGeneration)
+    {
+        auto sceneData = createAnalyticSceneData(model);
+        return {.sceneGeneration = sceneGeneration,
+                .requiredCapabilities = compute::RendererCapability::AnalyticRendering,
+                .analyticEvaluatorWgsl = std::move(sceneData.evaluatorWgsl),
+                .parameterValues = std::move(sceneData.parameterValues)};
+    }
+
+    compute::RenderSceneSnapshot WebGPUModelSliceRequestFactory::createScene(nodes::Assembly const & assembly,
+                                                                               std::uint64_t const sceneGeneration)
+    {
+        nodes::GraphFlattener flattener(assembly);
+        auto flattenedAssembly = flattener.flatten();
+        auto const & flattenedModel = flattenedAssembly.assemblyModel();
+        if (!flattenedModel)
+        {
+            throw std::runtime_error("WebGPU scene snapshot could not obtain a flattened assembly model");
+        }
+
+        return createScene(*flattenedModel, sceneGeneration);
     }
 }

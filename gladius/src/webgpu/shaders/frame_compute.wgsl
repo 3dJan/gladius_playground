@@ -4,6 +4,7 @@ struct FrameUniforms {
     right_and_width: vec4<f32>,
     up_and_height: vec4<f32>,
     vertical_scale_and_max_steps: vec4<f32>,
+    first_row_and_count: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -41,13 +42,17 @@ fn estimate_normal(position: vec3<f32>) -> vec3<f32> {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let width = u32(frame.right_and_width.w);
     let height = u32(frame.up_and_height.w);
-    if (global_id.x >= width || global_id.y >= height) {
+    let first_row = u32(frame.first_row_and_count.x);
+    let row_count = u32(frame.first_row_and_count.y);
+    if (global_id.x >= width || global_id.y >= row_count) {
         return;
     }
 
+    let source_row = global_id.y + first_row;
+
     let screen = vec2<f32>(
         f32(global_id.x) / f32(width - 1u) - 0.5,
-        0.5 - f32(global_id.y) / f32(height - 1u));
+        0.5 - f32(source_row) / f32(height - 1u));
     let ray_direction = normalize(
         frame.forward_and_horizontal_scale.xyz +
         frame.right_and_width.xyz * (screen.x * frame.forward_and_horizontal_scale.w) +

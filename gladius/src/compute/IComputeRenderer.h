@@ -2,9 +2,11 @@
 
 #include "compute/ComputeBackend.h"
 #include "compute/RenderContracts.h"
+#include "compute/RenderSceneSnapshot.h"
 
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace gladius::compute
@@ -39,6 +41,19 @@ namespace gladius::compute
     };
 
     /**
+     * @brief Opaque backend-owned realization of an immutable render scene snapshot.
+     */
+    class IRenderScene
+    {
+      public:
+        virtual ~IRenderScene() = default;
+
+        [[nodiscard]] virtual ComputeBackendKind getBackendKind() const noexcept = 0;
+        [[nodiscard]] virtual std::uint64_t getSceneGeneration() const noexcept = 0;
+        [[nodiscard]] virtual RendererCapability getCapabilities() const noexcept = 0;
+    };
+
+    /**
      * @brief Physical renderer for API-neutral frame rendering.
      *
      * Public consumers depend only on RenderRequest, RenderFrame, and capability flags. Scene
@@ -53,6 +68,21 @@ namespace gladius::compute
         [[nodiscard]] virtual ComputeBackendKind getBackendKind() const noexcept = 0;
         [[nodiscard]] virtual RendererCapability getCapabilities() const noexcept = 0;
         [[nodiscard]] virtual bool isAvailable() const noexcept = 0;
+
+        /// @brief Materialize an immutable CPU scene payload into backend-owned resources.
+        [[nodiscard]] virtual std::unique_ptr<IRenderScene> materializeScene(RenderSceneSnapshot snapshot)
+        {
+          throw std::runtime_error("This renderer does not materialize scene snapshots");
+        }
+
+        /// @brief Submit a frame against a materialized scene.
+        [[nodiscard]] virtual std::unique_ptr<IRenderSubmission>
+        submitFrame(IRenderScene const & scene, RenderRequest request)
+        {
+          throw std::runtime_error("This renderer does not submit materialized scenes");
+        }
+
+        /// @brief Transitional entry point for renderers that retain their scene externally.
         [[nodiscard]] virtual std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request) = 0;
     };
 }
