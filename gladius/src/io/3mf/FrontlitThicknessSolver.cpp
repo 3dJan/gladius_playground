@@ -313,16 +313,19 @@ namespace gladius::io
             return Eigen::Vector3f::Ones(); // White (no filament)
         }
 
-                // Background handling:
-                // - Frontlit: default to an opaque black backing (so a single layer returns its own KM reflectance).
-                // - Backlit: default to a white backlight.
-                Eigen::Vector3f backgroundReflectance =
-                    (m_mode == IlluminationMode::Backlit) ? Eigen::Vector3f::Ones() : Eigen::Vector3f::Zero();
-                if (m_backgroundIndex < n)
-                {
-                        backgroundReflectance =
-                            m_stack[m_backgroundIndex].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
-                }
+        // Background handling:
+        // - Frontlit: default to an opaque black backing (so a single layer returns its own KM reflectance).
+        // - Backlit: default to a white backlight.
+        Eigen::Vector3f backgroundReflectance = Eigen::Vector3f::Zero();
+        if (m_mode == IlluminationMode::Backlit)
+        {
+            backgroundReflectance.setOnes();
+        }
+        if (m_backgroundIndex < n)
+        {
+            backgroundReflectance =
+              m_stack[m_backgroundIndex].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+        }
 
         if (m_mode == IlluminationMode::Backlit)
         {

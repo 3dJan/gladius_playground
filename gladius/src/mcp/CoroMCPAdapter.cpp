@@ -21,15 +21,15 @@ namespace gladius::mcp
         }
 
         // Create thread pools for different operation types
-        m_backgroundPool = coro::thread_pool::make_shared(
+          m_backgroundPool = coro::thread_pool::make_unique(
           coro::thread_pool::options{.thread_count = static_cast<uint32_t>(backgroundThreads),
                                      .on_thread_start_functor = [](std::size_t) -> void {},
-                                     .on_thread_stop_functor = [](std::size_t) -> void {}});
+                             .on_thread_stop_functor = [](std::size_t) -> void {}});
 
-        m_computePool = coro::thread_pool::make_shared(
+          m_computePool = coro::thread_pool::make_unique(
           coro::thread_pool::options{.thread_count = static_cast<uint32_t>(computeThreads),
                                      .on_thread_start_functor = [](std::size_t) -> void {},
-                                     .on_thread_stop_functor = [](std::size_t) -> void {}});
+                             .on_thread_stop_functor = [](std::size_t) -> void {}});
     }
 
     CoroMCPAdapter::~CoroMCPAdapter()

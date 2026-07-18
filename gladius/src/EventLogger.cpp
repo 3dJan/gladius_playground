@@ -48,10 +48,10 @@ namespace gladius::events
         // Initialize thread pool for file operations
         if (m_fileLoggingEnabled)
         {
-            m_fileWritePool = coro::thread_pool::make_shared(coro::thread_pool::options{
+                        m_fileWritePool = coro::thread_pool::make_unique(coro::thread_pool::options{
               .thread_count = 1, // Single thread for file writing to avoid conflicts
               .on_thread_start_functor = [](std::size_t) {},
-              .on_thread_stop_functor = [](std::size_t) {}});
+                            .on_thread_stop_functor = [](std::size_t) {}});
         }
 
         m_initialized = true;

@@ -121,7 +121,7 @@ namespace gladius::ui::async_rendering
 
     AsyncRenderController::AsyncRenderController()
         : AsyncRenderController(
-            coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2}))
+            coro::thread_pool::make_unique(coro::thread_pool::options{.thread_count = 2}))
     {
     }
 
@@ -129,8 +129,7 @@ namespace gladius::ui::async_rendering
     {
         if (workerPool == nullptr)
         {
-            workerPool =
-              coro::thread_pool::make_shared(coro::thread_pool::options{.thread_count = 2});
+            workerPool = coro::thread_pool::make_unique(coro::thread_pool::options{.thread_count = 2});
         }
 
         m_state = std::make_shared<ControllerState>(std::move(workerPool));
@@ -169,7 +168,7 @@ namespace gladius::ui::async_rendering
             m_state->data.hasPendingResult.store(false, std::memory_order_release);
         }
 
-        auto const spawned = m_state->data.workerPool->spawn(workerLoop(m_state));
+        auto const spawned = m_state->data.workerPool->spawn_detached(workerLoop(m_state));
         if (!spawned)
         {
             m_running.store(false, std::memory_order_release);
