@@ -8,7 +8,9 @@ namespace gladius::compute
     {
         auto const configuredBackend =
           configManager.getValue<std::string>("compute", "backend", "opencl");
-        return parseComputeBackend(configuredBackend).value_or(ComputeBackendKind::WebGPU);
+        auto const backend = parseComputeBackend(configuredBackend).value_or(ComputeBackendKind::WebGPU);
+        // LOG: Backend selection - using <backend> (config=<value>, available=<bool>)
+        return backend;
     }
 
     void setConfiguredComputeBackend(ConfigManager & configManager, ComputeBackendKind const backend)
