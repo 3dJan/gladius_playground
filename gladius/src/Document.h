@@ -8,6 +8,7 @@
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
+#include "io/3mf/SaveSnapshot.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
@@ -129,6 +130,14 @@ namespace gladius
 
         void resetGeneratorContext();
         explicit Document(std::shared_ptr<ComputeCore> core);
+
+        /// Blocks until any in-flight asynchronous file-load / model-refresh worker
+        /// has finished before member teardown begins. Without this, the implicit
+        /// std::future destructors join the workers only after members declared after
+        /// them (e.g. m_isLoading, m_buildItems) are already destroyed, which is a
+        /// use-after-free hazard while the worker is still running.
+        ~Document();
+
         [[nodiscard]] bool refreshModelIfNoCompilationIsRunning();
 
         /// Signal that a structural graph edit occurred.
@@ -176,6 +185,26 @@ namespace gladius
          */
         [[nodiscard]] std::string getLoadingError() const;
         void saveAs(std::filesystem::path filename, bool writeThumbnail = true);
+
+        /**
+         * @brief Captures independent document data for background native 3MF serialization.
+         * @throws std::runtime_error if the document has no assembly or Lib3MF model.
+         */
+        [[nodiscard]] io::SaveSnapshot createSaveSnapshot() const;
+
+        /// @return Monotonically increasing version of persisted document changes.
+        [[nodiscard]] uint64_t saveVersion() const;
+
+        /// @return Identity of the logical document contents currently loaded in this object.
+        [[nodiscard]] io::DocumentIdentity documentIdentity() const;
+
+        /**
+         * @brief Applies bookkeeping for a completed background save.
+         * @return true when the saved snapshot is still the current document version.
+         */
+        bool completeSave(std::filesystem::path filename,
+                  io::DocumentIdentity snapshotDocumentIdentity,
+                  uint64_t snapshotVersion);
 
         void newModel();
         void newEmptyModel();
@@ -459,6 +488,9 @@ namespace gladius
         /// Summarize NanoVDB build issues on currently loaded mesh resources, if any.
         [[nodiscard]] NanoVdbBuildIssueSummary getNanoVdbBuildIssueSummary() const;
 
+        /// Summarize mesh topology diagnostics on currently loaded mesh resources, if any.
+        [[nodiscard]] MeshQualityIssueSummary getMeshQualityIssueSummary() const;
+
         /// Queue applying the mesh-SDF evaluation configuration to existing mesh resources.
         /// Heavy resource rebuild/upload work is folded into the debounced background refresh so
         /// the UI can keep showing the current preview.
@@ -482,6 +514,8 @@ namespace gladius
         void loadImpl(const std::filesystem::path & filename);
         void mergeImpl(const std::filesystem::path & filename);
         [[nodiscard]] bool refreshModelAsync();
+                [[nodiscard]] bool prepareAssemblyForRefresh(
+                    nodes::ValidationContext context = nodes::ValidationContext::Interactive);
         void loadAllMeshResources();
         void refreshWorker(RefreshMode refreshMode = RefreshMode::Normal);
         [[nodiscard]] std::optional<MeshSdfEvaluationConfig> takePendingMeshSdfEvaluationConfig();
@@ -503,6 +537,8 @@ namespace gladius
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
         std::shared_ptr<ComputeCore> m_core;
         bool m_fileChanged{false};
+        std::atomic<uint64_t> m_saveVersion{0};
+        std::atomic<io::DocumentIdentity> m_documentIdentity{0};
         std::atomic<bool> m_parameterDirty{false};
         std::atomic<bool> m_contoursDirty{false};
 

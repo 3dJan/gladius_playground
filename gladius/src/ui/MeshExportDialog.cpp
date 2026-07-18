@@ -103,6 +103,27 @@ namespace gladius::ui
             }
             return stem;
         }
+
+        [[nodiscard]] bool supportsShellExport(io::SurfaceExtractionMethod method) noexcept
+        {
+            return method == io::SurfaceExtractionMethod::LayeredMarchingCubes ||
+                   method == io::SurfaceExtractionMethod::ManifoldDualContouring;
+        }
+
+        [[nodiscard]] io::ShellGenerationMode shellGenerationModeFor(
+            io::SurfaceExtractionMethod method) noexcept
+        {
+            return method == io::SurfaceExtractionMethod::LayeredMarchingCubes
+                ? io::ShellGenerationMode::OpenVdbColorThickness
+                : io::ShellGenerationMode::LegacyManifoldDualContouring;
+        }
+
+        [[nodiscard]] char const * shellBackendLabelFor(io::SurfaceExtractionMethod method) noexcept
+        {
+            return method == io::SurfaceExtractionMethod::LayeredMarchingCubes
+                ? "OpenVDB color-thickness shells"
+                : "Legacy manifold dual contouring shells";
+        }
     }
 
     template <typename Exporter>
@@ -876,8 +897,7 @@ namespace gladius::ui
                 auto const & precomputedLuts = m_colorToThicknessDialog.getPrecomputedLuts();
                 bool const lutReady = !precomputedLuts.empty();
                 int const lutResolution = m_colorToThicknessDialog.getLutResolution();
-                bool const shellExportSupported = colorExportAvailable &&
-                    (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring);
+                bool const shellExportSupported = colorExportAvailable && supportsShellExport(m_selectedMethod);
 
                 ImGui::BeginDisabled(!shellExportSupported);
                 ImGui::Checkbox("Export shells with LUT", &m_enableShellBasedExport);
@@ -885,10 +905,31 @@ namespace gladius::ui
                 {
                         ImGui::SetTooltip(
                             "Shell-based export requires 3MF format, volumetric color, "
-                            "and the Manifold Dual Contouring method.");
+                            "and a shell-capable extraction method selected in the Mesh Extraction tab.");
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("One build item per shell with solid colors.");
+                ImGui::EndDisabled();
+
+                ImGui::BeginDisabled(!shellExportSupported || !m_enableShellBasedExport);
+                ImGui::Indent();
+                ImGui::Text("Shell backend: %s", shellBackendLabelFor(m_selectedMethod));
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Shell export uses the method selected in the Mesh Extraction tab.\n"
+                        "Choose layered marching cubes for the OpenVDB path or manifold dual contouring for the legacy shell path.");
+                }
+                if (m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes)
+                {
+                    ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
+                                       "Current scope: constant-thickness shell bands and surface-driven variable shell depths.");
+                }
+                else
+                {
+                    ImGui::TextDisabled("Current scope: legacy manifold shell generation.");
+                }
+                ImGui::Unindent();
                 ImGui::EndDisabled();
 
                 // Surface color sampling option (nested under shell export)
@@ -897,10 +938,10 @@ namespace gladius::ui
                 ImGui::Checkbox("Use surface color sampling", &m_useSurfaceColorSampling);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 {
-                        ImGui::SetTooltip(
-                            "Sample colors at the model surface (SDF=0) instead of interior.\n"
-                            "This fixes color accuracy for projected images and textures.\n"
-                            "Recommended for HueForge-style multi-color prints.");
+                    ImGui::SetTooltip(
+                        "Sample colors at the model surface (SDF=0) instead of interior.\n"
+                        "This fixes color accuracy for projected images and textures.\n"
+                        "Recommended for HueForge-style multi-color prints.");
                 }
                 ImGui::Unindent();
                 ImGui::EndDisabled();
@@ -1088,12 +1129,12 @@ namespace gladius::ui
             return;
         }
 
-        // Only support manifold dual contouring for palette derivation (matches color export path)
-        if (m_selectedMethod != io::SurfaceExtractionMethod::ManifoldDualContouring)
+                if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
         {
             m_colorToThicknessDialog.notifyPaletteDeriveFailed(
-              "Palette derivation is only available with manifold dual contouring.");
-            m_statusMessage = "Palette derivation currently supported only for Manifold dual contouring.";
+                            "Palette derivation is not implemented for dual contouring.");
+                        m_statusMessage =
+                            "Palette derivation currently supports OpenVDB and manifold dual contouring.";
             m_statusIsError = true;
             return;
         }
@@ -1119,8 +1160,10 @@ namespace gladius::ui
 
         auto * core = m_computeCore;
         io::PaletteExtractionOptions paletteOptions{};
+        paletteOptions.method = m_selectedMethod;
+        paletteOptions.marchingCubesQualityLevel = m_marchingCubesQuality;
         paletteOptions.manifoldOptions = options;
-        paletteOptions.convertToSrgb = m_convertToSrgb;
+        paletteOptions.convertToSrgb = true;
 
         m_paletteDeriveInProgress = true;
         m_colorToThicknessDialog.notifyPaletteDeriveStarted();
@@ -1189,6 +1232,7 @@ namespace gladius::ui
 
         // Build shell export config
         io::ShellExportConfig config;
+        config.generationMode = shellGenerationModeFor(m_selectedMethod);
         config.filamentStack = std::move(stack);
         config.precomputedLuts = precomputedLuts;
         config.lutResolution = lutResolution;
@@ -1223,8 +1267,7 @@ namespace gladius::ui
 
                 bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
                 bool const wantsShellExport =
-                    is3mf && m_enableShellBasedExport &&
-                    m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring;
+                    is3mf && m_enableShellBasedExport && supportsShellExport(m_selectedMethod);
 
                 if (wantsShellExport && !m_colorToThicknessDialog.hasPrecomputedLuts())
                 {
@@ -1242,7 +1285,6 @@ namespace gladius::ui
                         }
                 }
 
-                bool const shellLutReady = m_colorToThicknessDialog.hasPrecomputedLuts();
                 bool const is3mfMethodAllowed =
                     m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes ||
                     m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring;
@@ -1251,9 +1293,15 @@ namespace gladius::ui
                 {
                         throw std::runtime_error(
                             "3MF export is currently only supported with layered marching cubes, "
-                            "manifold dual contouring, or shell-based hierarchical dual contouring when LUTs are "
-                            "available.");
+                            "manifold dual contouring, or shell-based export when a shell-capable extraction "
+                            "method is selected.");
                 }
+
+        if (wantsShellExport)
+        {
+            exportShellsTo3mf(core);
+            return;
+        }
 
         switch (m_selectedMethod)
         {
@@ -1300,12 +1348,6 @@ namespace gladius::ui
         }
         case io::SurfaceExtractionMethod::ManifoldDualContouring:
         {
-            if (is3mf && wantsShellExport)
-            {
-                exportShellsTo3mf(core);
-                return;
-            }
-
             io::ManifoldDualContouringOptions options{};
             options.qualityPreset = m_manifoldQualityPreset;
             options.applyPreset();

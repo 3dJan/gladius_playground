@@ -1,11 +1,27 @@
 set(BINARY ${CMAKE_PROJECT_NAME})
 file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 
+list(APPEND SOURCES
+    io/3mf/OpenVdbShellGenerator.h
+    io/3mf/OpenVdbShellGenerator.cpp
+    io/3mf/ShellMaterialOrdering.h
+    io/3mf/ShellMaterialOrdering.cpp
+    io/3mf/ShellThicknessPartition.h
+    io/3mf/ShellThicknessPartition.cpp
+)
+
 # MCP sources are intentionally NOT part of the core targets (gladius, gladius_lib)
 # They will be added to the dedicated gladiusmcp target below
 file(GLOB MCP_SOURCES LIST_DIRECTORIES true mcp/*.h mcp/*.cpp)
 # Add MCP tools sources
 file(GLOB MCP_TOOLS_SOURCES LIST_DIRECTORIES true mcp/tools/*.h mcp/tools/*.cpp)
+
+if (MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/tools/ParameterManagementTool.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/tools/ResourceManagementTool.cpp
+        PROPERTIES JOB_POOL_COMPILE gladius_msvc_heavy_compile_pool)
+endif()
 
 
 
@@ -105,6 +121,56 @@ target_link_libraries(${BINARY}_lib PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
 
+# Precompiled headers: keep the Windows PCH deliberately lean. Large template-heavy
+# dependencies such as OpenVDB/Boost/Eigen/ImGui can raise the baseline heap for every
+# MSVC translation unit that uses the PCH. Linux/Clang keeps the broader PCH because it
+# is not where we see C1060 heap exhaustion.
+set(GLADIUS_CORE_PCH_HEADERS
+    <algorithm>
+    <array>
+    <chrono>
+    <cmath>
+    <cstring>
+    <filesystem>
+    <fstream>
+    <functional>
+    <iostream>
+    <limits>
+    <map>
+    <memory>
+    <mutex>
+    <optional>
+    <set>
+    <sstream>
+    <stdexcept>
+    <string>
+    <unordered_map>
+    <unordered_set>
+    <utility>
+    <variant>
+    <vector>
+    <fmt/format.h>
+)
+
+if (NOT MSVC)
+    list(APPEND GLADIUS_CORE_PCH_HEADERS
+        <Eigen/Core>
+        <imgui.h>)
+endif()
+
+set(GLADIUS_MCP_PCH_HEADERS
+    ${GLADIUS_CORE_PCH_HEADERS}
+    <nlohmann/json.hpp>
+)
+
+target_precompile_headers(${BINARY}_lib PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
+# _lib_mcp has GLADIUS_ENABLE_MCP defined so it gets its own PCH build
+target_precompile_headers(${BINARY}_lib_mcp PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
+# Keep a target-local PCH for the executable. MSVC embeds the target's PDB path
+# in the PCH, so reusing the static library PCH causes C2859 when the executable
+# is compiled with its own /Fd path.
+target_precompile_headers(${BINARY} PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
+
 # Enable AVX2 SIMD instructions for Phase 3 optimization
 # PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
 # avoiding ODR violations from mismatched struct layouts.
@@ -135,6 +201,9 @@ endif()
 target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
 # Ensure the MCP-enabled static library is built before linking the executable
 add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
+# Use an MCP-specific PCH instead of reusing the core/UI PCH; the MCP tools mostly need
+# standard library + JSON, not the full Eigen/ImGui-heavy core baseline.
+target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
 if (NOT WIN32)
     target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
 endif()

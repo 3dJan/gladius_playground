@@ -108,20 +108,37 @@ namespace gladius::nodes
             {
                 if (parameter.second.getSource().has_value())
                 {
-                    const auto portIter =
-                      std::find_if(std::begin(m_outPorts),
-                                   std::end(m_outPorts),
-                                   [&](auto & port)
-                                   {
-                                       return port.second->getUniqueName() ==
-                                              parameter.second.getSource().value().uniqueName;
-                                   });
+                    auto const & src = parameter.second.getSource().value();
+
+                    // Primary lookup: by uniqueName (the normal path).
+                    auto portIter = std::find_if(std::begin(m_outPorts),
+                                                 std::end(m_outPorts),
+                                                 [&](auto & port)
+                                                 {
+                                                     return port.second->getUniqueName() ==
+                                                            src.uniqueName;
+                                                 });
+
+                    // Fallback: by portId. This handles the case where a port was renamed
+                    // after the link was established and the Source::uniqueName became stale.
+                    if (portIter == std::end(m_outPorts))
+                    {
+                        portIter = m_outPorts.find(src.portId);
+                    }
 
                     if (portIter == std::end(m_outPorts))
                     {
-                        throw std::runtime_error(
-                          fmt::format("Output port with the name {} could not be found",
-                                      parameter.second.getSource().value().uniqueName));
+                        if (m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("Output port with the name {} could not be found — "
+                                           "link dropped during model copy",
+                                           src.uniqueName),
+                               events::Severity::Warning});
+                        }
+                        // Clear the stale source so the model remains in a consistent state.
+                        parameter.second.setSource(std::nullopt);
+                        continue;
                     }
                     bool const skipLinkValidation = true;
                     addLink(

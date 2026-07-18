@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include <imgui_stdlib.h>      // For InputText with std::string
 #include <lib3mf_implicit.hpp> // For VolumeData interfaces
+#include <optional>
 
 namespace gladius::ui
 {
@@ -137,6 +138,7 @@ namespace gladius::ui
 
         // Check if export is in progress - disable modifications
         bool const exportInProgress = m_exportState != nullptr && m_exportState->isExportInProgress();
+        std::optional<ResourceKey> pendingResourceDeletion;
         
         auto & resourceManager = document->getGeneratorContext().resourceManager;
 
@@ -366,7 +368,7 @@ namespace gladius::ui
                     {
                         if (safeResult.canBeRemoved)
                         {
-                            document->deleteResource(key);
+                            pendingResourceDeletion = key;
                         }
                     }
 
@@ -397,6 +399,11 @@ namespace gladius::ui
                              "Mesh Resource Details\n\n"
                              "View vertices, triangles, and properties of this mesh.\n"
                              "Meshes define the shape of objects using triangular surfaces.");
+
+                if (pendingResourceDeletion.has_value())
+                {
+                    break;
+                }
             }
             ImGui::TreePop();
         }
@@ -734,7 +741,7 @@ namespace gladius::ui
                     {
                         if (safeResult.canBeRemoved)
                         {
-                            document->deleteResource(key);
+                            pendingResourceDeletion = key;
                         }
                     }
 
@@ -765,6 +772,11 @@ namespace gladius::ui
                              "Image Stack Details\n\n"
                              "View and edit the 3D image data used in volumetric models.\n"
                              "These stacked images create a full 3D representation.");
+
+                if (pendingResourceDeletion.has_value())
+                {
+                    break;
+                }
             }
             ImGui::TreePop();
         }
@@ -774,6 +786,11 @@ namespace gladius::ui
                      "3D image data for volumetric models.\n"
                      "Image stacks store information as voxels (3D pixels) and allow you to\n"
                      "represent object properties that vary throughout the volume.");
+
+        if (pendingResourceDeletion.has_value())
+        {
+            document->deleteResource(*pendingResourceDeletion);
+        }
     }
 
     void ResourceView::addMesh(SharedDocument document)

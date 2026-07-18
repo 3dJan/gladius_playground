@@ -50,18 +50,37 @@ namespace gladius::nodes
     bool operator==(const InputTypeMap & lhs, const InputTypeMap & rhs);
     struct GeneratorContext
     {
-        GeneratorContext(SharedResources resourceContext, std::filesystem::path assemblyDir)
-            : resourceManager(resourceContext, std::move(assemblyDir))
-            , m_resourceContext(resourceContext) {};
-
-        SharedPrimitives primitives{nullptr};
-        ResourceManager resourceManager;
-        std::filesystem::path basePath{};
-        SharedComputeContext computeContext{nullptr};
-
       private:
+        std::unique_ptr<ResourceManager> m_ownedResourceManager;
         // Keep the resources alive for the lifetime of the GeneratorContext
         SharedResources m_resourceContext;
+
+      public:
+        GeneratorContext(SharedResources resourceContext, std::filesystem::path assemblyDir)
+            : m_ownedResourceManager(
+                std::make_unique<ResourceManager>(resourceContext, std::move(assemblyDir)))
+            , m_resourceContext(resourceContext)
+            , resourceManager(*m_ownedResourceManager)
+        {
+        }
+
+        /// Creates a staging context that reuses the document's host-side resources while
+        /// targeting an independent generation resource context. The borrowed manager must
+        /// outlive this GeneratorContext and concurrent resource mutation must be excluded by
+        /// the caller's staging barrier.
+        GeneratorContext(SharedResources resourceContext,
+                         ResourceManager & borrowedResourceManager,
+                         std::filesystem::path assemblyDir)
+            : resourceManager(borrowedResourceManager)
+            , m_resourceContext(std::move(resourceContext))
+            , basePath(std::move(assemblyDir))
+        {
+        }
+
+        SharedPrimitives primitives{nullptr};
+        ResourceManager & resourceManager;
+        std::filesystem::path basePath{};
+        SharedComputeContext computeContext{nullptr};
     };
 
     class NodeBase
@@ -79,9 +98,7 @@ namespace gladius::nodes
         virtual ~NodeBase() = default;
 
         ParameterMap & parameter()
-        {
-            return m_parameter;
-        }
+        { return m_parameter; }
 
         VariantParameter * getParameter(ParameterName const & parameterName)
         {
@@ -96,19 +113,13 @@ namespace gladius::nodes
         }
 
         ParameterMap const & constParameter() const
-        {
-            return m_parameter;
-        }
+        { return m_parameter; }
 
         [[nodiscard]] auto name() const -> NodeName const &
-        {
-            return m_name;
-        }
+        { return m_name; }
 
         [[nodiscard]] auto getUniqueName() const -> NodeName const &
-        {
-            return m_unique_name;
-        }
+        { return m_unique_name; }
 
         void setUniqueName(const std::string & name)
         {
@@ -129,24 +140,16 @@ namespace gladius::nodes
         }
 
         void setDisplayName(const NodeName & displayName)
-        {
-            m_displayName = displayName;
-        }
+        { m_displayName = displayName; }
 
         [[nodiscard]] auto outputs() const -> Outputs const &
-        {
-            return m_outputs;
-        }
+        { return m_outputs; }
 
         [[nodiscard]] Outputs & getOutputs()
-        {
-            return m_outputs;
-        }
+        { return m_outputs; }
 
         [[nodiscard]] Outputs const & getOutputs() const
-        {
-            return m_outputs;
-        }
+        { return m_outputs; }
 
         Port * findOutputPort(PortName const & portName)
         {
@@ -159,41 +162,27 @@ namespace gladius::nodes
         }
 
         [[nodiscard]] auto getId() const -> NodeId
-        {
-            return m_id;
-        }
+        { return m_id; }
 
         void setId(NodeId id)
-        {
-            m_id = id;
-        }
+        { m_id = id; }
 
         virtual void accept(Visitor & /*unused*/) {};
 
         [[nodiscard]] auto screenPos() -> float2 &
-        {
-            return m_screenPos;
-        }
+        { return m_screenPos; }
 
         [[nodiscard]] auto screenPos() const -> float2 const &
-        {
-            return m_screenPos;
-        }
+        { return m_screenPos; }
 
         [[nodiscard]] auto getCategory() const -> Category
-        {
-            return m_category;
-        }
+        { return m_category; }
 
         void setOrder(NodeId order)
-        {
-            m_order = order;
-        }
+        { m_order = order; }
 
         [[nodiscard]] auto getOrder() const -> NodeId
-        {
-            return m_order;
-        }
+        { return m_order; }
         void addOutputPort(const PortName & portName, std::type_index typeIndex)
         {
             auto & newPort = m_outputs[portName];
@@ -211,32 +200,24 @@ namespace gladius::nodes
         }
 
         std::unique_ptr<NodeBase> clone() const
-        {
-            return std::unique_ptr<NodeBase>(this->cloneImpl());
-        }
+        { return std::unique_ptr<NodeBase>(this->cloneImpl()); }
         void updateNodeIds();
 
         [[nodiscard]] virtual bool parameterChangeInvalidatesPayload() const
-        {
-            return false;
-        }
+        { return false; }
 
         virtual void generate(GeneratorContext & /*generatorContext*/) {};
 
         virtual void updateMemoryOffsets(GeneratorContext & /*generatorContext*/) {};
 
         [[nodiscard]] virtual std::string getDescription() const
-        {
-            return {"Basic node"};
-        }
+        { return {"Basic node"}; }
 
         /// @brief Determines if this node should be exempt from input connection validation
         /// @return true if the node doesn't require input validation (e.g., input/output markers,
         /// constants)
         [[nodiscard]] virtual bool isExemptFromInputValidation() const
-        {
-            return false;
-        }
+        { return false; }
 
         bool updateTypes(nodes::Model & model);
 
@@ -331,19 +312,13 @@ namespace gladius::nodes
         }
 
         [[nodiscard]] auto getTag() const -> NodeName const &
-        {
-            return m_tag;
-        }
+        { return m_tag; }
 
         void setTag(const NodeName & tag)
-        {
-            m_tag = tag;
-        }
+        { m_tag = tag; }
 
         [[nodiscard]] RuleType getRuleType() const
-        {
-            return m_ruleType;
-        }
+        { return m_ruleType; }
 
       protected:
         ParameterMap m_parameter;
@@ -361,9 +336,7 @@ namespace gladius::nodes
 
       private:
         [[nodiscard]] virtual NodeBase * cloneImpl() const
-        {
-            return new NodeBase(*this);
-        }
+        { return new NodeBase(*this); }
     };
 
     inline void NodeBase::updateNodeIds()

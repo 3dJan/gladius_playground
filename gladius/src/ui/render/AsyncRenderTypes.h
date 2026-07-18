@@ -1,5 +1,8 @@
 #pragma once
 
+#include "FramePresentationTypes.h"
+#include "RenderUpdateTypes.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +47,8 @@ namespace gladius::ui::async_rendering
     enum class RenderJobType
     {
         HighQuality,
+        RealtimeHighQuality,
+        StaticFullFrameProbe,
         LowResPreview,
         StreamingPreview,     // Continuous preview loop during parameter drag
         BoundingBoxUpdate,
@@ -58,6 +63,8 @@ namespace gladius::ui::async_rendering
     struct RenderJob
     {
         uint64_t epoch{0};
+        uint64_t viewEpoch{0};
+        uint64_t paramGeneration{0}; ///< GPU parameter-buffer generation captured when scheduled.
         uint64_t frameHint{0};
         RenderJobType type{RenderJobType::HighQuality};
         uint32_t width{0};
@@ -67,6 +74,8 @@ namespace gladius::ui::async_rendering
         bool precomputeSdf{false};
         bool enableHighQuality{true};
         bool precomputedSdf{false};  // True if SDF should be precomputed before rendering
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
@@ -76,6 +85,7 @@ namespace gladius::ui::async_rendering
     {
         uint64_t frameId{0};
         uint64_t epoch{0};
+        uint64_t viewEpoch{0};
         RenderJobType jobType{RenderJobType::HighQuality};
         uint32_t width{0};
         uint32_t height{0};
@@ -88,6 +98,8 @@ namespace gladius::ui::async_rendering
         float compilationProgress{0.0f};  // 0.0 - 1.0 for compilation jobs
         bool compilationSucceeded{false};
         std::string compilationError;     // Empty if no error
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
@@ -113,9 +125,14 @@ namespace gladius::ui::async_rendering
     {
         uint64_t frameId{0};         ///< Matches PreviewRenderJob::frameId
         uint64_t epoch{0};           ///< Matches PreviewRenderJob::epoch
+        uint64_t viewEpoch{0};       ///< Camera/view generation captured when the preview was queued
         uint64_t latencyNs{0};       ///< Time from job enqueue to completion (nanoseconds)
         bool cancelled{false};       ///< True if job was cancelled due to epoch change
         bool sdfWasValid{false};     ///< True if SDF was available during rendering
+        FramePresentationQuality quality{FramePresentationQuality::Preview};
+        FramePresentationSource source{FramePresentationSource::LowResolutionPreview};
+        uint64_t coordinatorRequestId{0};
+        RenderStamp coordinatorStamp{};
     };
 
     /**
@@ -127,6 +144,7 @@ namespace gladius::ui::async_rendering
         std::atomic<FrameState> state{FrameState::Idle};
         std::atomic<uint64_t> frameId{0};
         std::atomic<uint64_t> epoch{0};
+        std::atomic<uint64_t> viewEpoch{0};
         std::atomic<uint64_t> readyTimestampNs{0};
         std::atomic<uint64_t> publishTimestampNs{0};
 

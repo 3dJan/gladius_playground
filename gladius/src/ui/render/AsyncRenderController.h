@@ -12,6 +12,7 @@
 #include <coro/coro.hpp>
 
 #include "AsyncRenderTypes.h"
+#include "FramePresentationController.h"
 
 // Include OpenCL platform types for cl_float4
 #include <CL/cl_platform.h>
@@ -81,6 +82,7 @@ namespace gladius::ui::async_rendering
 
         void enqueueJob(RenderJob job);
         void setLatestEpoch(uint64_t epoch);
+        void setLatestViewEpoch(uint64_t viewEpoch);
         void setJobExecutor(JobExecutor executor);
         [[nodiscard]] std::optional<FrameResultMeta> tryConsumeResult();
 
@@ -92,6 +94,9 @@ namespace gladius::ui::async_rendering
 
         /// Get worker-specific command queue (used by worker thread for rendering)
         [[nodiscard]] cl::CommandQueue * workerQueue() noexcept;
+        /// Thread-safe snapshot — safe to call from worker threads concurrently with
+        /// initializeAsyncResources(). Holds the queue alive for the caller's lifetime.
+        [[nodiscard]] std::shared_ptr<cl::CommandQueue> workerQueueShared() const noexcept;
 
         /// Get staging buffer (used by worker thread for rendering output)
         [[nodiscard]] cl::Image2D * stagingBuffer() noexcept;
@@ -114,13 +119,46 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] FrameBuffer * acquireWriteBuffer(uint64_t epoch) noexcept;
 
         /// Publish a finished frame (Writing → Ready)
-        void publishFrame(FrameBuffer * buffer, uint64_t frameId, uint64_t epoch) noexcept;
+        void publishFrame(FrameBuffer * buffer,
+                          uint64_t frameId,
+                          uint64_t epoch,
+                          uint64_t viewEpoch = 0,
+                          FramePresentationQuality quality =
+                            FramePresentationQuality::Unknown) noexcept;
+
+        /// Publish a finished frame with the coordinator stamp used for presentation policy.
+        void publishFrame(FrameBuffer * buffer,
+                          uint64_t frameId,
+                          uint64_t epoch,
+                          uint64_t viewEpoch,
+                          RenderStamp const & stamp,
+                          FramePresentationQuality quality) noexcept;
+
+        /// Snapshot mirrored presentation metadata for a specific HQ buffer.
+        [[nodiscard]] std::optional<PresentationBuffer>
+          mirroredPresentationBuffer(FrameBuffer const * buffer) const noexcept;
+
+        /// Snapshot mirrored presentation metadata for the currently presented front buffer.
+        [[nodiscard]] std::optional<PresentationBuffer> mirroredFrontPresentationBuffer() const noexcept;
 
         /// Promote a Ready buffer to Front (for UI display)
         [[nodiscard]] FrameBuffer * promoteReadyToFront() noexcept;
 
-  /// Finalize promotion by transitioning Resampling → Front and updating indices
-  [[nodiscard]] bool finalizeFrontPromotion(FrameBuffer * buffer) noexcept;
+        /// Promote the best Ready buffer that is acceptable for the requested display stamp.
+        [[nodiscard]] FrameBuffer * promoteReadyToFront(RenderStamp const & required,
+                                                        RenderStampMask mask) noexcept;
+
+        /// Check whether an external/non-HQ candidate may be presented against the current front.
+        [[nodiscard]] bool canPresentFrame(RenderStamp const & candidateStamp,
+                                           FramePresentationQuality candidateQuality,
+                                           RenderStamp const & required,
+                                           RenderStampMask mask) const noexcept;
+
+          /// Release a completed Ready frame that should no longer be displayed.
+          void discardReadyFrame(uint64_t frameId, uint64_t epoch, uint64_t viewEpoch) noexcept;
+
+          /// Finalize promotion by transitioning Resampling → Front and updating indices
+          [[nodiscard]] bool finalizeFrontPromotion(FrameBuffer * buffer) noexcept;
 
         /// Release any Writing buffers from old epochs back to Idle
         /// (used when epoch changes to clean up cancelled jobs)
@@ -156,17 +194,25 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] static auto workerLoop(std::shared_ptr<ControllerState> state)
           -> coro::task<void>;
 
+        [[nodiscard]] std::optional<size_t>
+          frameBufferIndex(FrameBuffer const * buffer) const noexcept;
+        [[nodiscard]] bool tryTransitionBufferLocked(FrameBuffer * buffer,
+                                                     FrameState expectedState,
+                                                     FrameState newState) noexcept;
+
         std::shared_ptr<ControllerState> m_state;
         std::atomic<bool> m_running{false};
 
         // OpenCL resources for async rendering (Option A: separate CL queue, no GL interop)
-        std::unique_ptr<cl::CommandQueue> m_workerQueue;
+        mutable std::mutex m_workerQueueMutex;
+        std::shared_ptr<cl::CommandQueue> m_workerQueue;
         std::unique_ptr<cl::Image2D> m_stagingBuffer;
         size_t m_stagingWidth{0};
         size_t m_stagingHeight{0};
 
         // Triple buffer state machine (for HQ progressive rendering)
         std::array<FrameBuffer, 3> m_frameBuffers;
+        FramePresentationController m_framePresentation{m_frameBuffers.size()};
         std::atomic<size_t> m_frontBufferIndex{0};
         mutable std::mutex m_bufferMutex;
 

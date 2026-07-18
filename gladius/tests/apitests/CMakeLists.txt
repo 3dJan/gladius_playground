@@ -75,6 +75,9 @@ file(COPY "../../components/licenses" DESTINATION ".")
 file(MAKE_DIRECTORY "examples")
 file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 
+# Copy library files used by integration tests
+file(COPY "../../library/mechanical/involute_gear.3mf" DESTINATION "testdata")
+
 # Use gtest_discover_tests for automatic test discovery with 'api' label
 gtest_discover_tests(${BINARY}
     PROPERTIES LABELS "api"

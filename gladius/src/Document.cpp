@@ -1,5 +1,7 @@
 #include "Document.h"
 
+#include "io/3mf/Lib3mfLoader.h"
+
 #include "BackupManager.h"
 #include "CliReader.h"
 #include "CliWriter.h"
@@ -291,6 +293,39 @@ namespace gladius
         m_backupManager.initialize();
     }
 
+    Document::~Document()
+    {
+        // Join in-flight async workers before any member is destroyed. The workers
+        // (refreshWorker / file-load) capture `this` and touch members such as
+        // m_isLoading, m_loadingError and m_buildItems that are declared after the
+        // future members. Relying on the implicit std::future destructors to join
+        // would do so only after those later-declared members are already gone,
+        // producing a use-after-free during shutdown.
+        try
+        {
+            if (m_futureModelRefresh.valid())
+            {
+                m_futureModelRefresh.wait();
+            }
+        }
+        catch (...)
+        {
+            // Never throw from a destructor.
+        }
+
+        try
+        {
+            if (m_futureFileLoad.valid())
+            {
+                m_futureFileLoad.wait();
+            }
+        }
+        catch (...)
+        {
+            // Never throw from a destructor.
+        }
+    }
+
     bool Document::refreshModelAsync()
     {
         if (!m_assembly || !m_core)
@@ -298,8 +333,14 @@ namespace gladius
             return false;
         }
 
-        // Validation moved to refreshWorker() to avoid blocking the UI thread.
-        // The worker validates first and exits early if the model is invalid.
+        // Run a lightweight graph sync + validation pass before scheduling any
+        // background refresh work. This keeps invalid graphs from entering the
+        // expensive payload/compile path and avoids transient "compiling"
+        // states while the user is still resolving graph issues.
+        if (!prepareAssemblyForRefresh())
+        {
+            return false;
+        }
 
         // Signal compilation started on the UI thread BEFORE launching the worker.
         // This ensures isRendererReady() returns false immediately, preventing
@@ -336,6 +377,59 @@ namespace gladius
         return true;
     }
 
+    bool Document::prepareAssemblyForRefresh(nodes::ValidationContext const context)
+    {
+        if (!m_assembly)
+        {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> const lock(m_assemblyMutex);
+
+        std::optional<std::string> syncError;
+        try
+        {
+            m_assembly->updateInputsAndOutputs();
+        }
+        catch (std::exception const & e)
+        {
+            syncError = e.what();
+        }
+
+        markValidationDirty();
+        bool const graphValid = validateAssemblyIfDirty(context);
+
+        if (!syncError.has_value())
+        {
+            return graphValid;
+        }
+
+        nodes::ValidationIssue issue{};
+        issue.message = *syncError;
+        issue.type = nodes::IssueType::GraphSyncError;
+        if (syncError->find("function") != std::string::npos ||
+            syncError->find("Function") != std::string::npos)
+        {
+            issue.type = nodes::IssueType::FunctionNotFound;
+        }
+        issue.severity = nodes::IssueSeverity::Error;
+        issue.fixSuggestion = nodes::getFixSuggestion(issue.type);
+        issue.modelId = 0u;
+        issue.nodeId = {};
+        m_issueList.add(std::move(issue));
+
+        if (context != nodes::ValidationContext::Interactive)
+        {
+            auto logger = getSharedLogger();
+            if (logger)
+            {
+                logger->addEvent({*syncError, events::Severity::Error});
+            }
+        }
+
+        return false;
+    }
+
     void Document::loadAllMeshResources()
     {
         io::Importer3mf importer{getSharedLogger()};
@@ -369,13 +463,8 @@ namespace gladius
     void Document::refreshWorker(RefreshMode const refreshMode)
     {
         ProfileFunction;
-        auto computeToken = m_core->waitForComputeToken();
-        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
-          *m_core,
-          refreshMode == RefreshMode::InteractiveFirst};
 
         auto meshResourceState = m_core->getMeshResourceState();
-        meshResourceState->signalCompilationStarted();
 
         // Capture the structural edit epoch at the start of this worker run.
         // If a new structural edit arrives while we're working, the epoch will
@@ -386,10 +475,15 @@ namespace gladius
             return m_structuralEditEpoch.load(std::memory_order_acquire) != startEpoch;
         };
 
-        // Validate early: skip expensive compilation if model is in an invalid
-        // state (e.g. nodes with missing connections during graph editing).
-        // This used to run on the UI thread; running here avoids blocking it.
-        if (!validateAssembly())
+        if (isStale())
+        {
+            meshResourceState->signalCompilationFinished();
+            return;
+        }
+
+        // Validate before taking the compute token so invalid graphs can fail
+        // fast without waiting on in-flight GPU work.
+        if (!prepareAssemblyForRefresh())
         {
             meshResourceState->signalCompilationFinished();
             return;
@@ -401,7 +495,12 @@ namespace gladius
             return;
         }
 
-        m_assembly->updateInputsAndOutputs();
+        auto computeToken = m_core->waitForComputeToken();
+        ScopedOptimizedRenderCompilationDeferral optimizedRenderDeferral{
+          *m_core,
+          refreshMode == RefreshMode::InteractiveFirst};
+
+        meshResourceState->signalCompilationStarted();
 
         // Build the lightweight 3MF resource dependency graph before extracting
         // mesh geometry, so loadAllMeshResources() can skip meshes that are not
@@ -651,9 +750,30 @@ namespace gladius
     bool Document::refreshModelIfNoCompilationIsRunning()
     {
         ProfileFunction;
-        if (m_core->getBestRenderProgram()->isCompilationInProgress() ||
-            m_core->getSlicerProgram()->isCompilationInProgress() ||
-            !m_core->getMeshResourceState()->isModelUpToDate())
+
+        // This method is called from the UI frame loop. Only use non-blocking probes here;
+        // the background load/refresh worker can hold the compute token for several seconds
+        // while importing meshes and preparing GPU resources.
+        if (m_core->isAnyCompilationInProgressNonBlocking())
+        {
+            return false;
+        }
+
+        auto const meshResourceState = m_core->getMeshResourceState();
+        if (meshResourceState && !meshResourceState->isModelUpToDate())
+        {
+            return false;
+        }
+
+        {
+            auto computeToken = m_core->requestComputeToken();
+            if (!computeToken.has_value())
+            {
+                return false;
+            }
+        }
+
+        if (m_core->isAnyCompilationInProgressNonBlocking())
         {
             return false;
         }
@@ -664,6 +784,7 @@ namespace gladius
     void Document::newModel()
     {
         ProfileFunction;
+        m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
 
             m_assembly = std::make_shared<nodes::Assembly>();
@@ -684,6 +805,7 @@ namespace gladius
     void Document::newEmptyModel()
     {
         ProfileFunction;
+        m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
 
             m_assembly = std::make_shared<nodes::Assembly>();
@@ -1039,6 +1161,7 @@ namespace gladius
     void Document::markFileAsChanged()
     {
         m_fileChanged = true;
+        m_saveVersion.fetch_add(1, std::memory_order_release);
         m_validationDirty = true;
     }
 
@@ -1261,6 +1384,63 @@ namespace gladius
         }
     }
 
+    io::SaveSnapshot Document::createSaveSnapshot() const
+    {
+        auto assemblyToken = waitForAssemblyToken();
+        if (!m_assembly)
+        {
+            throw std::runtime_error("Cannot create save snapshot without an assembly");
+        }
+        if (!m_3mfmodel)
+        {
+            throw std::runtime_error("Cannot create save snapshot without a 3MF model");
+        }
+
+        auto const wrapper = io::loadLib3mfScoped();
+        auto const writer = m_3mfmodel->QueryWriter("3mf");
+        std::vector<Lib3MF_uint8> buffer;
+        writer->WriteToBuffer(buffer);
+
+        auto modelCopy = wrapper->CreateModel();
+        auto reader = modelCopy->QueryReader("3mf");
+        reader->ReadFromBuffer(buffer);
+
+        io::SaveSnapshot snapshot;
+        snapshot.assembly = std::make_shared<nodes::Assembly>(*m_assembly);
+        snapshot.model = std::move(modelCopy);
+        snapshot.documentIdentity = documentIdentity();
+        snapshot.version = saveVersion();
+        return snapshot;
+    }
+
+    uint64_t Document::saveVersion() const
+    {
+        return m_saveVersion.load(std::memory_order_acquire);
+    }
+
+    io::DocumentIdentity Document::documentIdentity() const
+    {
+        return m_documentIdentity.load(std::memory_order_acquire);
+    }
+
+    bool Document::completeSave(std::filesystem::path filename,
+                                io::DocumentIdentity snapshotDocumentIdentity,
+                                uint64_t snapshotVersion)
+    {
+        if (documentIdentity() != snapshotDocumentIdentity || saveVersion() != snapshotVersion)
+        {
+            return false;
+        }
+
+        m_currentAssemblyFileName = filename;
+        m_fileChanged = false;
+        if (m_assembly)
+        {
+            m_assembly->setFilename(filename);
+        }
+        return true;
+    }
+
     nodes::SharedAssembly Document::getAssembly() const
     {
 
@@ -1452,6 +1632,62 @@ namespace gladius
         summary.message = fmt::format(
           "NanoVDB is unavailable for {} mesh resources. First issue: {}",
           summary.affectedMeshCount,
+          firstMessage);
+        return summary;
+    }
+
+    MeshQualityIssueSummary Document::getMeshQualityIssueSummary() const
+    {
+        MeshQualityIssueSummary summary{};
+        std::string firstMessage;
+
+        for (auto const & [key, resource] : getResourceManager().getResourceMap())
+        {
+            if (key.getResourceType() != ResourceType::Mesh)
+            {
+                continue;
+            }
+
+            auto const * spatialMesh = dynamic_cast<SpatialMeshResource const *>(resource.get());
+            if (spatialMesh == nullptr || !spatialMesh->hasMeshQualityIssues())
+            {
+                continue;
+            }
+
+            ++summary.affectedMeshCount;
+            summary.hasIssue = true;
+
+            auto const & quality = spatialMesh->getMeshQualityDiagnostics();
+            summary.degenerateTriangleCount +=
+              static_cast<std::size_t>(quality.degenerateTriangleCount);
+            summary.boundaryEdgeCount += static_cast<std::size_t>(quality.boundaryEdgeCount);
+            summary.nonManifoldEdgeCount +=
+              static_cast<std::size_t>(quality.nonManifoldEdgeCount);
+
+            if (firstMessage.empty())
+            {
+                firstMessage = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            }
+        }
+
+        if (!summary.hasIssue)
+        {
+            return summary;
+        }
+
+        if (summary.affectedMeshCount == 1u)
+        {
+            summary.message = std::move(firstMessage);
+            return summary;
+        }
+
+        summary.message = fmt::format(
+          "Mesh topology diagnostics affect {} mesh resources ({} boundary edges, {} "
+          "non-manifold edges, {} degenerate triangles total). First issue: {}",
+          summary.affectedMeshCount,
+          summary.boundaryEdgeCount,
+          summary.nonManifoldEdgeCount,
+          summary.degenerateTriangleCount,
           firstMessage);
         return summary;
     }
@@ -1720,6 +1956,7 @@ namespace gladius
 
         if (filename.extension() == ".3mf")
         {
+            m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
             {
 
                 m_assembly = {};
@@ -1817,6 +2054,27 @@ namespace gladius
                 if (changed)
                 {
                     ++changedResources;
+                }
+
+                if (spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
+                    spatialMesh->hasMeshQualityIssues())
+                {
+                    auto const message = spatialMesh->formatMeshQualityMessage(
+                      key.getDisplayName());
+                    auto logger = getSharedLogger();
+                    if (logger)
+                    {
+                        logger->addEvent(
+                          {message,
+                           nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail
+                             ? events::Severity::Error
+                             : events::Severity::Warning});
+                    }
+
+                    if (nanovdbBuildPolicy.failurePolicy == NanoVdbFailurePolicy::Fail)
+                    {
+                        throw NanoVdbBuildRejectedError(message);
+                    }
                 }
 
                 if (changed && spatialMesh->evaluationConfig().method == MeshSdfMethod::NanoVDB &&
@@ -2665,6 +2923,11 @@ namespace gladius
 
     bool Document::dispatchStructuralUpdate()
     {
+        if (!prepareAssemblyForRefresh())
+        {
+            return false;
+        }
+
         if (refreshModelIfNoCompilationIsRunning())
         {
             return true;

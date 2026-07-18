@@ -21,6 +21,11 @@ namespace gladius::ui
         m_nanovdbIssueProvider = std::move(provider);
     }
 
+    void MeshSdfSettingsDialog::setMeshQualityIssueProvider(MeshQualityIssueProvider provider)
+    {
+        m_meshQualityIssueProvider = std::move(provider);
+    }
+
     void MeshSdfSettingsDialog::show()
     {
         syncFromSettings();
@@ -92,6 +97,38 @@ namespace gladius::ui
         // ---- Evaluation method ------------------------------------------------
         if (ImGui::CollapsingHeader("Evaluation", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            if (m_meshQualityIssueProvider)
+            {
+                auto const qualityIssue = m_meshQualityIssueProvider();
+                if (qualityIssue.hasIssue)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
+                                       "Mesh topology diagnostics detected");
+                    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
+                    ImGui::TextUnformatted(qualityIssue.message.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::TextDisabled(
+                      "No silent repair or fallback was applied; choose an explicit recovery and Apply.");
+
+                    if (ImGui::Button("Enable repair for next import"))
+                    {
+                        m_repair.weld = true;
+                        m_repair.removeDegenerate = true;
+                        m_repair.orientConsistently = true;
+                        m_repair.fillHoles = true;
+                        m_dirty = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Use FWN sign"))
+                    {
+                        m_eval.method = MeshSdfMethod::FastWindingNumber;
+                        m_eval.fwnUseSignCache = false;
+                        m_dirty = true;
+                    }
+                    ImGui::Separator();
+                }
+            }
+
             char const * preview = methodLabel(m_eval.method);
             if (ImGui::BeginCombo("Method", preview))
             {

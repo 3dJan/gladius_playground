@@ -116,6 +116,8 @@ namespace gladius
         /// @return Reference to the GPU buffer for ray march metrics collection.
         [[nodiscard]] cl::Buffer & getMetricsBuffer();
 
+        [[nodiscard]] GpuResourceHandle getMetricsBufferGpuResource() const noexcept;
+
       private:
         void clearDistanceMaps();
         std::unique_ptr<Vertices> m_contourVertexPos;
@@ -172,6 +174,7 @@ namespace gladius
 
         /// @brief Buffer for ray march metrics collection (4 x uint32: totalRays, totalSteps, cacheHits, nonConverged)
         std::optional<cl::Buffer> m_metricsBuffer;
+        GpuResourceHandle m_metricsBufferResource{};
 
         bool m_resizeOfBuildAreaBufferRequired = true;
         bool m_resizeOfDistanceMapsRequired = true;

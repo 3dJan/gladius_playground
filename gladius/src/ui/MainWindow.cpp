@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+
+#include "ComputeContext.h"
+#include "io/3mf/Writer3mf.h"
 #include "Theme.h"
 
 #include <algorithm>
@@ -32,6 +35,7 @@
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/Writer3mf.h"
 #include "io/ImageStackExporter.h"
+#include "render/RenderModeUpdatePolicy.h"
 #include <nodes/ToCommandStreamVisitor.h>
 
 namespace gladius::ui
@@ -597,6 +601,8 @@ namespace gladius::ui
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
+        pollNativeSave();
+
         // Poll for async compute initialization completion
         pollComputeInit();
 
@@ -605,6 +611,10 @@ namespace gladius::ui
         if (m_computeAvailable && m_doc)
         {
             bool const loadingNow = m_doc->isLoadingInProgress();
+            if (loadingNow)
+            {
+                m_mainView.startAnimationMode();
+            }
             if (m_asyncLoadState != AsyncLoadState::Idle && !loadingNow)
             {
                 if (m_asyncLoadState == AsyncLoadState::LoadingWithReset)
@@ -960,6 +970,7 @@ namespace gladius::ui
                 showExitPopUp();
                 showExportInProgressWarning();
                 showSaveBeforeFileOperationPopUp();
+                showSaveAsOverwriteConfirmation();
 
                 // Render library browser only when the model editor is visible.
                 if (m_modelEditor.isVisible())
@@ -1114,12 +1125,15 @@ namespace gladius::ui
         {
             auto savePath = filename;
             savePath.replace_extension(".3mf");
-            bool writeThumbnail = m_computeAvailable && m_core;
-            m_doc->saveAs(savePath, writeThumbnail);
-            // No invalidation needed — saving doesn't change the model.
-            m_fileChanged = false;
-            m_currentAssemblyFileName = savePath;
-            addToRecentFiles(savePath);
+            if (std::filesystem::exists(savePath))
+            {
+                m_pendingSaveAsPath = savePath;
+                m_showSaveAsOverwriteConfirmation = true;
+            }
+            else
+            {
+                executeSaveAs(savePath);
+            }
             break;
         }
         case AsyncDialogOperation::SaveCurrentFunction:
@@ -1347,13 +1361,15 @@ namespace gladius::ui
         {
             return; // skip rendering UI when compute is disabled
         }
-        // Process render window shortcuts
-        if (m_renderWindow.isVisible() && m_renderWindow.isHovered() && m_renderWindow.isFocused())
+
+        m_renderWindow.renderWindow();
+
+        // Process render window shortcuts after rendering so current-frame hover/focus state is
+        // available. This lets mouse-wheel zoom work as soon as the cursor is over the preview.
+        if (m_renderWindow.isVisible() && m_renderWindow.isHovered())
         {
             processShortcuts(ShortcutContext::RenderWindow);
         }
-
-        m_renderWindow.renderWindow();
     }
 
     void MainWindow::mainMenu()
@@ -1713,6 +1729,10 @@ namespace gladius::ui
     void MainWindow::markFileAsChanged()
     {
         m_fileChanged = true;
+        if (m_doc)
+        {
+            m_doc->markFileAsChanged();
+        }
     }
 
     void MainWindow::open()
@@ -1844,25 +1864,214 @@ namespace gladius::ui
             saveAs();
             return;
         }
-        bool writeThumbnail = m_computeAvailable && m_core;
-        m_doc->saveAs(m_currentAssemblyFileName.value(), writeThumbnail);
-        m_renderWindow.invalidateViewDuetoModelUpdate();
-        m_fileChanged = false;
-
-        // Add to recent files list
-        addToRecentFiles(m_currentAssemblyFileName.value());
+        enqueueNativeSave(m_currentAssemblyFileName.value());
     }
 
-    void MainWindow::saveAs()
+    void MainWindow::saveAs(std::filesystem::path defaultPath)
     {
         // Allow saving even if compute is disabled; just skip thumbnail generation.
         if (!m_doc || m_asyncFileDialog.isActive())
         {
             return;
         }
+        if (defaultPath.empty())
+        {
+            defaultPath = m_currentAssemblyFileName.value_or(std::filesystem::path{});
+        }
         m_asyncDialogOp = AsyncDialogOperation::SaveAs;
-        m_asyncFileDialog.saveFile({"*.implicit.3mf"},
-                                   m_currentAssemblyFileName.value_or(std::filesystem::path{}));
+        m_asyncFileDialog.saveFile({"*.implicit.3mf"}, defaultPath);
+    }
+
+    void MainWindow::executeSaveAs(std::filesystem::path const & savePath)
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+        enqueueNativeSave(savePath);
+    }
+
+    void MainWindow::enqueueNativeSave(std::filesystem::path filename)
+    {
+        if (!m_doc)
+        {
+            return;
+        }
+
+        try
+        {
+            PendingNativeSave save{std::move(filename), m_doc->createSaveSnapshot(), m_doc};
+            if (m_nativeSaveInProgress)
+            {
+                m_pendingNativeSave = std::move(save);
+                return;
+            }
+            startNativeSave(std::move(save));
+        }
+        catch (std::exception const & e)
+        {
+            m_logger->addEvent({fmt::format("Could not capture native 3MF save snapshot: {}",
+                                            e.what()),
+                                events::Severity::Error});
+        }
+    }
+
+    void MainWindow::startNativeSave(PendingNativeSave save)
+    {
+        auto const tempFilename = makeNativeSaveTempPath(save.filename);
+        auto snapshot = std::move(save.snapshot);
+        auto const filename = save.filename;
+        auto const snapshotDocumentIdentity = snapshot.documentIdentity;
+        auto const snapshotVersion = snapshot.version;
+        auto const sourceDocument = save.sourceDocument;
+        auto logger = m_logger;
+
+        m_nativeSaveInProgress = true;
+        m_nativeSaveFuture = std::async(
+          std::launch::async,
+          [filename,
+           tempFilename,
+           snapshotDocumentIdentity,
+           snapshotVersion,
+           sourceDocument,
+           snapshot = std::move(snapshot),
+           logger]() mutable
+          {
+              NativeSaveResult result{filename,
+                                      snapshotDocumentIdentity,
+                                      snapshotVersion,
+                                      false,
+                                      {},
+                                      sourceDocument};
+              auto thumbnailInput = tempFilename;
+              thumbnailInput.replace_extension(".3mf");
+              try
+              {
+                  io::Writer3mf writer(logger);
+                  if (!writer.save(thumbnailInput, snapshot, false))
+                  {
+                      result.error = "The 3MF writer rejected the save snapshot.";
+                  }
+                  else
+                  {
+                      auto thumbnailContext =
+                        std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+                      if (!thumbnailContext->isValid())
+                      {
+                          result.error = "No valid compute context is available for thumbnail "
+                                         "generation.";
+                      }
+                      else
+                      {
+                          auto thumbnailCore = std::make_shared<ComputeCore>(
+                            thumbnailContext, RequiredCapabilities::ComputeOnly, logger);
+                          auto thumbnailDocument = std::make_shared<Document>(thumbnailCore);
+                          thumbnailDocument->setUiMode(false);
+                          thumbnailDocument->load(thumbnailInput);
+
+                          if (!thumbnailCore->prepareImageRendering())
+                          {
+                              result.error = "The isolated thumbnail renderer could not prepare "
+                                             "the snapshot model.";
+                          }
+                          else
+                          {
+                              auto thumbnail = thumbnailCore->createThumbnailPng();
+                              if (!writer.attachThumbnail(snapshot.model, thumbnail.data))
+                              {
+                                  result.error = "The generated thumbnail could not be attached "
+                                                 "to the 3MF package.";
+                              }
+                              else if (!writer.save(tempFilename, snapshot, false))
+                              {
+                                  result.error = "The 3MF writer rejected the thumbnail package.";
+                              }
+                              else
+                              {
+                                  std::error_code renameError;
+                                  std::filesystem::rename(tempFilename,
+                                                          filename,
+                                                          renameError);
+                                  if (renameError)
+                                  {
+                                      result.error = fmt::format(
+                                        "Could not publish saved file: {}", renameError.message());
+                                  }
+                                  else
+                                  {
+                                      result.success = true;
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+              catch (std::exception const & e)
+              {
+                  result.error = e.what();
+              }
+
+              std::error_code cleanupError;
+              std::filesystem::remove(tempFilename, cleanupError);
+              std::filesystem::remove(thumbnailInput, cleanupError);
+              return result;
+          });
+    }
+
+    void MainWindow::pollNativeSave()
+    {
+        if (!m_nativeSaveInProgress || !m_nativeSaveFuture.valid() ||
+            m_nativeSaveFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+
+        auto result = m_nativeSaveFuture.get();
+        m_nativeSaveInProgress = false;
+
+        if (result.success)
+        {
+            bool currentDocumentWasSaved = false;
+            auto sourceDocument = result.sourceDocument.lock();
+            bool isCurrentDocument = sourceDocument && sourceDocument.get() == m_doc.get();
+            if (isCurrentDocument)
+            {
+                currentDocumentWasSaved = m_doc->completeSave(result.filename,
+                                                               result.snapshotDocumentIdentity,
+                                                               result.snapshotVersion);
+                if (currentDocumentWasSaved)
+                {
+                    m_fileChanged = false;
+                    m_currentAssemblyFileName = result.filename;
+                }
+            }
+
+            if (isCurrentDocument && !currentDocumentWasSaved)
+            {
+                m_fileChanged = true;
+            }
+            addToRecentFiles(result.filename);
+        }
+        else
+        {
+            m_logger->addEvent({fmt::format("Native 3MF save failed: {}", result.error),
+                                events::Severity::Error});
+        }
+
+        if (m_pendingNativeSave)
+        {
+            auto nextSave = std::move(*m_pendingNativeSave);
+            m_pendingNativeSave.reset();
+            startNativeSave(std::move(nextSave));
+        }
+    }
+
+        std::filesystem::path MainWindow::makeNativeSaveTempPath(
+            std::filesystem::path const & filename)
+    {
+        auto tempFilename = filename;
+        tempFilename += fmt::format(".gladius-save-{}.tmp", ++m_nativeSaveSequence);
+        return tempFilename;
     }
 
     void MainWindow::saveCurrentFunction()
@@ -2067,6 +2276,71 @@ namespace gladius::ui
         }
     }
 
+    void MainWindow::showSaveAsOverwriteConfirmation()
+    {
+        if (!m_showSaveAsOverwriteConfirmation || !m_pendingSaveAsPath)
+        {
+            return;
+        }
+
+        auto constexpr windowTitle = "File Already Exists";
+        if (!ImGui::IsPopupOpen(windowTitle))
+        {
+            ImGui::OpenPopup(windowTitle);
+        }
+        ImGuiWindowFlags const windowFlags =
+          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+        if (ImGui::BeginPopupModal(windowTitle, nullptr, windowFlags))
+        {
+            ImGui::NewLine();
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
+            ImGui::TextUnformatted(ICON_FA_EXCLAMATION_TRIANGLE " Warning");
+            ImGui::PopStyleColor();
+
+            ImGui::TextWrapped("A file with this name already exists:");
+            ImGui::TextUnformatted(m_pendingSaveAsPath->string().c_str());
+            ImGui::TextWrapped("If you overwrite it, the existing file will be permanently lost. "
+                               "We suggest selecting another file name.");
+
+            ImGui::NewLine();
+
+            // Safe action is the default / leftmost to prevent accidental overwrites.
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN "\tChoose Different Name", ImVec2(220, 0)))
+            {
+                auto const fallbackPath = *m_pendingSaveAsPath;
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+                saveAs(fallbackPath);
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0)))
+            {
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.0f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.0f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+            if (ImGui::Button(ICON_FA_TRASH "\tOverwrite Existing File", ImVec2(220, 0)))
+            {
+                executeSaveAs(*m_pendingSaveAsPath);
+                m_pendingSaveAsPath.reset();
+                m_showSaveAsOverwriteConfirmation = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::EndPopup();
+        }
+    }
+
     void MainWindow::renderExportOverlay()
     {
         if (!m_exportState.isExportInProgress())
@@ -2266,6 +2540,25 @@ namespace gladius::ui
                                 bb->max.y - bb->min.y,
                                 bb->max.z - bb->min.z);
                     ImGui::SameLine();
+                }
+            }
+
+            // HQ progressive render progress bar - lets the user see the progressive
+            // rendering advancing and, when the view is invalidated (camera move, model
+            // update, resize), the bar resets, making aborts and restarts visible.
+            auto const hqProgress = m_renderWindow.hqProgressiveRenderProgress();
+            if (hqProgress.active)
+            {
+                ImGui::SameLine();
+                float const barHeight = ImGui::GetTextLineHeight();
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.3f, 0.7f, 0.9f, 1.0f));
+                ImGui::ProgressBar(hqProgress.fraction,
+                                   ImVec2(120.0f, barHeight),
+                                   fmt::format("HQ {:.0f}%", hqProgress.fraction * 100.0f).c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("High-quality progressive render progress");
                 }
             }
 
@@ -2637,7 +2930,7 @@ namespace gladius::ui
     void MainWindow::updateModel()
     {
         // Avoid touching document/compute state while a file is being loaded on a background thread.
-        if (m_doc && m_doc->isLoadingInProgress())
+        if (m_doc && (m_doc->isLoadingInProgress() || m_asyncLoadState != AsyncLoadState::Idle))
         {
             return;
         }
@@ -2721,13 +3014,28 @@ namespace gladius::ui
             // bypass the throttle — the debounce already elapsed, we just need to retry.
             if (m_parameterThrottle.shouldRecompile() || !m_parameterThrottle.hasPendingRecompile())
             {
+                auto const parameterDispatch = async_rendering::classifyParameterChange(
+                  async_rendering::ParameterChangeDispatchInput{
+                    .mode = m_renderWindow.realtimeRaymarchMode(),
+                    .streamingPreviewActive = m_renderWindow.isStreamingPreviewActive(),
+                    .autoRealtimeActive = m_renderWindow.isRealtimeActive()});
+
                 // Streaming preview mode: the worker coroutine becomes the sole GPU
                 // writer, reading the latest Assembly values and pushing them to the
                 // parameter buffer in a tight loop.  This eliminates the UI-frame
                 // round-trip latency that limits one-shot preview scheduling.
-                if (!m_renderWindow.isStreamingPreviewActive())
+                // In Force realtime mode, parameter changes should be served by exact
+                // full-frame raymarching instead of the low-res streaming preview.
+                if (parameterDispatch.invalidateInteraction)
                 {
                     m_renderWindow.invalidateViewDueToParameterChange();
+                }
+                if (parameterDispatch.refreshStreamingInteraction)
+                {
+                    m_renderWindow.refreshStreamingParameterInteraction();
+                }
+                if (parameterDispatch.startStreamingPreview)
+                {
                     m_renderWindow.startStreamingPreview();
                 }
                 m_parameterDirty = false;
@@ -3439,6 +3747,15 @@ namespace gladius::ui
                   return {};
               }
               return m_doc->getNanoVdbBuildIssueSummary();
+          });
+        m_meshSdfSettingsDialog.setMeshQualityIssueProvider(
+          [this]() -> MeshQualityIssueSummary
+          {
+              if (!m_doc)
+              {
+                  return {};
+              }
+              return m_doc->getMeshQualityIssueSummary();
           });
     }
 

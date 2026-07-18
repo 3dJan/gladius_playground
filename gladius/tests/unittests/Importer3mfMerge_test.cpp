@@ -5,6 +5,7 @@
 #include <SpatialMeshResource.h>
 #include <compute/ComputeCore.h>
 #include <io/3mf/Importer3mf.h>
+#include <io/VdbImporter.h>
 
 #include <chrono>
 #include <fmt/core.h>
@@ -57,6 +58,33 @@ namespace gladius_tests
             sourceDoc->saveAs(tempPath, false);
             return tempPath;
         }
+
+          [[nodiscard]] std::filesystem::path createOpenQuad3mf() const
+          {
+            auto sourceDoc = std::make_shared<Document>(m_core);
+            sourceDoc->newEmptyModel();
+
+            vdb::TriangleMesh mesh;
+            mesh.vertices = {
+              openvdb::Vec3s{0.0f, 0.0f, 0.0f},
+              openvdb::Vec3s{10.0f, 0.0f, 0.0f},
+              openvdb::Vec3s{10.0f, 10.0f, 0.0f},
+              openvdb::Vec3s{0.0f, 10.0f, 0.0f},
+            };
+            mesh.indices = {
+              openvdb::Vec3I{0, 1, 2},
+              openvdb::Vec3I{0, 2, 3},
+            };
+
+            sourceDoc->addMeshResource(std::move(mesh), "open quad");
+
+            auto const uniqueSuffix =
+              std::chrono::steady_clock::now().time_since_epoch().count();
+            auto const tempPath = std::filesystem::temp_directory_path() /
+                        fmt::format("gladius_nanovdb_open_quad_{}.3mf", uniqueSuffix);
+            sourceDoc->saveAs(tempPath, false);
+            return tempPath;
+          }
 
         std::shared_ptr<Document> m_doc;
         std::shared_ptr<ComputeCore> m_core;
@@ -254,6 +282,33 @@ namespace gladius_tests
             std::filesystem::remove(tempFile);
         }
 
+        TEST_F(Importer3mfMerge_Test,
+               ImporterLoad_WithOpenNanoVdbMesh_DegradeReportsMeshQualityIssue)
+        {
+            auto const tempFile = createOpenQuad3mf();
+
+            MeshSdfEvaluationConfig meshEvaluationConfig;
+            meshEvaluationConfig.method = MeshSdfMethod::NanoVDB;
+            meshEvaluationConfig.nanovdbVoxelSize_mm = 0.1f;
+
+            io::Importer3mf importer(m_logger);
+            importer.setMeshSdfEvaluationConfig(meshEvaluationConfig);
+            importer.setNanoVdbBuildPolicy(
+              NanoVdbBuildPolicy{0u, NanoVdbFailurePolicy::Degrade});
+
+            m_doc->newEmptyModel();
+            ASSERT_NO_THROW(importer.load(tempFile, *m_doc));
+
+            auto const summary = m_doc->getMeshQualityIssueSummary();
+            EXPECT_TRUE(summary.hasIssue);
+            EXPECT_EQ(summary.affectedMeshCount, 1u);
+            EXPECT_GT(summary.boundaryEdgeCount, 0u);
+            EXPECT_NE(summary.message.find("No repair or fallback was applied silently"),
+                      std::string::npos);
+
+            std::filesystem::remove(tempFile);
+        }
+
         TEST_F(Importer3mfMerge_Test, DocumentLoad_WithNanoVdbHugeMesh_ThrowsRejectedError)
         {
             auto const tempFile = createLargeBox3mf(4000.0f, 4000.0f, 4000.0f);
@@ -267,5 +322,19 @@ namespace gladius_tests
 
             std::filesystem::remove(tempFile);
         }
+
+    TEST_F(Importer3mfMerge_Test, DocumentLoad_WithNanoVdbOpenMesh_ThrowsRejectedError)
+    {
+      auto const tempFile = createOpenQuad3mf();
+
+      MeshSdfEvaluationConfig meshEvaluationConfig;
+      meshEvaluationConfig.method = MeshSdfMethod::NanoVDB;
+      meshEvaluationConfig.nanovdbVoxelSize_mm = 0.1f;
+      m_doc->setMeshSdfEvaluationConfig(meshEvaluationConfig);
+
+      EXPECT_THROW(m_doc->load(tempFile), NanoVdbBuildRejectedError);
+
+      std::filesystem::remove(tempFile);
+    }
 
 } // namespace gladius_tests

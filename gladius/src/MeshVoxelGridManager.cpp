@@ -5,6 +5,7 @@
 #include "MeshVoxelGridManager.h"
 
 #include "CLProgram.h"
+#include "compute/GpuKernelAccessGuard.h"
 
 namespace gladius
 {
@@ -13,35 +14,48 @@ namespace gladius
     {
     }
 
-    bool MeshVoxelGridManager::buildGrid(CLProgram& program,
-                                          cl::Buffer& primitiveDataBuffer,
-                                          MeshVoxelGridBuildParams const& params)
+    bool MeshVoxelGridManager::buildGrid(CLProgram & program,
+                                         PrimitiveDataBuffer & primitiveData,
+                                         MeshVoxelGridBuildParams const & params)
     {
         if (params.voxelCount <= 0)
         {
-            return false;  // No voxels to build
+            return false; // No voxels to build
         }
-        
+
         // Run the build kernel
         // Global work size = total voxels
         cl::NDRange const globalRange(static_cast<size_t>(params.voxelCount));
-        
-        cl::Event event = program.runNonBlocking(m_context->GetQueue(),
-                                                  "buildMeshVoxelGrid",
-                                                  cl::NullRange,
-                                                  globalRange,
-                                                  primitiveDataBuffer,
-                                                  params.headerStart,
-                                                  params.voxelDataOffset,
-                                                  params.nodesOffset,
-                                                  params.trianglesOffset,
-                                                  params.normalsOffset,
-                                                  params.indicesOffset,
-                                                  params.edgeNeighborsOffset,
-                                                  params.nodeCount,
-                                                  params.triCount,
-                                                  params.vertexNormalCount);
-        
+
+        auto const & queue = m_context->GetQueue();
+        GpuKernelAccessGuard gpuAccess(
+          *m_context,
+          queue,
+          "buildMeshVoxelGrid",
+          {{primitiveData.gpuResourceHandle(), GpuAccessMode::ReadWrite}});
+        if (!gpuAccess.granted())
+        {
+            return false;
+        }
+
+        cl::Event event = program.runNonBlockingWithWaitList(queue,
+                                                             "buildMeshVoxelGrid",
+                                                             cl::NullRange,
+                                                             globalRange,
+                                                             gpuAccess.waitEvents(),
+                                                             primitiveData.getBuffer(),
+                                                             params.headerStart,
+                                                             params.voxelDataOffset,
+                                                             params.nodesOffset,
+                                                             params.trianglesOffset,
+                                                             params.normalsOffset,
+                                                             params.indicesOffset,
+                                                             params.edgeNeighborsOffset,
+                                                             params.nodeCount,
+                                                             params.triCount,
+                                                             params.vertexNormalCount);
+        gpuAccess.complete(event);
+
         // Check if the event is valid (non-null cl_event indicates success)
         return event() != nullptr;
     }
@@ -51,19 +65,20 @@ namespace gladius
         m_buildQueue.push_back(params);
     }
 
-    void MeshVoxelGridManager::executeQueuedBuilds(CLProgram& program, cl::Buffer& primitiveDataBuffer)
+    void MeshVoxelGridManager::executeQueuedBuilds(CLProgram & program,
+                                                   PrimitiveDataBuffer & primitiveData)
     {
-        for (auto const& params : m_buildQueue)
+        for (auto const & params : m_buildQueue)
         {
-            buildGrid(program, primitiveDataBuffer, params);
+            buildGrid(program, primitiveData, params);
         }
-        
+
         // Wait for all builds to complete
         if (!m_buildQueue.empty())
         {
             CL_ERROR(m_context->GetQueue().finish());
         }
-        
+
         m_buildQueue.clear();
     }
 

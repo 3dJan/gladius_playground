@@ -450,6 +450,8 @@ namespace gladius
                     throw ThreadQueueManagementError("queue insertion", currentThreadId);
                 }
 
+                (void) registerQueueIdLocked(result.first->second);
+
                 return result.first->second;
             }
             catch (OpenCLQueueCreationError const &)
@@ -480,6 +482,106 @@ namespace gladius
         }
 
         return iter->second;
+    }
+
+    GpuAccessCoordinator & ComputeContext::gpuAccessCoordinator()
+    {
+        return *m_gpuAccessCoordinator;
+    }
+
+    GpuAccessCoordinator const & ComputeContext::gpuAccessCoordinator() const
+    {
+        return *m_gpuAccessCoordinator;
+    }
+
+    GpuQueueId ComputeContext::getGpuQueueId(cl::CommandQueue const & queue) const
+    {
+        std::lock_guard<std::mutex> lock(m_queuesMutex);
+        return registerQueueIdLocked(queue);
+    }
+
+    GpuEventId ComputeContext::recordGpuEvent(cl::Event const & event)
+    {
+        return m_openClEventRegistry->record(event);
+    }
+
+    std::vector<cl::Event>
+    ComputeContext::gpuWaitEvents(std::vector<GpuEventId> const & eventIds) const
+    {
+        return m_openClEventRegistry->eventsFor(eventIds);
+    }
+
+    void ComputeContext::refreshGpuAccessEvents()
+    {
+        auto completedEvents = m_openClEventRegistry->pollCompleted();
+        if (!completedEvents.empty())
+        {
+            m_gpuAccessCoordinator->markEventsCompleted(completedEvents);
+            m_gpuAccessCoordinator->collectCompletedRetirements();
+        }
+    }
+
+    void ComputeContext::waitForGpuEvents(std::vector<GpuEventId> const & eventIds)
+    {
+        auto completedEvents = m_openClEventRegistry->waitFor(eventIds);
+        if (!completedEvents.empty())
+        {
+            m_gpuAccessCoordinator->markEventsCompleted(completedEvents);
+            m_gpuAccessCoordinator->collectCompletedRetirements();
+        }
+    }
+
+    void ComputeContext::waitForGpuResourceIdle(GpuResourceHandle const resource)
+    {
+        refreshGpuAccessEvents();
+
+        auto outstanding = m_gpuAccessCoordinator->outstandingEvents(resource);
+        if (!outstanding.empty())
+        {
+            waitForGpuEvents(outstanding);
+        }
+
+        if (m_gpuAccessCoordinator->isIdle(resource))
+        {
+            return;
+        }
+
+        finishAllQueues();
+        refreshGpuAccessEvents();
+
+        outstanding = m_gpuAccessCoordinator->outstandingEvents(resource);
+        if (!outstanding.empty())
+        {
+            waitForGpuEvents(outstanding);
+        }
+
+        if (!m_gpuAccessCoordinator->isIdle(resource) && m_logger)
+        {
+            m_logger->logWarning("GPU resource remained busy after finishing known queues");
+        }
+    }
+
+    void ComputeContext::waitForAllTrackedGpuWork()
+    {
+        auto completedEvents = m_openClEventRegistry->waitForAll();
+        if (!completedEvents.empty())
+        {
+            m_gpuAccessCoordinator->markEventsCompleted(completedEvents);
+        }
+
+        finishAllQueues();
+        refreshGpuAccessEvents();
+        m_gpuAccessCoordinator->collectCompletedRetirements();
+    }
+
+    void ComputeContext::setGpuAccessSafeModeEnabled(bool const enabled) noexcept
+    {
+        m_gpuAccessSafeModeEnabled = enabled;
+    }
+
+    bool ComputeContext::isGpuAccessSafeModeEnabled() const noexcept
+    {
+        return m_gpuAccessSafeModeEnabled;
     }
 
     bool ComputeContext::isValid() const
@@ -531,6 +633,7 @@ namespace gladius
 
         // Clear all queues as they're now invalid
         m_queues.clear();
+        m_gpuQueueIds.clear();
     }
 
     bool ComputeContext::validateQueue(const cl::CommandQueue & queue) const
@@ -899,6 +1002,47 @@ namespace gladius
             throw OpenCLQueueCreationError("Unexpected error in createQueue: " +
                                              std::string(e.what()),
                                            std::this_thread::get_id());
+        }
+    }
+
+    GpuQueueId ComputeContext::registerQueueIdLocked(cl::CommandQueue const & queue) const
+    {
+        auto const nativeQueue = queue();
+        if (nativeQueue == nullptr)
+        {
+            return 0u;
+        }
+
+        auto const queueIt = m_gpuQueueIds.find(nativeQueue);
+        if (queueIt != m_gpuQueueIds.end())
+        {
+            return queueIt->second;
+        }
+
+        GpuQueueId const queueId = m_nextGpuQueueId++;
+        m_gpuQueueIds.emplace(nativeQueue, queueId);
+        return queueId;
+    }
+
+    void ComputeContext::finishAllQueues() const
+    {
+        std::vector<cl::CommandQueue> queues;
+        {
+            std::lock_guard<std::mutex> lock(m_queuesMutex);
+            queues.reserve(m_queues.size());
+            for (auto const & [threadId, queue] : m_queues)
+            {
+                (void) threadId;
+                queues.push_back(queue);
+            }
+        }
+
+        for (auto const & queue : queues)
+        {
+            if (queue() != nullptr)
+            {
+                queue.finish();
+            }
         }
     }
 

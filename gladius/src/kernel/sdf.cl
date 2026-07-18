@@ -637,7 +637,7 @@ float vdbModelSimple(float3 pos, int index, PAYLOAD_ARGS)
         int3 coord = convert_int3(pos);
         pnanovdb_coord_t coordCenter = pnanovdb_make_coord(coord.x, coord.y, coord.z);
 
-        return pnanovdb_read_float_value(buf, &acc, coordCenter);
+        return pnanovdb_read_float_value(buf, &acc, coordCenter) / node.scaling;
     }
     // return boundingBox + bandwidth;
 }

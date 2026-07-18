@@ -133,6 +133,12 @@ namespace gladius::io
         void processComponentsObject(Lib3MF::PComponentsObject componentsObject);
 
         /**
+         * @brief Process a BooleanObject resource and add its dependencies to the graph
+         * @param booleanObject Pointer to the BooleanObject resource
+         */
+        void processBooleanObject(Lib3MF::PBooleanObject booleanObject);
+
+        /**
          * @brief Process a MeshObject resource and add its dependencies to the graph
          * @param meshObject Pointer to the MeshObject resource
          */

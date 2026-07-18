@@ -3,47 +3,21 @@ vcpkg_check_linkage(ONLY_DYNAMIC_LIBRARY)
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO 3MFConsortium/lib3mf
-    REF "f5555593f33a6ac3efe7ae3996315b1ebe6716b1" # v2.5 alpha 
-    SHA512 d26831de8fe0e659cb0f442d72fa15291732771cd26e76942f5770e87c97dc517ff1bfca49e190e6a74d752fee3bfb935486fe8f2124adf9ee49be0855ac796b
+    REF "82c524d6701a535ad11f8dae4a46a27fa199829c" # develop branch, v2.6.0 with Boolean spec support
+    SHA512 bfa93a2e087c5d0497dab7c55aee4f7e7e35e8718e250e9ad89f63b32c0b9e4dc0920b6d1c92d32b6fb9d606470c36846b39028f60992e1ada6d3b6103a8c206
+    PATCHES
+        fix-lib3mf-config-root.patch
+        fix-missing-algorithm.patch
 )
-
-# Normalize target_link_libraries signature by inserting PRIVATE for plain-signature lines
-file(READ "${SOURCE_PATH}/CMakeLists.txt" _lib3mf_cml)
-
-# Prepare literal token refs to avoid expansion during replacement
-set(_DLR "$")
-string(CONCAT _PROJ_REF "${_DLR}" "{" "PROJECT_NAME" "}")
-string(CONCAT _ZLIB_LIB_REF "${_DLR}" "{" "ZLIB_LIBRARIES" "}")
-string(CONCAT _ZLIB_INC_REF "${_DLR}" "{" "ZLIB_INCLUDE_DIRS" "}")
-string(CONCAT _ZLIB_LIBDIRS_REF "${_DLR}" "{" "ZLIB_LIBRARY_DIRS" "}")
-string(CONCAT _LIBZIP_LIB_REF "${_DLR}" "{" "LIBZIP_LIBRARIES" "}")
-string(CONCAT _LIBZIP_INC_REF "${_DLR}" "{" "LIBZIP_INCLUDE_DIRS" "}")
-string(CONCAT _LIBZIP_LIBDIRS_REF "${_DLR}" "{" "LIBZIP_LIBRARY_DIRS" "}")
-
-# Convert libzip linkage to keyword form and add include dirs
-string(REGEX REPLACE
-    [=[target_link_libraries\([ \t\r\n]*\$\{PROJECT_NAME\}[^)]*\$\{LIBZIP_LIBRARIES\}[^)]*\)]=]
-    "target_link_libraries(${_PROJ_REF} PRIVATE ${_LIBZIP_LIB_REF})\n    target_include_directories(${_PROJ_REF} PRIVATE ${_LIBZIP_INC_REF})\n    target_link_directories(${_PROJ_REF} PRIVATE ${_LIBZIP_LIBDIRS_REF})"
-    _lib3mf_cml "${_lib3mf_cml}")
-
-# Convert zlib linkage to keyword form and add include dirs
-string(REGEX REPLACE
-    [=[target_link_libraries\([ \t\r\n]*\$\{PROJECT_NAME\}[^)]*\$\{ZLIB_LIBRARIES\}[^)]*\)]=]
-    "target_link_libraries(${_PROJ_REF} PRIVATE ${_ZLIB_LIB_REF})\n    target_include_directories(${_PROJ_REF} PRIVATE ${_ZLIB_INC_REF})\n    target_link_directories(${_PROJ_REF} PRIVATE ${_ZLIB_LIBDIRS_REF})"
-    _lib3mf_cml "${_lib3mf_cml}")
-
-# Flip any hardcoded static CRT flags to dynamic to follow vcpkg defaults
-string(REPLACE " /MTd" " /MDd" _lib3mf_cml "${_lib3mf_cml}")
-string(REPLACE " /MT"  " /MD"  _lib3mf_cml "${_lib3mf_cml}")
-
-file(WRITE "${SOURCE_PATH}/CMakeLists.txt" "${_lib3mf_cml}")
 
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
-    OPTIONS 
+    OPTIONS
         -DUSE_INCLUDED_ZLIB=OFF
         -DUSE_INCLUDED_LIBZIP=OFF
         -DUSE_INCLUDED_SSL=OFF
+        -DUSE_INCLUDED_CPPBASE64=OFF
+        -DUSE_INCLUDED_FASTFLOAT=OFF
         -DBUILD_FOR_CODECOVERAGE=OFF
         -DLIB3MF_TESTS=OFF
 )

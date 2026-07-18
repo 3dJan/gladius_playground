@@ -16,6 +16,52 @@
 
 namespace gladius::io
 {
+    namespace
+    {
+        void quantizeClampThicknesses(ThicknessConstraints const& constraints, std::vector<float>& values)
+        {
+            float const maxT = constraints.maxThickness;
+            float const minT = constraints.minThickness;
+
+            for (float& value : values)
+            {
+                if (value <= 0.0f)
+                {
+                    value = (minT > 0.0f) ? minT : 0.0f;
+                    continue;
+                }
+
+                value = std::clamp(value, 0.0f, maxT);
+                if (minT > 0.0f)
+                {
+                    value = std::max(value, minT);
+                }
+
+                if (constraints.layerHeight > 0.0f)
+                {
+                    value = std::round(value / constraints.layerHeight) * constraints.layerHeight;
+                    value = std::clamp(value, 0.0f, maxT);
+                    if (minT > 0.0f && value > 0.0f)
+                    {
+                        value = std::max(value, minT);
+                    }
+                }
+            }
+
+            if (constraints.totalMaxThickness > 0.0f)
+            {
+                float const sum = std::accumulate(values.begin(), values.end(), 0.0f);
+                if (sum > constraints.totalMaxThickness && sum > 0.0f)
+                {
+                    float const scale = constraints.totalMaxThickness / sum;
+                    for (float& value : values)
+                    {
+                        value *= scale;
+                    }
+                }
+            }
+        }
+    } // namespace
 
     FrontlitThicknessSolver::FrontlitThicknessSolver(FilamentStack const& stack,
                                                      ThicknessConstraints const& constraints,
@@ -42,59 +88,17 @@ namespace gladius::io
             ThicknessSolution solution;
             solution.targetColor = targetColor;
             solution.achievedColor = Eigen::Vector3f::Ones(); // White (no filament)
-            solution.colorError = (solution.achievedColor - targetColor).squaredNorm();
+            solution.colorError = std::sqrt((solution.achievedColor - targetColor).squaredNorm());
             solution.converged = true;
             return solution;
         }
 
-        // Helper to quantize/clamp a thickness vector allowing zeros but respecting bounds/quantization and total max
-        auto quantizeClampVec = [this](std::vector<float>& values) {
-            float const maxT = m_constraints.maxThickness;
-            float const minT = m_constraints.minThickness;
-
-            for (float& v : values)
-            {
-                if (v <= 0.0f)
-                {
-                    v = 0.0f;
-                    continue;
-                }
-
-                v = std::clamp(v, 0.0f, maxT);
-                if (minT > 0.0f)
-                {
-                    v = std::max(v, minT);
-                }
-                if (m_constraints.layerHeight > 0.0f)
-                {
-                    v = std::round(v / m_constraints.layerHeight) * m_constraints.layerHeight;
-                    v = std::clamp(v, 0.0f, maxT);
-                    if (minT > 0.0f && v > 0.0f)
-                    {
-                        v = std::max(v, minT);
-                    }
-                }
-            }
-
-            if (m_constraints.totalMaxThickness > 0.0f)
-            {
-                float const sum = std::accumulate(values.begin(), values.end(), 0.0f);
-                if (sum > m_constraints.totalMaxThickness && sum > 0.0f)
-                {
-                    float const scale = m_constraints.totalMaxThickness / sum;
-                    for (float& v : values)
-                    {
-                        v *= scale;
-                    }
-                }
-            }
+        Eigen::Vector3f const target = targetColor.cwiseMax(0.0f).cwiseMin(1.0f);
+        auto evaluateCandidate = [this, &target](std::vector<float> const& values) {
+            return computeError(predictColor(values), target);
         };
 
-        Eigen::Vector3f const target = targetColor.cwiseMax(0.0f).cwiseMin(1.0f);
-
-        // Attempt global optimization (DIRECT-L + local polish) via NLopt
-        std::vector<float> thicknesses(n, 0.0f);
-        auto tryGlobalOptimize = [&](std::vector<float>& out) -> bool {
+        auto refineWithNlopt = [this, &target, n](std::vector<float>& values, bool includeGlobalPass) {
             if (n == 0)
             {
                 return false;
@@ -110,7 +114,9 @@ namespace gladius::io
 
             auto objective = [](std::vector<double> const& x, std::vector<double>& /*grad*/, void* data) {
                 auto* c = static_cast<NloptContext*>(data);
-                std::vector<float> xf(x.begin(), x.end());
+                std::vector<float> xf;
+                xf.reserve(x.size());
+                std::transform(x.begin(), x.end(), std::back_inserter(xf), [](double v) { return static_cast<float>(v); });
                 Eigen::Vector3f const predicted = c->solver->predictColor(xf);
                 double err = static_cast<double>((predicted - c->targetColor).squaredNorm());
 
@@ -134,31 +140,32 @@ namespace gladius::io
                 std::vector<double> lb(n, 0.0);
                 std::vector<double> ub(n, static_cast<double>(m_constraints.maxThickness));
 
-                // Global deterministic search
-                nlopt::opt globalOpt(nlopt::GN_DIRECT_L, static_cast<unsigned>(n));
-                globalOpt.set_lower_bounds(lb);
-                globalOpt.set_upper_bounds(ub);
-                globalOpt.set_min_objective(objective, &ctx);
-                globalOpt.set_maxeval(800);
-                globalOpt.set_maxtime(0.5);
-
-                // Seed point: light bias toward target dominant channels
-                std::vector<double> x(n, m_constraints.maxThickness * 0.25);
+                std::vector<double> x(values.begin(), values.end());
                 double f = 0.0;
-                globalOpt.optimize(x, f);
 
-                // Local polish
+                if (includeGlobalPass)
+                {
+                    nlopt::opt globalOpt(nlopt::GN_DIRECT_L, static_cast<unsigned>(n));
+                    globalOpt.set_lower_bounds(lb);
+                    globalOpt.set_upper_bounds(ub);
+                    globalOpt.set_min_objective(objective, &ctx);
+                    globalOpt.set_maxeval(350);
+                    globalOpt.set_maxtime(0.15);
+                    globalOpt.optimize(x, f);
+                }
+
                 nlopt::opt localOpt(nlopt::LN_BOBYQA, static_cast<unsigned>(n));
                 localOpt.set_lower_bounds(lb);
                 localOpt.set_upper_bounds(ub);
                 localOpt.set_min_objective(objective, &ctx);
                 localOpt.set_ftol_rel(1e-6);
                 localOpt.set_xtol_rel(1e-6);
-                localOpt.set_maxeval(500);
+                localOpt.set_maxeval(includeGlobalPass ? 300 : 200);
                 localOpt.optimize(x, f);
 
-                out.assign(x.begin(), x.end());
-                quantizeClampVec(out);
+                values.resize(x.size());
+                std::transform(x.begin(), x.end(), values.begin(), [](double v) { return static_cast<float>(v); });
+                quantizeClampThicknesses(m_constraints, values);
                 return true;
             }
             catch (std::exception const&)
@@ -167,89 +174,133 @@ namespace gladius::io
             }
         };
 
-        if (!tryGlobalOptimize(thicknesses))
+        auto refineWithGradient = [this, &target](std::vector<float>& thicknesses,
+                                                  ProgressCallback const& callback) -> bool {
+            float prevError = std::numeric_limits<float>::max();
+
+            for (int iter = 0; iter < m_maxIterations; ++iter)
+            {
+                Eigen::Vector3f const predicted = predictColor(thicknesses);
+                float const error = computeError(predicted, target);
+
+                if (callback)
+                {
+                    callback(iter, error);
+                }
+
+                if (std::abs(prevError - error) < m_convergenceTolerance)
+                {
+                    return true;
+                }
+                prevError = error;
+
+                std::vector<float> gradient = computeGradient(thicknesses, target);
+                float stepSize = m_stepSize;
+                std::vector<float> newThicknesses = thicknesses;
+                bool improved = false;
+
+                for (int backtrack = 0; backtrack < 10; ++backtrack)
+                {
+                    for (std::size_t i = 0; i < thicknesses.size(); ++i)
+                    {
+                        newThicknesses[i] = thicknesses[i] - stepSize * gradient[i];
+                    }
+                    projectOntoConstraints(newThicknesses);
+
+                    Eigen::Vector3f const newPredicted = predictColor(newThicknesses);
+                    float const newError = computeError(newPredicted, target);
+
+                    if (newError < error)
+                    {
+                        thicknesses = newThicknesses;
+                        improved = true;
+                        break;
+                    }
+                    stepSize *= 0.5f;
+                }
+
+                if (!improved)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        };
+
+        std::vector<std::vector<float>> candidates;
+        candidates.reserve(4U + 2U * n);
+
+        auto addCandidate = [this, &candidates](std::vector<float> candidate) {
+            quantizeClampThicknesses(m_constraints, candidate);
+            candidates.push_back(std::move(candidate));
+        };
+
+        addCandidate(std::vector<float>(n, 0.0f));
+        addCandidate(std::vector<float>(n, m_constraints.maxThickness * 0.25f));
+
+        std::vector<float> weights(n, 0.0f);
+        float weightSum = 0.0f;
+        for (std::size_t i = 0; i < n; ++i)
         {
-            // Fallback: color-biased heuristic to avoid gray equal-thickness
-            std::vector<float> weights(n, 0.0f);
-            float weightSum = 0.0f;
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                Eigen::Vector3f tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
-                float w = std::max(0.0f, tint.dot(target));
-                weights[i] = w;
-                weightSum += w;
-            }
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                float const maxT = m_constraints.maxThickness;
-                float bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : 1.0f / static_cast<float>(n);
-                float const raw = bias * maxT;
-                thicknesses[i] = raw;
-            }
-            quantizeClampVec(thicknesses);
+            Eigen::Vector3f const tint = m_stack[i].reflectanceColor.cwiseMax(0.0f).cwiseMin(1.0f);
+            float const weight = std::max(0.0f, tint.dot(target));
+            weights[i] = weight;
+            weightSum += weight;
         }
 
-        // Projected gradient descent
-        float prevError = std::numeric_limits<float>::max();
-
-        for (int iter = 0; iter < m_maxIterations; ++iter)
+        std::vector<float> colorBiased(n, 0.0f);
+        for (std::size_t i = 0; i < n; ++i)
         {
-            Eigen::Vector3f const predicted = predictColor(thicknesses);
-            float const error = computeError(predicted, targetColor);
+            float const bias = (weightSum > 0.0f) ? (weights[i] / weightSum) : (1.0f / static_cast<float>(n));
+            colorBiased[i] = bias * m_constraints.maxThickness;
+        }
+        addCandidate(colorBiased);
 
-            if (progressCallback)
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            std::vector<float> singleLayer(n, 0.0f);
+            singleLayer[i] = m_constraints.maxThickness;
+            addCandidate(singleLayer);
+        }
+
+        std::vector<float> globalCandidate(n, m_constraints.maxThickness * 0.25f);
+        bool const haveGlobalCandidate = refineWithNlopt(globalCandidate, true);
+        if (haveGlobalCandidate)
+        {
+            addCandidate(globalCandidate);
+        }
+
+        std::vector<float> thicknesses = candidates.front();
+        float bestError = std::numeric_limits<float>::max();
+
+        bool converged = false;
+        for (std::size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
+        {
+            std::vector<float> candidate = candidates[candidateIndex];
+            refineWithNlopt(candidate, false);
+            bool const candidateConverged = refineWithGradient(candidate, nullptr);
+
+            float const error = evaluateCandidate(candidate);
+            if (error < bestError)
             {
-                progressCallback(iter, error);
-            }
-
-            // Check convergence
-            if (std::abs(prevError - error) < m_convergenceTolerance)
-            {
-                ThicknessSolution solution(n);
-                solution.targetColor = targetColor;
-                solution.achievedColor = predicted;
-                solution.thicknesses = thicknesses;
-                solution.colorError = std::sqrt(error); // Return RMS error
-                solution.converged = true;
-                return solution;
-            }
-            prevError = error;
-
-            // Compute gradient and take step
-            std::vector<float> gradient = computeGradient(thicknesses, targetColor);
-
-            // Adaptive step size with backtracking line search
-            float stepSize = m_stepSize;
-            std::vector<float> newThicknesses = thicknesses;
-
-            for (int backtrack = 0; backtrack < 10; ++backtrack)
-            {
-                for (std::size_t i = 0; i < n; ++i)
-                {
-                    newThicknesses[i] = thicknesses[i] - stepSize * gradient[i];
-                }
-                projectOntoConstraints(newThicknesses);
-
-                Eigen::Vector3f const newPredicted = predictColor(newThicknesses);
-                float const newError = computeError(newPredicted, targetColor);
-
-                if (newError < error)
-                {
-                    thicknesses = newThicknesses;
-                    break;
-                }
-                stepSize *= 0.5f;
+                bestError = error;
+                thicknesses = std::move(candidate);
+                converged = candidateConverged;
             }
         }
 
-        // Max iterations reached
+        converged = refineWithGradient(thicknesses, progressCallback) && converged;
+
+        quantizeClampThicknesses(m_constraints, thicknesses);
+
         Eigen::Vector3f const predicted = predictColor(thicknesses);
         ThicknessSolution solution(n);
         solution.targetColor = targetColor;
         solution.achievedColor = predicted;
         solution.thicknesses = thicknesses;
         solution.colorError = std::sqrt(computeError(predicted, targetColor));
-        solution.converged = false;
+        solution.converged = converged && std::isfinite(solution.colorError);
         return solution;
     }
 
@@ -394,8 +445,9 @@ namespace gladius::io
             return gradient;
         }
 
-        // Numerical gradient using central differences
-        float const h = 1e-4f;
+        float const h = m_constraints.layerHeight > 0.0f
+            ? std::min(1e-4f, m_constraints.layerHeight * 0.25f)
+            : 1e-4f;
 
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -419,32 +471,7 @@ namespace gladius::io
 
     void FrontlitThicknessSolver::projectOntoConstraints(std::vector<float>& thicknesses) const
     {
-        float totalThickness = 0.0f;
-
-        for (std::size_t i = 0; i < thicknesses.size(); ++i)
-        {
-            if (thicknesses[i] <= 0.0f)
-            {
-                thicknesses[i] = 0.0f;
-            }
-            else
-            {
-                thicknesses[i] = m_constraints.constrain(thicknesses[i]);
-            }
-
-            totalThickness += thicknesses[i];
-        }
-
-        // Handle total thickness constraint by scaling if needed
-        if (m_constraints.totalMaxThickness > 0.0f && totalThickness > m_constraints.totalMaxThickness)
-        {
-            float const scale = m_constraints.totalMaxThickness / totalThickness;
-            for (float& t : thicknesses)
-            {
-                t *= scale;
-                t = m_constraints.constrain(t);
-            }
-        }
+        quantizeClampThicknesses(m_constraints, thicknesses);
     }
 
     float FrontlitThicknessSolver::computeError(Eigen::Vector3f const& predicted,

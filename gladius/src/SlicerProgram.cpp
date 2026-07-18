@@ -1,5 +1,7 @@
 #include "SlicerProgram.h"
 #include "ProgramBase.h"
+#include "compute/GpuKernelAccessGuard.h"
+#include "compute/RenderPayloadSnapshot.h"
 #include "gpgpu.h"
 
 #include <algorithm>
@@ -10,6 +12,22 @@
 
 namespace gladius
 {
+    namespace
+    {
+        [[nodiscard]] std::vector<GpuKernelResourceAccess>
+        makeSlicerPayloadReadAccesses(SharedResources const & resources,
+                                      Primitives const & lines)
+        {
+            return RenderPayloadSnapshot::capture(resources, lines).readAccesses();
+        }
+
+        void appendAccess(std::vector<GpuKernelResourceAccess> & accesses,
+                          GpuResourceHandle resource,
+                          GpuAccessMode mode)
+        {
+            accesses.push_back(GpuKernelResourceAccess{.resource = resource, .mode = mode});
+        }
+    }
 
 #define PAYLOAD_ARGUMENTS                                                                          \
     m_resources->getBuildArea(), lines.primitives.getBuffer(),                                      \
@@ -149,8 +167,30 @@ namespace gladius
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {target.getWidth(), target.getHeight(), target.getDepth()};
-        m_programFront->run(
-          "preComputeSdf", origin, range, target.getBuffer(), boundingBox, PAYLOAD_ARGUMENTS);
+        auto accesses = makeSlicerPayloadReadAccesses(m_resources, lines);
+        appendAccess(accesses, target.gpuResourceHandle(), GpuAccessMode::ReadWrite);
+        auto const & queue = m_ComputeContext->GetQueue();
+        GpuKernelAccessGuard gpuAccess(
+          *m_ComputeContext, queue, "preComputeSdf", std::move(accesses));
+        if (!gpuAccess.granted())
+        {
+            return;
+        }
+
+        cl::Event const event = m_programFront->runNonBlockingWithWaitList(queue,
+                                                                           "preComputeSdf",
+                                                                           origin,
+                                                                           range,
+                                                                           gpuAccess.waitEvents(),
+                                                                           target.getBuffer(),
+                                                                           boundingBox,
+                                                                           PAYLOAD_ARGUMENTS);
+        gpuAccess.complete(event);
+        if (event())
+        {
+            event.wait();
+            queue.finish();
+        }
     }
 
     cl::Event SlicerProgram::precomputeSdfAsync(const Primitives & lines,
@@ -167,14 +207,25 @@ namespace gladius
         const cl::NDRange origin = {0, 0, 0};
         const cl::NDRange range = {target.getWidth(), target.getHeight(), target.getDepth()};
 
+        auto accesses = makeSlicerPayloadReadAccesses(m_resources, lines);
+        appendAccess(accesses, target.gpuResourceHandle(), GpuAccessMode::ReadWrite);
+        GpuKernelAccessGuard gpuAccess(
+          *m_ComputeContext, queue, "preComputeSdf", std::move(accesses));
+        if (!gpuAccess.granted())
+        {
+            return cl::Event{};
+        }
+
         // Use runNonBlocking to get the event without blocking
-        cl::Event sdfEvent = m_programFront->runNonBlocking(queue,
-                                                            "preComputeSdf",
-                                                            origin,
-                                                            range,
-                                                            target.getBuffer(),
-                                                            boundingBox,
-                                                            PAYLOAD_ARGUMENTS);
+        cl::Event sdfEvent = m_programFront->runNonBlockingWithWaitList(queue,
+                                        "preComputeSdf",
+                                        origin,
+                                        range,
+                                        gpuAccess.waitEvents(),
+                                        target.getBuffer(),
+                                        boundingBox,
+                                        PAYLOAD_ARGUMENTS);
+        gpuAccess.complete(sdfEvent);
 
         // Flush to ensure the kernel is submitted, but don't wait
         if (sdfEvent())
@@ -398,21 +449,41 @@ namespace gladius
         
         cl::NDRange const origin = {0, 0, 0};
         cl::NDRange const globalRange = {static_cast<size_t>(params.voxelCount), 1, 1};
+
+                auto const & queue = m_ComputeContext->GetQueue();
+                GpuKernelAccessGuard gpuAccess(
+                    *m_ComputeContext,
+                    queue,
+                    "buildMeshVoxelGrid",
+                    {{primitives.data.gpuResourceHandle(), GpuAccessMode::ReadWrite}});
+                if (!gpuAccess.granted())
+                {
+                        return false;
+                }
         
-        m_programFront->run("buildMeshVoxelGrid",
-                            origin,
-                            globalRange,
-                            primitives.data.getBuffer(),               // 0: primitiveData
-                            static_cast<cl_int>(params.headerStart),   // 1: headerStart
-                            static_cast<cl_int>(params.voxelDataOffset), // 2: voxelDataOffset
-                            static_cast<cl_int>(params.nodesOffset),   // 3: nodesOffset
-                            static_cast<cl_int>(params.trianglesOffset), // 4: trianglesOffset
-                            static_cast<cl_int>(params.normalsOffset), // 5: normalsOffset
-                            static_cast<cl_int>(params.indicesOffset), // 6: indicesOffset
-                            static_cast<cl_int>(params.edgeNeighborsOffset), // 7: edgeNeighborsOffset
-                            static_cast<cl_int>(params.nodeCount),     // 8: nodeCount
-                            static_cast<cl_int>(params.triCount),      // 9: triCount
-                            static_cast<cl_int>(params.vertexNormalCount)); // 10: vertexNormalCount
+                cl::Event const event = m_programFront->runNonBlockingWithWaitList(
+                    queue,
+                    "buildMeshVoxelGrid",
+                    origin,
+                    globalRange,
+                    gpuAccess.waitEvents(),
+                    primitives.data.getBuffer(),                       // 0: primitiveData
+                    static_cast<cl_int>(params.headerStart),           // 1: headerStart
+                    static_cast<cl_int>(params.voxelDataOffset),       // 2: voxelDataOffset
+                    static_cast<cl_int>(params.nodesOffset),           // 3: nodesOffset
+                    static_cast<cl_int>(params.trianglesOffset),       // 4: trianglesOffset
+                    static_cast<cl_int>(params.normalsOffset),         // 5: normalsOffset
+                    static_cast<cl_int>(params.indicesOffset),         // 6: indicesOffset
+                    static_cast<cl_int>(params.edgeNeighborsOffset),   // 7: edgeNeighborsOffset
+                    static_cast<cl_int>(params.nodeCount),             // 8: nodeCount
+                    static_cast<cl_int>(params.triCount),              // 9: triCount
+                    static_cast<cl_int>(params.vertexNormalCount));    // 10: vertexNormalCount
+                gpuAccess.complete(event);
+                if (event())
+                {
+                        event.wait();
+                        queue.finish();
+                }
         
         return true;
     }
@@ -441,16 +512,29 @@ namespace gladius
         cl::NDRange const origin = {0, 0, 0};
         cl::NDRange const globalRange = {static_cast<size_t>(params.nodeCount), 1, 1};
 
-        cl::Event const event = m_programFront->runNonBlocking(queue,
-                                                               "buildMeshFwnAggregates",
-                                                               origin,
-                                                               globalRange,
-                                                               primitives.data.getBuffer(),
-                                                               static_cast<cl_int>(params.nodesOffset),
-                                                               static_cast<cl_int>(params.trianglesOffset),
-                                                               static_cast<cl_int>(params.fwnAggregatesOffset),
-                                                               static_cast<cl_int>(params.nodeCount),
-                                                               static_cast<cl_int>(params.triCount));
+                GpuKernelAccessGuard gpuAccess(
+                    *m_ComputeContext,
+                    queue,
+                    "buildMeshFwnAggregates",
+                    {{primitives.data.gpuResourceHandle(), GpuAccessMode::ReadWrite}});
+                if (!gpuAccess.granted())
+                {
+                        return false;
+                }
+
+                cl::Event const event = m_programFront->runNonBlockingWithWaitList(
+                    queue,
+                    "buildMeshFwnAggregates",
+                    origin,
+                    globalRange,
+                    gpuAccess.waitEvents(),
+                    primitives.data.getBuffer(),
+                    static_cast<cl_int>(params.nodesOffset),
+                    static_cast<cl_int>(params.trianglesOffset),
+                    static_cast<cl_int>(params.fwnAggregatesOffset),
+                    static_cast<cl_int>(params.nodeCount),
+                    static_cast<cl_int>(params.triCount));
+                gpuAccess.complete(event);
         return event() != nullptr;
     }
 
@@ -480,34 +564,46 @@ namespace gladius
         cl::CommandQueue const & queue = m_ComputeContext->GetQueue();
         cl::NDRange const origin = {0, 0, 0};
 
+        GpuKernelAccessGuard gpuAccess(*m_ComputeContext,
+                                       queue,
+                                       "buildMeshSignCache",
+                                       {{primitives.data.gpuResourceHandle(), GpuAccessMode::ReadWrite}});
+        if (!gpuAccess.granted())
+        {
+            return false;
+        }
+
         int const firstWord = std::clamp(params.baseWord, 0, params.wordCount);
         int const lastWord = std::min(params.wordCount, firstWord + params.wordsToBuild);
+        cl::Event lastEvent{};
         for (int baseWord = firstWord; baseWord < lastWord; baseWord += wordsPerBatch)
         {
             int const batchWordCount = std::min(wordsPerBatch, lastWord - baseWord);
             cl::NDRange const globalRange = {static_cast<size_t>(batchWordCount), 1, 1};
 
-            cl::Event const event = m_programFront->runNonBlocking(queue,
-                                                                    "buildMeshSignCache",
-                                                                    origin,
-                                                                    globalRange,
-                                                                    primitives.data.getBuffer(),
-                                                                    static_cast<cl_int>(params.headerStart),
-                                                                    static_cast<cl_int>(params.signCacheDataOffset),
-                                                                    static_cast<cl_int>(params.nodesOffset),
-                                                                    static_cast<cl_int>(params.trianglesOffset),
-                                                                    static_cast<cl_int>(params.normalsOffset),
-                                                                    static_cast<cl_int>(params.indicesOffset),
-                                                                    static_cast<cl_int>(params.edgeNeighborsOffset),
-                                                                    static_cast<cl_int>(params.fwnAggregatesOffset),
-                                                                    static_cast<cl_int>(params.nodeCount),
-                                                                    static_cast<cl_int>(params.triCount),
-                                                                    static_cast<cl_int>(params.vertexNormalCount),
-                                                                    static_cast<cl_int>(params.resolution),
-                                                                    static_cast<cl_int>(baseWord),
-                                                                    static_cast<cl_int>(params.wordCount),
-                                                                    static_cast<cl_float>(params.fwnBeta));
-            if (!event())
+            lastEvent = m_programFront->runNonBlockingWithWaitList(
+              queue,
+              "buildMeshSignCache",
+              origin,
+              globalRange,
+              gpuAccess.waitEvents(),
+              primitives.data.getBuffer(),
+              static_cast<cl_int>(params.headerStart),
+              static_cast<cl_int>(params.signCacheDataOffset),
+              static_cast<cl_int>(params.nodesOffset),
+              static_cast<cl_int>(params.trianglesOffset),
+              static_cast<cl_int>(params.normalsOffset),
+              static_cast<cl_int>(params.indicesOffset),
+              static_cast<cl_int>(params.edgeNeighborsOffset),
+              static_cast<cl_int>(params.fwnAggregatesOffset),
+              static_cast<cl_int>(params.nodeCount),
+              static_cast<cl_int>(params.triCount),
+              static_cast<cl_int>(params.vertexNormalCount),
+              static_cast<cl_int>(params.resolution),
+              static_cast<cl_int>(baseWord),
+              static_cast<cl_int>(params.wordCount),
+              static_cast<cl_float>(params.fwnBeta));
+            if (!lastEvent())
             {
                 return false;
             }
@@ -515,25 +611,30 @@ namespace gladius
 
         if (!params.completesBuild)
         {
+            gpuAccess.complete(lastEvent);
             return true;
         }
 
         // Flip the ready offset only after the final chunk kernels above complete.
         // The command queue is in-order, so any later render kernel sees either
         // offset 0 (not ready) or a fully built bitmap.
-        cl::Event const readyEvent = m_programFront->runNonBlocking(queue,
-                                                                    "markMeshSignCacheReady",
-                                                                    origin,
-                                                                    cl::NDRange{1, 1, 1},
-                                                                    primitives.data.getBuffer(),
-                                                                    static_cast<cl_int>(params.signCacheReadyOffset),
-                                                                    static_cast<cl_int>(params.signCacheDataOffset),
-                                                                    static_cast<cl_int>(params.signCacheBetaOffset),
-                                                                    static_cast<cl_float>(params.fwnBeta));
+                cl::Event const readyEvent = m_programFront->runNonBlockingWithWaitList(
+                    queue,
+                    "markMeshSignCacheReady",
+                    origin,
+                    cl::NDRange{1, 1, 1},
+                    gpuAccess.waitEvents(),
+                    primitives.data.getBuffer(),
+                    static_cast<cl_int>(params.signCacheReadyOffset),
+                    static_cast<cl_int>(params.signCacheDataOffset),
+                    static_cast<cl_int>(params.signCacheBetaOffset),
+                    static_cast<cl_float>(params.fwnBeta));
         if (!readyEvent())
         {
             return false;
         }
+
+            gpuAccess.complete(readyEvent);
 
         return true;
     }

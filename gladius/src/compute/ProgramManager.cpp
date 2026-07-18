@@ -442,11 +442,13 @@ namespace gladius
         m_slicerState.signalCompilationFinished();
     }
 
-    void ProgramManager::setComputeContext(std::shared_ptr<ComputeContext> context)
+    void ProgramManager::setComputeContext(std::shared_ptr<ComputeContext> context,
+                                           SharedResources resources)
     {
         ProfileFunction std::lock_guard<std::recursive_mutex> lockCompute(m_computeMutex);
 
         m_ComputeContext = std::move(context);
+        m_resources = std::move(resources);
         reset();
         init();
     }
@@ -931,6 +933,60 @@ namespace gladius
     void ProgramManager::setModelSource(std::string source)
     {
         setModelSources(std::move(source), std::nullopt, true);
+    }
+
+    void ProgramManager::setPreviewModelSource(std::string previewSource)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        invalidateCachedBestRenderProgram();
+
+        m_previewModelSource = std::move(previewSource);
+        m_hasPreviewModelSource = true;
+
+        // A preview-only publication represents a new model revision whose optimized source is
+        // not available yet. Disable optimized selection so an older optimized program cannot win.
+        m_modelSource.clear();
+        m_compileOptimizedRenderProgram = false;
+
+        if (m_eventLogger)
+        {
+            auto const message = fmt::format(
+              "ProgramManager.setPreviewModelSource: preview={} bytes",
+              m_previewModelSource.size());
+            getLogger().addEvent({message, events::Severity::Info});
+        }
+
+        m_previewRenderState.signalCompilationRequired();
+    }
+
+    void ProgramManager::setOptimizedModelSource(std::string optimizedSource,
+                                                 bool const compileOptimizedRenderProgram,
+                                                 bool const compileSlicerProgram)
+    {
+        std::lock_guard<std::mutex> lock(m_modelSourceMutex);
+        invalidateCachedBestRenderProgram();
+
+        m_modelSource = std::move(optimizedSource);
+        m_compileOptimizedRenderProgram = compileOptimizedRenderProgram;
+
+        if (m_eventLogger)
+        {
+            auto const message = fmt::format(
+              "ProgramManager.setOptimizedModelSource: optimized={} bytes optimizedRender={} slicer={}",
+              m_modelSource.size(),
+              m_compileOptimizedRenderProgram ? 1 : 0,
+              compileSlicerProgram ? 1 : 0);
+            getLogger().addEvent({message, events::Severity::Info});
+        }
+
+        if (m_compileOptimizedRenderProgram)
+        {
+            m_renderState.signalCompilationRequired();
+        }
+        if (compileSlicerProgram)
+        {
+            m_slicerState.signalCompilationRequired();
+        }
     }
 
     void ProgramManager::setModelSources(std::string optimizedSource,
