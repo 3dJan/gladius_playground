@@ -54,6 +54,22 @@ namespace gladius::compute::tests
         EXPECT_FALSE(settings.isValid());
     }
 
+    TEST(RenderSceneSnapshot, IsValid_WithAnalyticEvaluatorAndFiniteParameters_ReturnsTrue)
+    {
+        RenderSceneSnapshot const snapshot{.sceneGeneration = 1u,
+                                           .analyticEvaluatorWgsl = "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { return vec4<f32>(position, 0.0); }",
+                                           .parameterValues = {0.0f, 1.0f}};
+
+        EXPECT_TRUE(snapshot.isValid());
+    }
+
+    TEST(RenderSceneSnapshot, IsValid_WithZeroGeneration_ReturnsFalse)
+    {
+        RenderSceneSnapshot const snapshot{.analyticEvaluatorWgsl = "fn evaluateModel() {}"};
+
+        EXPECT_FALSE(snapshot.isValid());
+    }
+
     TEST(RenderViewport, PixelCount_WithProgressiveRows_ReturnsRowRangePixelCount)
     {
         RenderViewport const viewport{.width = 17u, .height = 33u, .firstRow = 10u, .endRow = 15u};

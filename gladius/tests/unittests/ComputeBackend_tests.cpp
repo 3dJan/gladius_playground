@@ -5,6 +5,7 @@
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "webgpu/WebGPUComputeBackend.h"
+#include "webgpu/WebGPUComputeRenderer.h"
 #endif
 
 #include <cstdlib>
@@ -75,13 +76,14 @@ namespace gladius::compute::tests
 
     TEST(WebGPUShaderAbi, FrameUniforms_HasWebGpuCompatibleLayout)
     {
-        EXPECT_EQ(sizeof(webgpu::FrameUniforms), 80u);
+        EXPECT_EQ(sizeof(webgpu::FrameUniforms), 96u);
         EXPECT_EQ(alignof(webgpu::FrameUniforms), 16u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, eyeAndMaxDistance), 0u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, forwardAndHorizontalScale), 16u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, rightAndWidth), 32u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, upAndHeight), 48u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, verticalScaleAndMaxSteps), 64u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, firstRowAndCount), 80u);
     }
 
     TEST(WebGPUDispatchPolicy, CalculateSliceDispatchSize_WithPartialWorkgroups_RoundsUp)
@@ -162,6 +164,39 @@ namespace gladius::compute::tests
         ASSERT_EQ(result->pixels.size(), 33u * 33u);
         EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
         EXPECT_GT((result->pixels[(16u * 33u) + 16u] >> 16u) & 0xFFu, 100u);
+    }
+
+    TEST(WebGPUComputeRenderer, SubmitFrame_WithMaterializedAnalyticScene_ReturnsFrame)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeRenderer> renderer;
+        try
+        {
+            renderer = std::make_unique<webgpu::WebGPUComputeRenderer>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto scene = renderer->materializeScene(
+          RenderSceneSnapshot{.sceneGeneration = 1u,
+                              .analyticEvaluatorWgsl = "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { return vec4<f32>(vec3<f32>(0.8, 0.4, 0.2), length(position) - 0.5); }"});
+        auto submission = renderer->submitFrame(
+                    *scene, RenderRequest{.viewport = {.width = 33u, .height = 33u, .firstRow = 10u, .endRow = 20u}});
+        submission->wait();
+
+        ASSERT_EQ(submission->getStatus(), RenderSubmissionStatus::Succeeded) << submission->getErrorMessage();
+        auto frame = submission->takeFrame();
+        ASSERT_TRUE(frame.has_value());
+        EXPECT_TRUE(frame->isValid());
+        EXPECT_EQ(frame->firstRow, 10u);
+        EXPECT_EQ(frame->endRow, 20u);
+        EXPECT_EQ(frame->pixels.size(), 33u * 10u);
     }
 #endif
 }

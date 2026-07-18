@@ -45,7 +45,7 @@ namespace gladius::ui::async_rendering::tests
             std::optional<compute::RenderFrame> m_frame;
         };
 
-        class ImmediateRenderer final : public compute::IComputeRenderer
+        class ImmediateRenderer : public compute::IComputeRenderer
         {
           public:
             [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
@@ -75,6 +75,35 @@ namespace gladius::ui::async_rendering::tests
                   .endRow = viewport.endRow,
                   .freshness = request.freshness,
                   .pixels = std::vector<std::uint32_t>(viewport.pixelCount())});
+            }
+        };
+
+        class ImmediateScene final : public compute::IRenderScene
+        {
+          public:
+            [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
+            {
+                return compute::ComputeBackendKind::OpenCL;
+            }
+
+            [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept override
+            {
+                return 1u;
+            }
+
+            [[nodiscard]] compute::RendererCapability getCapabilities() const noexcept override
+            {
+                return compute::RendererCapability::AnalyticRendering;
+            }
+        };
+
+        class SceneAwareImmediateRenderer final : public ImmediateRenderer
+        {
+          public:
+            [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
+            submitFrame(compute::IRenderScene const &, compute::RenderRequest request) override
+            {
+                return ImmediateRenderer::submitFrame(std::move(request));
             }
         };
 
@@ -126,6 +155,22 @@ namespace gladius::ui::async_rendering::tests
 
         EXPECT_FALSE(scheduler.submit(makeTask(RenderTaskType::LowResolutionPreview), renderer));
         EXPECT_FALSE(scheduler.hasInFlightSubmissions());
+    }
+
+    TEST(NeutralRenderScheduler, Submit_WithMaterializedScene_ReturnsAcceptedFrame)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        SceneAwareImmediateRenderer renderer;
+        ImmediateScene scene;
+        auto const task = makeTask();
+
+        ASSERT_TRUE(scheduler.submit(task, renderer, scene));
+
+        auto accepted = scheduler.poll();
+
+        ASSERT_EQ(accepted.size(), 1u);
+        EXPECT_EQ(accepted.front().frame.firstRow, task.startLine);
+        EXPECT_EQ(accepted.front().frame.endRow, task.startLine + task.lineCount);
     }
 
     TEST(NeutralRenderScheduler, Poll_WithCurrentFullQualityFrame_RejectsProgressiveRegression)

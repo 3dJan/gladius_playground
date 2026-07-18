@@ -399,6 +399,38 @@ namespace gladius::nodes::tests
         EXPECT_EQ(request.shaderSource.find("GLADIUS_MODEL_EVALUATOR"), std::string::npos);
     }
 
+    TEST(WebGPUModelSliceRequestFactory, CreateScene_WithModifiableScalar_PreservesEvaluatorAndParameters)
+    {
+        Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+
+        auto * color = model.create<ConstantVector>();
+        auto * distance = model.create<ConstantScalar>();
+        ASSERT_NE(color, nullptr);
+        ASSERT_NE(distance, nullptr);
+        for (auto & [name, parameter] : color->parameter())
+        {
+            parameter.setModifiable(false);
+        }
+        distance->parameter().at(FieldNames::Value).setValue(-0.25f);
+        distance->parameter().at(FieldNames::Value).setLookUpIndex(0);
+
+        auto * end = model.getEndNode();
+        ASSERT_NE(end, nullptr);
+        ASSERT_TRUE(model.addLink(color->getVectorOutputPort().getId(),
+                                  end->parameter().at(FieldNames::Color).getId()));
+        ASSERT_TRUE(model.addLink(distance->getValueOutputPort().getId(),
+                                  end->parameter().at(FieldNames::Shape).getId()));
+
+        auto const snapshot = webgpu::WebGPUModelSliceRequestFactory::createScene(model, 17u);
+
+        ASSERT_TRUE(snapshot.isValid());
+        EXPECT_EQ(snapshot.sceneGeneration, 17u);
+        EXPECT_TRUE(compute::hasCapability(snapshot.requiredCapabilities, compute::RendererCapability::AnalyticRendering));
+        EXPECT_EQ(snapshot.parameterValues, std::vector<float>({-0.25f}));
+        EXPECT_NE(snapshot.analyticEvaluatorWgsl.find("fn evaluateModel(position: vec3<f32>) -> vec4<f32>"), std::string::npos);
+    }
+
     TEST(WebGPUModelSliceRequestFactory, Create_WithModifiableMatrix_PacksRowMajorValues)
     {
         Model model;
