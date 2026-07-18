@@ -10,6 +10,30 @@
     "nlopt",
     "platform-folders",
     "opencl",
+    {
+        "name": "dawn",
+        "default-features": false,
+        "features": [
+          "vulkan"
+        ],
+        "platform": "linux"
+    },
+    {
+        "name": "dawn",
+        "default-features": false,
+        "features": [
+          "d3d12"
+        ],
+        "platform": "windows"
+    },
+    {
+        "name": "dawn",
+        "default-features": false,
+        "features": [
+          "metal"
+        ],
+        "platform": "osx"
+    },
      {
         "name": "openvdb",
         "features":

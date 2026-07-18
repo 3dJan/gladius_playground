@@ -73,7 +73,6 @@ find_package(NLopt CONFIG REQUIRED)
 
 # Core dependencies (shared by gladius and gladiusmcp)
 set(DEPENDENCIES_CORE
-    OpenCL::OpenCL
     ${X11_LIBRARIES}
     ${OPENGL_LIBRARIES}
     glfw
@@ -100,6 +99,14 @@ set(DEPENDENCIES_CORE
     OpenMP::OpenMP_CXX
 )
 
+if(GLADIUS_ENABLE_OPENCL)
+    list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)
+endif()
+
+if(GLADIUS_ENABLE_WEBGPU)
+    list(APPEND DEPENDENCIES_CORE dawn::webgpu_dawn)
+endif()
+
 # MCP-only dependencies
 set(DEPENDENCIES_MCP
     httplib::httplib
@@ -120,6 +127,15 @@ endif()
 target_link_libraries(${BINARY}_lib PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY}_lib_mcp PUBLIC ${DEPENDENCIES_CORE})
 target_link_libraries(${BINARY} PUBLIC ${BINARY}_lib)
+
+foreach(target ${BINARY}_lib ${BINARY}_lib_mcp ${BINARY})
+    if(GLADIUS_ENABLE_OPENCL)
+        target_compile_definitions(${target} PUBLIC GLADIUS_ENABLE_OPENCL=1)
+    endif()
+    if(GLADIUS_ENABLE_WEBGPU)
+        target_compile_definitions(${target} PUBLIC GLADIUS_ENABLE_WEBGPU=1)
+    endif()
+endforeach()
 
 # Precompiled headers: keep the Windows PCH deliberately lean. Large template-heavy
 # dependencies such as OpenVDB/Boost/Eigen/ImGui can raise the baseline heap for every

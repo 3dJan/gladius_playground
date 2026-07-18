@@ -12,8 +12,14 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
+option(GLADIUS_ENABLE_OPENCL "Build the OpenCL compute backend" ON)
+option(GLADIUS_ENABLE_WEBGPU "Build the native Dawn/WebGPU compute backend" OFF)
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" ON)
 option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
+
+if(NOT GLADIUS_ENABLE_OPENCL AND NOT GLADIUS_ENABLE_WEBGPU)
+  message(FATAL_ERROR "At least one Gladius compute backend must be enabled.")
+endif()
 
 # Allow the environment variable GLADIUS_ENABLE_UI_TESTING to override the cmake option
 if(DEFINED ENV{GLADIUS_ENABLE_UI_TESTING})
@@ -174,7 +180,12 @@ find_package(GTest CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
-find_package(OpenCL REQUIRED)
+if(GLADIUS_ENABLE_OPENCL)
+  find_package(OpenCL REQUIRED)
+endif()
+if(GLADIUS_ENABLE_WEBGPU)
+  find_package(Dawn CONFIG REQUIRED)
+endif()
 find_package(fmt REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenMesh REQUIRED)
@@ -208,6 +219,7 @@ pkg_check_modules(libcoro REQUIRED IMPORTED_TARGET libcoro)
 
 file(GLOB KERNEL_FILES
   "src/kernel/*"
+  "src/webgpu/shaders/*"
 )
 
 cmrc_add_resource_library(gladius_resources ALIAS gladius::rc ${KERNEL_FILES})
@@ -268,6 +280,9 @@ endif()
 add_subdirectory(tests)
 add_subdirectory(src)
 add_subdirectory(src/compute)
+if(GLADIUS_ENABLE_WEBGPU)
+  add_subdirectory(src/webgpu)
+endif()
 add_subdirectory(src/ui)
 add_subdirectory(src/nodes)
 add_subdirectory(src/io)
