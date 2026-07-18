@@ -5,9 +5,8 @@
 #include "OrbitalCamera.h"
 #include "compute/ComputeCore.h"
 #include "render/AsyncRenderController.h"
-#include "render/PresentedFrameLedger.h"
+#include "render/NeutralRenderScheduler.h"
 #include "render/RealtimeRaymarchController.h"
-#include "render/RenderUpdateCoordinator.h"
 #include <CL/cl_platform.h>
 #include <atomic>
 #include <chrono>
@@ -211,7 +210,7 @@ namespace gladius::ui
         void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
         [[nodiscard]] async_rendering::RealtimeRaymarchConfig loadRealtimeRaymarchConfig() const;
         void saveRealtimeRaymarchMode(async_rendering::RealtimeRaymarchMode mode) const;
-        void queueRenderDecision(async_rendering::RenderUpdateDecision decision);
+        void queueRenderDecision(async_rendering::RenderWorkflowDecision decision);
         [[nodiscard]] bool executeQueuedRenderCommands(RenderWindowState & state);
         [[nodiscard]] bool executeRenderCommand(async_rendering::RenderCommand const & command,
                                                 RenderWindowState & state);
@@ -384,8 +383,11 @@ namespace gladius::ui
         void onCameraManuallyMoved();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
-        async_rendering::RenderUpdateCoordinator m_renderUpdateCoordinator{};
-        async_rendering::PresentedFrameLedger m_presentedFrames{};
+        async_rendering::NeutralRenderScheduler m_neutralRenderScheduler{
+          [](async_rendering::RenderTaskRequest const &)
+            -> std::optional<compute::RenderRequest> { return std::nullopt; }};
+        async_rendering::RenderWorkflowController & m_renderUpdateCoordinator{
+          m_neutralRenderScheduler.workflow()};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};

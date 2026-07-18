@@ -33,6 +33,11 @@ namespace gladius::compute
       public:
         virtual ~IRenderSubmission() = default;
 
+        /// @brief Advance backend callbacks without blocking the calling thread.
+        virtual void progress() noexcept
+        {
+        }
+
         [[nodiscard]] virtual RenderSubmissionStatus getStatus() const noexcept = 0;
         virtual void requestCancellation() noexcept = 0;
         virtual void wait() = 0;

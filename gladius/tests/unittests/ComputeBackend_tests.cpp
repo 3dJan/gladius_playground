@@ -8,6 +8,7 @@
 #include "webgpu/WebGPUComputeRenderer.h"
 #endif
 
+#include <chrono>
 #include <cstdlib>
 
 #include <gtest/gtest.h>
@@ -188,7 +189,12 @@ namespace gladius::compute::tests
                               .analyticEvaluatorWgsl = "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { return vec4<f32>(vec3<f32>(0.8, 0.4, 0.2), length(position) - 0.5); }"});
         auto submission = renderer->submitFrame(
                     *scene, RenderRequest{.viewport = {.width = 33u, .height = 33u, .firstRow = 10u, .endRow = 20u}});
-        submission->wait();
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (submission->getStatus() == RenderSubmissionStatus::Pending &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            submission->progress();
+        }
 
         ASSERT_EQ(submission->getStatus(), RenderSubmissionStatus::Succeeded) << submission->getErrorMessage();
         auto frame = submission->takeFrame();

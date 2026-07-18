@@ -100,6 +100,12 @@ namespace gladius::ui::async_rendering::tests
         class SceneAwareImmediateRenderer final : public ImmediateRenderer
         {
           public:
+                        [[nodiscard]] std::unique_ptr<compute::IRenderScene>
+                        materializeScene(compute::RenderSceneSnapshot snapshot) override
+                        {
+                                return std::make_unique<ImmediateScene>();
+                        }
+
             [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
             submitFrame(compute::IRenderScene const &, compute::RenderRequest request) override
             {
@@ -139,12 +145,15 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_TRUE(scheduler.submit(task, renderer));
         EXPECT_TRUE(scheduler.hasInFlightSubmissions());
 
-        auto accepted = scheduler.poll();
+        auto result = scheduler.poll();
 
-        ASSERT_EQ(accepted.size(), 1u);
-        EXPECT_EQ(accepted.front().candidate.frameId, task.requestId);
-        EXPECT_EQ(accepted.front().candidate.quality, FramePresentationQuality::ProgressivePartial);
-        EXPECT_EQ(accepted.front().frame.pixels.size(), task.width * task.lineCount);
+        ASSERT_EQ(result.acceptedFrames.size(), 1u);
+        EXPECT_EQ(result.acceptedFrames.front().candidate.frameId, task.requestId);
+        EXPECT_EQ(result.acceptedFrames.front().candidate.quality, FramePresentationQuality::ProgressivePartial);
+        EXPECT_EQ(result.acceptedFrames.front().frame.pixels.size(), task.width * task.lineCount);
+        EXPECT_FALSE(result.commands.empty());
+        ASSERT_EQ(result.completions.size(), 1u);
+        EXPECT_TRUE(result.completions.front().taskResult.succeeded());
         EXPECT_FALSE(scheduler.hasInFlightSubmissions());
     }
 
@@ -166,11 +175,30 @@ namespace gladius::ui::async_rendering::tests
 
         ASSERT_TRUE(scheduler.submit(task, renderer, scene));
 
-        auto accepted = scheduler.poll();
+                auto result = scheduler.poll();
 
-        ASSERT_EQ(accepted.size(), 1u);
-        EXPECT_EQ(accepted.front().frame.firstRow, task.startLine);
-        EXPECT_EQ(accepted.front().frame.endRow, task.startLine + task.lineCount);
+                ASSERT_EQ(result.acceptedFrames.size(), 1u);
+                EXPECT_EQ(result.acceptedFrames.front().frame.firstRow, task.startLine);
+                EXPECT_EQ(result.acceptedFrames.front().frame.endRow, task.startLine + task.lineCount);
+        }
+
+        TEST(NeutralRenderScheduler, Submit_WithBackendSession_ReturnsAcceptedFrame)
+        {
+                NeutralRenderScheduler scheduler{makeRequest};
+                auto renderer = std::make_unique<SceneAwareImmediateRenderer>();
+                compute::RenderBackendSession session{std::move(renderer)};
+                ASSERT_TRUE(session.replaceScene(
+                    compute::RenderSceneSnapshot{.sceneGeneration = 1u,
+                                                                             .analyticEvaluatorWgsl = "fn evaluateModel() {}"}));
+                (void) scheduler.workflow().notifyStructuralModelChanged();
+                auto task = makeTask();
+                task.stamp = scheduler.workflow().latestStamp();
+
+                ASSERT_TRUE(scheduler.submit(task, session));
+
+                auto result = scheduler.poll();
+                ASSERT_EQ(result.acceptedFrames.size(), 1u);
+                EXPECT_EQ(result.acceptedFrames.front().candidate.frameId, task.requestId);
     }
 
     TEST(NeutralRenderScheduler, Poll_WithCurrentFullQualityFrame_RejectsProgressiveRegression)
@@ -187,7 +215,7 @@ namespace gladius::ui::async_rendering::tests
 
         ASSERT_TRUE(scheduler.submit(task, renderer));
 
-        EXPECT_TRUE(scheduler.poll().empty());
+        EXPECT_TRUE(scheduler.poll().acceptedFrames.empty());
         ASSERT_TRUE(scheduler.workflow().presentedFrame().has_value());
         EXPECT_EQ(scheduler.workflow().presentedFrame()->frameId, 1u);
     }

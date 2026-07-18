@@ -4,6 +4,17 @@
 
 namespace gladius::ui::async_rendering
 {
+  NeutralFrameSubmissionTracker::~NeutralFrameSubmissionTracker()
+  {
+    try
+    {
+      (void) drain();
+    }
+    catch (...)
+    {
+    }
+  }
+
     bool NeutralFrameSubmissionTracker::track(RenderTaskRequest task,
                                               std::unique_ptr<compute::IRenderSubmission> submission)
     {
@@ -32,6 +43,14 @@ namespace gladius::ui::async_rendering
         }
     }
 
+      void NeutralFrameSubmissionTracker::requestCancellationForAll() noexcept
+      {
+        for (auto const & tracked : m_submissions)
+        {
+          tracked.submission->requestCancellation();
+        }
+      }
+
     std::vector<NeutralFrameSubmissionResult> NeutralFrameSubmissionTracker::poll()
     {
         std::vector<NeutralFrameSubmissionResult> results;
@@ -39,6 +58,7 @@ namespace gladius::ui::async_rendering
                                                 m_submissions.end(),
                                                 [&results](TrackedSubmission & tracked)
                                                 {
+                                                  tracked.submission->progress();
                                                     auto const status = tracked.submission->getStatus();
                                                     if (status == compute::RenderSubmissionStatus::Pending)
                                                     {
@@ -50,7 +70,8 @@ namespace gladius::ui::async_rendering
                                                         auto frame = tracked.submission->takeFrame();
                                                         if (frame.has_value() && matchesTask(*frame, tracked.task))
                                                         {
-                                                            auto const completedFrame = frame->endRow == frame->height;
+                                                            auto const completedFrame = frame->firstRow == 0u &&
+                                                                                        frame->endRow == frame->height;
                                                             results.push_back(
                                                               NeutralFrameSubmissionResult{
                                                                 .taskResult = makeTerminalResult(
@@ -81,6 +102,16 @@ namespace gladius::ui::async_rendering
         m_submissions.erase(retainedEnd, m_submissions.end());
         return results;
     }
+
+      std::vector<NeutralFrameSubmissionResult> NeutralFrameSubmissionTracker::drain()
+      {
+        requestCancellationForAll();
+        for (auto const & tracked : m_submissions)
+        {
+          tracked.submission->wait();
+        }
+        return poll();
+      }
 
     bool NeutralFrameSubmissionTracker::empty() const noexcept
     {

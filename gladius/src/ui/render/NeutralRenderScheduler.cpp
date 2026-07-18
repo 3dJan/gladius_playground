@@ -1,5 +1,6 @@
 #include "ui/render/NeutralRenderScheduler.h"
 
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
@@ -63,30 +64,88 @@ namespace gladius::ui::async_rendering
         }
     }
 
+    bool NeutralRenderScheduler::submit(RenderTaskRequest const & task,
+                                        compute::RenderBackendSession & session)
+    {
+        if (!isSupportedDisplayTask(task.type) || !session.isAvailable() ||
+            !session.hasMaterializedScene() || task.stamp.sceneEpoch != session.getSceneGeneration())
+        {
+            return false;
+        }
+
+        auto request = m_requestFactory(task);
+        if (!request.has_value() || !request->isValid())
+        {
+            return false;
+        }
+
+        try
+        {
+            return m_submissions.track(task, session.submitFrame(std::move(*request)));
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     void NeutralRenderScheduler::requestCancellationForStale() noexcept
     {
         m_submissions.requestCancellationForStale(m_workflow.latestStamp());
     }
 
-    std::vector<AcceptedNeutralFrame> NeutralRenderScheduler::poll()
+    void NeutralRenderScheduler::requestCancellationForAll() noexcept
     {
-        std::vector<AcceptedNeutralFrame> acceptedFrames;
+        m_submissions.requestCancellationForAll();
+    }
+
+    NeutralRenderPollResult NeutralRenderScheduler::poll()
+    {
+        NeutralRenderPollResult result;
         for (auto & completion : m_submissions.poll())
         {
             auto decision = m_workflow.completeTask(completion.taskResult);
-            if (!completion.frame.has_value())
+            result.commands.insert(result.commands.end(),
+                                   std::make_move_iterator(decision.commands.begin()),
+                                   std::make_move_iterator(decision.commands.end()));
+
+            if (completion.frame.has_value())
             {
-                continue;
+                auto candidate = findCandidate(decision, completion.taskResult.requestId);
+                if (candidate.has_value())
+                {
+                    result.acceptedFrames.push_back(
+                      AcceptedNeutralFrame{.frame = std::move(*completion.frame), .candidate = *candidate});
+                }
             }
 
-            auto candidate = findCandidate(decision, completion.taskResult.requestId);
-            if (candidate.has_value())
-            {
-                acceptedFrames.push_back(
-                  AcceptedNeutralFrame{.frame = std::move(*completion.frame), .candidate = *candidate});
-            }
+            result.completions.push_back(std::move(completion));
         }
-        return acceptedFrames;
+        return result;
+    }
+
+    NeutralRenderPollResult NeutralRenderScheduler::drain()
+    {
+        NeutralRenderPollResult result;
+        for (auto & completion : m_submissions.drain())
+        {
+            auto decision = m_workflow.completeTask(completion.taskResult);
+            result.commands.insert(result.commands.end(),
+                                   std::make_move_iterator(decision.commands.begin()),
+                                   std::make_move_iterator(decision.commands.end()));
+            result.completions.push_back(std::move(completion));
+        }
+        return result;
+    }
+
+    void NeutralRenderScheduler::resetWorkflow(RealtimeRaymarchConfig config)
+    {
+        if (hasInFlightSubmissions())
+        {
+            throw std::logic_error("Cannot reset render workflow while submissions are in flight");
+        }
+        m_workflow = RenderWorkflowController{};
+        m_workflow.configureRealtime(config);
     }
 
     RenderWorkflowController & NeutralRenderScheduler::workflow() noexcept

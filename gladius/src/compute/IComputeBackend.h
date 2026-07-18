@@ -97,6 +97,11 @@ namespace gladius::compute
             public:
                 virtual ~IFrameSubmission() = default;
 
+                /// @brief Advance backend callbacks without blocking the calling thread.
+                virtual void progress() noexcept
+                {
+                }
+
                 [[nodiscard]] virtual ComputeCompletionStatus getStatus() const noexcept = 0;
                 virtual void wait() = 0;
                 [[nodiscard]] virtual std::optional<FrameResult> takeResult() = 0;

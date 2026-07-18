@@ -303,8 +303,7 @@ namespace gladius::ui
             m_asyncStaticFullFrameJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfJobInFlight.store(false, std::memory_order_release);
             m_asyncSdfInFlightEpoch.store(0, std::memory_order_release);
-            m_renderUpdateCoordinator = async_rendering::RenderUpdateCoordinator{};
-            m_renderUpdateCoordinator.configureRealtime(loadRealtimeRaymarchConfig());
+            m_neutralRenderScheduler.resetWorkflow(loadRealtimeRaymarchConfig());
             m_pendingRenderCommands.clear();
             notifyAsyncEpochIncrement();
         }
@@ -439,7 +438,7 @@ namespace gladius::ui
         m_configManager->save();
     }
 
-    void RenderWindow::queueRenderDecision(async_rendering::RenderUpdateDecision decision)
+    void RenderWindow::queueRenderDecision(async_rendering::RenderWorkflowDecision decision)
     {
         m_pendingRenderCommands.insert(m_pendingRenderCommands.end(),
                                        std::make_move_iterator(decision.commands.begin()),
@@ -814,7 +813,7 @@ namespace gladius::ui
                                 .fullFrameRenderJobInFlight = fullFrameRenderJobInFlight,
                                 .suppressHqDisplay = m_suppressHQDisplay.load(std::memory_order_acquire),
                                 .resultImageAvailable = resultImage != nullptr,
-                                .presentedFrame = m_presentedFrames.presentedFrame()});
+                                .presentedFrame = m_renderUpdateCoordinator.presentedFrame()});
 
             if (displaySource == async_rendering::DisplayFrameSource::FrontBuffer && frontBuf)
             {
@@ -2890,8 +2889,9 @@ namespace gladius::ui
                                                             .quality = async_rendering::FramePresentationQuality::FullQuality,
                                                             .source = source,
                                                             .completedFrame = true};
-                                                        [[maybe_unused]] bool const presented =
-                                                            m_presentedFrames.presentCandidate(candidate, requiredPresentationStamp);
+                                                                                                                [[maybe_unused]] bool const presented =
+                                                                                                                        m_renderUpdateCoordinator.presentCandidate(
+                                                                                                                            candidate, requiredPresentationStamp);
                                                 }
                                         }
                                 }
@@ -3294,7 +3294,7 @@ namespace gladius::ui
                         bool const promoted = m_asyncController->finalizeFrontPromotion(newFront);
                         if (promoted)
                         {
-                                [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+                                [[maybe_unused]] bool const presented = m_renderUpdateCoordinator.presentCandidate(
                                     async_rendering::FramePresentationCandidate{
                                         .frameId = task.requestId,
                                         .stamp = task.stamp,
@@ -4601,7 +4601,7 @@ namespace gladius::ui
 
         auto const & meta = result.value();
 
-        auto presentedFrame = m_presentedFrames.presentedFrame();
+        auto presentedFrame = m_renderUpdateCoordinator.presentedFrame();
         if (!presentedFrame.has_value())
         {
             if (auto mirroredFront = m_asyncController->mirroredFrontPresentationBuffer();
@@ -4614,7 +4614,7 @@ namespace gladius::ui
                   .source = async_rendering::FramePresentationSource::ProgressiveHighQuality,
                   .completedFrame = mirroredFront->quality ==
                                     async_rendering::FramePresentationQuality::FullQuality};
-                m_presentedFrames.seedPresentedFrame(*presentedFrame);
+                m_renderUpdateCoordinator.seedPresentedFrame(*presentedFrame);
             }
         }
 
@@ -4687,7 +4687,7 @@ namespace gladius::ui
             auto const previewPresentationStamp = acceptance.presentAsRequiredStamp
                                                     ? requiredPresentationStamp
                                                     : meta.coordinatorStamp;
-            [[maybe_unused]] bool const presented = m_presentedFrames.presentCandidate(
+            [[maybe_unused]] bool const presented = m_renderUpdateCoordinator.presentCandidate(
               async_rendering::FramePresentationCandidate{.frameId = meta.frameId,
                                                           .stamp = previewPresentationStamp,
                                                           .quality = meta.quality,

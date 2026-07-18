@@ -76,6 +76,14 @@ namespace gladius::webgpu
                 }
             }
 
+            void progress() noexcept override
+            {
+                if (m_submission)
+                {
+                    m_submission->progress();
+                }
+            }
+
             void requestCancellation() noexcept override
             {
                 m_cancelRequested.store(true, std::memory_order_release);

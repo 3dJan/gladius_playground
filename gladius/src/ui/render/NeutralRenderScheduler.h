@@ -2,6 +2,7 @@
 
 #include "NeutralFrameSubmissionTracker.h"
 #include "RenderWorkflowController.h"
+#include "compute/RenderBackendSession.h"
 
 #include <functional>
 #include <optional>
@@ -17,6 +18,16 @@ namespace gladius::ui::async_rendering
         compute::RenderFrame frame;
         FramePresentationCandidate candidate;
     };
+
+      /**
+       * @brief Terminal submission data and workflow commands produced by one non-blocking poll.
+       */
+      struct NeutralRenderPollResult
+      {
+        std::vector<AcceptedNeutralFrame> acceptedFrames;
+        std::vector<NeutralFrameSubmissionResult> completions;
+        std::vector<RenderCommand> commands;
+      };
 
     /**
      * @brief Connects coordinator display tasks to an IComputeRenderer without owning UI policy.
@@ -37,8 +48,13 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool submit(RenderTaskRequest const & task,
                 compute::IComputeRenderer & renderer,
                 compute::IRenderScene const & scene);
+        [[nodiscard]] bool submit(RenderTaskRequest const & task,
+                compute::RenderBackendSession & session);
         void requestCancellationForStale() noexcept;
-        [[nodiscard]] std::vector<AcceptedNeutralFrame> poll();
+        void requestCancellationForAll() noexcept;
+        [[nodiscard]] NeutralRenderPollResult poll();
+        [[nodiscard]] NeutralRenderPollResult drain();
+        void resetWorkflow(RealtimeRaymarchConfig config);
 
         [[nodiscard]] RenderWorkflowController & workflow() noexcept;
         [[nodiscard]] RenderWorkflowController const & workflow() const noexcept;

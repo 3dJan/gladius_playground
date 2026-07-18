@@ -32,9 +32,13 @@ namespace gladius::ui::async_rendering
     class NeutralFrameSubmissionTracker
     {
       public:
+        ~NeutralFrameSubmissionTracker();
+
         [[nodiscard]] bool track(RenderTaskRequest task, std::unique_ptr<compute::IRenderSubmission> submission);
         void requestCancellationForStale(RenderStamp const & currentStamp) noexcept;
+        void requestCancellationForAll() noexcept;
         [[nodiscard]] std::vector<NeutralFrameSubmissionResult> poll();
+        [[nodiscard]] std::vector<NeutralFrameSubmissionResult> drain();
         [[nodiscard]] bool empty() const noexcept;
 
       private:

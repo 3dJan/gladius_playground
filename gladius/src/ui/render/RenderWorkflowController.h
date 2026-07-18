@@ -68,6 +68,11 @@ namespace gladius::ui::async_rendering
             return m_coordinator.isRealtimeSchedulingActive();
         }
 
+        [[nodiscard]] bool isRealtimeActive() const noexcept
+        {
+            return m_coordinator.isRealtimeActive();
+        }
+
         [[nodiscard]] bool isAutoPreviewFallbackActive() const noexcept
         {
             return m_coordinator.isAutoPreviewFallbackActive();
@@ -152,6 +157,12 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate) noexcept
         {
             return m_presentedFrames.presentCandidate(candidate, latestStamp());
+        }
+
+        [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate,
+                                            RenderStamp const & requiredStamp) noexcept
+        {
+            return m_presentedFrames.presentCandidate(candidate, requiredStamp);
         }
 
       private:

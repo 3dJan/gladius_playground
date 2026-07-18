@@ -286,9 +286,14 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
             [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override { return m_status; }
 
-            void wait() override
+            void progress() noexcept override
             {
-                while (m_status == compute::ComputeCompletionStatus::Pending)
+                if (m_status != compute::ComputeCompletionStatus::Pending || !m_context)
+                {
+                    return;
+                }
+
+                try
                 {
                     m_context->processEvents();
                     if (!m_context->isValid())
@@ -296,6 +301,24 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                         m_status = compute::ComputeCompletionStatus::Failed;
                         m_errorMessage = m_context->getErrorMessage();
                     }
+                }
+                catch (std::exception const & error)
+                {
+                    m_status = compute::ComputeCompletionStatus::Failed;
+                    m_errorMessage = error.what();
+                }
+                catch (...)
+                {
+                    m_status = compute::ComputeCompletionStatus::Failed;
+                    m_errorMessage = "WebGPU event processing failed";
+                }
+            }
+
+            void wait() override
+            {
+                while (m_status == compute::ComputeCompletionStatus::Pending)
+                {
+                    progress();
                 }
             }
 
