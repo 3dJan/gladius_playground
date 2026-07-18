@@ -2,6 +2,7 @@
 
 #include "compute/ComputeBackend.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -44,6 +45,33 @@ namespace gladius::compute
     };
 
     /**
+     * @brief Owned camera and model data for a headless implicit-model frame render.
+     */
+    struct FrameRequest
+    {
+        std::uint32_t width{};
+        std::uint32_t height{};
+        std::array<float, 3> eyePosition{};
+        std::array<float, 3> forwardDirection{0.0f, 0.0f, -1.0f};
+        std::array<float, 3> rightDirection{1.0f, 0.0f, 0.0f};
+        std::array<float, 3> upDirection{0.0f, 1.0f, 0.0f};
+        float verticalFieldOfViewRadians{1.0f};
+        float maxDistance{1000.0f};
+        std::string shaderSource;
+        std::vector<float> parameterValues;
+    };
+
+    /**
+     * @brief Packed RGBA8 output from a completed headless frame render.
+     */
+    struct FrameResult
+    {
+        std::uint32_t width{};
+        std::uint32_t height{};
+        std::vector<std::uint32_t> pixels;
+    };
+
+    /**
      * @brief Represents a slice operation and owns its asynchronous completion state.
      */
     class ISliceSubmission
@@ -57,6 +85,20 @@ namespace gladius::compute
         [[nodiscard]] virtual std::string getErrorMessage() const = 0;
     };
 
+        /**
+         * @brief Represents a headless frame render and owns its asynchronous completion state.
+         */
+        class IFrameSubmission
+        {
+            public:
+                virtual ~IFrameSubmission() = default;
+
+                [[nodiscard]] virtual ComputeCompletionStatus getStatus() const noexcept = 0;
+                virtual void wait() = 0;
+                [[nodiscard]] virtual std::optional<FrameResult> takeResult() = 0;
+                [[nodiscard]] virtual std::string getErrorMessage() const = 0;
+        };
+
     /**
      * @brief Physical compute backend interface for API-independent compute operations.
      */
@@ -68,5 +110,6 @@ namespace gladius::compute
         [[nodiscard]] virtual ComputeBackendKind getKind() const noexcept = 0;
         [[nodiscard]] virtual bool isAvailable() const noexcept = 0;
         [[nodiscard]] virtual std::unique_ptr<ISliceSubmission> submitSlice(SliceRequest request) = 0;
+        [[nodiscard]] virtual std::unique_ptr<IFrameSubmission> submitFrame(FrameRequest request) = 0;
     };
 }

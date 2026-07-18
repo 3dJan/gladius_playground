@@ -593,5 +593,78 @@ namespace gladius::nodes::tests
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result->pixels.front(), 0xFFB0753Bu);
     }
+
+    TEST(WebGPUModelSliceRequestFactory, CreateFrame_WithAnalyticSphere_RayMarchesGeneratedModel)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * color = model.create<ConstantVector>();
+        auto * radius = model.create<ConstantScalar>();
+        auto * length = model.create<Length>();
+        auto * sphere = model.create<Subtraction>();
+        ASSERT_NE(color, nullptr);
+        ASSERT_NE(radius, nullptr);
+        ASSERT_NE(length, nullptr);
+        ASSERT_NE(sphere, nullptr);
+        for (auto * node : {static_cast<NodeBase *>(color), static_cast<NodeBase *>(radius)})
+        {
+            for (auto & [name, parameter] : node->parameter())
+            {
+                parameter.setModifiable(false);
+            }
+        }
+        color->parameter().at(FieldNames::X).setValue(0.25f);
+        color->parameter().at(FieldNames::Y).setValue(0.5f);
+        color->parameter().at(FieldNames::Z).setValue(0.75f);
+        radius->parameter().at(FieldNames::Value).setValue(0.5f);
+
+        auto * begin = model.getBeginNode();
+        auto * end = model.getEndNode();
+        ASSERT_NE(begin, nullptr);
+        ASSERT_NE(end, nullptr);
+        ASSERT_TRUE(model.addLink(begin->getOutputs().at(FieldNames::Pos).getId(),
+                                  length->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(length->getOutputs().at(FieldNames::Result).getId(),
+                                  sphere->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(radius->getValueOutputPort().getId(),
+                                  sphere->parameter().at(FieldNames::B).getId()));
+        ASSERT_TRUE(model.addLink(sphere->getOutputs().at(FieldNames::Result).getId(),
+                                  end->parameter().at(FieldNames::Shape).getId()));
+        ASSERT_TRUE(model.addLink(color->getVectorOutputPort().getId(),
+                                  end->parameter().at(FieldNames::Color).getId()));
+
+        auto request = webgpu::WebGPUModelSliceRequestFactory::createFrame(
+          model,
+          compute::FrameRequest{.width = 33u,
+                                .height = 33u,
+                                .eyePosition = {0.0f, 0.0f, 2.0f},
+                                .maxDistance = 10.0f});
+        EXPECT_NE(request.shaderSource.find("fn estimate_normal"), std::string::npos);
+                    EXPECT_NE(request.shaderSource.find("length("), std::string::npos);
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto submission = backend->submitFrame(std::move(request));
+        submission->wait();
+        ASSERT_EQ(submission->getStatus(), compute::ComputeCompletionStatus::Succeeded)
+          << submission->getErrorMessage();
+        auto result = submission->takeResult();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
+        EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFF654422u);
+    }
 #endif
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -22,4 +23,18 @@ namespace gladius::webgpu
     static_assert(offsetof(SliceUniforms, width) == 4u);
     static_assert(offsetof(SliceUniforms, height) == 8u);
     static_assert(offsetof(SliceUniforms, scale) == 12u);
+
+    /**
+     * @brief Camera data shared with the headless WebGPU frame ray marcher.
+     */
+    struct alignas(16) FrameUniforms
+    {
+        std::array<float, 4> eyeAndMaxDistance{};
+        std::array<float, 4> forwardAndFieldOfView{};
+        std::array<float, 4> rightAndWidth{};
+        std::array<float, 4> upAndHeight{};
+    };
+
+    static_assert(alignof(FrameUniforms) == 16u);
+    static_assert(sizeof(FrameUniforms) == 64u);
 }

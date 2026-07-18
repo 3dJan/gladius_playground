@@ -19,6 +19,8 @@ namespace gladius::webgpu
         [[nodiscard]] bool isAvailable() const noexcept override;
         [[nodiscard]] std::unique_ptr<compute::ISliceSubmission>
         submitSlice(compute::SliceRequest request) override;
+        [[nodiscard]] std::unique_ptr<compute::IFrameSubmission>
+        submitFrame(compute::FrameRequest request) override;
 
       private:
         std::shared_ptr<WebGPUComputeContext> m_context;

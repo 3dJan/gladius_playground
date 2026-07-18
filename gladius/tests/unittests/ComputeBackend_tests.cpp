@@ -120,5 +120,37 @@ namespace gladius::compute::tests
         EXPECT_EQ(result->pixels.front(), 0xFF1F1F1Fu);
         EXPECT_EQ(result->pixels[(16u * 17u) + 8u], 0xFFEBEBEBu);
     }
+
+    TEST(WebGPUComputeBackend, SubmitFrame_WithHeadlessDevice_RayMarchesCameraFacingModel)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto submission = backend->submitFrame(FrameRequest{.width = 33u,
+                                                             .height = 33u,
+                                                             .eyePosition = {0.0f, 0.0f, 2.0f},
+                                                             .maxDistance = 10.0f});
+        submission->wait();
+
+        ASSERT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
+          << submission->getErrorMessage();
+        auto result = submission->takeResult();
+        ASSERT_TRUE(result.has_value());
+        ASSERT_EQ(result->pixels.size(), 33u * 33u);
+        EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
+        EXPECT_GT((result->pixels[(16u * 33u) + 16u] >> 16u) & 0xFFu, 100u);
+    }
 #endif
 }

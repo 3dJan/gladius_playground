@@ -5,6 +5,7 @@
 #include "nodes/GraphFlattener.h"
 #include "nodes/Parameter.h"
 #include "nodes/ToWgslVisitor.h"
+#include "webgpu/WebGPUFrameShaderComposer.h"
 #include "webgpu/WebGPUSliceShaderComposer.h"
 
 #include <sstream>
@@ -127,5 +128,43 @@ namespace gladius::webgpu
         }
 
         return create(*flattenedModel, width, height, sliceZ, scale);
+    }
+
+    compute::FrameRequest WebGPUModelSliceRequestFactory::createFrame(nodes::Model & model,
+                                                                       compute::FrameRequest frameRequest)
+    {
+        nodes::ToWgslVisitor visitor;
+        model.visitNodes(visitor);
+
+        std::ostringstream evaluator;
+        visitor.write(evaluator);
+
+        std::vector<float> parameterValues(visitor.getRequiredParameterCount(), 0.0f);
+        std::vector<bool> assignedValues(parameterValues.size(), false);
+        for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
+        {
+            if (parameter != nullptr && parameter->getId() == parameterId && visitor.usesParameter(parameterId))
+            {
+                writeParameterValues(*parameter, parameterValues, assignedValues);
+            }
+        }
+
+        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(evaluator.str());
+        frameRequest.parameterValues = std::move(parameterValues);
+        return frameRequest;
+    }
+
+    compute::FrameRequest WebGPUModelSliceRequestFactory::createFrame(nodes::Assembly const & assembly,
+                                                                       compute::FrameRequest frameRequest)
+    {
+        nodes::GraphFlattener flattener(assembly);
+        auto flattenedAssembly = flattener.flatten();
+        auto const & flattenedModel = flattenedAssembly.assemblyModel();
+        if (!flattenedModel)
+        {
+            throw std::runtime_error("WebGPU frame request could not obtain a flattened assembly model");
+        }
+
+        return createFrame(*flattenedModel, std::move(frameRequest));
     }
 }
