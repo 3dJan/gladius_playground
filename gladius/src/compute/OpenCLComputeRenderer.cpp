@@ -14,6 +14,41 @@ namespace gladius::compute
 {
     namespace
     {
+        class OpenCLRenderScene final : public IRenderScene
+        {
+          public:
+            OpenCLRenderScene(SharedRenderSession session, std::uint64_t sceneGeneration)
+                : m_session{std::move(session)}
+                , m_sceneGeneration{sceneGeneration}
+            {
+            }
+
+            [[nodiscard]] ComputeBackendKind getBackendKind() const noexcept override
+            {
+                return ComputeBackendKind::OpenCL;
+            }
+
+            [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept override
+            {
+                return m_sceneGeneration;
+            }
+
+            [[nodiscard]] RendererCapability getCapabilities() const noexcept override
+            {
+                return RendererCapability::AnalyticRendering | RendererCapability::ProgressiveRendering |
+                       RendererCapability::FramePresentation;
+            }
+
+            [[nodiscard]] SharedRenderSession const & getSession() const noexcept
+            {
+                return m_session;
+            }
+
+          private:
+            SharedRenderSession m_session;
+            std::uint64_t m_sceneGeneration;
+        };
+
         [[nodiscard]] RenderingSettings createOpenCLSettings(RenderSettingsSnapshot const & snapshot)
         {
             RenderingSettings settings{};
@@ -227,6 +262,36 @@ namespace gladius::compute
     bool OpenCLComputeRenderer::isAvailable() const noexcept
     {
         return m_session->getComputeContext()->isValid() && m_session->isPayloadCurrent();
+    }
+
+    std::unique_ptr<IRenderScene> OpenCLComputeRenderer::materializeScene(RenderSceneSnapshot snapshot)
+    {
+        if (!snapshot.isValid())
+        {
+            throw std::invalid_argument("OpenCL render scene snapshot is invalid");
+        }
+        if (!isAvailable())
+        {
+            throw std::runtime_error("OpenCL render session is unavailable or stale");
+        }
+        if (!hasCapability(getCapabilities(), snapshot.requiredCapabilities))
+        {
+            throw std::invalid_argument("OpenCL renderer does not support the scene capabilities");
+        }
+
+        return std::make_unique<OpenCLRenderScene>(m_session, snapshot.sceneGeneration);
+    }
+
+    std::unique_ptr<IRenderSubmission> OpenCLComputeRenderer::submitFrame(IRenderScene const & scene,
+                                                                            RenderRequest request)
+    {
+        auto const * openCLScene = dynamic_cast<OpenCLRenderScene const *>(&scene);
+        if (openCLScene == nullptr || openCLScene->getSession() != m_session)
+        {
+            throw std::invalid_argument("OpenCL renderer received a scene from another renderer");
+        }
+
+        return submitFrame(std::move(request));
     }
 
     std::unique_ptr<IRenderSubmission> OpenCLComputeRenderer::submitFrame(RenderRequest request)

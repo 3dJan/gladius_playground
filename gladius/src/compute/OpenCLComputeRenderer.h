@@ -20,6 +20,9 @@ namespace gladius::compute
         [[nodiscard]] ComputeBackendKind getBackendKind() const noexcept override;
         [[nodiscard]] RendererCapability getCapabilities() const noexcept override;
         [[nodiscard]] bool isAvailable() const noexcept override;
+        [[nodiscard]] std::unique_ptr<IRenderScene> materializeScene(RenderSceneSnapshot snapshot) override;
+        [[nodiscard]] std::unique_ptr<IRenderSubmission>
+        submitFrame(IRenderScene const & scene, RenderRequest request) override;
         [[nodiscard]] std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request) override;
 
       private:
