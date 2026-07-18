@@ -1,8 +1,10 @@
 #include "compute/RenderContracts.h"
+#include "compute/IComputeRenderer.h"
 
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <utility>
 
 namespace gladius::compute::tests
 {
@@ -105,5 +107,94 @@ namespace gladius::compute::tests
         EXPECT_TRUE(hasCapability(capabilities,
                                   RendererCapability::AnalyticRendering | RendererCapability::ProgressiveRendering));
         EXPECT_FALSE(hasCapability(capabilities, RendererCapability::MeshSdf));
+    }
+
+    class CompletedRenderSubmission final : public IRenderSubmission
+    {
+      public:
+        explicit CompletedRenderSubmission(RenderFrame frame)
+            : m_frame{std::move(frame)}
+        {
+        }
+
+        [[nodiscard]] RenderSubmissionStatus getStatus() const noexcept override
+        {
+            return m_frame.has_value() ? RenderSubmissionStatus::Succeeded : RenderSubmissionStatus::Cancelled;
+        }
+
+        void requestCancellation() noexcept override
+        {
+            m_frame.reset();
+        }
+
+        void wait() override
+        {
+        }
+
+        [[nodiscard]] std::optional<RenderFrame> takeFrame() override
+        {
+            return std::exchange(m_frame, std::nullopt);
+        }
+
+        [[nodiscard]] std::string getErrorMessage() const override
+        {
+            return {};
+        }
+
+      private:
+        std::optional<RenderFrame> m_frame;
+    };
+
+    class TestComputeRenderer final : public IComputeRenderer
+    {
+      public:
+        [[nodiscard]] ComputeBackendKind getBackendKind() const noexcept override
+        {
+            return ComputeBackendKind::OpenCL;
+        }
+
+        [[nodiscard]] RendererCapability getCapabilities() const noexcept override
+        {
+            return RendererCapability::AnalyticRendering | RendererCapability::FramePresentation;
+        }
+
+        [[nodiscard]] bool isAvailable() const noexcept override
+        {
+            return true;
+        }
+
+        [[nodiscard]] std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request) override
+        {
+            auto const & viewport = request.viewport;
+            return std::make_unique<CompletedRenderSubmission>(
+              RenderFrame{.width = viewport.width,
+                          .height = viewport.height,
+                          .firstRow = viewport.firstRow,
+                          .endRow = viewport.endRow,
+                          .freshness = request.freshness,
+                          .pixels = std::vector<std::uint32_t>(viewport.pixelCount())});
+        }
+    };
+
+    TEST(IComputeRenderer, SubmitFrame_WithValidRequest_TransfersFrameOwnershipOnce)
+    {
+        TestComputeRenderer renderer;
+        RenderRequest const request{
+          .viewport = {.width = 4u, .height = 3u, .firstRow = 1u, .endRow = 3u},
+          .freshness = {.sceneGeneration = 1u, .viewGeneration = 2u, .parameterGeneration = 3u}};
+
+        ASSERT_TRUE(request.isValid());
+        EXPECT_EQ(renderer.getBackendKind(), ComputeBackendKind::OpenCL);
+        EXPECT_TRUE(hasCapability(renderer.getCapabilities(), RendererCapability::AnalyticRendering));
+
+        auto submission = renderer.submitFrame(request);
+        ASSERT_NE(submission, nullptr);
+        EXPECT_EQ(submission->getStatus(), RenderSubmissionStatus::Succeeded);
+
+        auto frame = submission->takeFrame();
+        ASSERT_TRUE(frame.has_value());
+        EXPECT_TRUE(frame->isValid());
+        EXPECT_EQ(frame->freshness, request.freshness);
+        EXPECT_FALSE(submission->takeFrame().has_value());
     }
 }

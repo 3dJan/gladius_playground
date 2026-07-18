@@ -4,6 +4,8 @@
 #include "RenderSceneGeneration.h"
 #include "RenderSessionInputs.h"
 
+#include <optional>
+
 namespace gladius
 {
     /**
@@ -26,6 +28,8 @@ namespace gladius
         [[nodiscard]] RenderSceneRevision getRevision() const noexcept;
         [[nodiscard]] RenderSessionInputs const & getInputs() const;
         [[nodiscard]] RenderPayloadSnapshot const & getPayloadSnapshot() const;
+        [[nodiscard]] SharedPrimitives getPrimitives() const;
+        [[nodiscard]] std::optional<RenderProgram *> tryGetRenderProgram() const;
 
         [[nodiscard]] bool isPayloadCurrent() const;
 

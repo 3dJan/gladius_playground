@@ -1,6 +1,7 @@
 #include "Document.h"
 #include "Mesh.h"
 #include "SpatialMeshResource.h"
+#include "compute/OpenCLComputeRenderer.h"
 #include "compute/OpenCLRenderRequestFactory.h"
 #include "opencl_test_helper.h"
 #include "testhelper.h"
@@ -672,4 +673,44 @@ namespace gladius_tests
                               .viewGeneration = 12u,
                               .parameterGeneration = 13u}));
       }
+
+    TEST_F(ComputeCore_Test, OpenCLComputeRenderer_WithCompiledModel_ReadsBackProgressiveFrame)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto assembly = std::make_shared<nodes::Assembly>();
+        assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+        core->setCodeGenerator(CodeGenerator::Code);
+        core->refreshProgram(assembly);
+        ASSERT_NO_THROW(core->recompileBlockingNoLock());
+
+        auto resources = core->getResourceContext();
+        ASSERT_NE(resources, nullptr);
+        resources->setEyePosition({0.0f, 0.0f, 2.0f});
+        cl_float16 matrix{};
+        matrix.s0 = 1.0f;
+        matrix.s5 = 1.0f;
+        matrix.sa = -1.0f;
+        resources->setModelViewPerspectiveMat(matrix);
+
+        compute::OpenCLComputeRenderer renderer{core->createRenderSession()};
+        auto const request = compute::OpenCLRenderRequestFactory::create(
+          *resources,
+          compute::RenderViewport{.width = 17u, .height = 13u, .firstRow = 3u, .endRow = 8u},
+          compute::RenderFreshnessStamp{.sceneGeneration = 7u, .viewGeneration = 8u, .parameterGeneration = 9u});
+
+        ASSERT_TRUE(renderer.isAvailable());
+        auto submission = renderer.submitFrame(request);
+        ASSERT_NE(submission, nullptr);
+        submission->wait();
+
+        EXPECT_EQ(submission->getStatus(), compute::RenderSubmissionStatus::Succeeded);
+        auto frame = submission->takeFrame();
+        ASSERT_TRUE(frame.has_value());
+        EXPECT_TRUE(frame->isValid());
+        EXPECT_EQ(frame->pixels.size(), 17u * 5u);
+        EXPECT_EQ(frame->freshness, request.freshness);
+        EXPECT_FALSE(submission->takeFrame().has_value());
+    }
 }

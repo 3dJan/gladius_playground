@@ -22,6 +22,12 @@ namespace gladius
     RenderPayloadSnapshot const & RenderSession::getPayloadSnapshot() const
     { return m_payloadSnapshot; }
 
+    SharedPrimitives RenderSession::getPrimitives() const
+    { return m_generation->getPrimitives(); }
+
+    std::optional<RenderProgram *> RenderSession::tryGetRenderProgram() const
+    { return m_generation->getProgramManager().tryGetBestRenderProgram(); }
+
     bool RenderSession::isPayloadCurrent() const
     {
         return m_payloadSnapshot.isCurrent(
