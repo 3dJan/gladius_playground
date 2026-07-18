@@ -67,9 +67,7 @@ namespace gladius::webgpu
             }
 
             [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override
-            {
-                return m_status;
-            }
+            { return m_status; }
 
             void wait() override
             {
@@ -96,9 +94,7 @@ namespace gladius::webgpu
             }
 
             [[nodiscard]] std::string getErrorMessage() const override
-            {
-                return m_errorMessage;
-            }
+            { return m_errorMessage; }
 
           private:
             static std::string loadDefaultShader()
@@ -129,12 +125,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                  request.width,
                                  request.height,
                                  request.parameterValues.size());
-                m_buffers.writeUniforms(
-                  m_context->getQueue(),
-                  SliceUniforms{.sliceZ = request.sliceZ,
-                                .width = request.width,
-                                .height = request.height,
-                                .scale = request.scale});
+                m_buffers.writeUniforms(m_context->getQueue(),
+                                        SliceUniforms{.sliceZ = request.sliceZ,
+                                                      .width = request.width,
+                                                      .height = request.height,
+                                                      .scale = request.scale});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())
@@ -165,18 +160,21 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 wgpu::BindGroupLayoutDescriptor layoutDescriptor;
                 layoutDescriptor.entryCount = std::size(bindings);
                 layoutDescriptor.entries = bindings;
-                auto const bindGroupLayout = m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
+                auto const bindGroupLayout =
+                  m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
 
                 wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
                 pipelineLayoutDescriptor.bindGroupLayoutCount = 1u;
                 pipelineLayoutDescriptor.bindGroupLayouts = &bindGroupLayout;
-                auto const pipelineLayout = m_context->getDevice().CreatePipelineLayout(&pipelineLayoutDescriptor);
+                auto const pipelineLayout =
+                  m_context->getDevice().CreatePipelineLayout(&pipelineLayoutDescriptor);
 
                 wgpu::ComputePipelineDescriptor pipelineDescriptor;
                 pipelineDescriptor.layout = pipelineLayout;
                 pipelineDescriptor.compute.module = shader;
                 pipelineDescriptor.compute.entryPoint = "main";
-                auto const pipeline = m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
+                auto const pipeline =
+                  m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
 
                 wgpu::BindGroupEntry bindGroupEntries[3]{};
                 bindGroupEntries[0].binding = 0u;
@@ -199,7 +197,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 auto const computePass = encoder.BeginComputePass();
                 computePass.SetPipeline(pipeline);
                 computePass.SetBindGroup(0u, bindGroup);
-                computePass.DispatchWorkgroups(dispatchSize->workgroupsX, dispatchSize->workgroupsY);
+                computePass.DispatchWorkgroups(dispatchSize->workgroupsX,
+                                               dispatchSize->workgroupsY);
                 computePass.End();
                 encoder.CopyBufferToBuffer(m_buffers.getOutputBuffer(),
                                            0u,
@@ -224,7 +223,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                       }
 
                       auto const * mappedPixels = static_cast<std::uint32_t const *>(
-                        m_buffers.getStagingBuffer().GetConstMappedRange(0u, m_buffers.getOutputSizeBytes()));
+                        m_buffers.getStagingBuffer().GetConstMappedRange(
+                          0u, m_buffers.getOutputSizeBytes()));
                       if (mappedPixels == nullptr)
                       {
                           m_status = compute::ComputeCompletionStatus::Failed;
@@ -232,10 +232,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                           return;
                       }
 
-                      auto const pixelCount = m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
-                      m_result = compute::SliceResult{.width = m_width,
-                                                      .height = m_height,
-                                                      .pixels = {mappedPixels, mappedPixels + pixelCount}};
+                      auto const pixelCount =
+                        m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
+                      m_result =
+                        compute::SliceResult{.width = m_width,
+                                             .height = m_height,
+                                             .pixels = {mappedPixels, mappedPixels + pixelCount}};
                       m_buffers.getStagingBuffer().Unmap();
                       m_status = compute::ComputeCompletionStatus::Succeeded;
                   });
@@ -284,7 +286,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 }
             }
 
-            [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override { return m_status; }
+            [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override
+            { return m_status; }
 
             void progress() noexcept override
             {
@@ -333,7 +336,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 return std::exchange(m_result, std::nullopt);
             }
 
-            [[nodiscard]] std::string getErrorMessage() const override { return m_errorMessage; }
+            [[nodiscard]] std::string getErrorMessage() const override
+            { return m_errorMessage; }
 
           private:
             static std::string loadDefaultShader()
@@ -358,44 +362,45 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     request.endRow = request.height;
                 }
                 if (request.firstRow >= request.endRow || request.endRow > request.height ||
-                    !calculateSliceDispatchSize(request.width, request.endRow - request.firstRow).has_value())
+                    !calculateSliceDispatchSize(request.width, request.endRow - request.firstRow)
+                       .has_value())
                 {
                     throw std::invalid_argument("Invalid WebGPU frame row range");
                 }
-                if (request.horizontalScale <= 0.0f || request.verticalScale <= 0.0f || request.maxRaySteps == 0u ||
-                    request.maxTravelDistance <= 0.0f)
+                if (request.horizontalScale <= 0.0f || request.verticalScale <= 0.0f ||
+                    request.maxRaySteps == 0u || request.maxTravelDistance <= 0.0f)
                 {
                     throw std::invalid_argument("WebGPU frame camera values must be positive");
                 }
 
                 auto const rowCount = request.endRow - request.firstRow;
-                m_buffers.resize(m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
+                m_buffers.resize(
+                  m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
                 m_buffers.writeUniforms(
                   m_context->getQueue(),
-                  FrameUniforms{.eyeAndMaxDistance = {request.eyePosition[0],
-                                                      request.eyePosition[1],
-                                                      request.eyePosition[2],
-                                                          request.maxTravelDistance},
-                                            .forwardAndHorizontalScale = {request.forwardDirection[0],
-                                                              request.forwardDirection[1],
-                                                              request.forwardDirection[2],
-                                                              request.horizontalScale},
-                                .rightAndWidth = {request.rightDirection[0],
-                                                  request.rightDirection[1],
-                                                  request.rightDirection[2],
-                                                  static_cast<float>(request.width)},
-                                .upAndHeight = {request.upDirection[0],
-                                                request.upDirection[1],
-                                                request.upDirection[2],
-                                                static_cast<float>(request.height)},
-                                .verticalScaleAndMaxSteps = {request.verticalScale,
-                                                              static_cast<float>(request.maxRaySteps),
-                                                              0.0f,
-                                                              0.0f},
-                                .firstRowAndCount = {static_cast<float>(request.firstRow),
-                                                     static_cast<float>(rowCount),
-                                                     0.0f,
-                                                     0.0f}});
+                  FrameUniforms{
+                    .eyeAndMaxDistance = {request.eyePosition[0],
+                                          request.eyePosition[1],
+                                          request.eyePosition[2],
+                                          request.maxTravelDistance},
+                    .forwardAndHorizontalScale = {request.forwardDirection[0],
+                                                  request.forwardDirection[1],
+                                                  request.forwardDirection[2],
+                                                  request.horizontalScale},
+                    .rightAndWidth = {request.rightDirection[0],
+                                      request.rightDirection[1],
+                                      request.rightDirection[2],
+                                      static_cast<float>(request.width)},
+                    .upAndHeight = {request.upDirection[0],
+                                    request.upDirection[1],
+                                    request.upDirection[2],
+                                    static_cast<float>(request.height)},
+                    .verticalScaleAndMaxSteps =
+                      {request.verticalScale, static_cast<float>(request.maxRaySteps), 0.0f, 0.0f},
+                    .firstRowAndCount = {static_cast<float>(request.firstRow),
+                                         static_cast<float>(rowCount),
+                                         0.0f,
+                                         0.0f}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())
@@ -426,18 +431,21 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 wgpu::BindGroupLayoutDescriptor layoutDescriptor;
                 layoutDescriptor.entryCount = std::size(bindings);
                 layoutDescriptor.entries = bindings;
-                auto const bindGroupLayout = m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
+                auto const bindGroupLayout =
+                  m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
 
                 wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
                 pipelineLayoutDescriptor.bindGroupLayoutCount = 1u;
                 pipelineLayoutDescriptor.bindGroupLayouts = &bindGroupLayout;
-                auto const pipelineLayout = m_context->getDevice().CreatePipelineLayout(&pipelineLayoutDescriptor);
+                auto const pipelineLayout =
+                  m_context->getDevice().CreatePipelineLayout(&pipelineLayoutDescriptor);
 
                 wgpu::ComputePipelineDescriptor pipelineDescriptor;
                 pipelineDescriptor.layout = pipelineLayout;
                 pipelineDescriptor.compute.module = shader;
                 pipelineDescriptor.compute.entryPoint = "main";
-                auto const pipeline = m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
+                auto const pipeline =
+                  m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
 
                 wgpu::BindGroupEntry bindGroupEntries[3]{};
                 bindGroupEntries[0].binding = 0u;
@@ -486,7 +494,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                       }
 
                       auto const * mappedPixels = static_cast<std::uint32_t const *>(
-                        m_buffers.getStagingBuffer().GetConstMappedRange(0u, m_buffers.getOutputSizeBytes()));
+                        m_buffers.getStagingBuffer().GetConstMappedRange(
+                          0u, m_buffers.getOutputSizeBytes()));
                       if (mappedPixels == nullptr)
                       {
                           m_status = compute::ComputeCompletionStatus::Failed;
@@ -494,10 +503,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                           return;
                       }
 
-                      auto const pixelCount = m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
-                      m_result = compute::FrameResult{.width = m_width,
-                                                      .height = m_height,
-                                                      .pixels = {mappedPixels, mappedPixels + pixelCount}};
+                      auto const pixelCount =
+                        m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
+                      m_result =
+                        compute::FrameResult{.width = m_width,
+                                             .height = m_height,
+                                             .pixels = {mappedPixels, mappedPixels + pixelCount}};
                       m_buffers.getStagingBuffer().Unmap();
                       m_status = compute::ComputeCompletionStatus::Succeeded;
                   });
@@ -519,24 +530,16 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
     }
 
     compute::ComputeBackendKind WebGPUComputeBackend::getKind() const noexcept
-    {
-        return compute::ComputeBackendKind::WebGPU;
-    }
+    { return compute::ComputeBackendKind::WebGPU; }
 
     bool WebGPUComputeBackend::isAvailable() const noexcept
-    {
-        return m_context && m_context->isValid();
-    }
+    { return m_context && m_context->isValid(); }
 
     std::unique_ptr<compute::ISliceSubmission>
     WebGPUComputeBackend::submitSlice(compute::SliceRequest request)
-    {
-        return std::make_unique<WebGPUSliceSubmission>(m_context, std::move(request));
-    }
+    { return std::make_unique<WebGPUSliceSubmission>(m_context, std::move(request)); }
 
     std::unique_ptr<compute::IFrameSubmission>
     WebGPUComputeBackend::submitFrame(compute::FrameRequest request)
-    {
-        return std::make_unique<WebGPUFrameSubmission>(m_context, std::move(request));
-    }
+    { return std::make_unique<WebGPUFrameSubmission>(m_context, std::move(request)); }
 }
