@@ -4,10 +4,13 @@
 #include "GLView.h"
 #include "OrbitalCamera.h"
 #include "compute/ComputeCore.h"
+#include "compute/OpenCLRenderRequestFactory.h"
 #include "render/AsyncRenderController.h"
 #include "render/NeutralRenderScheduler.h"
+#include "render/OpenGLFramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
 #include <CL/cl_platform.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -272,6 +275,7 @@ namespace gladius::ui
         /// SDF precomputation and bounding-box updates remain asynchronous.
         [[nodiscard]] bool tryRenderRealtimeFrameSync(
           async_rendering::RenderTaskRequest const & task);
+        [[nodiscard]] bool tryRenderWithNeutralBackend(RenderWindowState & state);
 
         GLView * m_view{};
 
@@ -384,10 +388,62 @@ namespace gladius::ui
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         async_rendering::NeutralRenderScheduler m_neutralRenderScheduler{
-          [](async_rendering::RenderTaskRequest const &)
-            -> std::optional<compute::RenderRequest> { return std::nullopt; }};
+          [this](async_rendering::RenderTaskRequest const & task)
+            -> std::optional<compute::RenderRequest> {
+              if (!m_core || !m_renderBackendSession)
+              {
+                  return std::nullopt;
+              }
+
+              auto const width = task.width > 0u ? task.width : static_cast<std::uint32_t>(std::max(
+                1.0f,
+                std::clamp(m_renderWindowSize_px.x * m_renderWindowState.renderQuality,
+                           1.0f,
+                           16000.0f)));
+              auto const height = task.height > 0u ? task.height : static_cast<std::uint32_t>(std::max(
+                1.0f,
+                std::clamp(m_renderWindowSize_px.y * m_renderWindowState.renderQuality,
+                           1.0f,
+                           16000.0f)));
+
+              auto const viewport = compute::RenderViewport{.width = width,
+                                                            .height = height,
+                                                            .firstRow = 0u,
+                                                            .endRow = height};
+              if (!viewport.isValid())
+              {
+                  return std::nullopt;
+              }
+
+              auto const resources = m_core->getResourceContext();
+              if (!resources)
+              {
+                  return std::nullopt;
+              }
+
+              auto const freshness = compute::RenderFreshnessStamp{
+                .sceneGeneration = task.stamp.sceneEpoch,
+                .viewGeneration = task.stamp.viewEpoch,
+                .parameterGeneration = task.stamp.parameterEpoch};
+
+              try
+              {
+                  return compute::OpenCLRenderRequestFactory::create(*resources, viewport, freshness);
+              }
+              catch (...)
+              {
+                  return std::nullopt;
+              }
+          }};
         async_rendering::RenderWorkflowController & m_renderUpdateCoordinator{
           m_neutralRenderScheduler.workflow()};
+        std::unique_ptr<compute::RenderBackendSession> m_renderBackendSession;
+        std::unique_ptr<async_rendering::OpenGLFramePresenter> m_neutralFramePresenter;
+        bool m_neutralBackendActive{false};
+        std::uint64_t m_neutralSceneGeneration{0u};
+        std::uint32_t m_neutralViewportWidth{0u};
+        std::uint32_t m_neutralViewportHeight{0u};
+        std::atomic<uint64_t> m_neutralRenderRequestCounter{0};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};

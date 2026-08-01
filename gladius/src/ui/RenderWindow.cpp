@@ -5,6 +5,7 @@
 #include <coroutine>
 #include <cstddef>
 #include <fmt/core.h>
+#include <iostream>
 #include <iterator>
 #include <thread>
 
@@ -24,6 +25,9 @@
 #include "Widgets.h"
 #include "OverflowMenuBar.h"
 #include "compute/ComputeCore.h"
+#include "compute/ComputeBackendSettings.h"
+#include "compute/ComputeRendererFactory.h"
+#include "compute/OpenCLRenderRequestFactory.h"
 #include "imgui.h"
 #include "render/DisplayFrameSelector.h"
 #include "render/ProgressiveBufferPolicy.h"
@@ -220,6 +224,18 @@ namespace gladius::ui
         m_view = view;
         m_shortcutManager = shortcutManager;
         m_configManager = configManager;
+        auto const configuredBackend = m_configManager != nullptr
+                         ? compute::getConfiguredComputeBackend(*m_configManager)
+                         : compute::ComputeBackendKind::OpenCL;
+        m_neutralBackendActive = configuredBackend == compute::ComputeBackendKind::WebGPU;
+
+        std::cout << "[ComputeBackend] viewport configured="
+              << compute::toString(configuredBackend)
+              << " selected="
+              << compute::toString(m_neutralBackendActive
+                         ? compute::ComputeBackendKind::WebGPU
+                         : compute::ComputeBackendKind::OpenCL)
+              << std::endl;
 
         // Initialize settings when core is ready
         if (m_core && m_core->isRendererReady())
@@ -245,6 +261,169 @@ namespace gladius::ui
     void RenderWindow::setDocument(Document * doc)
     {
         m_document = doc;
+        m_renderBackendSession.reset();
+        m_neutralViewportWidth = 0u;
+        m_neutralViewportHeight = 0u;
+        if (m_neutralFramePresenter)
+        {
+            m_neutralFramePresenter->release();
+        }
+        ++m_neutralSceneGeneration;
+        queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
+    }
+
+    bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
+    {
+        if (!m_neutralBackendActive || !m_core || !m_document || !m_configManager)
+        {
+            return false;
+        }
+
+        if (!m_renderBackendSession)
+        {
+            try
+            {
+                m_renderBackendSession = compute::ComputeRendererFactory::createRenderBackendSession(
+                  *m_configManager,
+                                    compute::ComputeBackendKind::WebGPU);
+                if (m_renderBackendSession)
+                {
+                    std::cout << "[ComputeBackend] viewport active="
+                              << compute::toString(m_renderBackendSession->getBackendKind())
+                              << std::endl;
+                }
+            }
+            catch (std::exception const & error)
+            {
+                std::cout << "[ComputeBackend] viewport initialization failed: "
+                          << error.what() << std::endl;
+                m_renderBackendSession.reset();
+            }
+        }
+
+        if (!m_renderBackendSession)
+        {
+            return false;
+        }
+
+        if (!m_renderBackendSession->hasMaterializedScene() ||
+            m_renderBackendSession->getSceneGeneration() != m_neutralSceneGeneration)
+        {
+            auto const assembly = m_document->getAssembly();
+            if (assembly && assembly->assemblyModel())
+            {
+                auto const snapshot = compute::ComputeRendererFactory::materializeScene(
+                  assembly.get(),
+                  *assembly->assemblyModel(),
+                  m_neutralSceneGeneration);
+                if (!m_renderBackendSession->replaceScene(snapshot))
+                {
+                    return false;
+                }
+            }
+        }
+
+        if (!m_renderBackendSession->hasMaterializedScene() || !m_renderBackendSession->isAvailable())
+        {
+            return false;
+        }
+
+        if (!m_neutralFramePresenter)
+        {
+            m_neutralFramePresenter = std::make_unique<async_rendering::OpenGLFramePresenter>();
+        }
+
+        auto const width = static_cast<std::uint32_t>(std::max(
+          1u,
+          static_cast<unsigned>(std::clamp(m_renderWindowSize_px.x * state.renderQuality,
+                                          1.0f,
+                                          16000.0f))));
+        auto const height = static_cast<std::uint32_t>(std::max(
+          1u,
+          static_cast<unsigned>(std::clamp(m_renderWindowSize_px.y * state.renderQuality,
+                                          1.0f,
+                                          16000.0f))));
+
+        if (m_neutralViewportWidth != width || m_neutralViewportHeight != height)
+        {
+            m_neutralViewportWidth = width;
+            m_neutralViewportHeight = height;
+            queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
+        }
+
+        auto const pollResult = m_neutralRenderScheduler.poll(false);
+        for (auto & accepted : pollResult.acceptedFrames)
+        {
+            if (accepted.frame.isValid())
+            {
+                (void) m_neutralFramePresenter->present(accepted.frame);
+            }
+        }
+
+        auto pendingCommands = std::move(m_pendingRenderCommands);
+        m_pendingRenderCommands.clear();
+        for (auto const & command : pendingCommands)
+        {
+            if (command.type != async_rendering::RenderCommandType::StartTask)
+            {
+                continue;
+            }
+
+            bool const isDisplayTask =
+              command.task.type == async_rendering::RenderTaskType::RealtimeFullFrame ||
+              command.task.type == async_rendering::RenderTaskType::StaticFullFrameProbe ||
+              command.task.type == async_rendering::RenderTaskType::ProgressiveHighQualityChunk ||
+              command.task.type == async_rendering::RenderTaskType::LowResolutionPreview;
+            if (isDisplayTask)
+            {
+                if (m_neutralRenderScheduler.submit(command.task, *m_renderBackendSession))
+                {
+                    return true;
+                }
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Failed},
+                  false));
+            }
+            else
+            {
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Completed},
+                  false));
+            }
+        }
+
+        if (m_neutralRenderScheduler.hasInFlightSubmissions())
+        {
+            return true;
+        }
+
+        auto const taskDecision = m_neutralRenderScheduler.workflow().startDisplayTask(
+          async_rendering::RenderTaskType::RealtimeFullFrame);
+        for (auto const & command : taskDecision.commands)
+        {
+            if (command.type != async_rendering::RenderCommandType::StartTask)
+            {
+                continue;
+            }
+            if (m_neutralRenderScheduler.submit(command.task, *m_renderBackendSession))
+            {
+                return true;
+            }
+
+            queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+              async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                .type = command.task.type,
+                                                .stamp = command.task.stamp,
+                                                .status = async_rendering::RenderTaskStatus::Failed}));
+        }
+
+        return false;
     }
 
     void RenderWindow::setExportState(ExportState const * exportState)
@@ -772,8 +951,18 @@ namespace gladius::ui
 
         // THEN get the image to display - will see newly promoted front buffer
         std::shared_ptr<GLImageBuffer> displayImage;
+        bool const useNeutralTexture = m_neutralBackendActive &&
+                           m_neutralFramePresenter != nullptr &&
+                                       m_neutralFramePresenter->getTextureId() != 0u &&
+                                       m_neutralFramePresenter->getWidth() > 0u &&
+                                       m_neutralFramePresenter->getHeight() > 0u;
+        std::uint32_t textureId = 0u;
 
-        if (m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
+        if (useNeutralTexture)
+        {
+            textureId = m_neutralFramePresenter->getTextureId();
+        }
+        else if (!m_neutralBackendActive && m_asyncConfig.wantsCoroutineBackend() && m_asyncController)
         {
             // Use the front buffer from triple buffering system
             auto * frontBuf = m_asyncController->frontBuffer();
@@ -828,13 +1017,13 @@ namespace gladius::ui
                 displayImage = resultImage;
             }
         }
-        else
+        else if (!m_neutralBackendActive)
         {
             // Synchronous rendering - use result image
             displayImage = m_core->getResultImage();
         }
 
-        if (!displayImage)
+        if (!displayImage && !useNeutralTexture)
         {
             // No image yet (early init / between resize and re-allocation).
             // Skip drawing this frame instead of dereferencing a null shared_ptr.
@@ -845,8 +1034,11 @@ namespace gladius::ui
             return;
         }
 
-        displayImage->bind();
-        auto const textureId = displayImage->GetTextureId();
+        if (!useNeutralTexture)
+        {
+            displayImage->bind();
+            textureId = displayImage->GetTextureId();
+        }
         auto & io = ImGui::GetIO();
         ImGuiWindowFlags const window_flags =
           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
@@ -1147,7 +1339,10 @@ namespace gladius::ui
 
         ImGui::End();
         ImGui::PopStyleVar();
-        displayImage->unbind();
+        if (!useNeutralTexture)
+        {
+            displayImage->unbind();
+        }
 
         if (isFileLoading)
         {
@@ -1262,6 +1457,13 @@ namespace gladius::ui
         // lock — concurrent modification from the UI thread causes a segfault.
         stopStreamingPreview();
 
+        if (m_neutralBackendActive)
+        {
+            ++m_neutralSceneGeneration;
+            m_renderBackendSession.reset();
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
+
         // CRITICAL: Mark SDF as invalid immediately so renderer uses direct function evaluation
         // This prevents rendering with stale precomputed SDF data
         m_core->setSdfValid(false);
@@ -1306,6 +1508,12 @@ namespace gladius::ui
         // The epoch is bumped later when the bbox debounce fires after drag stops,
         // starting the fresh SDF → HQ pipeline.
         m_core->setSdfValid(false);
+
+        if (m_neutralBackendActive)
+        {
+            m_renderBackendSession.reset();
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
 
         m_dirty = true;
 
@@ -1840,6 +2048,13 @@ namespace gladius::ui
         if (m_asyncController)
         {
             processAsyncPreviewResults();
+        }
+
+        if (m_neutralBackendActive)
+        {
+            m_core->applyCamera(m_camera);
+            (void) tryRenderWithNeutralBackend(state);
+            return;
         }
 
         if (!m_core->tryIsRenderProgramReady().value_or(false))
@@ -4834,6 +5049,7 @@ namespace gladius::ui
     {
         stopStreamingPreview();
         notifyAsyncEpochIncrement();
+        m_neutralRenderScheduler.requestCancellationForAll();
 
         // Wait for in-flight jobs to finish before returning.
         // This is called from the UI thread before refreshWorker() starts

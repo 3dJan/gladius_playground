@@ -172,6 +172,57 @@ namespace gladius_tests
         EXPECT_EQ(helper::countNumberOfNodesOfType<nodes::Addition>(copy), 1);
     }
 
+    TEST_F(Model, CopyConstructor_WithStaleSource_ClearsOnlyClonedSource)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * addition = model.create<nodes::Addition>();
+
+        nodes::Source staleSource;
+        staleSource.portId = 99999;
+        staleSource.nodeId = 99999;
+        staleSource.uniqueName = "missing_output";
+        staleSource.shortName = "missing_output";
+        staleSource.type = nodes::ParameterTypeIndex::Float3;
+        addition->parameter().at(nodes::FieldNames::A).setSource(staleSource);
+        model.invalidateGraph();
+
+        nodes::Model copy{model};
+
+        auto const copiedAddition = copy.getNode(addition->getId());
+        ASSERT_TRUE(copiedAddition.has_value());
+        EXPECT_FALSE((*copiedAddition)->parameter().at(nodes::FieldNames::A).getSource().has_value());
+        EXPECT_TRUE(model.getNode(addition->getId()).value()->parameter().at(nodes::FieldNames::A)
+                      .getSource()
+                      .has_value());
+    }
+
+    TEST_F(Model, CopyConstructor_WithStalePortId_RepairsSourceByNodeAndShortName)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * addition = model.create<nodes::Addition>();
+
+        auto const originalPort = model.getBeginNode()->getOutputs().at(nodes::FieldNames::Pos);
+        nodes::Source staleSource;
+        staleSource.portId = 99999;
+        staleSource.nodeId = originalPort.getParentId();
+        staleSource.uniqueName = "renamed_output";
+        staleSource.shortName = originalPort.getShortName();
+        staleSource.type = originalPort.getTypeIndex();
+        addition->parameter().at(nodes::FieldNames::A).setSource(staleSource);
+        model.invalidateGraph();
+
+        nodes::Model copy{model};
+
+        auto const copiedAddition = copy.getNode(addition->getId());
+        ASSERT_TRUE(copiedAddition.has_value());
+        auto const copiedSource = (*copiedAddition)->parameter().at(nodes::FieldNames::A).getSource();
+        ASSERT_TRUE(copiedSource.has_value());
+        EXPECT_EQ(copiedSource->portId,
+                  copy.getBeginNode()->getOutputs().at(nodes::FieldNames::Pos).getId());
+    }
+
     TEST_F(Model, SimplifyModel_NodesNotConnectedToEnd_AreRemoved)
     {
         // Arrange

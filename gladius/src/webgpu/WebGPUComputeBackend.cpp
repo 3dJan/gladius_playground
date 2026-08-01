@@ -7,6 +7,7 @@
 
 #include <cmrc/cmrc.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -17,6 +18,11 @@ namespace gladius::webgpu
 {
     namespace
     {
+        constexpr std::uint32_t MAX_FRAME_DIMENSION = 4096u;
+        constexpr std::size_t MAX_FRAME_PIXELS = 4u * 1024u * 1024u;
+        constexpr std::uint32_t MAX_FRAME_RAY_STEPS = 512u;
+        constexpr std::size_t MAX_FRAME_RAY_ITERATIONS = 64u * 1024u * 1024u;
+
         std::string toString(wgpu::StringView const value)
         {
             if (value.data == nullptr)
@@ -372,6 +378,21 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("WebGPU frame camera values must be positive");
                 }
+                if (request.width > MAX_FRAME_DIMENSION || request.height > MAX_FRAME_DIMENSION)
+                {
+                    throw std::invalid_argument("WebGPU frame dimensions exceed the safe limit");
+                }
+
+                auto const framePixelCount = static_cast<std::size_t>(request.width) *
+                                              static_cast<std::size_t>(request.height);
+                if (framePixelCount > MAX_FRAME_PIXELS ||
+                    framePixelCount / request.width != request.height)
+                {
+                    throw std::invalid_argument("WebGPU frame pixel count exceeds the safe limit");
+                }
+                                auto const rayStepsForSafeWorkload = MAX_FRAME_RAY_ITERATIONS / framePixelCount;
+                                request.maxRaySteps = std::min(
+                                    {request.maxRaySteps, MAX_FRAME_RAY_STEPS, static_cast<std::uint32_t>(rayStepsForSafeWorkload)});
 
                 auto const rowCount = request.endRow - request.firstRow;
                 m_buffers.resize(
@@ -400,7 +421,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     .firstRowAndCount = {static_cast<float>(request.firstRow),
                                          static_cast<float>(rowCount),
                                          0.0f,
-                                         0.0f}});
+                                                                                 0.0f},
+                                        .timeSliceQualityNormal = {request.timeSeconds,
+                                                                                             request.sliceHeight,
+                                                                                             request.quality,
+                                                                                             request.normalOffset},
+                                        .flagsModeReserved = {request.renderingFlags, request.renderingMode, 0u, 0u}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())

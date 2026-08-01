@@ -28,6 +28,7 @@
 #include "LibraryBrowser.h"
 #include "Profiling.h"
 #include "SvgWriter.h"
+#include "compute/ComputeBackendSettings.h"
 #include "compute/ComputeCore.h"
 #include "exceptions.h"
 #include "imgui.h"
@@ -503,6 +504,12 @@ namespace gladius::ui
                 {
                     m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
                 }
+
+                auto const configuredBackend = m_configManager != nullptr
+                                                 ? compute::getConfiguredComputeBackend(*m_configManager)
+                                                 : compute::ComputeBackendKind::OpenCL;
+                std::cout << "[ComputeBackend] OpenCL compute core active; viewport configured="
+                          << compute::toString(configuredBackend) << std::endl;
             }
             else
             {

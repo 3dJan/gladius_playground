@@ -143,9 +143,16 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.tick());
         }
 
-        [[nodiscard]] RenderWorkflowDecision completeTask(RenderTaskResult const & result)
+        [[nodiscard]] RenderWorkflowDecision startDisplayTask(RenderTaskType type,
+                                                              size_t lineCount = 0)
         {
-            return applyCoordinatorDecision(m_coordinator.completeTask(result));
+            return applyCoordinatorDecision(m_coordinator.startDisplayTask(type, lineCount));
+        }
+
+        [[nodiscard]] RenderWorkflowDecision completeTask(RenderTaskResult const & result,
+                                                          bool scheduleFollowUp = true)
+        {
+            return applyCoordinatorDecision(m_coordinator.completeTask(result, scheduleFollowUp));
         }
 
         [[nodiscard]] bool canPresentCandidate(

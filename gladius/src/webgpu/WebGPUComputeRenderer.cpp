@@ -144,6 +144,12 @@ namespace gladius::webgpu
                     .verticalScale = request.frustum.verticalScale,
                     .maxRaySteps = request.settings.maxRaySteps,
                     .maxTravelDistance = request.settings.maxTravelDistance,
+                    .timeSeconds = request.settings.timeSeconds,
+                    .sliceHeight = request.settings.sliceHeight,
+                    .quality = request.settings.quality,
+                    .normalOffset = request.settings.normalOffset,
+                    .renderingFlags = request.settings.flags,
+                    .renderingMode = static_cast<std::uint32_t>(request.settings.mode),
                     .shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl),
                     .parameterValues = scene.parameterValues};
         }
@@ -161,7 +167,10 @@ namespace gladius::webgpu
 
     compute::RendererCapability WebGPUComputeRenderer::getCapabilities() const noexcept
     {
-        return compute::RendererCapability::AnalyticRendering | compute::RendererCapability::FramePresentation;
+        return compute::RendererCapability::AnalyticRendering |
+               compute::RendererCapability::ProgressiveRendering |
+               compute::RendererCapability::LowResolutionPreview |
+               compute::RendererCapability::FramePresentation;
     }
 
     bool WebGPUComputeRenderer::isAvailable() const noexcept

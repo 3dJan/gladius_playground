@@ -61,6 +61,12 @@ namespace gladius::compute
         float verticalScale{0.5f};
         std::uint32_t maxRaySteps{2000u};
         float maxTravelDistance{100000.0f};
+        float timeSeconds{};
+        float sliceHeight{};
+        float quality{1.0f};
+        float normalOffset{0.001f};
+        std::uint32_t renderingFlags{};
+        std::uint32_t renderingMode{};
         std::string shaderSource;
         std::vector<float> parameterValues;
     };

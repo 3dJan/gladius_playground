@@ -1,5 +1,6 @@
 #include "Application.h"
 #include "ComputeContext.h"
+#include "compute/ComputeBackend.h"
 #include <atomic>
 #include <csignal>
 #include <filesystem>
@@ -18,6 +19,7 @@ void printUsage()
     std::cout << "  --mcp-stdio          Enable MCP server with stdio transport (for VS Code)\n";
 #endif
     std::cout << "  --headless          Run without starting the UI (headless mode)\n";
+    std::cout << "  --compute-backend=<opencl|webgpu>  Select the rendering backend\n";
     std::cout
       << "  --debug-opencl      Enable OpenCL debug output (kernel validation, buffer checks)\n";
     std::cout << "  --help              Show this help message\n";
@@ -40,6 +42,7 @@ int main(int argc, char ** argv)
     int mcpPort = 8080;
     bool headless = false;
     std::optional<std::filesystem::path> filename;
+    std::optional<gladius::compute::ComputeBackendKind> backendOverride;
 
     // Graceful termination flag for headless MCP mode
     static std::atomic<bool> terminateRequested{false};
@@ -93,6 +96,22 @@ int main(int argc, char ** argv)
         else if (arg == "--headless")
         {
             headless = true;
+        }
+        else if (arg.starts_with("--compute-backend="))
+        {
+            auto const value = arg.substr(std::string{"--compute-backend="}.size());
+            auto const parsed = gladius::compute::parseComputeBackend(value);
+            if (!parsed.has_value())
+            {
+                std::cerr << "Invalid compute backend: " << value << std::endl;
+                return 1;
+            }
+            if (!gladius::compute::isComputeBackendBuilt(*parsed))
+            {
+                std::cerr << "Requested compute backend is not built: " << value << std::endl;
+                return 1;
+            }
+            backendOverride = parsed;
         }
         else if (arg == "--debug-opencl")
         {
@@ -154,7 +173,7 @@ int main(int argc, char ** argv)
     }
 
     // Create application based on arguments
-    gladius::Application app(headless);
+    gladius::Application app(headless, backendOverride);
     // Propagate OpenCL debug flag to UI/MainWindow before setup
     for (int i = 1; i < argc; ++i)
     {

@@ -696,7 +696,7 @@ namespace gladius::nodes::tests
         auto result = submission->takeResult();
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
-        EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFF654422u);
+        EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFF7C532Au);
     }
 #endif
 }

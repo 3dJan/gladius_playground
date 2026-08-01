@@ -157,12 +157,17 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(scheduler.hasInFlightSubmissions());
     }
 
-    TEST(NeutralRenderScheduler, Submit_WithLowResolutionTask_ReturnsFalse)
+    TEST(NeutralRenderScheduler, SubmitAndPoll_WithLowResolutionTask_ReturnsAcceptedFrame)
     {
         NeutralRenderScheduler scheduler{makeRequest};
         ImmediateRenderer renderer;
 
-        EXPECT_FALSE(scheduler.submit(makeTask(RenderTaskType::LowResolutionPreview), renderer));
+        auto const task = makeTask(RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(scheduler.submit(task, renderer));
+        auto const result = scheduler.poll();
+
+        ASSERT_EQ(result.acceptedFrames.size(), 1u);
+        EXPECT_EQ(result.acceptedFrames.front().candidate.frameId, task.requestId);
         EXPECT_FALSE(scheduler.hasInFlightSubmissions());
     }
 

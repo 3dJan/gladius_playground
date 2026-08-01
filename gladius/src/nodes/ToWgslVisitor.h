@@ -79,6 +79,7 @@ namespace gladius::nodes
         void visit(MatrixVectorMultiplication & matrixVectorMultiplication) override;
         void visit(Transformation & transformation) override;
         void visit(Transpose & transpose) override;
+        void visit(Resource & resource) override;
 
       private:
         [[nodiscard]] bool beginNode(NodeBase const & node);
@@ -100,5 +101,6 @@ namespace gladius::nodes
         mutable std::map<std::pair<NodeId, std::string>, std::string> m_inlineExpressions;
         mutable std::size_t m_requiredParameterCount{};
         mutable std::set<ParameterId> m_requiredParameterIds;
+        bool m_functionClosed{};
     };
 }

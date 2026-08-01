@@ -3,9 +3,11 @@
 #include "ConfigManager.h"
 #include "EventLogger.h"
 #include "MeshSdfSettings.h"
+#include "compute/ComputeBackend.h"
 #include "ui/MainWindow.h"
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <thread>
 
 namespace gladius
@@ -35,6 +37,8 @@ namespace gladius
         Application();
         /// Construct application with explicit headless mode (pre-setup)
         explicit Application(bool headlessMode);
+        /// Construct application with an optional backend override applied before setup.
+        Application(bool headlessMode, std::optional<compute::ComputeBackendKind> backendOverride);
         // Construct application with explicit headless mode and OpenCL debug flag propagation
         Application(bool headlessMode, bool openclDebugEnabled);
         Application(int argc, char ** argv);

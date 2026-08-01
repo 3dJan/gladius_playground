@@ -52,8 +52,8 @@ namespace gladius::ui::async_rendering
                 compute::RenderBackendSession & session);
         void requestCancellationForStale() noexcept;
         void requestCancellationForAll() noexcept;
-        [[nodiscard]] NeutralRenderPollResult poll();
-        [[nodiscard]] NeutralRenderPollResult drain();
+        [[nodiscard]] NeutralRenderPollResult poll(bool scheduleFollowUp = true);
+        [[nodiscard]] NeutralRenderPollResult drain(bool scheduleFollowUp = true);
         void resetWorkflow(RealtimeRaymarchConfig config);
 
         [[nodiscard]] RenderWorkflowController & workflow() noexcept;

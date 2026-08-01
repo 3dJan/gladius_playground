@@ -99,12 +99,12 @@ namespace gladius::ui::async_rendering
         m_submissions.requestCancellationForAll();
     }
 
-    NeutralRenderPollResult NeutralRenderScheduler::poll()
+    NeutralRenderPollResult NeutralRenderScheduler::poll(bool const scheduleFollowUp)
     {
         NeutralRenderPollResult result;
         for (auto & completion : m_submissions.poll())
         {
-            auto decision = m_workflow.completeTask(completion.taskResult);
+            auto decision = m_workflow.completeTask(completion.taskResult, scheduleFollowUp);
             result.commands.insert(result.commands.end(),
                                    std::make_move_iterator(decision.commands.begin()),
                                    std::make_move_iterator(decision.commands.end()));
@@ -124,12 +124,12 @@ namespace gladius::ui::async_rendering
         return result;
     }
 
-    NeutralRenderPollResult NeutralRenderScheduler::drain()
+    NeutralRenderPollResult NeutralRenderScheduler::drain(bool const scheduleFollowUp)
     {
         NeutralRenderPollResult result;
         for (auto & completion : m_submissions.drain())
         {
-            auto decision = m_workflow.completeTask(completion.taskResult);
+            auto decision = m_workflow.completeTask(completion.taskResult, scheduleFollowUp);
             result.commands.insert(result.commands.end(),
                                    std::make_move_iterator(decision.commands.begin()),
                                    std::make_move_iterator(decision.commands.end()));
@@ -166,7 +166,8 @@ namespace gladius::ui::async_rendering
     bool NeutralRenderScheduler::isSupportedDisplayTask(RenderTaskType const type) noexcept
     {
         return type == RenderTaskType::RealtimeFullFrame || type == RenderTaskType::StaticFullFrameProbe ||
-               type == RenderTaskType::ProgressiveHighQualityChunk;
+               type == RenderTaskType::ProgressiveHighQualityChunk ||
+               type == RenderTaskType::LowResolutionPreview;
     }
 
     std::optional<FramePresentationCandidate> NeutralRenderScheduler::findCandidate(

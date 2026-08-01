@@ -48,6 +48,7 @@ namespace gladius::nodes
         m_inlineExpressions.clear();
         m_requiredParameterCount = 0u;
         m_requiredParameterIds.clear();
+        m_functionClosed = false;
     }
 
     void ToWgslVisitor::write(std::ostream & out) const
@@ -67,6 +68,11 @@ namespace gladius::nodes
 
     bool ToWgslVisitor::beginNode(NodeBase const & node)
     {
+        if (m_functionClosed)
+        {
+            return false;
+        }
+
         return m_visitedNodes.insert(node.getId()).second;
     }
 
@@ -254,6 +260,7 @@ namespace gladius::nodes
         m_definition << fmt::format("return vec4<f32>({}, {});\n}}\n",
                                     resolveParameter(ending.parameter().at(FieldNames::Color)),
                                     resolveParameter(ending.parameter().at(FieldNames::Shape)));
+        m_functionClosed = true;
     }
 
     void ToWgslVisitor::visit(ConstantScalar & constantScalar)
@@ -800,5 +807,17 @@ namespace gladius::nodes
                   FieldNames::Matrix,
                   "mat4x4<f32>",
                   fmt::format("transpose({})", resolveParameter(transpose.parameter().at(FieldNames::A))));
+    }
+
+    void ToWgslVisitor::visit(Resource & resource)
+    {
+        // Resource nodes carry compile-time IDs used while flattening function calls. They do
+        // not have a runtime analytic value and should not emit WGSL declarations. A resource
+        // consumed by an analytic node is rejected when that parameter is resolved instead of
+        // producing a shader that references an undefined identifier.
+        if (!beginNode(resource))
+        {
+            return;
+        }
     }
 }

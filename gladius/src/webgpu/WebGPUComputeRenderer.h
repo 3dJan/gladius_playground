@@ -10,8 +10,8 @@ namespace gladius::webgpu
     /**
      * @brief Materializes analytic WGSL scene snapshots and submits them through Dawn/WebGPU.
      *
-     * This initial renderer accepts full-frame analytic requests. Progressive row ranges require
-     * a dedicated output-row offset in the WGSL frame ABI and remain intentionally unavailable.
+    * This renderer accepts analytic full-frame and progressive row-range requests. Low-resolution
+    * requests use the same evaluator at the coordinator-provided viewport dimensions.
      */
     class WebGPUComputeRenderer final : public compute::IComputeRenderer
     {

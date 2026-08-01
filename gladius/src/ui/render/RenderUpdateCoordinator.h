@@ -267,7 +267,16 @@ namespace gladius::ui::async_rendering
             return decision;
         }
 
-        [[nodiscard]] RenderUpdateDecision completeTask(RenderTaskResult const & result)
+        [[nodiscard]] RenderUpdateDecision startDisplayTask(RenderTaskType type,
+                                                             size_t lineCount = 0)
+        {
+            RenderUpdateDecision decision{};
+            startTask(decision, type, m_latestStamp, lineCount);
+            return decision;
+        }
+
+        [[nodiscard]] RenderUpdateDecision completeTask(RenderTaskResult const & result,
+                                bool scheduleFollowUp = true)
         {
             RenderUpdateDecision decision{};
             removeInFlight(result);
@@ -316,7 +325,7 @@ namespace gladius::ui::async_rendering
                 break;
             }
 
-            if (m_interactionState == RenderInteractionState::Static)
+            if (scheduleFollowUp && m_interactionState == RenderInteractionState::Static)
             {
                 scheduleStaticCatchUp(decision);
             }

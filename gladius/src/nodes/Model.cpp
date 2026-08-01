@@ -95,20 +95,30 @@ namespace gladius::nodes
             node.second->setId(node.second->getId());
         }
 
-        auto beginVisitor =
-          OnTypeVisitor<Begin>([&](auto & beginNode) { m_beginNode = &beginNode; });
-        visitNodes(beginVisitor);
-
-        auto endVisitor = OnTypeVisitor<End>([&](auto & endNode) { m_endNode = &endNode; });
-        visitNodes(endVisitor);
-
         for (const auto & node : other.m_nodes)
         {
-            for (auto & parameter : node.second->parameter())
+            auto const clonedNodeIter = m_nodes.find(node.first);
+            if (clonedNodeIter == std::end(m_nodes) || !clonedNodeIter->second)
             {
-                if (parameter.second.getSource().has_value())
+                continue;
+            }
+
+            auto & clonedNode = *clonedNodeIter->second;
+            for (auto const & parameter : node.second->parameter())
+            {
+                auto clonedParameterIter = clonedNode.parameter().find(parameter.first);
+                if (clonedParameterIter == std::end(clonedNode.parameter()))
                 {
-                    auto const & src = parameter.second.getSource().value();
+                    continue;
+                }
+
+                auto & clonedParameter = clonedParameterIter->second;
+                // Rebuild links from the original model below. Keeping the copied source here
+                // would allow updateTypes() to restore stale metadata after a failed lookup.
+                clonedParameter.setSource(std::nullopt);
+                if (parameter.second.getConstSource().has_value())
+                {
+                    auto const & src = parameter.second.getConstSource().value();
 
                     // Primary lookup: by uniqueName (the normal path).
                     auto portIter = std::find_if(std::begin(m_outPorts),
@@ -126,6 +136,20 @@ namespace gladius::nodes
                         portIter = m_outPorts.find(src.portId);
                     }
 
+                    // Port IDs can become stale when dynamic FunctionCall outputs are rebuilt.
+                    // The cloned node IDs and output short names are stable enough to repair the
+                    // link without relying on the stale Source::portId or uniqueName.
+                    if (portIter == std::end(m_outPorts))
+                    {
+                        portIter = std::find_if(std::begin(m_outPorts),
+                                               std::end(m_outPorts),
+                                               [&](auto & port)
+                                               {
+                                                   return port.second->getParentId() == src.nodeId &&
+                                                          port.second->getShortName() == src.shortName;
+                                               });
+                    }
+
                     if (portIter == std::end(m_outPorts))
                     {
                         if (m_logger)
@@ -136,18 +160,26 @@ namespace gladius::nodes
                                            src.uniqueName),
                                events::Severity::Warning});
                         }
-                        // Clear the stale source so the model remains in a consistent state.
-                        parameter.second.setSource(std::nullopt);
                         continue;
                     }
                     bool const skipLinkValidation = true;
-                    addLink(
-                      portIter->second->getId(), parameter.second.getId(), skipLinkValidation);
+                    addLink(portIter->second->getId(), clonedParameter.getId(), skipLinkValidation);
                 }
 
-                parameter.second.setConsumedByFunction(parameter.second.isConsumedByFunction());
+                clonedParameter.setConsumedByFunction(parameter.second.isConsumedByFunction());
             }
         }
+
+                // The copied graph may contain stale source metadata. Rebuild its graph before using
+                // visitors to locate Begin/End nodes so invalid links cannot suppress the traversal.
+                m_graphRequiresUpdate = true;
+
+                auto beginVisitor =
+                    OnTypeVisitor<Begin>([&](auto & beginNode) { m_beginNode = &beginNode; });
+                visitNodes(beginVisitor);
+
+                auto endVisitor = OnTypeVisitor<End>([&](auto & endNode) { m_endNode = &endNode; });
+                visitNodes(endVisitor);
 
         this->updateTypes();
         this->updateOrder();

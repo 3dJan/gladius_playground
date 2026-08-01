@@ -4,6 +4,7 @@
 #include "mcp/MCPServer.h"
 #endif
 #include "Document.h"
+#include "compute/ComputeBackendSettings.h"
 #include "ui/MainWindow.h"
 
 #include <filesystem>
@@ -31,6 +32,12 @@ namespace gladius
     }
 
     Application::Application(bool headlessMode)
+        : Application(headlessMode, std::nullopt)
+    {
+    }
+
+    Application::Application(bool headlessMode,
+                             std::optional<compute::ComputeBackendKind> backendOverride)
         : m_configManager()
         , m_mainWindow()
         , m_globalLogger(std::make_shared<events::Logger>())
@@ -40,6 +47,10 @@ namespace gladius
 #endif
     {
         m_headlessMode = headlessMode;
+        if (backendOverride.has_value())
+        {
+            compute::setConfiguredComputeBackend(m_configManager, *backendOverride);
+        }
         m_mainWindow.setConfigManager(m_configManager);
         wireMeshSdfSettings();
         if (!m_headlessMode)

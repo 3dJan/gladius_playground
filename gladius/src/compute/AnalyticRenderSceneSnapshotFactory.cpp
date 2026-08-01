@@ -15,6 +15,22 @@ namespace gladius::compute
 {
     namespace
     {
+        void assignParameterLookupIndices(nodes::Model & model)
+        {
+            int nextIndex = 0;
+            for (auto const & [parameterId, parameter] : model.getParameterRegistry())
+            {
+                if (parameter == nullptr || parameter->getId() != parameterId || !parameter->isModifiable() ||
+                    parameter->getConstSource().has_value())
+                {
+                    continue;
+                }
+
+                parameter->setLookUpIndex(nextIndex);
+                nextIndex += parameter->getSize();
+            }
+        }
+
         void writeParameterValues(nodes::IParameter const & parameter,
                                   std::vector<float> & parameterValues,
                                   std::vector<bool> & assignedValues)
@@ -45,7 +61,9 @@ namespace gladius::compute
                 }
                 if (assignedValues[index])
                 {
-                    throw std::runtime_error("Analytic render scene parameter lookup indices must be unique");
+                    throw std::runtime_error("Analytic render scene parameter lookup index " +
+                                             std::to_string(index) + " is assigned more than once by parameter " +
+                                             std::to_string(parameter.getId()));
                 }
 
                 parameterValues[index] = value;
@@ -84,6 +102,8 @@ namespace gladius::compute
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Model & model,
                                                                     std::uint64_t const sceneGeneration)
     {
+        assignParameterLookupIndices(model);
+
         nodes::ToWgslVisitor visitor;
         model.visitNodes(visitor);
 
