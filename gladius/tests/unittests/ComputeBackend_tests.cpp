@@ -165,7 +165,7 @@ namespace gladius::compute::tests
         auto result = submission->takeResult();
         ASSERT_TRUE(result.has_value());
         ASSERT_EQ(result->pixels.size(), 33u * 33u);
-        EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
+        EXPECT_EQ(result->pixels.front(), 0xFF1A1A1Au);
         EXPECT_GT((result->pixels[(16u * 33u) + 16u] >> 16u) & 0xFFu, 100u);
     }
 

@@ -392,7 +392,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 }
                                 auto const rayStepsForSafeWorkload = MAX_FRAME_RAY_ITERATIONS / framePixelCount;
                                 request.maxRaySteps = std::min(
-                                    {request.maxRaySteps, MAX_FRAME_RAY_STEPS, static_cast<std::uint32_t>(rayStepsForSafeWorkload)});
+                                    {request.maxRaySteps,
+                                     MAX_FRAME_RAY_STEPS,
+                                     static_cast<std::uint32_t>(rayStepsForSafeWorkload)});
 
                 auto const rowCount = request.endRow - request.firstRow;
                 m_buffers.resize(
@@ -421,12 +423,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     .firstRowAndCount = {static_cast<float>(request.firstRow),
                                          static_cast<float>(rowCount),
                                          0.0f,
-                                                                                 0.0f},
-                                        .timeSliceQualityNormal = {request.timeSeconds,
-                                                                                             request.sliceHeight,
-                                                                                             request.quality,
-                                                                                             request.normalOffset},
-                                        .flagsModeReserved = {request.renderingFlags, request.renderingMode, 0u, 0u}});
+                                         0.0f},
+                    .timeSliceQualityNormal = {request.timeSeconds,
+                                              request.sliceHeight,
+                                              request.quality,
+                                              request.normalOffset},
+                    .flagsModeReserved = {request.renderingFlags, request.renderingMode, 0u, 0u}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())

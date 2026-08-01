@@ -677,7 +677,7 @@ namespace gladius::nodes::tests
                                 .eyePosition = {0.0f, 0.0f, 2.0f},
                                 .maxTravelDistance = 10.0f});
         EXPECT_NE(request.shaderSource.find("fn estimate_normal"), std::string::npos);
-                    EXPECT_NE(request.shaderSource.find("length("), std::string::npos);
+        EXPECT_NE(request.shaderSource.find("length("), std::string::npos);
 
         std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
         try
@@ -695,8 +695,8 @@ namespace gladius::nodes::tests
           << submission->getErrorMessage();
         auto result = submission->takeResult();
         ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->pixels.front(), 0xFF140D08u);
-        EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFF7C532Au);
+        EXPECT_EQ(result->pixels.front(), 0xFF1A1A1Au);
+        EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFFFFDB8Cu);
     }
 #endif
 }

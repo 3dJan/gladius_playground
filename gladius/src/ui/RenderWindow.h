@@ -406,10 +406,16 @@ namespace gladius::ui
                            1.0f,
                            16000.0f)));
 
+              auto const firstRow = static_cast<std::uint32_t>(std::min(task.startLine,
+                                                                          static_cast<std::size_t>(height)));
+              auto const requestedLineCount = task.lineCount > 0u ? task.lineCount : height;
+              auto const endRow = static_cast<std::uint32_t>(std::min(
+                firstRow + requestedLineCount,
+                static_cast<std::size_t>(height)));
               auto const viewport = compute::RenderViewport{.width = width,
                                                             .height = height,
-                                                            .firstRow = 0u,
-                                                            .endRow = height};
+                                                            .firstRow = firstRow,
+                                                            .endRow = endRow};
               if (!viewport.isValid())
               {
                   return std::nullopt;
