@@ -14,8 +14,7 @@
 #include "AsyncRenderTypes.h"
 #include "FramePresentationController.h"
 
-// Include OpenCL platform types for cl_float4
-#include <CL/cl_platform.h>
+#include "../../ComputeTypes.h"
 
 // Forward declarations for OpenCL types
 namespace cl
@@ -203,12 +202,14 @@ namespace gladius::ui::async_rendering
         std::shared_ptr<ControllerState> m_state;
         std::atomic<bool> m_running{false};
 
+      #if defined(GLADIUS_ENABLE_OPENCL)
         // OpenCL resources for async rendering (Option A: separate CL queue, no GL interop)
         mutable std::mutex m_workerQueueMutex;
         std::shared_ptr<cl::CommandQueue> m_workerQueue;
         std::unique_ptr<cl::Image2D> m_stagingBuffer;
         size_t m_stagingWidth{0};
         size_t m_stagingHeight{0};
+      #endif
 
         // Triple buffer state machine (for HQ progressive rendering)
         std::array<FrameBuffer, 3> m_frameBuffers;

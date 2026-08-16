@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gpgpu.h"
+#include "ComputeTypes.h"
 
 namespace gladius
 {

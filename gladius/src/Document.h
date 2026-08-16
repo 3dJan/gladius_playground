@@ -4,7 +4,14 @@
 #include "BitmapChannel.h"
 #include "Mesh.h"
 #include "MeshSdfMethod.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
+#else
+namespace gladius
+{
+    class ComputeCore;
+}
+#endif
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
@@ -130,6 +137,7 @@ namespace gladius
 
         void resetGeneratorContext();
         explicit Document(std::shared_ptr<ComputeCore> core);
+        explicit Document(events::SharedLogger logger);
 
         /// Blocks until any in-flight asynchronous file-load / model-refresh worker
         /// has finished before member teardown begins. Without this, the implicit
@@ -536,6 +544,7 @@ namespace gladius
         std::filesystem::path m_modelFileName;
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
         std::shared_ptr<ComputeCore> m_core;
+        events::SharedLogger m_logger;
         bool m_fileChanged{false};
         std::atomic<uint64_t> m_saveVersion{0};
         std::atomic<io::DocumentIdentity> m_documentIdentity{0};

@@ -17,7 +17,9 @@ Abstract: This is a stub class definition of CGladius
 #include "gladius_contouraccessor.hpp"
 #include "gladius_detailederroraccessor.hpp"
 #include "gladius_faceaccessor.hpp"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "io/MeshExporter.h"
+#endif
 
 using namespace GladiusLib::Impl;
 
@@ -27,6 +29,9 @@ using namespace GladiusLib::Impl;
 
 void CGladius::initCoreOrThrow()
 {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+    throw std::runtime_error("The Gladius API requires the OpenCL backend in this build");
+#else
     using namespace gladius;
     if (m_core)
     {
@@ -49,6 +54,7 @@ void CGladius::initCoreOrThrow()
     m_core->setCodeGenerator(gladius::CodeGenerator::Code); // faster, but takes longer to compile
     m_doc = std::make_unique<Document>(m_core);
     logger->addEvent({"Core and document created", events::Severity::Info});
+#endif
 }
 
 void CGladius::LoadAssembly(const std::string & filename)

@@ -13,7 +13,6 @@
 #include <map>
 
 #include "ImageStackResource.h"
-#include "ResourceContext.h"
 #include "ResourceKey.h"
 #include "ResourceManager.h"
 #include "VdbResource.h"

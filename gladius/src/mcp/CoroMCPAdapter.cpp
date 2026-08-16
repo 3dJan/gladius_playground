@@ -83,9 +83,15 @@ namespace gladius::mcp
             catch (...)
             {
             }
-            bool const writeThumbnail = m_application && m_application->isHeadlessMode();
+            bool const writeThumbnail =
+#ifdef GLADIUS_ENABLE_OPENCL
+              m_application && m_application->isHeadlessMode();
+#else
+              false;
+#endif
 
             bool preparationSuccess = true;
+#ifdef GLADIUS_ENABLE_OPENCL
             if (writeThumbnail)
             {
                 // Get the compute core from the document for thumbnail preparation
@@ -171,6 +177,7 @@ namespace gladius::mcp
                     preparationSuccess = false;
                 }
             }
+#endif
 
             // Only write thumbnail if preparation succeeded
             bool const actualWriteThumbnail = writeThumbnail && preparationSuccess;

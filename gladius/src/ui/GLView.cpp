@@ -1,7 +1,7 @@
 #include "GLView.h"
 #include "Theme.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
-#include "../gpgpu.h"
+#include <glad/glad.h>
 
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl2.h>

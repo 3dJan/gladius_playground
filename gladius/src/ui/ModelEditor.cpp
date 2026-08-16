@@ -1472,10 +1472,15 @@ namespace gladius::ui
                                       }
                                   });
 
+#if defined(GLADIUS_ENABLE_OPENCL)
                     overflow.item(ICON_FA_BOXES "\tAuto update bounding box",
                                   [&]
                                   {
                                       auto core = m_doc->getCore();
+                                      if (!core)
+                                      {
+                                          return;
+                                      }
                                       bool autoUpdateBoundingBox =
                                         core->isAutoUpdateBoundingBoxEnabled();
                                       toggleButton(
@@ -1507,6 +1512,7 @@ namespace gladius::ui
                                           }
                                       }
                                   });
+#endif
 
                     overflow.item(ICON_FA_DATABASE "\tResource Nodes",
                                   [&]
@@ -1578,19 +1584,24 @@ namespace gladius::ui
                         }
                     }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
                     {
                         auto core = m_doc->getCore();
-                        bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
-                        auto optimizedNewState = optimized;
-
-                        if (optimizedNewState != optimized)
+                        if (core)
                         {
-                            core->setCodeGenerator((optimizedNewState)
-                                                     ? CodeGenerator::Code
-                                                     : CodeGenerator::CommandStream);
-                            invalidateEverything();
+                            bool optimized = core->getCodeGenerator() == CodeGenerator::Code;
+                            auto optimizedNewState = optimized;
+
+                            if (optimizedNewState != optimized)
+                            {
+                                core->setCodeGenerator((optimizedNewState)
+                                                         ? CodeGenerator::Code
+                                                         : CodeGenerator::CommandStream);
+                                invalidateEverything();
+                            }
                         }
                     }
+#endif
 
                     ImGui::EndMenuBar();
                 }
@@ -2425,6 +2436,19 @@ namespace gladius::ui
 
     void ModelEditor::importStlDrop(std::filesystem::path const & path, ImVec2 screenPos)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) path;
+        (void) screenPos;
+        if (m_doc)
+        {
+            if (auto logger = m_doc->getSharedLogger())
+            {
+                logger->addEvent({"STL import is unavailable for the selected backend",
+                                  events::Severity::Warning});
+            }
+        }
+        return;
+#else
         if (!m_doc || !m_currentModel)
         {
             return;
@@ -2464,6 +2488,7 @@ namespace gladius::ui
         pending.displayName   = displayName;
         pending.dropScreenPos = screenPos;
         m_pendingStlImports.push_back(std::move(pending));
+#endif
     }
 
     void ModelEditor::processPendingStlImports()

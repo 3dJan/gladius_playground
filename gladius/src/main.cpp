@@ -1,5 +1,4 @@
 #include "Application.h"
-#include "ComputeContext.h"
 #include "compute/ComputeBackend.h"
 #include <atomic>
 #include <csignal>
@@ -172,8 +171,20 @@ int main(int argc, char ** argv)
         // continue
     }
 
+    // Redirect stdout before application setup in stdio mode. Headless backend
+    // initialization may emit diagnostics; protocol stdout must remain clean.
+    std::streambuf * originalCout = nullptr;
+    if (mcpStdio)
+    {
+        originalCout = std::cout.rdbuf(std::cerr.rdbuf());
+    }
+
     // Create application based on arguments
     gladius::Application app(headless, backendOverride);
+    if (mcpStdio)
+    {
+        app.setLoggerOutputMode(gladius::events::OutputMode::Silent);
+    }
     // Propagate OpenCL debug flag to UI/MainWindow before setup
     for (int i = 1; i < argc; ++i)
     {
@@ -191,18 +202,12 @@ int main(int argc, char ** argv)
         bool success;
         if (mcpStdio)
         {
-            // In stdio mode, redirect stdout to stderr to avoid interfering with JSON-RPC
-            // Save original stdout for restoration later
-            std::streambuf * orig_cout = std::cout.rdbuf();
-            std::cout.rdbuf(std::cerr.rdbuf());
-
-            // Set logger to silent mode for stdio transport to avoid interfering with JSON-RPC
-            app.setLoggerOutputMode(gladius::events::OutputMode::Silent);
+            // Restore stdout only after setup is complete. The stdio worker starts
+            // during enableMCPServerStdio() and writes protocol responses to stdout.
+            std::cout.rdbuf(originalCout);
+            originalCout = nullptr;
 
             success = app.enableMCPServerStdio();
-
-            // Restore stdout for MCP protocol
-            std::cout.rdbuf(orig_cout);
             if (!success)
             {
                 // Use stderr for error since stdout is reserved for MCP protocol

@@ -5,12 +5,12 @@
 #include <unordered_map>
 
 #include "Assembly.h"
+#include "../CommandBuffer.h"
 #include "Commands.h"
 #include "Model.h"
 #include "NodeBase.h"
 #include "Parameter.h"
 #include "Port.h"
-#include "ResourceContext.h"
 #include "Visitor.h"
 #include "nodesfwd.h"
 

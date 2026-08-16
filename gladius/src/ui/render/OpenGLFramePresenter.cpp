@@ -1,6 +1,6 @@
 #include "ui/render/OpenGLFramePresenter.h"
 
-#include "gpgpu.h"
+#include <glad/glad.h>
 
 namespace gladius::ui::async_rendering
 {

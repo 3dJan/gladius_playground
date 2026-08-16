@@ -3,13 +3,15 @@
 #include "../types.h"
 #include "GLView.h"
 #include "OrbitalCamera.h"
+#include "compute/ApplicationComputeRuntime.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
 #include "compute/OpenCLRenderRequestFactory.h"
+#endif
 #include "render/AsyncRenderController.h"
 #include "render/NeutralRenderScheduler.h"
 #include "render/OpenGLFramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
-#include <CL/cl_platform.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -28,6 +30,8 @@ namespace gladius
 {
     class ConfigManager;
     class Document;
+  class ComputeCore;
+  class GLImageBuffer;
 }
 
 namespace gladius::ui
@@ -56,7 +60,11 @@ namespace gladius::ui
         void initialize(ComputeCore * core,
                         GLView * view,
                         std::shared_ptr<ShortcutManager> shortcutManager,
-                        gladius::ConfigManager * configManager);
+                        gladius::ConfigManager * configManager,
+                        compute::IBackendRuntime * runtime = nullptr);
+        void setBackendRuntime(compute::IBackendRuntime * runtime);
+        [[nodiscard]] compute::RenderSettingsSnapshot & getNeutralRenderSettings() noexcept;
+        [[nodiscard]] compute::RenderSettingsSnapshot const & getNeutralRenderSettings() const noexcept;
 
         /**
          * @brief Set the document reference for checking loading state
@@ -230,6 +238,7 @@ namespace gladius::ui
 
         [[nodiscard]] bool isAsyncBackendActive() const noexcept;
         [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
+        [[nodiscard]] std::optional<compute::RenderBounds> getNeutralModelBounds() const;
         [[nodiscard]] bool updateCameraCentering();
 
         // Async bounding box computation
@@ -277,10 +286,12 @@ namespace gladius::ui
         [[nodiscard]] bool tryRenderRealtimeFrameSync(
           async_rendering::RenderTaskRequest const & task);
         [[nodiscard]] bool tryRenderWithNeutralBackend(RenderWindowState & state);
+        [[nodiscard]] compute::RenderBackendSession * getActiveRenderBackendSession() noexcept;
 
         GLView * m_view{};
 
-        ComputeCore * m_core;
+        ComputeCore * m_core{nullptr};
+        compute::IBackendRuntime * m_runtime{nullptr};
         Document * m_document{nullptr};
         ExportState const * m_exportState{nullptr};
         std::shared_ptr<ShortcutManager> m_shortcutManager;
@@ -389,10 +400,15 @@ namespace gladius::ui
         [[nodiscard]] bool isNeutralDocumentReady();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
+        compute::RenderSettingsSnapshot m_neutralRenderSettings{
+          .normalOffset = 0.0001f,
+          .maxRaySteps = 2000u,
+          .maxTravelDistance = 100000.0f};
         async_rendering::NeutralRenderScheduler m_neutralRenderScheduler{
           [this](async_rendering::RenderTaskRequest const & task)
             -> std::optional<compute::RenderRequest> {
-              if (!m_core || !m_renderBackendSession)
+              auto * const renderBackendSession = getActiveRenderBackendSession();
+              if (!renderBackendSession)
               {
                   return std::nullopt;
               }
@@ -423,11 +439,38 @@ namespace gladius::ui
                   return std::nullopt;
               }
 
-              auto const resources = m_core->getResourceContext();
-              if (!resources)
+              if (!m_core)
               {
-                  return std::nullopt;
+                  auto const eye = m_camera.getEyePosition();
+                  auto const & matrix = m_camera.computeModelViewPerspectiveMatrix();
+                  auto const modelBounds = getNeutralModelBounds();
+                  if (!modelBounds.has_value())
+                  {
+                    return std::nullopt;
+                  }
+                  compute::RenderRequest request{
+                    .camera = {.eyePosition = {eye.x, eye.y, eye.z},
+                               .forwardDirection = {matrix.s8, matrix.s9, matrix.sa},
+                               .rightDirection = {matrix.s0, matrix.s1, matrix.s2},
+                               .upDirection = {matrix.s4, matrix.s5, matrix.s6}},
+                    .frustum = {.horizontalScale = 0.5f,
+                                .verticalScale = 0.5f / static_cast<float>(width) * height},
+                    .settings = m_neutralRenderSettings,
+                    .modelBounds = *modelBounds,
+                    .viewport = viewport,
+                    .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
+                                  .viewGeneration = task.stamp.viewEpoch,
+                                  .parameterGeneration = task.stamp.parameterEpoch}};
+                  return request.isValid() ? std::optional<compute::RenderRequest>{request}
+                                           : std::nullopt;
               }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+              auto const resources = m_core->getResourceContext();
+                if (!resources)
+                {
+                  return std::nullopt;
+                }
 
               auto const freshness = compute::RenderFreshnessStamp{
                 .sceneGeneration = task.stamp.sceneEpoch,
@@ -455,10 +498,15 @@ namespace gladius::ui
               {
                   return std::nullopt;
               }
+        #else
+                (void) task;
+                return std::nullopt;
+        #endif
           }};
         async_rendering::RenderWorkflowController & m_renderUpdateCoordinator{
           m_neutralRenderScheduler.workflow()};
         std::unique_ptr<compute::RenderBackendSession> m_renderBackendSession;
+        compute::RenderBackendSession * m_runtimeRenderBackendSession{nullptr};
         std::unique_ptr<async_rendering::OpenGLFramePresenter> m_neutralFramePresenter;
         bool m_neutralBackendActive{false};
         std::uint64_t m_neutralSceneGeneration{0u};

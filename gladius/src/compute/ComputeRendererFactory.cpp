@@ -3,8 +3,10 @@
 #include "compute/ComputeRendererFactory.h"
 
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/OpenCLComputeRenderer.h"
 #include "compute/RenderSession.h"
+#endif
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #  include "webgpu/WebGPUComputeRenderer.h"
@@ -41,6 +43,7 @@ namespace gladius::compute
         }
     }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
     std::unique_ptr<IComputeRenderer> ComputeRendererFactory::create(ComputeBackendKind kind,
                                                                      SharedRenderSession session)
     {
@@ -69,6 +72,7 @@ namespace gladius::compute
                 throw std::runtime_error("Unknown compute backend kind");
         }
     }
+#endif
 
     std::unique_ptr<RenderBackendSession> ComputeRendererFactory::createRenderBackendSession(
         ConfigManager const & configManager,
@@ -108,6 +112,7 @@ namespace gladius::compute
         return nullptr;
     }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
     std::unique_ptr<RenderBackendSession> ComputeRendererFactory::createRenderBackendSession(
         ConfigManager const & configManager,
         SharedRenderSession openclSession,
@@ -146,6 +151,7 @@ namespace gladius::compute
 
         return nullptr;
     }
+#endif
 
     RenderSceneSnapshot ComputeRendererFactory::materializeScene(
         nodes::Assembly const * assembly,

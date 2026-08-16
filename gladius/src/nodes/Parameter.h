@@ -1,6 +1,5 @@
 #pragma once
 
-#include <gpgpu.h>
 #include <sstream>
 
 #include "BuildParameter.h"

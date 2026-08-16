@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Buffer.h"
+#include "CommandBuffer.h"
 #include "ImageRGBA.h"
 #include "ImageStackOCLBuffer.h"
 #include "kernel/types.h"
@@ -19,7 +19,6 @@ namespace gladius
     using ParameterBuffer = Buffer<cl_float>;
     using BoundingBoxBuffer = Buffer<BoundingBox>;
     using NanoVdbGridBuffer = Buffer<cl_float>;
-    using CommandBuffer = Buffer<Command>;
     using VertexBuffer = Buffer<cl_float4>;
     using Vertex2dBuffer = Buffer<cl_float2>;
 

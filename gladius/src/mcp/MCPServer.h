@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace gladius
 {
@@ -158,6 +159,12 @@ namespace gladius::mcp
         // Stdio transport components
         std::thread m_stdioThread;
 
+        enum class StdioFraming
+        {
+          NewlineDelimited,
+          ContentLength
+        };
+
         /// Setup built-in tools
         void setupBuiltinTools();
 
@@ -181,10 +188,10 @@ namespace gladius::mcp
         createErrorResponse(const nlohmann::json & id, int code, const std::string & message) const;
 
         /// Handle stdio message processing
-        void handleStdioMessage(const std::string & line);
+        void handleStdioMessage(const std::string & message, StdioFraming framing);
 
         /// Send JSON response to stdout
-        void sendStdioResponse(const nlohmann::json & response);
+        void sendStdioResponse(const nlohmann::json & response, StdioFraming framing);
     };
 
 } // namespace gladius::mcp

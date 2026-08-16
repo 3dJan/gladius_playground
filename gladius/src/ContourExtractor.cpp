@@ -11,7 +11,6 @@
 #include <stdexcept>
 #include <vector>
 
-#include <CL/cl_platform.h>
 #include <Eigen/src/Core/Matrix.h>
 #include <Eigen/src/Core/util/Constants.h>
 #include <clipper2/clipper.h>

@@ -232,9 +232,12 @@ namespace gladius::ui
     void RenderWindow::initialize(ComputeCore * core,
                                   GLView * view,
                                   std::shared_ptr<ShortcutManager> shortcutManager,
-                                  gladius::ConfigManager * configManager)
+                                  gladius::ConfigManager * configManager,
+                                  compute::IBackendRuntime * runtime)
     {
         m_core = core;
+        m_runtime = runtime;
+        m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_view = view;
         m_shortcutManager = shortcutManager;
         m_configManager = configManager;
@@ -264,6 +267,28 @@ namespace gladius::ui
         // Don't initialize async rendering here - will be done lazily on first render
     }
 
+    void RenderWindow::setBackendRuntime(compute::IBackendRuntime * runtime)
+    {
+        m_runtime = runtime;
+        m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
+        m_renderBackendSession.reset();
+        if (m_neutralBackendActive)
+        {
+            ++m_neutralSceneGeneration;
+            m_neutralRenderScheduler.requestCancellationForAll();
+        }
+    }
+
+    compute::RenderSettingsSnapshot & RenderWindow::getNeutralRenderSettings() noexcept
+    {
+        return m_neutralRenderSettings;
+    }
+
+    compute::RenderSettingsSnapshot const & RenderWindow::getNeutralRenderSettings() const noexcept
+    {
+        return m_neutralRenderSettings;
+    }
+
     void RenderWindow::setDocument(Document * doc)
     {
         m_document = doc;
@@ -278,14 +303,20 @@ namespace gladius::ui
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
     }
 
+    compute::RenderBackendSession * RenderWindow::getActiveRenderBackendSession() noexcept
+    {
+        return m_runtimeRenderBackendSession != nullptr ? m_runtimeRenderBackendSession
+                                                        : m_renderBackendSession.get();
+    }
+
     bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
     {
-        if (!m_neutralBackendActive || !m_core || !m_document || !m_configManager)
+        if (!m_neutralBackendActive || !m_document)
         {
             return false;
         }
 
-        if (!m_renderBackendSession)
+        if (!getActiveRenderBackendSession() && m_configManager)
         {
             try
             {
@@ -299,13 +330,14 @@ namespace gladius::ui
             }
         }
 
-        if (!m_renderBackendSession)
+        auto * const renderBackendSession = getActiveRenderBackendSession();
+        if (!renderBackendSession)
         {
             return false;
         }
 
-        if (!m_renderBackendSession->hasMaterializedScene() ||
-            m_renderBackendSession->getSceneGeneration() != m_neutralSceneGeneration)
+        if (!renderBackendSession->hasMaterializedScene() ||
+            renderBackendSession->getSceneGeneration() != m_neutralSceneGeneration)
         {
             auto const assembly = m_document->getAssembly();
             if (assembly && assembly->assemblyModel())
@@ -314,14 +346,14 @@ namespace gladius::ui
                   assembly.get(),
                   *assembly->assemblyModel(),
                   m_neutralSceneGeneration);
-                if (!m_renderBackendSession->replaceScene(snapshot))
+                if (!renderBackendSession->replaceScene(snapshot))
                 {
                     return false;
                 }
             }
         }
 
-        if (!m_renderBackendSession->hasMaterializedScene() || !m_renderBackendSession->isAvailable())
+        if (!renderBackendSession->hasMaterializedScene() || !renderBackendSession->isAvailable())
         {
             return false;
         }
@@ -382,7 +414,7 @@ namespace gladius::ui
               command.task.type == async_rendering::RenderTaskType::LowResolutionPreview;
             if (isDisplayTask)
             {
-                if (m_neutralRenderScheduler.submit(command.task, *m_renderBackendSession))
+                if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
                 {
                     m_pendingRenderCommands.insert(m_pendingRenderCommands.end(),
                                                    pendingCommands.begin() + commandIndex + 1u,
@@ -420,7 +452,7 @@ namespace gladius::ui
             {
                 continue;
             }
-            if (m_neutralRenderScheduler.submit(command.task, *m_renderBackendSession))
+            if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
             {
                 return true;
             }
@@ -1139,8 +1171,21 @@ namespace gladius::ui
                         overflow.item("Rendering Options",
                                                     [&]
                                                     {
-                                                            int renderingFlags =
-                                                                m_core->getResourceContext()->getRenderingSettings().flags;
+                                                            bool const hasOpenCLCore = (m_core != nullptr);
+                                                            int renderingFlags = 0;
+                                                            float quality = m_renderWindowState.renderQuality;
+                                                            if (hasOpenCLCore)
+                                                            {
+                                                                    renderingFlags =
+                                                                        m_core->getResourceContext()->getRenderingSettings().flags;
+                                                                    quality =
+                                                                        m_core->getResourceContext()->getRenderingSettings().quality;
+                                                            }
+                                                            else if (m_neutralBackendActive)
+                                                            {
+                                                                    renderingFlags = static_cast<int>(m_neutralRenderSettings.flags);
+                                                                    quality = m_neutralRenderSettings.quality;
+                                                            }
 
                                                             bool flagsChanged = false;
                                                             if (ImGui::BeginMenu("..."))
@@ -1159,8 +1204,6 @@ namespace gladius::ui
                                                                         RF_SHOW_COORDINATE_SYSTEM);
 
                                                                     ImGui::Separator();
-                                                                    float quality =
-                                                                        m_core->getResourceContext()->getRenderingSettings().quality;
                                   ImGui::SetNextItemWidth(150.f * m_uiScale);
                                   bool qualityChanged =
                                     ImGui::SliderFloat("Quality", &quality, 0.1f, 2.0f);
@@ -1172,8 +1215,15 @@ namespace gladius::ui
                                   }
                                   if (qualityChanged)
                                   {
-                                      m_core->getResourceContext()->getRenderingSettings().quality =
-                                        quality;
+                                      if (hasOpenCLCore)
+                                      {
+                                          m_core->getResourceContext()->getRenderingSettings().quality =
+                                            quality;
+                                      }
+                                      else if (m_neutralBackendActive)
+                                      {
+                                          m_neutralRenderSettings.quality = quality;
+                                      }
                                       m_renderWindowState.renderQuality = quality;
                                       m_renderWindowState.renderQualityWhileMoving = quality * 0.5f;
                                       invalidateView();
@@ -1227,14 +1277,22 @@ namespace gladius::ui
                                   invalidateView();
                               }
 
-                              m_core->getResourceContext()->getRenderingSettings().flags =
-                                renderingFlags;
+                              if (hasOpenCLCore)
+                              {
+                                  m_core->getResourceContext()->getRenderingSettings().flags =
+                                    renderingFlags;
+                              }
+                              else if (m_neutralBackendActive)
+                              {
+                                  m_neutralRenderSettings.flags =
+                                    static_cast<std::uint32_t>(renderingFlags);
+                              }
                           });
 
             overflow.end();
 
             // Compilation status indicator
-            if (m_core->isAnyCompilationInProgressNonBlocking())
+            if (m_core && m_core->isAnyCompilationInProgressNonBlocking())
             {
                 ImGui::TextUnformatted("Compilation in progress");
             }
@@ -1366,7 +1424,9 @@ namespace gladius::ui
         // Show the progress indicator only when no renderable program is available.
         // In automatic mode the optimized OpenCL program may still compile in the
         // background while the command-stream preview program is already usable.
-        else if (!m_core->tryIsRenderProgramReady().value_or(false))
+        // Progress indicator only when an OpenCL core exists and has no renderable program.
+        // WebGPU/neutral rendering never uses the OpenCL program-ready state.
+        else if (m_core && !m_core->tryIsRenderProgramReady().value_or(false))
         {
             m_view->startAnimationMode();
             ImGuiWindowFlags window_flags =
@@ -1402,7 +1462,10 @@ namespace gladius::ui
     {
         if (m_core)
         {
-            m_core->applyCamera(m_camera);
+            if (m_core)
+            {
+                m_core->applyCamera(m_camera);
+            }
         }
     }
 
@@ -1481,7 +1544,10 @@ namespace gladius::ui
 
         // CRITICAL: Mark SDF as invalid immediately so renderer uses direct function evaluation
         // This prevents rendering with stale precomputed SDF data
-        m_core->setSdfValid(false);
+        if (m_core)
+        {
+            m_core->setSdfValid(false);
+        }
 
         // Force a low-res render on next frame for immediate visual feedback
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
@@ -1498,6 +1564,11 @@ namespace gladius::ui
         m_modelModifiedSinceLastCenter = true;
 
         // Reset bounding box so it will be recomputed
+        if (!m_core)
+        {
+            return;
+        }
+
         m_core->resetBoundingBox();
 
         // DON'T schedule bbox update here - it blocks the UI thread!
@@ -1522,10 +1593,14 @@ namespace gladius::ui
         //   2. Cause unnecessary churn in the render pipeline
         // The epoch is bumped later when the bbox debounce fires after drag stops,
         // starting the fresh SDF → HQ pipeline.
-        m_core->setSdfValid(false);
+        if (m_core)
+        {
+            m_core->setSdfValid(false);
+        }
 
         if (m_neutralBackendActive)
         {
+            ++m_neutralSceneGeneration;
             m_renderBackendSession.reset();
             m_neutralRenderScheduler.requestCancellationForStale();
         }
@@ -1561,8 +1636,12 @@ namespace gladius::ui
         m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
         queueRenderDecision(m_renderUpdateCoordinator.notifyParameterChanged(true));
 
-        // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin
-        m_core->markBoundingBoxStale();
+        // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin.
+        // Coreless backends use their backend-neutral scene bounds and have no legacy bbox state.
+        if (m_core)
+        {
+            m_core->markBoundingBoxStale();
+        }
         m_lastParameterChangeTime = std::chrono::steady_clock::now();
     }
 
@@ -2075,7 +2154,10 @@ namespace gladius::ui
                 // camera's old interpolated position for several hundred frames.
                 m_camera.snapToTarget();
             }
-            m_core->applyCamera(m_camera);
+            if (m_core)
+            {
+                m_core->applyCamera(m_camera);
+            }
             (void) tryRenderWithNeutralBackend(state);
             return;
         }
@@ -2167,8 +2249,10 @@ namespace gladius::ui
 
     bool RenderWindow::updateCameraCentering()
     {
-        bool const firstTimeBoundingBoxAvailable =
-          !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();
+                bool const firstTimeBoundingBoxAvailable =
+                    !m_boundingBoxEverAvailable &&
+                    ((m_core && m_core->getBoundingBox().has_value()) ||
+                     (m_neutralBackendActive && m_document != nullptr));
         bool const shouldCenter =
           m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
         if (!shouldCenter)
@@ -2176,15 +2260,27 @@ namespace gladius::ui
             return false;
         }
 
-        auto boundingBox = m_core->getBoundingBox();
+            std::optional<BoundingBox> boundingBox;
+            if (m_core)
+            {
+                boundingBox = m_core->getBoundingBox();
+            }
+            else if (m_neutralBackendActive && m_document)
+            {
+                boundingBox = m_document->computeBoundingBox();
+            }
+
         if (!boundingBox.has_value() && m_neutralBackendActive)
         {
             // The neutral path does not initialize the legacy async controller, so request the
             // backend-independent bounding box directly when the document has finished loading.
             // If the slicer is still settling, retry on the next frame instead of centering on
             // the empty document.
-            (void) m_core->updateBBox();
-            boundingBox = m_core->getBoundingBox();
+            if (m_core)
+            {
+                (void) m_core->updateBBox();
+                boundingBox = m_core->getBoundingBox();
+            }
         }
 
         bool boundingBoxValid = boundingBox.has_value();
@@ -2245,10 +2341,23 @@ namespace gladius::ui
 
     bool RenderWindow::isNeutralDocumentReady()
     {
-        if (!m_neutralBackendActive || !m_core || !m_document ||
-            m_document->isLoadingInProgress())
+        if (!m_neutralBackendActive || !m_document || m_document->isLoadingInProgress())
         {
             return !m_neutralBackendActive;
+        }
+
+        if (!m_core)
+        {
+            auto const assembly = m_document->getAssembly();
+            if (!assembly || !assembly->assemblyModel())
+            {
+                return false;
+            }
+
+            auto const boundingBox = m_document->computeBoundingBox();
+            return boundingBox.max.x > boundingBox.min.x &&
+                   boundingBox.max.y > boundingBox.min.y &&
+                   boundingBox.max.z > boundingBox.min.z;
         }
 
         if (isRenderableBoundingBox(m_core->getBoundingBox()))
@@ -2260,9 +2369,36 @@ namespace gladius::ui
         return isRenderableBoundingBox(m_core->getBoundingBox());
     }
 
+    std::optional<compute::RenderBounds> RenderWindow::getNeutralModelBounds() const
+    {
+        if (!m_neutralBackendActive || !m_document)
+        {
+            return std::nullopt;
+        }
+
+        try
+        {
+            auto const boundingBox = m_document->computeBoundingBox();
+            compute::RenderBounds const modelBounds{
+              .min = {boundingBox.min.x, boundingBox.min.y, boundingBox.min.z},
+              .max = {boundingBox.max.x, boundingBox.max.y, boundingBox.max.z}};
+            return modelBounds.isValid() ? std::optional<compute::RenderBounds>{modelBounds}
+                                         : std::nullopt;
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
     void RenderWindow::renderSync(RenderWindowState & state)
     {
         ProfileFunction;
+
+        if (!m_core)
+        {
+            return;
+        }
 
         // Skip all GPU rendering work while an export is in progress
         if (m_exportState != nullptr && m_exportState->isExportInProgress())
@@ -2917,7 +3053,7 @@ namespace gladius::ui
         ZoneScoped;
         ZoneName("scheduleAsyncRenderJob", strlen("scheduleAsyncRenderJob"));
 
-        if (!m_asyncController || !m_asyncController->isRunning())
+        if (!m_asyncController || !m_asyncController->isRunning() || !m_core)
         {
             return false;
         }
@@ -3230,7 +3366,7 @@ namespace gladius::ui
         ZoneScoped;
                 ZoneName("scheduleFullFrameRenderJob", strlen("scheduleFullFrameRenderJob"));
 
-        if (!m_asyncController || !m_asyncController->isRunning() || !m_enableHQRendering)
+        if (!m_asyncController || !m_asyncController->isRunning() || !m_core || !m_enableHQRendering)
         {
             return false;
         }
@@ -3586,7 +3722,7 @@ namespace gladius::ui
         auto constexpr progressiveTargetRenderTime_ms = 100.0f;
         auto constexpr tolerance_ms = 1.0f;
 
-        if (state.isMoving || m_core->isAnyCompilationInProgressNonBlocking())
+        if (!m_core || state.isMoving || m_core->isAnyCompilationInProgressNonBlocking())
         {
             return;
         }
@@ -3614,6 +3750,11 @@ namespace gladius::ui
     void RenderWindow::slider(ImVec2 const & areaMin, ImVec2 const & areaMax)
     {
         ProfileFunction;
+
+        if (!m_core)
+        {
+            return;
+        }
 
         auto & settings = m_core->getResourceContext()->getRenderingSettings();
         int renderingFlags = settings.flags;
@@ -3841,6 +3982,11 @@ namespace gladius::ui
     {
         ProfileFunction;
 
+        if (!m_core)
+        {
+            return;
+        }
+
         // Show the last rendered frame (no clearing - keep existing image visible)
         auto displayImage = m_core->getResultImage();
         if (!displayImage)
@@ -3882,6 +4028,11 @@ namespace gladius::ui
     void RenderWindow::renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage)
     {
         ProfileFunction;
+
+        if (!m_core)
+        {
+            return;
+        }
 
         // Display the existing frame without triggering new rendering
         // This keeps the UI responsive during parameter changes

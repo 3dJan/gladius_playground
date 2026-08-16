@@ -67,6 +67,16 @@ namespace gladius::io
 
     void Writer3mfBase::updateThumbnail(Document & doc, Lib3MF::PModel model3mf)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) doc;
+        if (m_logger)
+        {
+            m_logger->addEvent({"Thumbnail generation is unavailable for the selected backend",
+                                events::Severity::Warning});
+        }
+        (void) model3mf;
+        return;
+#else
         if (!model3mf)
         {
             if (m_logger)
@@ -101,6 +111,7 @@ namespace gladius::io
                   {fmt::format("Failed to add thumbnail: {}", e.what()), events::Severity::Error});
             }
         }
+#endif
     }
 
     void Writer3mfBase::addDefaultMetadata(Lib3MF::PModel model3mf)

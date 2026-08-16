@@ -206,9 +206,10 @@ namespace gladius::mcp::tools
                 return out;
             }
 
+            std::optional<BoundingBox> bboxOpt;
+#if defined(GLADIUS_ENABLE_OPENCL)
             // Prefer the ComputeCore bbox if present; otherwise fall back to Document helper
             auto core = document->getCore();
-            std::optional<BoundingBox> bboxOpt;
             if (core)
             {
                 bboxOpt = core->getBoundingBox();
@@ -236,6 +237,7 @@ namespace gladius::mcp::tools
                     }
                 }
             }
+#endif
 
             BoundingBox bbox{};
             if (bboxOpt.has_value())

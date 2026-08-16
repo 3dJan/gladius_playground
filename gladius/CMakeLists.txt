@@ -17,6 +17,12 @@ option(GLADIUS_ENABLE_WEBGPU "Build the native Dawn/WebGPU compute backend" ON)
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" OFF)
 option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
 
+if(GLADIUS_ENABLE_OPENCL)
+  set(GLADIUS_VCPKG_OPENCL_DEPENDENCY "    \"opencl\",")
+else()
+  set(GLADIUS_VCPKG_OPENCL_DEPENDENCY "")
+endif()
+
 if(NOT GLADIUS_ENABLE_OPENCL AND NOT GLADIUS_ENABLE_WEBGPU)
   message(FATAL_ERROR "At least one Gladius compute backend must be enabled.")
 endif()
@@ -48,7 +54,7 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h.in"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h"
 )
-#vcpgk.json
+# vcpkg.json
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json.in"
   "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json"
@@ -156,6 +162,14 @@ else()
     # Treat all compiler warnings as errors on GCC/Clang to keep the Linux build clean.
     add_compile_options(-Werror)
 endif()
+
+if(NOT GLADIUS_ENABLE_OPENCL AND NOT MSVC)
+  # The legacy OpenCL implementation remains in the shared source tree while the
+  # backend-neutral migration is completed. Keep unreferenced legacy methods out of
+  # pure-WebGPU binaries so they cannot retain OpenCL loader symbols.
+  add_compile_options(-ffunction-sections -fdata-sections)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections")
+endif()
 add_definitions(-DTBB_SUPPRESS_DEPRECATED_MESSAGES -DNOMINMAX)
 
 if (ENABLE_TRACY)
@@ -194,7 +208,9 @@ find_package(glfw3 CONFIG REQUIRED)
 # loader available until those production sources are split behind the backend
 # abstraction; otherwise merely disabling GLADIUS_ENABLE_OPENCL produces
 # undefined clRelease*/clGet* references at link time.
-find_package(OpenCL REQUIRED)
+if(GLADIUS_ENABLE_OPENCL)
+  find_package(OpenCL REQUIRED)
+endif()
 if(GLADIUS_ENABLE_WEBGPU)
   find_package(Dawn CONFIG REQUIRED)
 endif()
@@ -229,10 +245,15 @@ pkg_check_modules(Clipper2 REQUIRED IMPORTED_TARGET Clipper2)
 pkg_check_modules(libcoro REQUIRED IMPORTED_TARGET libcoro)
 
 
-file(GLOB KERNEL_FILES
-  "src/kernel/*"
-  "src/webgpu/shaders/*"
-)
+if(GLADIUS_ENABLE_OPENCL)
+  file(GLOB KERNEL_FILES "src/kernel/*")
+else()
+  set(KERNEL_FILES)
+endif()
+if(GLADIUS_ENABLE_WEBGPU)
+  file(GLOB WEBGPU_SHADER_FILES "src/webgpu/shaders/*")
+  list(APPEND KERNEL_FILES ${WEBGPU_SHADER_FILES})
+endif()
 
 cmrc_add_resource_library(gladius_resources ALIAS gladius::rc ${KERNEL_FILES})
 if (MSVC)
@@ -303,19 +324,21 @@ add_subdirectory(src/slicer)
 add_subdirectory(src/api)
 add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
 
-configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
-configure_file(src/kernel/sdf.h src/kernel/sdf.h COPYONLY)
-configure_file(src/kernel/rendering.cl src/kernel/rendering.cl COPYONLY)
-configure_file(src/kernel/sdf_generator.cl src/kernel/sdf_generator.cl COPYONLY)
-configure_file(src/kernel/manifold_dual_contouring.cl src/kernel/manifold_dual_contouring.cl COPYONLY)
+if(GLADIUS_ENABLE_OPENCL)
+  configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
+  configure_file(src/kernel/sdf.h src/kernel/sdf.h COPYONLY)
+  configure_file(src/kernel/rendering.cl src/kernel/rendering.cl COPYONLY)
+  configure_file(src/kernel/sdf_generator.cl src/kernel/sdf_generator.cl COPYONLY)
+  configure_file(src/kernel/manifold_dual_contouring.cl src/kernel/manifold_dual_contouring.cl COPYONLY)
 
-# Copy CNanoVDB.h from vcpkg OpenVDB installation instead of using manually maintained copy
-find_path(NANOVDB_INCLUDE_DIR
-    NAMES nanovdb/CNanoVDB.h
-    HINTS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-    REQUIRED
-)
-configure_file(${NANOVDB_INCLUDE_DIR}/nanovdb/CNanoVDB.h src/kernel/CNanoVDB.h COPYONLY)
+  # Copy CNanoVDB.h from vcpkg OpenVDB installation instead of using manually maintained copy
+  find_path(NANOVDB_INCLUDE_DIR
+      NAMES nanovdb/CNanoVDB.h
+      HINTS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+      REQUIRED
+  )
+  configure_file(${NANOVDB_INCLUDE_DIR}/nanovdb/CNanoVDB.h src/kernel/CNanoVDB.h COPYONLY)
+endif()
 configure_file(components/fonts/Roboto-Medium.ttf src/misc/fonts/Roboto-Medium.ttf COPYONLY)
 configure_file(components/fonts/fontawesome-free-5.14.0-web/fa-regular-400.ttf src/misc/fonts/fa-regular-400.ttf COPYONLY)
 configure_file(components/fonts/fontawesome-free-5.14.0-web/fa-solid-900.ttf src/misc/fonts/fa-solid-900.ttf COPYONLY)

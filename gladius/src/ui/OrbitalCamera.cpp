@@ -1,8 +1,8 @@
 #include "OrbitalCamera.h"
-#include <CL/cl_platform.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/Geometry>
 #include <eigen3/Eigen/src/Core/Matrix.h>
@@ -35,8 +35,8 @@ namespace gladius::ui
         {
             m_pitchTarget += deltaY * 3.E-3f;
             m_yawTarget -= deltaX * 3.E-3f;
-            m_yawTarget = std::fmod(m_yawTarget, 2.0f * CL_M_PI_F);
-            m_pitchTarget = std::fmod(m_pitchTarget, 2.0f * CL_M_PI_F);
+            m_yawTarget = std::fmod(m_yawTarget, 2.0f * std::numbers::pi_v<float>);
+            m_pitchTarget = std::fmod(m_pitchTarget, 2.0f * std::numbers::pi_v<float>);
 
             moving = true;
         }

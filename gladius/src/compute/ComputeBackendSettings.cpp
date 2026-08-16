@@ -4,6 +4,14 @@
 
 namespace gladius::compute
 {
+    std::optional<ComputeBackendKind> getConfiguredComputeBackendPreference(
+      ConfigManager const & configManager)
+    {
+        auto const configuredBackend =
+          configManager.getValue<std::string>("compute", "backend", std::string{});
+        return parseComputeBackend(configuredBackend);
+    }
+
     ComputeBackendKind getConfiguredComputeBackend(ConfigManager const & configManager)
     {
         auto const configuredBackend =

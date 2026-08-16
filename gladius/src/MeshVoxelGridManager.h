@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include "ComputeContext.h"
 #include "MeshVoxelGrid.h"
 #include "Primitives.h"
 #include "ResourceKey.h"

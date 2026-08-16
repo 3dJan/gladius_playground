@@ -1,5 +1,9 @@
 #include "SliceView.h"
 
+#if defined(GLADIUS_ENABLE_OPENCL)
+#include "../compute/ComputeCore.h"
+#endif
+
 #include "imgui.h"
 #include <fmt/format.h>
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "ComputeTypes.h"
 #include "types.h"
 
 #include <eigen3/Eigen/Core>

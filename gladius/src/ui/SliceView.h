@@ -1,7 +1,5 @@
 #pragma once
 
-#include "compute/ComputeCore.h"
-
 #include "Contour.h"
 #include "imgui.h"
 #include <algorithm>
@@ -10,6 +8,7 @@
 
 namespace gladius
 {
+    class ComputeCore;
     class GLView;
 }
 

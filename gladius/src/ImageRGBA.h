@@ -1,7 +1,10 @@
 #pragma once
 
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "ComputeContext.h"
-#include <CL/cl_platform.h>
+#endif
+
+#include "ComputeTypes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +15,9 @@
 
 namespace gladius
 {
+    class ComputeContext;
+
+#if defined(GLADIUS_ENABLE_OPENCL)
     template <typename ImageDataPoint>
     class ImageImpl
     {
@@ -373,4 +379,174 @@ namespace gladius
     using DistanceInitBuffer = ImageImpl<cl_float>;
 
     using MarchingSquaresStates = ImageImpl<cl_char>;
+#else
+    /// Backend-neutral host image used by CPU-side contour and resource code when
+    /// the OpenCL backend is not part of the binary.
+    template <typename ImageDataPoint>
+    class ImageImpl
+    {
+      public:
+        explicit ImageImpl(ComputeContext &)
+            : m_width(512)
+            , m_height(512)
+            , m_size(m_width * m_height * m_depth)
+        {
+        }
+
+        ImageImpl(ComputeContext &, size_t width, size_t height)
+            : m_width(width)
+            , m_height(height)
+            , m_size(m_width * m_height * m_depth)
+        {
+        }
+
+        ImageImpl(ComputeContext &, size_t width, size_t height, size_t depth)
+            : m_width(width)
+            , m_height(height)
+            , m_depth(depth)
+            , m_size(m_width * m_height * m_depth)
+        {
+        }
+
+        ImageImpl(ImageImpl const & source)
+            : m_width(source.m_width)
+            , m_height(source.m_height)
+            , m_depth(source.m_depth)
+            , m_size(source.m_size)
+            , m_data(source.m_data)
+        {
+        }
+
+        virtual ~ImageImpl() = default;
+
+        void setWidth(size_t width)
+        {
+            m_width = std::max(static_cast<size_t>(1), width);
+            m_size = m_width * m_height * m_depth;
+        }
+
+        void setHeight(size_t height)
+        {
+            m_height = std::max(static_cast<size_t>(1), height);
+            m_size = m_width * m_height * m_depth;
+        }
+
+        void read()
+        {
+        }
+
+        void write()
+        {
+        }
+
+        void fill(ImageDataPoint value)
+        {
+            std::fill(std::begin(m_data), std::end(m_data), value);
+        }
+
+        virtual void allocateOnDevice()
+        {
+            m_size = m_width * m_height * m_depth;
+            m_data.resize(m_size);
+        }
+
+        std::vector<ImageDataPoint> & getData()
+        {
+            return m_data;
+        }
+
+        [[nodiscard]] std::vector<ImageDataPoint> const & getData() const
+        {
+            return m_data;
+        }
+
+        void print()
+        {
+            int lineIndex = 0;
+            for (auto const & value : m_data)
+            {
+                std::cout << value.x << " ";
+                ++lineIndex;
+                if (lineIndex == static_cast<int>(std::sqrt(static_cast<double>(m_data.size()))))
+                {
+                    lineIndex = 0;
+                    std::cout << std::endl;
+                }
+            }
+            std::cout << std::endl;
+        }
+
+        [[nodiscard]] size_t index(size_t x, size_t y) const
+        {
+            auto const ix = std::clamp(x, static_cast<size_t>(3), m_width - 2);
+            auto const iy = std::clamp(y, static_cast<size_t>(3), m_height - 2);
+            return iy * m_width + ix;
+        }
+
+        [[nodiscard]] size_t index(size_t x, size_t y, size_t z) const
+        {
+            auto const ix = std::clamp(x, static_cast<size_t>(0), m_width);
+            auto const iy = std::clamp(y, static_cast<size_t>(0), m_height);
+            auto const iz = std::clamp(z, static_cast<size_t>(0), m_depth);
+            return std::clamp(iz * m_width * m_height + iy * m_width + ix,
+                              static_cast<size_t>(0),
+                              m_size - 1);
+        }
+
+        [[nodiscard]] size_t getWidth() const
+        {
+            return m_width;
+        }
+
+        [[nodiscard]] size_t getHeight() const
+        {
+            return m_height;
+        }
+
+        [[nodiscard]] size_t getDepth() const
+        {
+            return m_depth;
+        }
+
+        [[nodiscard]] ImageDataPoint getValue(size_t x, size_t y) const
+        {
+            return m_data.at(index(x, y));
+        }
+
+        [[nodiscard]] ImageDataPoint getValue(size_t x, size_t y, size_t z) const
+        {
+            return m_data.at(index(x, y, z));
+        }
+
+        void setValue(size_t x, size_t y, ImageDataPoint value)
+        {
+            m_data.at(index(x, y)) = value;
+        }
+
+        void setValue(size_t x, size_t y, size_t z, ImageDataPoint value)
+        {
+            m_data.at(index(x, y, z)) = value;
+        }
+
+      protected:
+        std::vector<ImageDataPoint> m_data;
+        size_t m_width;
+        size_t m_height;
+        size_t m_depth = 1;
+        size_t m_size = 0;
+    };
+
+    using ImageRGBA = ImageImpl<cl_float4>;
+    using DistanceMap = ImageImpl<cl_float2>;
+    using DepthBuffer = ImageImpl<cl_float>;
+    using PowerMap = ImageImpl<cl_float2>;
+    using Vertices = ImageImpl<cl_float4>;
+    using Normals = ImageImpl<cl_float2>;
+    using Adjacencies = ImageImpl<cl_int2>;
+    using JfAMap = ImageImpl<cl_float2>;
+    using Skeleton = ImageImpl<cl_int>;
+    using PreComputedSdf = ImageImpl<cl_float4>;
+    using DistanceInitBuffer = ImageImpl<cl_float>;
+    using MarchingSquaresStates = ImageImpl<cl_char>;
+#endif
 }

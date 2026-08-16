@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <thread>
 #include <vector>
@@ -175,6 +176,7 @@ namespace gladius::mcp
             return false;
         }
 
+        m_transportType = TransportType::STDIO;
         m_running = true;
 
         // Start stdio processing in a separate thread
@@ -191,6 +193,7 @@ namespace gladius::mcp
             return false;
         }
 
+        m_transportType = TransportType::HTTP;
         m_port = port;
 
         // Start server in a separate thread
@@ -215,33 +218,32 @@ namespace gladius::mcp
 
     void MCPServer::stop()
     {
-        if (!m_running)
-        {
-            return;
-        }
-
-        m_running = false;
+        bool const wasRunning = m_running.exchange(false);
 
         if (m_transportType == TransportType::HTTP)
         {
             m_server->stop();
-            if (m_serverThread.joinable())
+            if (m_serverThread.joinable() && m_serverThread.get_id() != std::this_thread::get_id())
             {
                 m_serverThread.join();
             }
         }
         else if (m_transportType == TransportType::STDIO)
         {
-            // For stdio, the thread will exit when m_running becomes false
-            if (m_stdioThread.joinable())
+            // EOF can stop the loop before stop() is called. Always join a completed
+            // stdio thread so its destructor never sees a joinable thread.
+            if (m_stdioThread.joinable() && m_stdioThread.get_id() != std::this_thread::get_id())
             {
                 m_stdioThread.join();
             }
         }
 
         m_port = 0;
-        // Log to stderr (stdout may be reserved for MCP protocol)
-        std::cerr << "MCP Server stopped" << std::endl;
+        if (wasRunning)
+        {
+            // Log to stderr (stdout may be reserved for MCP protocol)
+            std::cerr << "MCP Server stopped" << std::endl;
+        }
     }
 
     bool MCPServer::isRunning() const
@@ -2382,41 +2384,161 @@ namespace gladius::mcp
 
     void MCPServer::runStdioLoop()
     {
-        std::string line;
-        while (m_running && std::getline(std::cin, line))
+        while (m_running)
         {
-            if (!line.empty())
+            std::string firstLine;
+            if (!std::getline(std::cin, firstLine))
             {
-                handleStdioMessage(line);
+                break;
+            }
+
+            if (!firstLine.empty() && firstLine.back() == '\r')
+            {
+                firstLine.pop_back();
+            }
+            if (firstLine.empty())
+            {
+                continue;
+            }
+
+            auto firstNonWhitespace = firstLine.find_first_not_of(" \t");
+            auto const colon = firstLine.find(':', firstNonWhitespace);
+            std::string headerName;
+            if (firstNonWhitespace != std::string::npos && colon != std::string::npos)
+            {
+                headerName = firstLine.substr(firstNonWhitespace, colon - firstNonWhitespace);
+                for (char & character : headerName)
+                {
+                    character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                }
+            }
+            if (headerName == "content-length")
+            {
+                std::size_t contentLength = 0;
+                std::string lengthText = firstLine.substr(colon + 1);
+                auto trim = [](std::string value)
+                {
+                    auto const first = value.find_first_not_of(" \t");
+                    if (first == std::string::npos)
+                    {
+                        return std::string{};
+                    }
+                    auto const last = value.find_last_not_of(" \t");
+                    return value.substr(first, last - first + 1);
+                };
+                lengthText = trim(lengthText);
+
+                bool validLength = !lengthText.empty();
+                for (char const character : lengthText)
+                {
+                    if (character < '0' || character > '9')
+                    {
+                        validLength = false;
+                        break;
+                    }
+                }
+                if (validLength)
+                {
+                    try
+                    {
+                        auto const parsedLength = std::stoull(lengthText);
+                                                if (parsedLength > std::numeric_limits<std::size_t>::max() ||
+                                                        parsedLength >
+                                                            static_cast<unsigned long long>(
+                                                                std::numeric_limits<std::streamsize>::max()))
+                        {
+                            validLength = false;
+                        }
+                        else
+                        {
+                            contentLength = static_cast<std::size_t>(parsedLength);
+                        }
+                    }
+                    catch (const std::exception &)
+                    {
+                        validLength = false;
+                    }
+                }
+
+                bool headerTerminated = false;
+                std::string headerLine;
+                while (validLength && std::getline(std::cin, headerLine))
+                {
+                    if (!headerLine.empty() && headerLine.back() == '\r')
+                    {
+                        headerLine.pop_back();
+                    }
+                    if (headerLine.empty())
+                    {
+                        headerTerminated = true;
+                        break;
+                    }
+                }
+
+                if (!validLength || !headerTerminated)
+                {
+                    sendStdioResponse(
+                      createErrorResponse(nullptr, -32700, "Invalid Content-Length framing"),
+                      StdioFraming::ContentLength);
+                    break;
+                }
+
+                std::string message(contentLength, '\0');
+                std::cin.read(message.data(), static_cast<std::streamsize>(contentLength));
+                if (std::cin.gcount() != static_cast<std::streamsize>(contentLength))
+                {
+                    sendStdioResponse(
+                      createErrorResponse(nullptr, -32700, "Incomplete Content-Length message"),
+                      StdioFraming::ContentLength);
+                    break;
+                }
+
+                handleStdioMessage(message, StdioFraming::ContentLength);
+            }
+            else
+            {
+                handleStdioMessage(firstLine, StdioFraming::NewlineDelimited);
             }
         }
+
+        // EOF is a normal termination condition for a stdio server. Publishing it
+        // lets the owning headless application leave its supervisory loop.
+        m_running = false;
     }
 
-    void MCPServer::handleStdioMessage(const std::string & line)
+    void MCPServer::handleStdioMessage(const std::string & message, StdioFraming framing)
     {
         try
         {
-            json request = json::parse(line);
+            json request = json::parse(message);
             json response = processJSONRPCRequest(request);
-            sendStdioResponse(response);
+            sendStdioResponse(response, framing);
         }
         catch (const json::parse_error & e)
         {
             json errorResponse =
               createErrorResponse(0, -32700, "Parse error: " + std::string(e.what()));
-            sendStdioResponse(errorResponse);
+            sendStdioResponse(errorResponse, framing);
         }
         catch (const std::exception & e)
         {
             json errorResponse =
               createErrorResponse(0, -32603, "Internal error: " + std::string(e.what()));
-            sendStdioResponse(errorResponse);
+            sendStdioResponse(errorResponse, framing);
         }
     }
 
-    void MCPServer::sendStdioResponse(const nlohmann::json & response)
+    void MCPServer::sendStdioResponse(const nlohmann::json & response, StdioFraming framing)
     {
-        std::cout << response.dump() << std::endl;
+        std::string const body = response.dump();
+        if (framing == StdioFraming::ContentLength)
+        {
+            std::cout << "Content-Length: " << body.size() << "\r\n\r\n" << body;
+        }
+        else
+        {
+            std::cout << body << '\n';
+        }
         std::cout.flush();
     }
 

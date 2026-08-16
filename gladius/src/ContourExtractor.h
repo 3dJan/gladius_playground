@@ -1,12 +1,12 @@
 #pragma once
 
 #include "Buffer.h"
+#include "kernel/types.h"
 #include "nodes/BuildParameter.h"
 
 #include "Contour.h"
 #include "EventLogger.h"
 #include "ImageRGBA.h"
-#include "SlicerProgram.h"
 
 namespace gladius
 {

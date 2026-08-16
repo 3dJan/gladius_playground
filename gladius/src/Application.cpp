@@ -305,17 +305,22 @@ namespace gladius
 
     void Application::propagateComputeCapabilities()
     {
-        if (auto document = getCurrentDocument())
+        auto const capabilities = m_mainWindow.getBackendCapabilities();
+        if (compute::hasCapability(capabilities, compute::RendererCapability::VdbSampling))
         {
-            if (auto core = document->getCore())
-            {
-                auto const & pm = core->getProgramManager();
-                m_mainWindow.setVdbSupported(pm.isVdbSupported(), pm.getVdbSupportFailureReason());
-                return;
-            }
+            m_mainWindow.setVdbSupported(true);
+            return;
         }
-        // No compute available; leave NanoVDB grayed out with a generic message.
-        m_mainWindow.setVdbSupported(false, "No OpenCL compute context available.");
+
+        if (m_mainWindow.getBackendCapabilities() != compute::RendererCapability::None)
+        {
+            m_mainWindow.setVdbSupported(
+              false,
+              "NanoVDB/VDB sampling is not supported by the selected compute backend.");
+            return;
+        }
+
+        m_mainWindow.setVdbSupported(false, "No compute backend is available.");
     }
 
     std::size_t Application::applyMeshSdfSettingsToCurrentDocument()
@@ -335,6 +340,7 @@ namespace gladius
 
         // 2a) Forward runtime knobs into the active rendering settings so kernel
         //     dispatch picks the chosen method on the next frame.
+    #if defined(GLADIUS_ENABLE_OPENCL)
         if (auto core = document->getCore())
         {
             if (auto resources = core->getResourceContext())
@@ -361,6 +367,7 @@ namespace gladius
                 }
             }
         }
+#endif
 
         return document->queueMeshSdfEvaluationConfigUpdate(evalCfg);
     }

@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "ComputeContext.h"
+#endif
 #include "io/3mf/Writer3mf.h"
 #include "Theme.h"
 
@@ -15,29 +17,39 @@
 #include <shellapi.h>
 #endif
 
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "../CliReader.h"
 #include "../CliWriter.h"
+#endif
 #include "../EventLogger.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
 #include "../TimeMeasurement.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "../io/MeshExporter.h"
+#endif
 #include "AboutDialog.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
 #include "GLView.h"
 #include "LibraryBrowser.h"
 #include "Profiling.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "SvgWriter.h"
+#endif
 #include "compute/ComputeBackendSettings.h"
+#include "compute/types.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
+#endif
 #include "exceptions.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/Writer3mf.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "io/ImageStackExporter.h"
+#endif
 #include "render/RenderModeUpdatePolicy.h"
-#include <nodes/ToCommandStreamVisitor.h>
 
 namespace gladius::ui
 {
@@ -90,6 +102,8 @@ namespace gladius::ui
         m_mainView.setRequestCloseCallBack([&]() { close(); });
     }
 
+    MainWindow::~MainWindow() = default;
+
     void MainWindow::setup(std::shared_ptr<ComputeCore> core,
                            std::shared_ptr<Document> doc,
                            events::SharedLogger logger)
@@ -114,15 +128,24 @@ namespace gladius::ui
         // Initialize keyboard shortcuts
         initializeShortcuts();
 
-        m_renderWindow.initialize(m_core.get(), &m_mainView, m_shortcutManager, m_configManager);
+            #if defined(GLADIUS_ENABLE_OPENCL)
+                m_renderWindow.initialize(
+                  m_core.get(), &m_mainView, m_shortcutManager, m_configManager, m_runtime.get());
+            #else
+                m_renderWindow.initialize(
+                  nullptr, &m_mainView, m_shortcutManager, m_configManager, m_runtime.get());
+            #endif
         m_renderWindow.setDocument(m_doc.get());
         m_renderWindow.setExportState(&m_exportState);
-        LOG_LOCATION
-        m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack([&]()
-                                                                    { onPreviewProgramSwap(); });
-
-        m_core->getOptimzedRenderProgram()->setOnProgramSwapCallBack([&]()
-                                                                     { onPreviewProgramSwap(); });
+            #if defined(GLADIUS_ENABLE_OPENCL)
+                if (m_core)
+                {
+                    m_core->getPreviewRenderProgram()->setOnProgramSwapCallBack(
+                      [&]() { onPreviewProgramSwap(); });
+                    m_core->getOptimzedRenderProgram()->setOnProgramSwapCallBack(
+                      [&]() { onPreviewProgramSwap(); });
+                }
+            #endif
 
         m_dirty = true;
 
@@ -187,7 +210,9 @@ namespace gladius::ui
         m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
 
         // Wire up export state to dialogs and editors that need it
+    #if defined(GLADIUS_ENABLE_OPENCL)
         m_meshExporterDialog.setExportState(&m_exportState);
+    #endif
         m_modelEditor.setExportState(&m_exportState);
 
         // Defer the initial template load while the welcome screen is visible.
@@ -219,16 +244,16 @@ namespace gladius::ui
         {
             if (!m_computeAvailable)
             {
-                ImGui::TextWrapped("Rendering and compute settings are unavailable because "
-                                   "OpenCL/compute initialization failed.\nThe UI remains usable, "
-                                   "but 3D preview and slicing are disabled.");
+                ImGui::TextWrapped("Rendering settings are unavailable because compute "
+                                   "initialization failed.");
                 ImGui::Separator();
                 if (ImGui::Button("Close"))
                 {
                     // Nothing else to do when compute is disabled
                 }
             }
-            else
+#if defined(GLADIUS_ENABLE_OPENCL)
+            else if (m_core)
             {
                 // Add save/load buttons for settings if ConfigManager is available
                 if (m_configManager)
@@ -263,6 +288,41 @@ namespace gladius::ui
                     refreshModel();
                 }
             }
+#else
+            else
+            {
+                auto & settings = m_renderWindow.getNeutralRenderSettings();
+                if (m_configManager)
+                {
+                    if (ImGui::Button("Save Settings"))
+                    {
+                        saveRenderSettings();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Load Settings"))
+                    {
+                        loadRenderSettings();
+                        m_renderWindow.invalidateViewDueToParameterChange();
+                    }
+                    ImGui::Separator();
+                }
+
+                ImGui::SliderFloat("Ray marching tolerance", &settings.quality, 0.1f, 20.0f);
+                bool enableSdfRendering = (settings.flags & RF_SHOW_FIELD) != 0u;
+                if (ImGui::Checkbox("Show Distance field", &enableSdfRendering))
+                {
+                    if (enableSdfRendering)
+                    {
+                        settings.flags |= RF_SHOW_FIELD;
+                    }
+                    else
+                    {
+                        settings.flags &= ~RF_SHOW_FIELD;
+                    }
+                    m_renderWindow.invalidateViewDueToParameterChange();
+                }
+            }
+#endif
         }
 
         if (ImGui::CollapsingHeader("Appearance"))
@@ -318,6 +378,13 @@ namespace gladius::ui
             ImGui::Separator();
         }
 
+    #if defined(GLADIUS_ENABLE_OPENCL)
+        if (!m_computeAvailable || !m_core)
+        {
+            ImGui::End();
+            return;
+        }
+
         auto z = m_core->getSliceHeight();
         if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
         {
@@ -332,6 +399,7 @@ namespace gladius::ui
         {
             m_logView.show();
         }
+#endif
         ImGui::End();
     }
 
@@ -376,7 +444,7 @@ namespace gladius::ui
               }
           });
 
-        // Start async OpenCL initialization
+        // Start asynchronous initialization of the selected backend.
         startAsyncComputeInit();
     }
 
@@ -389,6 +457,82 @@ namespace gladius::ui
             return; // Already started or completed
         }
 
+        if (auto const configuredBackend = getExplicitlyConfiguredBackend();
+            configuredBackend == compute::ComputeBackendKind::WebGPU
+#if !defined(GLADIUS_ENABLE_OPENCL)
+            || !configuredBackend.has_value()
+#endif
+        )
+        {
+            m_computeInitState = ComputeInitState::InProgress;
+            try
+            {
+                m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
+                if (!m_runtime->isAvailable())
+                {
+                    throw std::runtime_error(m_runtime->getErrorMessage());
+                }
+
+                m_core.reset();
+                m_doc = std::make_shared<Document>(m_logger);
+                m_computeAvailable = true;
+                m_computeErrorMessage.clear();
+                setup(nullptr, m_doc, m_logger);
+
+                if (m_startupFile)
+                {
+                    loadFileDeferred(*m_startupFile);
+                    m_startupFile.reset();
+                }
+
+                if (m_logger)
+                {
+                    m_logger->addEvent({"WebGPU initialized successfully", events::Severity::Info});
+                }
+                m_computeInitState = ComputeInitState::Finalized;
+            }
+            catch (std::exception const & exception)
+            {
+                m_runtime.reset();
+                setComputeUnavailable(
+                  std::string{"WebGPU initialization failed: "} + exception.what(), true);
+                m_computeInitState = ComputeInitState::Finalized;
+            }
+            if (m_logger)
+            {
+                if (!m_computeErrorMessage.empty())
+                {
+                    m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
+                }
+            }
+            if (m_onComputeReadyCallback)
+            {
+                m_onComputeReadyCallback();
+            }
+            return;
+        }
+
+        if (auto const configuredBackend = getExplicitlyConfiguredBackend();
+            configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend))
+        {
+            m_computeInitState = ComputeInitState::Finalized;
+            setComputeUnavailable(
+              "The explicitly selected compute backend '" +
+                std::string{compute::toString(*configuredBackend)} +
+                "' is not available in this build. No other backend was selected.",
+              true);
+            if (m_logger)
+            {
+                m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
+            }
+            if (m_onComputeReadyCallback)
+            {
+                m_onComputeReadyCallback();
+            }
+            return;
+        }
+
+    #if defined(GLADIUS_ENABLE_OPENCL)
         m_computeInitState = ComputeInitState::InProgress;
 
         // Phase 1: Run the slow device enumeration on a background thread
@@ -435,10 +579,21 @@ namespace gladius::ui
               }
               return result;
           });
+#else
+        m_computeInitState = ComputeInitState::Finalized;
+        setComputeUnavailable("No supported compute backend is available in this build.", true);
+        if (m_onComputeReadyCallback)
+        {
+            m_onComputeReadyCallback();
+        }
+#endif
     }
 
     void MainWindow::pollComputeInit()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return;
+#else
         if (m_computeInitState != ComputeInitState::InProgress)
         {
             return;
@@ -480,6 +635,7 @@ namespace gladius::ui
 
                 m_core = std::make_shared<ComputeCore>(
                   context, RequiredCapabilities::OpenGLInterop, m_logger);
+                m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
                 m_doc = std::make_shared<Document>(m_core);
                 m_computeAvailable = true;
                 m_computeErrorMessage.clear();
@@ -505,11 +661,15 @@ namespace gladius::ui
                     m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
                 }
 
-                auto const configuredBackend = m_configManager != nullptr
-                                                 ? compute::getConfiguredComputeBackend(*m_configManager)
-                                                 : compute::ComputeBackendKind::OpenCL;
-                std::cout << "[ComputeBackend] OpenCL compute core active; viewport configured="
-                          << compute::toString(configuredBackend) << std::endl;
+                                auto const configuredBackend = m_configManager != nullptr
+                                                                                                 ? compute::getConfiguredComputeBackend(*m_configManager)
+                                                                                                 : compute::ComputeBackendKind::OpenCL;
+                                if (m_logger)
+                                {
+                                        m_logger->addEvent({"OpenCL compute core active; viewport configured=" +
+                                                                                    std::string(compute::toString(configuredBackend)),
+                                                                                events::Severity::Info});
+                                }
             }
             else
             {
@@ -545,13 +705,14 @@ namespace gladius::ui
         {
             m_onComputeReadyCallback();
         }
+#endif
     }
 
     void MainWindow::setupHeadless(events::SharedLogger logger)
     {
         ProfileFunction;
         // Only run once
-        if (m_initialized && m_doc && m_core)
+        if (m_initialized && m_doc && (m_core || m_runtime))
         {
             return;
         }
@@ -559,6 +720,59 @@ namespace gladius::ui
         m_logger = std::move(logger);
         m_initialized = true;
 
+                if (auto const configuredBackend = getExplicitlyConfiguredBackend();
+                        configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend) &&
+                        *configuredBackend != compute::ComputeBackendKind::WebGPU)
+        {
+                        setComputeUnavailable(
+                            "The explicitly selected compute backend '" +
+                                std::string{compute::toString(*configuredBackend)} +
+                                "' is not available in this build. OpenCL was not initialized.",
+                            false);
+            if (m_logger)
+            {
+                m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
+            }
+            return;
+        }
+
+        if (getExplicitlyConfiguredBackend() == compute::ComputeBackendKind::WebGPU
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+            || !getExplicitlyConfiguredBackend().has_value()
+    #endif
+        )
+        {
+            try
+            {
+                m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
+                if (!m_runtime->isAvailable())
+                {
+                    throw std::runtime_error(m_runtime->getErrorMessage());
+                }
+                m_core.reset();
+                m_doc = std::make_shared<Document>(m_logger);
+                m_doc->setUiMode(false);
+                m_computeAvailable = true;
+                m_computeErrorMessage.clear();
+            }
+            catch (std::exception const & exception)
+            {
+                m_runtime.reset();
+                m_computeAvailable = false;
+                m_computeErrorMessage = exception.what();
+                if (m_logger)
+                {
+                    m_logger->addEvent({std::string("Headless WebGPU disabled: ") + exception.what(),
+                                        events::Severity::Warning});
+                }
+            }
+            return;
+        }
+
+        #if !defined(GLADIUS_ENABLE_OPENCL)
+            setComputeUnavailable("No compute backend is available in this build", false);
+            return;
+        #else
         // Initialize compute stack without OpenGL interop for headless safety
         try
         {
@@ -573,6 +787,7 @@ namespace gladius::ui
 
             m_core =
               std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
+            m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
             m_doc = std::make_shared<Document>(m_core);
 
             // Explicitly mark document as non-UI mode to disable backups and UI-only behaviors
@@ -601,6 +816,30 @@ namespace gladius::ui
                                     events::Severity::Warning});
             }
         }
+#endif
+    }
+
+    bool MainWindow::isWebGPUBackendRequested() const
+    {
+        auto const configuredBackend = getExplicitlyConfiguredBackend();
+        return configuredBackend == compute::ComputeBackendKind::WebGPU;
+    }
+
+    std::optional<compute::ComputeBackendKind> MainWindow::getExplicitlyConfiguredBackend() const
+    {
+        if (m_configManager == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        return compute::getConfiguredComputeBackendPreference(*m_configManager);
+    }
+
+    void MainWindow::setComputeUnavailable(std::string errorMessage, bool showModal)
+    {
+        m_computeAvailable = false;
+        m_computeErrorMessage = std::move(errorMessage);
+        m_showComputeErrorModal = showModal;
     }
 
     void MainWindow::render()
@@ -692,7 +931,8 @@ namespace gladius::ui
             }
         }
 
-        // If compute is available, validate context
+        // If compute is available, validate the legacy OpenCL context.
+    #if defined(GLADIUS_ENABLE_OPENCL)
         if (m_computeAvailable && m_core)
         {
             // try to get the compute token
@@ -728,6 +968,7 @@ namespace gladius::ui
                 }
             }
         }
+#endif
 
         try
         {
@@ -1025,12 +1266,14 @@ namespace gladius::ui
 
             // Library browser is rendered from the main UI loop.
         }
+    #if defined(GLADIUS_ENABLE_OPENCL)
         catch (OpenCLError & e)
         {
             m_logger->addEvent(
               {fmt::format("Unexpected exception: {}", e.what()), events::Severity::Error});
             m_logView.show();
         }
+    #endif
         catch (std::exception & e)
         {
             m_logger->addEvent(fmt::format("Unexpected exception: {}", e.what()));
@@ -1072,46 +1315,66 @@ namespace gladius::ui
         {
         case AsyncDialogOperation::ExportCliCurrentLayer:
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             CliWriter writer;
             writer.saveCurrentLayer(filename, *m_core);
 #ifdef WIN32
             ShellExecuteW(
               nullptr, L"open", writer.getFilename().c_str(), nullptr, nullptr, SW_SHOW);
 #endif
+#else
+            throw std::runtime_error("CLI export is unavailable for the selected backend");
+#endif
             break;
         }
         case AsyncDialogOperation::ExportCliSliced:
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             auto exportPath = filename;
             exportPath.replace_extension(".cli");
             m_cliExportDialog.beginExport(exportPath, *m_core);
+#else
+            throw std::runtime_error("CLI export is unavailable for the selected backend");
+#endif
             break;
         }
         case AsyncDialogOperation::ExportSvgCurrentLayer:
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             SvgWriter svgWriter;
             svgWriter.saveCurrentLayer(filename, *m_core);
 #ifdef WIN32
             ShellExecuteW(nullptr, L"open", filename.c_str(), nullptr, nullptr, SW_SHOW);
 #endif
+#else
+            throw std::runtime_error("SVG export is unavailable for the selected backend");
+#endif
             break;
         }
         case AsyncDialogOperation::ExportVdb:
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             vdb::MeshExporter exporter;
             exporter.setQualityLevel(1);
             exporter.beginExport(filename, *m_core);
             while (exporter.advanceExport(*m_core)) {}
             exporter.finalizeExportVdb();
+#else
+            throw std::runtime_error("VDB export is unavailable for the selected backend");
+#endif
             break;
         }
         case AsyncDialogOperation::ExportNvdb:
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             vdb::MeshExporter exporter;
             exporter.setQualityLevel(1);
             exporter.beginExport(filename, *m_core);
             while (exporter.advanceExport(*m_core)) {}
             exporter.finalizeExportNanoVdb();
+#else
+            throw std::runtime_error("NanoVDB export is unavailable for the selected backend");
+#endif
             break;
         }
         case AsyncDialogOperation::Import:
@@ -1491,8 +1754,8 @@ namespace gladius::ui
             showWelcomeScreen();
         }
 
+    #if defined(GLADIUS_ENABLE_OPENCL)
         CliWriter writer;
-
         ImGui::Separator();
         ImGui::TextUnformatted("Export");
 
@@ -1579,6 +1842,10 @@ namespace gladius::ui
             ImGui::TextDisabled("Compute is disabled: export functions are unavailable.");
             ImGui::EndDisabled();
         }
+        #else
+            ImGui::Separator();
+            ImGui::TextDisabled("Export functions are unavailable for the selected backend.");
+        #endif
 
         ImGui::Separator();
 
@@ -1685,6 +1952,10 @@ namespace gladius::ui
 
     void MainWindow::sliceWindow()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        m_isSlicePreviewVisible = false;
+        return;
+#else
         updateContours();
         m_isSlicePreviewVisible = m_sliceView.render(*m_core, m_mainView);
 
@@ -1693,24 +1964,43 @@ namespace gladius::ui
         {
             processShortcuts(ShortcutContext::SlicePreview);
         }
+#endif
     }
 
     void MainWindow::meshExportDialog()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return;
+#else
+        if (!m_core)
+        {
+            return;
+        }
+
         if (m_meshExporterDialog.isVisible())
         {
             m_mainView.startAnimationMode();
         }
         m_meshExporterDialog.render(*m_core);
+    #endif
     }
 
     void MainWindow::cliExportDialog()
     {
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+        return;
+    #else
+        if (!m_core)
+        {
+            return;
+        }
+
         if (m_cliExportDialog.isVisible())
         {
             m_mainView.startAnimationMode();
         }
         m_cliExportDialog.render(*m_core);
+    #endif
     }
 
     void MainWindow::import()
@@ -1725,12 +2015,17 @@ namespace gladius::ui
 
     void MainWindow::updateContours()
     {
-        if (!m_contoursDirty || !m_isSlicePreviewVisible)
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        m_contoursDirty = false;
+        return;
+#else
+        if (!m_core || !m_contoursDirty || !m_isSlicePreviewVisible)
         {
             return;
         }
         m_core->invalidateContourCache();
         m_contoursDirty = false;
+#endif
     }
 
     void MainWindow::markFileAsChanged()
@@ -1950,6 +2245,7 @@ namespace gladius::ui
                                       false,
                                       {},
                                       sourceDocument};
+#if defined(GLADIUS_ENABLE_OPENCL)
               auto thumbnailInput = tempFilename;
               thumbnailInput.replace_extension(".3mf");
               try
@@ -2021,6 +2317,37 @@ namespace gladius::ui
               std::error_code cleanupError;
               std::filesystem::remove(tempFilename, cleanupError);
               std::filesystem::remove(thumbnailInput, cleanupError);
+#else
+              try
+              {
+                  io::Writer3mf writer(logger);
+                  if (!writer.save(tempFilename, snapshot, false))
+                  {
+                      result.error = "The 3MF writer rejected the save snapshot.";
+                  }
+                  else
+                  {
+                      std::error_code renameError;
+                      std::filesystem::rename(tempFilename, filename, renameError);
+                      if (renameError)
+                      {
+                          result.error = fmt::format(
+                            "Could not publish saved file: {}", renameError.message());
+                      }
+                      else
+                      {
+                          result.success = true;
+                      }
+                  }
+              }
+              catch (std::exception const & e)
+              {
+                  result.error = e.what();
+              }
+
+              std::error_code cleanupError;
+              std::filesystem::remove(tempFilename, cleanupError);
+#endif
               return result;
           });
     }
@@ -2121,6 +2448,11 @@ namespace gladius::ui
 
     void MainWindow::onPreviewProgramSwap()
     {
+        if (!m_doc)
+        {
+            return;
+        }
+
         m_parameterDirty = true;
         m_contoursDirty = true;
         m_dirty = true;
@@ -2141,13 +2473,18 @@ namespace gladius::ui
             return;
         }
 
-        // Gracefully stop any ongoing compilations before exit
-        auto & programManager = m_core->getProgramManager();
-        if (programManager.isAnyCompilationInProgressNonBlocking())
+        // Gracefully stop any ongoing OpenCL compilations before exit
+    #if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core)
         {
-            programManager.requestShutdownAll();
-            programManager.waitForAllCompilations();
+            auto & programManager = m_core->getProgramManager();
+            if (programManager.isAnyCompilationInProgressNonBlocking())
+            {
+                programManager.requestShutdownAll();
+                programManager.waitForAllCompilations();
+            }
         }
+#endif
 
         if (m_fileChanged)
         {
@@ -2499,6 +2836,7 @@ namespace gladius::ui
             char const * renderBackendStr = "N/A";
             auto selectedRenderBackend = RenderBackend::Unavailable;
             auto isRenderBackendCompiling = false;
+#if defined(GLADIUS_ENABLE_OPENCL)
             if (m_core)
             {
                 bool const cameraMoving = m_renderWindow.isCameraMoving();
@@ -2534,8 +2872,10 @@ namespace gladius::ui
                                      ? "Compiling"
                                      : getRenderBackendStatusLabel(selectedRenderBackend);
             }
+#endif
             
             // Bounding box dimensions
+#if defined(GLADIUS_ENABLE_OPENCL)
             if (m_core)
             {
                 auto const bb = m_core->getBoundingBox();
@@ -2549,6 +2889,18 @@ namespace gladius::ui
                     ImGui::SameLine();
                 }
             }
+#else
+            if (m_doc)
+            {
+                auto const bb = m_doc->computeBoundingBox();
+                ImGui::Text("%s %.3f x %.3f x %.3f mm",
+                            ICON_FA_CUBE,
+                            bb.max.x - bb.min.x,
+                            bb.max.y - bb.min.y,
+                            bb.max.z - bb.min.z);
+                ImGui::SameLine();
+            }
+#endif
 
             // HQ progressive render progress bar - lets the user see the progressive
             // rendering advancing and, when the view is invalidated (camera move, model
@@ -2595,7 +2947,7 @@ namespace gladius::ui
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::BeginTooltip();
-                    ImGui::TextUnformatted("OpenCL/compute unavailable. Click for details.");
+                    ImGui::TextUnformatted("Compute backend unavailable. Click for details.");
                     if (!m_computeErrorMessage.empty())
                     {
                         ImGui::Separator();
@@ -2615,20 +2967,22 @@ namespace gladius::ui
     void MainWindow::renderComputeErrorModal()
     {
         // Compute error details modal - rendered independently of other UI elements
-        // to ensure it's always visible when OpenCL initialization fails
+        // to ensure a backend initialization failure is always visible.
         if (m_showComputeErrorModal)
         {
-            if (!ImGui::IsPopupOpen("OpenCL/Compute Unavailable"))
+            if (!ImGui::IsPopupOpen("Compute Backend Unavailable"))
             {
-                ImGui::OpenPopup("OpenCL/Compute Unavailable");
+                ImGui::OpenPopup("Compute Backend Unavailable");
             }
-            if (ImGui::BeginPopupModal("OpenCL/Compute Unavailable",
+            if (ImGui::BeginPopupModal("Compute Backend Unavailable",
                                        &m_showComputeErrorModal,
                                        ImGuiWindowFlags_AlwaysAutoResize |
                                          ImGuiWindowFlags_NoSavedSettings))
             {
-                ImGui::TextWrapped("Gladius couldn't initialize OpenCL. The UI stays usable, but "
-                                   "rendering and slicing are disabled.");
+                bool const webGpuRequested = isWebGPUBackendRequested();
+                ImGui::TextWrapped(
+                  "Gladius couldn't initialize the selected compute backend. The UI stays usable, "
+                  "but rendering and slicing are disabled.");
                 ImGui::Separator();
 
                 if (!m_computeErrorMessage.empty())
@@ -2648,13 +3002,23 @@ namespace gladius::ui
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // Provide helpful troubleshooting guidance
-                ImGui::TextWrapped("Common solutions:");
-                ImGui::BulletText("Install OpenCL drivers for your GPU (NVIDIA, AMD, or Intel)");
-                ImGui::BulletText(
-                  "On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
-                ImGui::BulletText("Check if other OpenCL applications work (e.g., clinfo)");
-                ImGui::BulletText("Restart the application after installing drivers");
+                if (webGpuRequested)
+                {
+                    ImGui::TextWrapped(
+                      "WebGPU is selected explicitly, so Gladius will not silently fall back to "
+                        "OpenCL. Check the WebGPU device and Dawn initialization details above, "
+                        "then retry or select another backend explicitly.");
+                }
+                else
+                {
+                    // Provide helpful troubleshooting guidance
+                    ImGui::TextWrapped("Common solutions:");
+                    ImGui::BulletText("Install OpenCL drivers for your GPU (NVIDIA, AMD, or Intel)");
+                    ImGui::BulletText(
+                      "On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
+                    ImGui::BulletText("Check if other OpenCL applications work (e.g., clinfo)");
+                    ImGui::BulletText("Restart the application after installing drivers");
+                }
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -2664,28 +3028,50 @@ namespace gladius::ui
                 {
                     try
                     {
-                        auto const context =
-                          std::make_shared<ComputeContext>(EnableGLOutput::enabled);
-                        context->setLogger(m_logger);
-                        gladius::setGlobalLogger(m_logger);
-                        context->setDebugOutputEnabled(m_openclDebugEnabled);
-                        if (!context->isValid())
+                        if (webGpuRequested)
                         {
-                            throw OpenCLContextCreationError("Context invalid after retry");
-                        }
-                        if (!m_core)
-                        {
-                            m_core = std::make_shared<ComputeCore>(
-                              context, RequiredCapabilities::OpenGLInterop, m_logger);
-                            m_doc = std::make_shared<Document>(m_core);
-
-                            // If retry successful, complete the full setup
-                            setup(m_core, m_doc, m_logger);
+                            m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
+                            if (!m_runtime->isAvailable())
+                            {
+                                throw std::runtime_error(m_runtime->getErrorMessage());
+                            }
+                            m_core.reset();
+                            m_doc = std::make_shared<Document>(m_logger);
+                            setup(nullptr, m_doc, m_logger);
                         }
                         else
                         {
-                            m_core->setComputeContext(context);
+#if defined(GLADIUS_ENABLE_OPENCL)
+                            auto const context =
+                              std::make_shared<ComputeContext>(EnableGLOutput::enabled);
+                            context->setLogger(m_logger);
+                            gladius::setGlobalLogger(m_logger);
+                            context->setDebugOutputEnabled(m_openclDebugEnabled);
+                            if (!context->isValid())
+                            {
+                                throw OpenCLContextCreationError("Context invalid after retry");
+                            }
+                            if (!m_core)
+                            {
+                                m_core = std::make_shared<ComputeCore>(
+                                  context, RequiredCapabilities::OpenGLInterop, m_logger);
+                                m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
+                                m_doc = std::make_shared<Document>(m_core);
+
+                                // If retry successful, complete the full setup
+                                setup(m_core, m_doc, m_logger);
+                            }
+                            else
+                            {
+                                m_core->setComputeContext(context);
+                                m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
+                            }
+#else
+                            throw std::runtime_error(
+                              "OpenCL retry is unavailable for the selected backend");
+#endif
                         }
+                        m_renderWindow.setBackendRuntime(m_runtime.get());
                         m_computeAvailable = true;
                         m_computeErrorMessage.clear();
                         m_showComputeErrorModal = false;
@@ -2694,7 +3080,9 @@ namespace gladius::ui
                         if (m_logger)
                         {
                             m_logger->addEvent(
-                              {"OpenCL initialized successfully!", events::Severity::Info});
+                              {webGpuRequested ? "WebGPU initialized successfully!"
+                                               : "OpenCL initialized successfully!",
+                               events::Severity::Info});
                         }
                     }
                     catch (const std::exception & e)
@@ -2713,14 +3101,14 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button("Copy Details"))
                 {
-                    std::string details = "Gladius OpenCL Initialization Error\n\n";
+                    std::string details = "Gladius Compute Backend Initialization Error\n\n";
                     details += m_computeErrorMessage.empty() ? std::string("No details available")
                                                              : m_computeErrorMessage;
                     ImGui::SetClipboardText(details.c_str());
                 }
 
                 ImGui::SameLine();
-                if (ImGui::Button("Continue Without OpenCL"))
+                if (ImGui::Button("Continue Without Compute"))
                 {
                     m_showComputeErrorModal = false;
                     // Show welcome screen again so user can browse examples or documentation
@@ -2965,6 +3353,19 @@ namespace gladius::ui
             m_renderWindow.suppressHQDisplay();
         }
 
+        if (!m_core)
+        {
+            if (m_parameterDirty)
+            {
+                m_renderWindow.invalidateViewDueToParameterChange();
+            }
+            m_parameterDirty = false;
+            m_contoursDirty = false;
+            m_dirty = false;
+            return;
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
         auto const timeSinceLastUpdate = std::chrono::steady_clock::now() - m_lastUpateTime;
         auto const rateLimit = std::chrono::milliseconds(static_cast<int>(ImGui::GetIO().DeltaTime * 5000.f));
         
@@ -3050,6 +3451,7 @@ namespace gladius::ui
             }
         }
         updateContours();
+#endif
     }
 
     /**
@@ -3771,6 +4173,11 @@ namespace gladius::ui
         m_meshSdfSettingsDialog.setVdbSupported(supported, reason);
     }
 
+    compute::RendererCapability MainWindow::getBackendCapabilities() const noexcept
+    {
+        return m_runtime ? m_runtime->getCapabilities() : compute::RendererCapability::None;
+    }
+
     void MainWindow::setOnComputeReadyCallback(ViewCallBack callback)
     {
         m_onComputeReadyCallback = std::move(callback);
@@ -3794,14 +4201,24 @@ namespace gladius::ui
             return;
         }
 
-        // Save rendering settings if compute is available
-        if (m_computeAvailable && m_core)
+        // Save rendering settings if the selected runtime is available.
+        if (m_computeAvailable && (m_core || m_runtime))
         {
-            auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
-
             nlohmann::json renderJson;
-            renderJson["quality"] = renderSettings.quality;
-            renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+#if defined(GLADIUS_ENABLE_OPENCL)
+            if (m_core)
+            {
+                auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+                renderJson["quality"] = renderSettings.quality;
+                renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+            }
+            else
+#endif
+            {
+                auto const & renderSettings = m_renderWindow.getNeutralRenderSettings();
+                renderJson["quality"] = renderSettings.quality;
+                renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+            }
 
             m_configManager->setValue("rendering", "settings", renderJson);
         }
@@ -3839,7 +4256,7 @@ namespace gladius::ui
           m_configManager->getValue<std::string>("ui", "theme", "Modern");
         m_mainView.setCurrentTheme(themeIdFromString(themeName));
 
-        if (!m_computeAvailable || !m_core)
+        if (!m_computeAvailable)
         {
             return;
         }
@@ -3854,22 +4271,40 @@ namespace gladius::ui
             return;
         }
 
-        // Get current rendering settings to update
-        auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
-
-        // Update settings from config
-        if (renderJson.contains("quality"))
+        auto setSettings = [&](float const quality, bool const showDistanceField)
         {
-            renderSettings.quality = renderJson["quality"].get<float>();
-        }
+#if defined(GLADIUS_ENABLE_OPENCL)
+            if (m_core)
+            {
+                auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+                renderSettings.quality = quality;
+                if (showDistanceField)
+                    renderSettings.flags |= RF_SHOW_FIELD;
+                else
+                    renderSettings.flags &= ~RF_SHOW_FIELD;
+                return;
+            }
+#endif
 
-        if (renderJson.contains("sdfVisEnabled"))
-        {
-            bool const en = renderJson["sdfVisEnabled"].get<bool>();
-            if (en)
+            auto & renderSettings = m_renderWindow.getNeutralRenderSettings();
+            renderSettings.quality = quality;
+            if (showDistanceField)
                 renderSettings.flags |= RF_SHOW_FIELD;
             else
                 renderSettings.flags &= ~RF_SHOW_FIELD;
+        };
+
+        // Update settings from config
+        auto const quality = renderJson.contains("quality")
+                               ? renderJson["quality"].get<float>()
+                               : m_renderWindow.getNeutralRenderSettings().quality;
+        auto const showDistanceField = renderJson.contains("sdfVisEnabled")
+                                         ? renderJson["sdfVisEnabled"].get<bool>()
+                                         : (m_renderWindow.getNeutralRenderSettings().flags &
+                                            RF_SHOW_FIELD) != 0u;
+        if (renderJson.contains("quality") || renderJson.contains("sdfVisEnabled"))
+        {
+            setSettings(quality, showDistanceField);
         }
 
         // Log success

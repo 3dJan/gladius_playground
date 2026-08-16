@@ -4,11 +4,13 @@
  */
 
 #include "RenderingTool.h"
+#ifdef GLADIUS_ENABLE_OPENCL
 #include "../../Application.h"
 #include "../../Document.h"
 #include "../../ui/OrbitalCamera.h"
 #include <filesystem>
 #include <nlohmann/json.hpp>
+#endif
 
 namespace gladius
 {
@@ -19,6 +21,44 @@ namespace gladius
         {
         }
 
+#ifndef GLADIUS_ENABLE_OPENCL
+                nlohmann::json RenderingTool::renderToFile(const std::string &,
+                                                                                                     unsigned int,
+                                                                                                     unsigned int,
+                                                                                                     const std::string &,
+                                                                                                     float)
+                {
+                        return createToolError(
+                            "Image rendering is unavailable in a pure WebGPU MCP build.");
+                }
+
+                nlohmann::json RenderingTool::renderWithCamera(const std::string &,
+                                                                                                             const nlohmann::json &,
+                                                                                                             const nlohmann::json &)
+                {
+                        return createToolError(
+                            "Camera rendering is unavailable in a pure WebGPU MCP build.");
+                }
+
+                nlohmann::json RenderingTool::generateThumbnail(const std::string &, unsigned int)
+                {
+                        return createToolError(
+                            "Thumbnail generation is unavailable in a pure WebGPU MCP build.");
+                }
+
+                nlohmann::json RenderingTool::getOptimalCameraPosition()
+                {
+                        return createToolError(
+                            "Optimal camera calculation is unavailable in a pure WebGPU MCP build.");
+                }
+
+                nlohmann::json RenderingTool::getModelBoundingBox()
+                {
+                        return createToolError(
+                            "MCP rendering is unavailable in a pure WebGPU build.");
+                }
+
+#else
         std::shared_ptr<ComputeCore> RenderingTool::getValidatedComputeCore()
         {
             auto document = m_application->getCurrentDocument();
@@ -506,5 +546,6 @@ namespace gladius
                 return response;
             }
         }
+#endif
     }
 }

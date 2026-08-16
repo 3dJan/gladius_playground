@@ -5,6 +5,7 @@
 
 #include "LibraryTool.h"
 
+#ifdef GLADIUS_ENABLE_OPENCL
 #include "DocumentLifecycleTool.h"
 #include "FunctionOperationsTool.h"
 
@@ -28,9 +29,11 @@
 #include <lib3mf_implicit.hpp>
 #include <sstream>
 #include <unordered_set>
+#endif
 
 namespace gladius::mcp::tools
 {
+#ifdef GLADIUS_ENABLE_OPENCL
     namespace fs = std::filesystem;
 
     namespace
@@ -1744,4 +1747,80 @@ namespace gladius::mcp::tools
         }
     }
 
+#else
+    LibraryTool::LibraryTool(Application * app)
+        : MCPToolBase(app)
+    {
+    }
+
+    nlohmann::json LibraryTool::listLibrary(std::string const &, std::string const &) const
+    {
+        return createToolError("Library operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::getLibraryEntryInfo(std::string const &, std::string const &) const
+    {
+        return createToolError("Library operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::createLibraryEntry(std::string const &,
+                                                   std::string const &,
+                                                   std::string const &,
+                                                   uint32_t,
+                                                   std::string const &,
+                                                   std::vector<std::string> const &,
+                                                   bool)
+    {
+        return createToolError("Library creation is unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::exportToLibrary(uint32_t,
+                                                std::string const &,
+                                                std::string const &,
+                                                std::string const &,
+                                                bool,
+                                                bool)
+    {
+        return createToolError("Library export is unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::setLibraryMetadata(std::vector<uint32_t> const &,
+                                                   std::string const &,
+                                                   std::vector<std::string> const &,
+                                                   std::string const &,
+                                                   std::string const &)
+    {
+        return createToolError("Library metadata operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::importLibraryEntry(std::string const &, std::string const &)
+    {
+        return createToolError("Library import is unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::deleteLibraryEntry(std::string const &, std::string const &)
+    {
+        return createToolError("Library deletion is unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::browseBin(std::string const &) const
+    {
+        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::restoreBinEntry(std::string const &, std::string const &)
+    {
+        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::deleteBinEntry(std::string const &, std::string const &)
+    {
+        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
+    }
+
+    nlohmann::json LibraryTool::emptyBin()
+    {
+        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
+    }
+#endif
 } // namespace gladius::mcp::tools

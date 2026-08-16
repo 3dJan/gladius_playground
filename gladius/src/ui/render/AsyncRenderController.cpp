@@ -1,18 +1,20 @@
 #include "AsyncRenderController.h"
 
-#include <ComputeContext.h>
 #include <ConfigManager.h>
-#include <GLImageBuffer.h>
 #include <Profiling.h>
 #include <coro/queue.hpp>
 #include <coro/sync_wait.hpp>
 
+#if defined(GLADIUS_ENABLE_OPENCL)
+#include <ComputeContext.h>
+#include <GLImageBuffer.h>
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
 #include <OpenCL/opencl.hpp>
 #else
 #include <CL/opencl.h>
 #include <CL/opencl.hpp>
+#endif
 #endif
 
 #include <algorithm>
@@ -139,9 +141,11 @@ namespace gladius::ui::async_rendering
     {
         stop();
 
+#if defined(GLADIUS_ENABLE_OPENCL)
         // Clean up OpenCL resources
         m_stagingBuffer.reset();
         m_workerQueue.reset();
+#endif
     }
 
     void AsyncRenderController::start()
@@ -424,6 +428,7 @@ namespace gladius::ui::async_rendering
                                                          size_t width,
                                                          size_t height)
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         ProfileFunction
           // Clean up old resources if dimensions changed
           if (m_stagingWidth != width || m_stagingHeight != height || !m_workerQueue ||
@@ -481,26 +486,44 @@ namespace gladius::ui::async_rendering
             m_framePresentation.reset(m_frameBuffers.size());
             m_frontBufferIndex.store(0, std::memory_order_release);
         }
+#else
+        (void)context;
+        (void)width;
+        (void)height;
+#endif
     }
 
     cl::CommandQueue * AsyncRenderController::workerQueue() noexcept
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         return m_workerQueue.get();
+#else
+        return nullptr;
+#endif
     }
 
     std::shared_ptr<cl::CommandQueue> AsyncRenderController::workerQueueShared() const noexcept
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         std::lock_guard<std::mutex> lock(m_workerQueueMutex);
         return m_workerQueue;
+#else
+        return nullptr;
+#endif
     }
 
     cl::Image2D * AsyncRenderController::stagingBuffer() noexcept
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         return m_stagingBuffer.get();
+#else
+        return nullptr;
+#endif
     }
 
     void AsyncRenderController::downloadStagingBufferAsync(std::vector<cl_float4> & outPixels)
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         ProfileFunction
 
           if (!m_workerQueue || !m_stagingBuffer)
@@ -525,6 +548,9 @@ namespace gladius::ui::async_rendering
                                         0,
                                         outPixels.data());
         m_workerQueue->finish();
+                    #else
+                        (void)outPixels;
+                    #endif
     }
 
     FrameBuffer * AsyncRenderController::findBufferInState(FrameState state) noexcept

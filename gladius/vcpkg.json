@@ -9,7 +9,7 @@
     "gtest",
     "nlopt",
     "platform-folders",
-    "opencl",
+      "opencl",
     {
         "name": "dawn",
         "default-features": false,

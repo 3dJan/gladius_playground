@@ -20,6 +20,12 @@ namespace gladius
 
         nlohmann::json ValidationTool::validateModel(const nlohmann::json & options)
         {
+#ifndef GLADIUS_ENABLE_OPENCL
+                        (void)options;
+                        return createToolError(
+                            "OpenCL model compilation is unavailable in a pure WebGPU MCP build. "
+                            "Graph validation remains available through the document API.");
+#else
             nlohmann::json out;
             out["phases"] = nlohmann::json::array();
             out["success"] = false;
@@ -204,6 +210,7 @@ namespace gladius
             out["success"] =
               out["summary"]["graph_ok"].get<bool>() && out["summary"]["compile_ok"].get<bool>();
             return out;
+#endif
         }
 
         nlohmann::json

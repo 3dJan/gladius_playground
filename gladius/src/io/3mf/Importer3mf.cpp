@@ -2618,8 +2618,10 @@ namespace gladius::io
             return;
         }
 
+    #if defined(GLADIUS_ENABLE_OPENCL)
         auto core = doc.getCore();
         auto computeToken = core->waitForComputeToken();
+    #endif
 
         try
         {

@@ -20,11 +20,9 @@ namespace gladius::webgpu
     {
         constexpr std::uint32_t MAX_FRAME_DIMENSION = 4096u;
         // Keep the explicit allocation guard, but allow common desktop viewport sizes such as
-        // 3685x1855 (approximately 6.8 million pixels). MAX_FRAME_RAY_ITERATIONS remains the
-        // separate total-work guard and reduces ray steps as the frame grows.
+        // 3685x1855 (approximately 6.8 million pixels).
         constexpr std::size_t MAX_FRAME_PIXELS = 10u * 1024u * 1024u;
         constexpr std::uint32_t MAX_FRAME_RAY_STEPS = 2048u;
-        constexpr std::size_t MAX_FRAME_RAY_ITERATIONS = 64u * 1024u * 1024u;
 
         std::string toString(wgpu::StringView const value)
         {
@@ -381,6 +379,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("WebGPU frame camera values must be positive");
                 }
+                if (request.maxRaySteps > MAX_FRAME_RAY_STEPS)
+                {
+                    throw std::invalid_argument(
+                      "WebGPU frame maxRaySteps exceeds the supported limit of 2048");
+                }
                 if (request.width > MAX_FRAME_DIMENSION || request.height > MAX_FRAME_DIMENSION)
                 {
                     throw std::invalid_argument("WebGPU frame dimensions exceed the safe limit");
@@ -397,11 +400,6 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("WebGPU frame pixel count exceeds the safe limit");
                 }
-                                auto const rayStepsForSafeWorkload = MAX_FRAME_RAY_ITERATIONS / framePixelCount;
-                                request.maxRaySteps = std::min(
-                                    {request.maxRaySteps,
-                                     MAX_FRAME_RAY_STEPS,
-                                     static_cast<std::uint32_t>(rayStepsForSafeWorkload)});
 
                 auto const rowCount = request.endRow - request.firstRow;
                 auto const modelBounds = request.modelBounds.value_or(compute::RenderBounds{});

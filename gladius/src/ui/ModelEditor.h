@@ -33,7 +33,6 @@
 #include "io/3mf/LibraryExampleExtractor.h"
 #include "io/VdbImporter.h"
 #include "Style.h"
-#include "compute/ComputeCore.h"
 #include "nodes/Assembly.h"
 #include "nodes/FunctionExtractor.h"
 #include "nodes/Model.h"

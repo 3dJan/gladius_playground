@@ -1,14 +1,50 @@
 set(BINARY ${CMAKE_PROJECT_NAME})
 file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 
+if(NOT GLADIUS_ENABLE_OPENCL)
+    # These translation units are the legacy OpenCL host pipeline.  They must not
+    # enter a pure-WebGPU target: including them and relying on section garbage
+    # collection still compiles OpenCL code and can pull its loader symbols into
+    # static-library consumers.
+    list(FILTER SOURCES EXCLUDE REGEX ".*/CLProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ComputeContext\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringGpuSampling\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/HierarchicalDualContouring\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ProgramBase\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/CliWriter\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/SvgWriter\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/GpuKernelAccessGuard\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/HierarchicalDCProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/MeshPreparationProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/OpenClEventRegistry\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/SlicerProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/GLImageBuffer\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ImageStackOCL\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ImageStackOCLBuffer\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/MeshVoxelGridManager\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/RenderProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ResourceContext\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringSamplingProgram\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringMesher\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringOctree\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringPrototype\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringQef\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/CliReader\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/ToOCLVisitor\\.cpp$")
+endif()
+
 list(APPEND SOURCES
-    io/3mf/OpenVdbShellGenerator.h
-    io/3mf/OpenVdbShellGenerator.cpp
     io/3mf/ShellMaterialOrdering.h
     io/3mf/ShellMaterialOrdering.cpp
     io/3mf/ShellThicknessPartition.h
     io/3mf/ShellThicknessPartition.cpp
 )
+if(GLADIUS_ENABLE_OPENCL)
+    list(APPEND SOURCES
+        io/3mf/OpenVdbShellGenerator.h
+        io/3mf/OpenVdbShellGenerator.cpp
+    )
+endif()
 
 # MCP sources are intentionally NOT part of the core targets (gladius, gladius_lib)
 # They will be added to the dedicated gladiusmcp target below
@@ -99,11 +135,9 @@ set(DEPENDENCIES_CORE
     OpenMP::OpenMP_CXX
 )
 
-# ComputeContext, ComputeCore, and the current UI/export implementation still
-# compile the legacy OpenCL host pipeline in WebGPU builds. Link the loader for
-# that compatibility code until the remaining production paths are migrated to
-# IComputeRenderer/RenderBackendSession.
-list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)
+if(GLADIUS_ENABLE_OPENCL)
+    list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)
+endif()
 
 if(GLADIUS_ENABLE_WEBGPU)
     list(APPEND DEPENDENCIES_CORE dawn::webgpu_dawn)

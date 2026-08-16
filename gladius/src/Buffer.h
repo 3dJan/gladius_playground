@@ -1,6 +1,18 @@
 #pragma once
 
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "ComputeContext.h"
+#else
+#include <cstddef>
+#include <iostream>
+#include <vector>
+
+namespace gladius
+{
+    class ComputeContext;
+}
+#endif
+
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -9,6 +21,7 @@
 
 namespace gladius
 {
+#if defined(GLADIUS_ENABLE_OPENCL)
     template <typename T>
     class Buffer
     {
@@ -191,4 +204,86 @@ namespace gladius
         size_t m_size = 0;
         std::unique_ptr<cl::Buffer> m_buffer;
     };
+#else
+    /// Backend-neutral host buffer used when the OpenCL backend is not built.
+    /// It preserves the data-container API needed by mesh and CPU-side code without
+    /// pulling OpenCL wrapper types into pure WebGPU translation units.
+    template <typename T>
+    class Buffer
+    {
+      public:
+        explicit Buffer(ComputeContext &)
+        {
+        }
+
+        ~Buffer() = default;
+        Buffer(Buffer const &) = default;
+        Buffer(Buffer &&) = delete;
+        Buffer & operator=(Buffer const &) = delete;
+        Buffer & operator=(Buffer &&) = delete;
+
+        void read()
+        {
+        }
+
+        void create()
+        {
+            if (m_data.empty())
+            {
+                m_data.push_back({});
+            }
+        }
+
+        void clear()
+        {
+            m_data.clear();
+        }
+
+        void write()
+        {
+        }
+
+        [[nodiscard]] std::vector<T> getDataCopy() const
+        {
+            return m_data;
+        }
+
+        [[nodiscard]] std::vector<T> & getData()
+        {
+            return m_data;
+        }
+
+        [[nodiscard]] std::vector<T> const & getData() const
+        {
+            return m_data;
+        }
+
+        [[nodiscard]] size_t getSize() const
+        {
+            return m_data.size();
+        }
+
+        void print() const
+        {
+            int elementCount = 0;
+            int const lineBreak = static_cast<int>(
+              std::sqrt(static_cast<double>(m_data.size())));
+
+            for (auto const & value : m_data)
+            {
+                std::cout << value << " ";
+                ++elementCount;
+                if (lineBreak > 0 && elementCount == lineBreak)
+                {
+                    elementCount = 0;
+                    std::cout << std::endl;
+                }
+            }
+            std::cout << std::endl;
+        }
+
+      private:
+        std::vector<T> m_data;
+    };
+#endif
 }

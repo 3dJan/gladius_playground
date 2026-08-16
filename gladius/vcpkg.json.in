@@ -9,7 +9,7 @@
     "gtest",
     "nlopt",
     "platform-folders",
-    "opencl",
+  @GLADIUS_VCPKG_OPENCL_DEPENDENCY@
     {
         "name": "dawn",
         "default-features": false,

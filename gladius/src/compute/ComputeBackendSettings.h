@@ -10,6 +10,16 @@ namespace gladius
 namespace gladius::compute
 {
     /**
+     * @brief Gets a valid backend explicitly persisted in the configuration.
+     *
+     * Unlike getConfiguredComputeBackend(), this function does not apply the legacy default or
+     * fallback policy. It is used when the application must distinguish an explicit request from
+     * an unset preference before initializing a backend.
+     */
+    [[nodiscard]] std::optional<ComputeBackendKind> getConfiguredComputeBackendPreference(
+      ConfigManager const & configManager);
+
+    /**
      * @brief Gets the configured and available compute backend, defaulting to OpenCL for existing users.
      *
      * Falls back to another backend compiled into the current binary when a persisted preference

@@ -4,7 +4,9 @@
 #include "compute/IComputeRenderer.h"
 #include "compute/RenderBackendSession.h"
 #include "compute/RenderSceneSnapshot.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/RenderSession.h"
+#endif
 
 #include <memory>
 #include <string>
@@ -22,7 +24,9 @@ namespace gladius::nodes
 
 namespace gladius::compute
 {
+#if defined(GLADIUS_ENABLE_OPENCL)
     using SharedRenderSession = std::shared_ptr<gladius::RenderSession>;
+#endif
 
     /**
      * @brief Creates IComputeRenderer instances based on the requested backend kind.
@@ -44,8 +48,10 @@ namespace gladius::compute
          * @return A unique pointer to the newly created OpenCL renderer.
          * @throws std::invalid_argument if session is null.
          */
+    #if defined(GLADIUS_ENABLE_OPENCL)
         [[nodiscard]] static std::unique_ptr<IComputeRenderer> create(ComputeBackendKind kind,
-                                                                      SharedRenderSession session);
+                                          SharedRenderSession session);
+    #endif
 
         /**
          * @brief Creates a RenderBackendSession from configuration and model data.
@@ -73,10 +79,12 @@ namespace gladius::compute
          * @param preferredBackend Fallback backend kind when config is empty/unparseable.
          * @return A unique pointer to the initialized session, or nullptr on failure.
          */
+#if defined(GLADIUS_ENABLE_OPENCL)
         [[nodiscard]] static std::unique_ptr<RenderBackendSession> createRenderBackendSession(
             ConfigManager const & configManager,
             SharedRenderSession openclSession,
             ComputeBackendKind preferredBackend);
+#endif
 
         /**
          * @brief Materializes a scene snapshot for the given model/assembly.

@@ -26,19 +26,43 @@ if(NOT ENABLE_OPENCL_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/io/3mf/MeshSamplingGeometry_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/io/3mf/MeshWriter3mf_tests.cpp"
   )
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/CLPrgram_tests\\.cpp$")
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/BaseExportDialog_tests\\.cpp$")
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/LayerBasedMeshExporter_tests\\.cpp$")
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/MeshExportDialog3mf_tests\\.cpp$")
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/ShellExporter_tests\\.cpp$")
   message(STATUS "OpenCL tests disabled - excluding OpenCL-requiring unit tests")
+endif()
+
+if(NOT GLADIUS_ENABLE_OPENCL)
+  list(REMOVE_ITEM TEST_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/AssemblySnapshot_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLattice_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAccelerationReference.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAcceleration_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringPrototype_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringQef_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/FunctionGraphRoundTrip_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/JSONRPC_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ManifoldDualContouringProgress_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/SvgWriter_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WebGPU_3mfRendering_tests.cpp"
+  )
+  message(STATUS "Pure WebGPU build - excluding tests that instantiate OpenCL host wrappers")
 endif()
 
 set(SOURCES ${TEST_SOURCES})
 add_executable(${BINARY} ${TEST_SOURCES})
 
 # Include MCP sources for tests that validate MCP behavior
-file(GLOB TEST_MCP_SOURCES CONFIGURE_DEPENDS
-  "${CMAKE_SOURCE_DIR}/src/mcp/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/*.cpp"
-  "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.cpp"
-)
-target_sources(${BINARY} PRIVATE ${TEST_MCP_SOURCES})
-target_compile_definitions(${BINARY} PRIVATE GLADIUS_ENABLE_MCP)
+if(GLADIUS_ENABLE_OPENCL)
+  file(GLOB TEST_MCP_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/mcp/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/*.cpp"
+    "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.cpp"
+  )
+  target_sources(${BINARY} PRIVATE ${TEST_MCP_SOURCES})
+  target_compile_definitions(${BINARY} PRIVATE GLADIUS_ENABLE_MCP)
+endif()
 target_compile_definitions(${BINARY} PRIVATE GLADIUS_KERNEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/kernel")
 
 if(MSVC)

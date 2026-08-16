@@ -156,6 +156,20 @@
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "ENABLE_OPENCL_TESTS": "OFF"
             }
+        },
+        {
+            "name": "linux-webgpu-releaseWithDebug",
+            "description": "Linux RelWithDebInfo pure WebGPU configuration",
+            "displayName": "Linux RelWithDebInfo (WebGPU only)",
+            "inherits": [
+                "linux-release"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "GLADIUS_ENABLE_OPENCL": "OFF",
+                "GLADIUS_ENABLE_WEBGPU": "ON",
+                "ENABLE_OPENCL_TESTS": "OFF"
+            }
         }
     ],
     "version": 3,
@@ -208,6 +222,12 @@
         {
             "name": "linux-releaseWithDebug-noOpenCL",
             "configurePreset": "linux-releaseWithDebug-noOpenCL",
+            "jobs": 8
+        },
+        {
+            "name": "linux-webgpu-releaseWithDebug",
+            "displayName": "Linux RelWithDebInfo (WebGPU only)",
+            "configurePreset": "linux-webgpu-releaseWithDebug",
             "jobs": 8
         }
     ],

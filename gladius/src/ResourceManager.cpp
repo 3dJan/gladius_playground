@@ -3,7 +3,9 @@
 #include "BeamLatticeResource.h"
 #include "ImageStackResource.h"
 #include "Profiling.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "ResourceContext.h"
+#endif
 #include "SpatialMeshResource.h"
 #include "StlResource.h"
 #include "VdbImporter.h"
@@ -115,7 +117,9 @@ namespace gladius
     void ResourceManager::clear()
     {
         m_textures.clear();
+#if defined(GLADIUS_ENABLE_OPENCL)
         m_resourceContext->clearImageStacks();
+#endif
         m_nameCounter = 0;
     }
 

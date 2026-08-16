@@ -6,7 +6,7 @@
 #endif
 
 #ifdef COMPILING_FOR_HOST
-#include "../gpgpu.h"
+#include "../ComputeTypes.h"
 typedef cl_float8 float8;
 typedef cl_float4 float4;
 typedef cl_float2 float2;

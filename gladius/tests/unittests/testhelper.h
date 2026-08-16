@@ -3,6 +3,7 @@
 #include <Eigen/Core>
 #include <Eigen/src/Core/Matrix.h>
 
+#include "ComputeTypes.h"
 #include "nodes/Model.h"
 
 #include <vector>

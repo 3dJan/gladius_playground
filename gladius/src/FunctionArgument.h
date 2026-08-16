@@ -23,7 +23,10 @@ namespace gladius
         std::string name;
         ArgumentType type;
 
-        FunctionArgument() = default;
+        FunctionArgument()
+            : type(ArgumentType::Scalar)
+        {
+        }
         FunctionArgument(std::string const & argName, ArgumentType argType)
             : name(argName)
             , type(argType)

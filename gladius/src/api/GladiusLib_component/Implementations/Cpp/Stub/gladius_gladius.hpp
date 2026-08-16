@@ -21,8 +21,10 @@ Abstract: This is the class declaration of CGladius
 #endif
 
 // Include custom headers here.
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "ComputeContext.h"
 #include "compute/ComputeCore.h"
+#endif
 #include "Document.h"
 
 namespace GladiusLib
@@ -87,8 +89,10 @@ namespace GladiusLib
 
           private:
             std::unique_ptr<gladius::Document> m_doc;
+#if defined(GLADIUS_ENABLE_OPENCL)
             std::shared_ptr<gladius::ComputeCore> m_core;
             gladius::SharedComputeContext m_computeContext;
+#endif
         };
 
     } // namespace Impl

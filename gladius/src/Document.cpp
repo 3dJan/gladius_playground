@@ -3,17 +3,19 @@
 #include "io/3mf/Lib3mfLoader.h"
 
 #include "BackupManager.h"
-#include "CliReader.h"
-#include "CliWriter.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
 #include "MeshBVH.h"
-#include "MeshExporter.h"
 #include "Profiling.h"
 #include "ResourceManager.h"
 #include "SpatialMeshResource.h"
 #include "TimeMeasurement.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
+#include "io/DualContouringStlExporter.h"
+#include "io/ManifoldDualContouringStlExporter.h"
+#include "io/MeshExporter.h"
+#endif
 #include "exceptions.h"
 #include "imguinodeeditor.h"
 #include "io/3mf/BeamLatticeExporter.h"
@@ -23,17 +25,13 @@
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
-#include "io/DualContouringStlExporter.h"
 #include "io/ImporterVdb.h"
-#include "io/ManifoldDualContouringStlExporter.h"
 #include "io/VdbImporter.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/LowerFunctionGradient.h"
 #include "nodes/LowerNormalizeDistanceField.h"
 #include "nodes/Model.h"
 #include "nodes/OptimizeOutputs.h"
-#include "nodes/ToCommandStreamVisitor.h"
-#include "nodes/ToOCLVisitor.h"
 #include "nodes/Validator.h"
 
 #include <algorithm>
@@ -57,6 +55,7 @@ namespace gladius
     {
         constexpr double kNanoVdbBudgetUtilization = 0.5;
 
+#if defined(GLADIUS_ENABLE_OPENCL)
         [[nodiscard]] NanoVdbBuildPolicy
         makeNanoVdbBuildPolicy(SharedComputeContext const & computeContext,
                                NanoVdbFailurePolicy const failurePolicy) noexcept
@@ -99,6 +98,7 @@ namespace gladius
             policy.budgetBytes = std::min(deviceMaxAllocBytes, budgetFromGlobal);
             return policy;
         }
+#endif
 
         [[nodiscard]] MeshSdfEvaluationConfig makeInteractivePreviewMeshSdfConfig(
           MeshSdfEvaluationConfig cfg) noexcept
@@ -157,6 +157,7 @@ namespace gladius
             std::atomic<bool> & m_loading;
         };
 
+    #if defined(GLADIUS_ENABLE_OPENCL)
         class ScopedOptimizedRenderCompilationDeferral
         {
           public:
@@ -201,6 +202,7 @@ namespace gladius
             bool m_previousSlicerDeferred = false;
             bool m_restored = false;
         };
+    #endif
 
         class ScopedMeshSdfEvaluationConfigOverride
         {
@@ -262,34 +264,76 @@ namespace gladius
     void Document::resetGeneratorContext()
     {
 
-        if (!m_assembly || !m_core)
+        if (!m_assembly)
         {
-            throw std::runtime_error("No assembly or core");
+            throw std::runtime_error("No assembly");
         }
-        // Get the resource context directly as a shared pointer
-        auto resourceContextPtr = m_core->getResourceContext();
+
+        auto resourceContextPtr =
+    #if defined(GLADIUS_ENABLE_OPENCL)
+          m_core ? m_core->getResourceContext() : SharedResources{};
+    #else
+          SharedResources{};
+    #endif
         m_generatorContext = std::make_unique<nodes::GeneratorContext>(
           resourceContextPtr, m_assembly->getFilename().remove_filename());
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core)
+        {
+            m_generatorContext->computeContext = m_core->getComputeContext();
+        }
+#endif
         m_primitiveDateNeedsUpdate = true;
     }
 
     Document::Document(std::shared_ptr<ComputeCore> core)
         : m_core(std::move(core))
+        , m_logger(
+    #if defined(GLADIUS_ENABLE_OPENCL)
+            m_core ? m_core->getSharedLogger() : events::SharedLogger{}
+    #else
+            events::SharedLogger{}
+    #endif
+          )
     {
+    #if defined(GLADIUS_ENABLE_OPENCL)
         m_channels.push_back(
           BitmapChannel{"DownSkin",
-                        [&](float z_mm, Vector2 pixelSize_mm)
-                        { return m_core->generateDownSkinMap(z_mm, std::move(pixelSize_mm)); }});
+                                                [&](float z_mm, Vector2 pixelSize_mm)
+                                                {
+                                                        if (!m_core)
+                                                        {
+                                                                throw std::runtime_error(
+                                                                    "Down-skin generation is unavailable for the selected backend");
+                                                        }
+                                                        return m_core->generateDownSkinMap(z_mm, std::move(pixelSize_mm));
+                                                }});
 
         m_channels.push_back(
           BitmapChannel{"UpSkin",
-                        [&](float z_mm, Vector2 pixelSize_mm)
-                        { return m_core->generateUpSkinMap(z_mm, std::move(pixelSize_mm)); }});
+                                                [&](float z_mm, Vector2 pixelSize_mm)
+                                                {
+                                                        if (!m_core)
+                                                        {
+                                                                throw std::runtime_error(
+                                                                    "Up-skin generation is unavailable for the selected backend");
+                                                        }
+                                                        return m_core->generateUpSkinMap(z_mm, std::move(pixelSize_mm));
+                                                }});
+                            #endif
 
         newModel();
         resetGeneratorContext();
 
         // Initialize backup manager
+        m_backupManager.initialize();
+    }
+
+    Document::Document(events::SharedLogger logger)
+        : m_logger(std::move(logger))
+    {
+        newModel();
+        resetGeneratorContext();
         m_backupManager.initialize();
     }
 
@@ -328,6 +372,9 @@ namespace gladius
 
     bool Document::refreshModelAsync()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return false;
+#else
         if (!m_assembly || !m_core)
         {
             return false;
@@ -375,6 +422,7 @@ namespace gladius
                                               });
         }
         return true;
+#endif
     }
 
     bool Document::prepareAssemblyForRefresh(nodes::ValidationContext const context)
@@ -462,6 +510,10 @@ namespace gladius
 
     void Document::refreshWorker(RefreshMode const refreshMode)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) refreshMode;
+        return;
+#else
         ProfileFunction;
 
         auto meshResourceState = m_core->getMeshResourceState();
@@ -629,6 +681,7 @@ namespace gladius
         }
 
         meshResourceState->signalCompilationFinished();
+#endif
     }
 
     void Document::updateFlatAssembly()
@@ -749,7 +802,15 @@ namespace gladius
 
     bool Document::refreshModelIfNoCompilationIsRunning()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return false;
+#else
         ProfileFunction;
+
+        if (!m_core)
+        {
+            return false;
+        }
 
         // This method is called from the UI frame loop. Only use non-blocking probes here;
         // the background load/refresh worker can hold the compute token for several seconds
@@ -779,6 +840,7 @@ namespace gladius
         }
 
         return refreshModelAsync();
+#endif
     }
 
     void Document::newModel()
@@ -798,7 +860,12 @@ namespace gladius
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
-        m_core->getResourceContext()->clearImageStacks();
+        if (m_core)
+        {
+#if defined(GLADIUS_ENABLE_OPENCL)
+            m_core->getResourceContext()->clearImageStacks();
+#endif
+        }
         resetGeneratorContext();
     }
 
@@ -819,7 +886,12 @@ namespace gladius
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
         m_3mfmodel = importer.get3mfWrapper()->CreateModel();
 
-        m_core->getResourceContext()->clearImageStacks();
+        if (m_core)
+        {
+#if defined(GLADIUS_ENABLE_OPENCL)
+            m_core->getResourceContext()->clearImageStacks();
+#endif
+        }
         resetGeneratorContext();
     }
 
@@ -836,6 +908,9 @@ namespace gladius
 
     bool Document::updateParameter()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return false;
+#else
         ProfileFunction;
         if (!m_assembly || !m_core)
         {
@@ -882,6 +957,7 @@ namespace gladius
 
         m_parameterDirty = !updateSucceeded;
         return updateSucceeded;
+#endif
     }
 
     void Document::updateParameterRegistration()
@@ -907,6 +983,9 @@ namespace gladius
 
     void Document::updatePayload()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return;
+#else
         ProfileFunction;
         if (!m_generatorContext)
         {
@@ -1046,10 +1125,14 @@ namespace gladius
                 logger->addEvent(
                   {std::string("unhandled exception: ") + e.what(), events::Severity::Error});
         }
+    #endif
     }
 
     void Document::refreshModelBlocking()
     {
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+        return;
+    #else
         ProfileFunction;
         m_core->getSlicerProgram()->waitForCompilation();
         {
@@ -1074,6 +1157,7 @@ namespace gladius
         updateParameter();
 
         saveBackup();
+#endif
     }
 
     void Document::exportAsStl(std::filesystem::path const & filename)
@@ -1084,6 +1168,11 @@ namespace gladius
     void Document::exportAsStl(std::filesystem::path const & filename,
                                io::StlExportOptions const & options)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) filename;
+        (void) options;
+        throw std::runtime_error("STL export is unavailable for the selected backend");
+#else
         refreshModelBlocking();
 
         auto logger = getSharedLogger();
@@ -1156,6 +1245,7 @@ namespace gladius
         default:
             throw std::runtime_error("Unsupported surface extraction method");
         }
+#endif
     }
 
     void Document::markFileAsChanged()
@@ -1184,8 +1274,15 @@ namespace gladius
             // Initial validation with FileLoad context - logs errors once for file loading
             validateAssembly(nodes::ValidationContext::FileLoad);
 
+            if (!m_core)
+            {
+                return;
+            }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
             refreshModelBlocking();
             m_core->updateBBox();
+#endif
         }
         catch (NanoVdbBuildRejectedError const &)
         {
@@ -1254,6 +1351,11 @@ namespace gladius
                       // Initial validation with FileLoad context - logs
                       // errors once
                       validateAssembly(nodes::ValidationContext::FileLoad);
+                      if (!m_core)
+                      {
+                          return;
+                      }
+
                       // Chain into async model refresh. 3MF loads publish
                       // a lightweight command-stream preview first, then
                       // start the optimized renderer and slicer
@@ -1302,6 +1404,11 @@ namespace gladius
     void Document::merge(std::filesystem::path filename)
     {
         mergeImpl(filename);
+        if (!m_core)
+        {
+            signalStructuralEdit();
+            return;
+        }
         (void) refreshModelAsync(); // Result intentionally ignored for merge
     }
 
@@ -1357,6 +1464,7 @@ namespace gladius
         {
             if (writeThumbnail && m_core)
             {
+#if defined(GLADIUS_ENABLE_OPENCL)
                 auto computeToken = m_core->waitForComputeToken();
                 (void) computeToken;
 
@@ -1371,6 +1479,9 @@ namespace gladius
                 {
                     writeThumbnail = false;
                 }
+#else
+                writeThumbnail = false;
+#endif
             }
             io::saveTo3mfFile(filename, *this, writeThumbnail);
         }
@@ -1528,6 +1639,16 @@ namespace gladius
 
     PolyLines Document::generateContour(float z, nodes::SliceParameter const & sliceParameter) const
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) z;
+        (void) sliceParameter;
+        throw std::runtime_error("Contour generation is unavailable for the selected backend");
+#else
+        if (!m_core)
+        {
+            throw std::runtime_error("Contour generation is unavailable for the selected backend");
+        }
+
         if (z != m_core->getSliceHeight())
         {
             m_core->setSliceHeight(z);
@@ -1541,10 +1662,22 @@ namespace gladius
             return contourExtractor->generateOffsetContours(sliceParameter.offset, contours);
         }
         return contours;
+    #endif
     }
 
     BoundingBox Document::computeBoundingBox() const
     {
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+        return BoundingBox{{0.0f, 0.0f, 0.0f, 0.0f}, {400.0f, 400.0f, 400.0f, 0.0f}};
+    #else
+        if (!m_core)
+        {
+            // Analytic WebGPU scenes do not have an OpenCL precomputed SDF from which to derive
+            // a tight box. Keep the same build-volume contract used by ComputeCore's fallback so
+            // camera framing and ray clipping remain deterministic until evaluator-level bounds
+            // metadata is available.
+            return BoundingBox{{0.0f, 0.0f, 0.0f, 0.0f}, {400.0f, 400.0f, 400.0f, 0.0f}};
+        }
 
         if (!m_core->updateBBox())
         {
@@ -1552,12 +1685,21 @@ namespace gladius
         }
         m_core->getResourceContext()->releasePreComputedSdf(); // saving memory (api usage)
         return m_core->getBoundingBox().value_or(BoundingBox{});
+    #endif
     }
 
     gladius::Mesh Document::generateMesh() const
     {
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+        throw std::runtime_error("Mesh generation is unavailable for the selected backend");
+    #else
+        if (!m_core)
+        {
+            throw std::runtime_error("Mesh generation is unavailable for the selected backend");
+        }
 
         return gladius::vdb::generatePreviewMesh(*m_core, *m_assembly);
+#endif
     }
 
     BitmapChannels & Document::getBitmapChannels()
@@ -1572,18 +1714,28 @@ namespace gladius
 
     SharedComputeContext Document::getComputeContext() const
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        throw std::runtime_error("No OpenCL compute context is available");
+#else
         if (!m_core)
         {
             throw std::runtime_error("No core");
         }
         return m_core->getComputeContext();
+    #endif
     }
 
     NanoVdbBuildPolicy Document::getNanoVdbBuildPolicy() const
     {
+    #if !defined(GLADIUS_ENABLE_OPENCL)
+        NanoVdbBuildPolicy policy{};
+        policy.failurePolicy = m_nanovdbFailurePolicy.load(std::memory_order_relaxed);
+        return policy;
+    #else
         return makeNanoVdbBuildPolicy(
           m_core ? m_core->getComputeContext() : SharedComputeContext{},
           m_nanovdbFailurePolicy.load(std::memory_order_relaxed));
+    #endif
     }
 
     NanoVdbBuildIssueSummary Document::getNanoVdbBuildIssueSummary() const
@@ -1694,11 +1846,11 @@ namespace gladius
 
     events::SharedLogger Document::getSharedLogger() const
     {
-        if (!m_core)
-        {
-            throw std::runtime_error("No core");
-        }
-        return m_core->getSharedLogger();
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        return m_logger;
+#else
+        return m_core ? m_core->getSharedLogger() : m_logger;
+#endif
     }
 
     std::shared_ptr<ComputeCore> Document::getCore()
@@ -1912,7 +2064,12 @@ namespace gladius
 
     void Document::loadImpl(const std::filesystem::path & filename)
     {
-        auto computeToken = m_core->waitForComputeToken();
+#if defined(GLADIUS_ENABLE_OPENCL)
+        std::unique_ptr<ComputeToken> computeToken;
+        if (m_core)
+        {
+            computeToken.reset(new ComputeToken(m_core->waitForComputeToken()));
+        }
         m_buildItems.clear();
         // clear event logger
         auto logger = getSharedLogger();
@@ -1934,8 +2091,12 @@ namespace gladius
         }
 
         resetGeneratorContext();
-        m_core->reset();
-        m_core->getResourceContext()->clearImageStacks();
+        if (m_core)
+        {
+            m_core->reset();
+            m_core->getResourceContext()->clearImageStacks();
+        }
+#endif
         auto newFilename = filename;
         m_primitiveDateNeedsUpdate = true;
 
@@ -1946,8 +2107,12 @@ namespace gladius
 
         if (filename.extension() == ".vdb")
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             newEmptyModel();
             io::loadFromOpenVdbFile(filename, *this);
+#else
+            throw std::runtime_error("VDB loading is unavailable for the selected backend");
+#endif
             return;
         }
 
@@ -2104,7 +2269,12 @@ namespace gladius
 
     void Document::injectSmoothingKernel(std::string const & kernel)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) kernel;
+        throw std::runtime_error("Smoothing kernel injection is unavailable for the selected backend");
+#else
         m_core->injectSmoothingKernel(kernel);
+#endif
     }
 
     nodes::BuildItems::iterator Document::addBuildItem(nodes::BuildItem && item)
@@ -2135,6 +2305,10 @@ namespace gladius
 
     std::optional<ResourceKey> Document::addMeshResource(std::filesystem::path const & filename)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) filename;
+        throw std::runtime_error("STL mesh import is unavailable for the selected backend");
+#else
         vdb::VdbImporter reader;
         auto logger = getSharedLogger();
         try
@@ -2153,6 +2327,7 @@ namespace gladius
 
         auto mesh = reader.getMesh();
         return addMeshResource(std::move(mesh), filename.filename().string());
+    #endif
     }
 
     ResourceKey Document::addMeshResource(vdb::TriangleMesh && mesh, std::string const & name)
@@ -2393,6 +2568,11 @@ namespace gladius
 
     void Document::addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius)
     {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) stlFilename;
+        (void) beamRadius;
+        throw std::runtime_error("Beam lattice import is unavailable for the selected backend");
+#else
         // Load the STL file
         vdb::VdbImporter reader;
         auto logger = getSharedLogger();
@@ -2524,6 +2704,7 @@ namespace gladius
                                           stlFilename.filename().string()),
                               events::Severity::Info});
         }
+#endif
     }
 
     ResourceKey Document::addImageStackResource(std::filesystem::path const & path)
@@ -2926,6 +3107,11 @@ namespace gladius
         if (!prepareAssemblyForRefresh())
         {
             return false;
+        }
+
+        if (!m_core)
+        {
+            return true;
         }
 
         if (refreshModelIfNoCompilationIsRunning())

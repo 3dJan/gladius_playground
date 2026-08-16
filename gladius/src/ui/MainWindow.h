@@ -9,13 +9,17 @@
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "AboutDialog.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "CliExportDialog.h"
+#endif
 #include "ExportState.h"
 #include "FileDialogService.h"
 #include "GLView.h"
 #include "LibraryExportDialog.h"
 #include "LogView.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "MeshExportDialog.h"
+#endif
 #include "ModelEditor.h"
 #include "Outline.h"
 #include "ParameterThrottle.h"
@@ -68,6 +72,7 @@ namespace gladius::ui
     {
       public:
         MainWindow();
+                ~MainWindow();
 
         /**
          * @brief Set the ConfigManager reference
@@ -158,6 +163,7 @@ namespace gladius::ui
         /// on the active OpenCL device. Grays out the NanoVDB combo entry when false.
         /// @p reason is forwarded to the dialog as a tooltip (may be empty).
         void setVdbSupported(bool supported, std::string const & reason = {});
+        [[nodiscard]] compute::RendererCapability getBackendCapabilities() const noexcept;
 
         /// Register a callback that is invoked once when the async OpenCL compute
         /// initialisation has finished (success or failure). Use this to react to
@@ -284,7 +290,15 @@ namespace gladius::ui
 
         std::filesystem::path m_modelFileName;
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
+    #if defined(GLADIUS_ENABLE_OPENCL)
         std::shared_ptr<ComputeCore> m_core;
+    #else
+        // Keep the pure-WebGPU UI from instantiating shared_ptr<ComputeCore>'s
+        // OpenCL-only destruction path.  The public setup API remains source
+        // compatible for callers that pass nullptr.
+        std::shared_ptr<void> m_core;
+    #endif
+        std::unique_ptr<compute::IBackendRuntime> m_runtime;
         bool m_fileChanged{false};
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
@@ -309,8 +323,10 @@ namespace gladius::ui
         bool m_moving = false;
 
         bool m_showAuthoringTools{true};
+    #if defined(GLADIUS_ENABLE_OPENCL)
         MeshExportDialog m_meshExporterDialog;
         CliExportDialog m_cliExportDialog;
+    #endif
         LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;
         LogView m_logView;
@@ -436,7 +452,9 @@ namespace gladius::ui
         /// @brief Result of async device enumeration
         struct ComputeEnumResult
         {
+#if defined(GLADIUS_ENABLE_OPENCL)
             AcceleratorList accelerators;
+#endif
             bool success = false;
             std::string errorMessage;
         };
@@ -455,5 +473,15 @@ namespace gladius::ui
 
         /// @brief Poll and finalize async compute initialization (called from render loop)
         void pollComputeInit();
+
+        /// @brief Returns whether WebGPU was explicitly selected.
+        [[nodiscard]] bool isWebGPUBackendRequested() const;
+
+        /// @brief Returns the explicitly persisted backend, if one was configured.
+        [[nodiscard]] std::optional<compute::ComputeBackendKind>
+        getExplicitlyConfiguredBackend() const;
+
+        /// @brief Marks compute unavailable without constructing a different backend.
+        void setComputeUnavailable(std::string errorMessage, bool showModal);
     };
 }

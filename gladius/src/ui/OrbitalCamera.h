@@ -1,7 +1,7 @@
 #pragma once
 
+#include "../ComputeTypes.h"
 #include "../kernel/types.h"
-#include <CL/cl_platform.h>
 #include <cmath>
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/src/Core/Matrix.h>

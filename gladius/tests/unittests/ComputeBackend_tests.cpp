@@ -1,6 +1,10 @@
 #include "compute/ComputeBackend.h"
 #include "compute/ComputeBackendSettings.h"
+#include "compute/ApplicationComputeRuntime.h"
+#include "compute/ComputeRendererFactory.h"
 #include "compute/IComputeBackend.h"
+#include "compute/RenderBackendSession.h"
+#include "Document.h"
 #include "webgpu/WebGPUDispatchPolicy.h"
 #include "webgpu/WebGPUShaderAbi.h"
 
@@ -22,6 +26,25 @@ namespace gladius::compute::tests
     {
         EXPECT_EQ(toString(ComputeBackendKind::OpenCL), "opencl");
         EXPECT_EQ(toString(ComputeBackendKind::WebGPU), "webgpu");
+    }
+
+    TEST(ComputeBackendSettings, ExplicitConfiguredBackend_IsReturnedWithoutFallback)
+    {
+        ConfigManager configManager;
+        setConfiguredComputeBackend(configManager, ComputeBackendKind::WebGPU);
+
+        auto const preference = getConfiguredComputeBackendPreference(configManager);
+
+        ASSERT_TRUE(preference.has_value());
+        EXPECT_EQ(*preference, ComputeBackendKind::WebGPU);
+    }
+
+    TEST(ComputeBackendSettings, InvalidConfiguredBackend_HasNoExplicitPreference)
+    {
+        ConfigManager configManager;
+        configManager.setValue("compute", "backend", std::string{"invalid"});
+
+        EXPECT_FALSE(getConfiguredComputeBackendPreference(configManager).has_value());
     }
 
     TEST(ComputeBackend, ParseComputeBackend_WithKnownValue_ReturnsBackend)
@@ -59,6 +82,81 @@ namespace gladius::compute::tests
             EXPECT_EQ(selectedBackend, ComputeBackendKind::OpenCL);
         }
     }
+
+    TEST(Document, CorelessConstruction_CreatesAnalyticDocumentState)
+    {
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document(logger);
+
+        EXPECT_EQ(document.getCore(), nullptr);
+        ASSERT_TRUE(document.getAssembly());
+        ASSERT_TRUE(document.getAssembly()->assemblyModel());
+    }
+
+#if defined(GLADIUS_ENABLE_WEBGPU)
+    TEST(ApplicationComputeRuntime, WebGPUConstruction_DoesNotCreateOpenCLCore)
+    {
+        std::unique_ptr<compute::IBackendRuntime> runtime;
+        try
+        {
+            runtime = compute::ApplicationComputeRuntime::createWebGPU();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        ASSERT_TRUE(runtime);
+        EXPECT_EQ(runtime->getBackendKind(), ComputeBackendKind::WebGPU);
+        EXPECT_EQ(runtime->getOpenCLCore(), nullptr);
+        ASSERT_TRUE(runtime->isAvailable()) << runtime->getErrorMessage();
+        EXPECT_NE(runtime->getRenderBackendSession(), nullptr);
+    }
+
+    TEST(ApplicationComputeRuntime, WebGPUCorelessDocument_CanMaterializeAndRender)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document(logger);
+
+        std::unique_ptr<compute::IBackendRuntime> runtime;
+        try
+        {
+            runtime = compute::ApplicationComputeRuntime::createWebGPU();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        ASSERT_TRUE(runtime->isAvailable()) << runtime->getErrorMessage();
+        auto * const session = runtime->getRenderBackendSession();
+        ASSERT_NE(session, nullptr);
+
+        auto const snapshot = compute::ComputeRendererFactory::materializeScene(
+          document.getAssembly().get(), *document.getAssembly()->assemblyModel(), 1u);
+        ASSERT_TRUE(session->replaceScene(snapshot));
+
+        auto submission = session->submitFrame(
+          compute::RenderRequest{.viewport = {.width = 17u, .height = 17u, .firstRow = 0u, .endRow = 17u}});
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (submission->getStatus() == compute::RenderSubmissionStatus::Pending &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            submission->progress();
+        }
+
+        ASSERT_EQ(submission->getStatus(), compute::RenderSubmissionStatus::Succeeded)
+          << submission->getErrorMessage();
+        auto frame = submission->takeFrame();
+        ASSERT_TRUE(frame.has_value());
+        EXPECT_TRUE(frame->isValid());
+    }
+#endif
 
     TEST(ComputeBackend, SliceRequest_WithDefaultValues_HasValidUnitScale)
     {

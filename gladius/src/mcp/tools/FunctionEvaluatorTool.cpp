@@ -5,6 +5,7 @@
 
 #include "FunctionEvaluatorTool.h"
 
+#ifdef GLADIUS_ENABLE_OPENCL
 #include "../../Application.h"
 #include "../../CLProgram.h"
 #include "../../Document.h"
@@ -30,9 +31,11 @@
 #else
 #include <unistd.h>
 #endif
+#endif
 
 namespace gladius::mcp::tools
 {
+#ifdef GLADIUS_ENABLE_OPENCL
     namespace
     {
         /// Map a node type_index to the OpenCL type name.
@@ -434,6 +437,7 @@ namespace gladius::mcp::tools
         }
 
     } // anonymous namespace
+#endif
 
     FunctionEvaluatorTool::FunctionEvaluatorTool(Application * app)
         : MCPToolBase(app)
@@ -443,6 +447,13 @@ namespace gladius::mcp::tools
     nlohmann::json FunctionEvaluatorTool::evaluateFunction(uint32_t functionId,
                                                            nlohmann::json const & samples)
     {
+#ifndef GLADIUS_ENABLE_OPENCL
+                (void)functionId;
+                (void)samples;
+                return createToolError(
+                    "Function evaluation is unavailable in a pure WebGPU build. "
+                    "Use WebGPU rendering or provide a backend with host-side evaluation support.");
+#else
         using json = nlohmann::json;
 
         if (!validateApplication())
@@ -734,6 +745,7 @@ namespace gladius::mcp::tools
             return createToolError(
               fmt::format("Evaluation failed: {}", e.what()));
         }
+#endif
     }
 
 } // namespace gladius::mcp::tools
