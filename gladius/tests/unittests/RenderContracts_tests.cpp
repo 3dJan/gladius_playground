@@ -54,6 +54,29 @@ namespace gladius::compute::tests
         EXPECT_FALSE(settings.isValid());
     }
 
+    TEST(RenderBounds, IsValid_WithOrderedFiniteBounds_ReturnsTrue)
+    {
+        RenderBounds const bounds{.min = {-1.0f, 2.0f, 3.0f}, .max = {4.0f, 5.0f, 6.0f}};
+
+        EXPECT_TRUE(bounds.isValid());
+    }
+
+    TEST(RenderBounds, IsValid_WithCollapsedAxis_ReturnsFalse)
+    {
+        RenderBounds const bounds{.min = {0.0f, 0.0f, 0.0f}, .max = {4.0f, 0.0f, 6.0f}};
+
+        EXPECT_FALSE(bounds.isValid());
+    }
+
+    TEST(RenderRequest, IsValid_WithInvalidModelBounds_ReturnsFalse)
+    {
+        RenderRequest request{.modelBounds = RenderBounds{.min = {0.0f, 0.0f, 0.0f},
+                                                          .max = {4.0f, 0.0f, 6.0f}},
+                              .viewport = {.width = 17u, .height = 33u, .firstRow = 0u, .endRow = 33u}};
+
+        EXPECT_FALSE(request.isValid());
+    }
+
     TEST(RenderSceneSnapshot, IsValid_WithAnalyticEvaluatorAndFiniteParameters_ReturnsTrue)
     {
         RenderSceneSnapshot const snapshot{.sceneGeneration = 1u,

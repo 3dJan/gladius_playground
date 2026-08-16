@@ -150,6 +150,7 @@ namespace gladius::webgpu
                     .normalOffset = request.settings.normalOffset,
                     .renderingFlags = request.settings.flags,
                     .renderingMode = static_cast<std::uint32_t>(request.settings.mode),
+                    .modelBounds = request.modelBounds,
                     .shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl),
                     .parameterValues = scene.parameterValues};
         }

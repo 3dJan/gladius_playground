@@ -7,6 +7,8 @@ struct FrameUniforms {
     first_row_and_count: vec4<f32>,
     time_slice_quality_normal: vec4<f32>,
     flags_mode_reserved: vec4<u32>,
+    clipping_box_min: vec4<f32>,
+    clipping_box_max: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -47,6 +49,21 @@ struct SceneSample {
 fn signed_box(position: vec3<f32>, half_size: vec3<f32>) -> f32 {
     let distance = abs(position) - half_size;
     return length(max(distance, vec3<f32>(0.0))) + min(max(distance.x, max(distance.y, distance.z)), 0.0);
+}
+
+fn bounding_box_distance(position: vec3<f32>, minimum: vec3<f32>, maximum: vec3<f32>) -> f32 {
+    return signed_box(position - 0.5f * (minimum + maximum), 0.5f * (maximum - minimum));
+}
+
+fn has_model_bounds() -> bool {
+    return frame.flags_mode_reserved.z != 0u;
+}
+
+fn clipping_box_distance(position: vec3<f32>, slice_height: f32) -> f32 {
+    let maximum = vec3<f32>(frame.clipping_box_max.x,
+                            frame.clipping_box_max.y,
+                            slice_height - 0.1f);
+    return bounding_box_distance(position, frame.clipping_box_min.xyz, maximum);
 }
 
 fn signed_cylinder(position: vec3<f32>, radius: f32, height: f32) -> f32 {
@@ -99,14 +116,23 @@ fn build_platform(position: vec3<f32>) -> f32 {
 }
 
 fn field_overlay(position: vec3<f32>, slice_height: f32) -> f32 {
-    return signed_box(position - vec3<f32>(200.0f, 200.0f, slice_height - 0.5f), vec3<f32>(200.0f, 200.0f, 0.5f));
+    let minimum = vec3<f32>(frame.clipping_box_min.x,
+                            frame.clipping_box_min.y,
+                            slice_height - 1.0f);
+    let maximum = vec3<f32>(frame.clipping_box_max.x,
+                            frame.clipping_box_max.y,
+                            slice_height);
+    return bounding_box_distance(position, minimum, maximum);
 }
 
-fn stack_overlay(position: vec3<f32>) -> f32 {
+fn stack_overlay(position: vec3<f32>, slice_height: f32) -> f32 {
     let stack_height = 2.5f;
     let stack_position = position.z - round(position.z / stack_height) * stack_height;
-    return signed_box(vec3<f32>(position.x - 200.0f, position.y - 200.0f, stack_position),
-                      vec3<f32>(200.0f, 200.0f, 0.25f));
+    let minimum = vec3<f32>(frame.clipping_box_min.x, frame.clipping_box_min.y, 0.0f);
+    let maximum = vec3<f32>(frame.clipping_box_max.x, frame.clipping_box_max.y, 0.5f);
+    let stack_distance = bounding_box_distance(
+      vec3<f32>(position.x, position.y, stack_position), minimum, maximum);
+    return max(clipping_box_distance(position, slice_height), stack_distance);
 }
 
 fn evaluate_surface(position: vec3<f32>) -> SceneSample {
@@ -115,7 +141,11 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;
     if ((flags & RF_CUT_OFF_OBJECT) != 0u && slice_height > 0.0001f) {
-        sample.distance = max(sample.distance, position.z - slice_height);
+        var clipping_distance = position.z - slice_height;
+        if (has_model_bounds()) {
+            clipping_distance = clipping_box_distance(position, slice_height);
+        }
+        sample.distance = max(sample.distance, clipping_distance);
     }
 
     if ((flags & RF_SHOW_BUILDPLATE) != 0u) {
@@ -127,7 +157,7 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
         }
     }
 
-    if ((flags & RF_SHOW_FIELD) != 0u && slice_height > 0.0001f) {
+    if ((flags & RF_SHOW_FIELD) != 0u && slice_height > 0.0001f && has_model_bounds()) {
         let field_distance = field_overlay(position, slice_height);
         if (field_distance < sample.distance) {
             sample.distance = field_distance;
@@ -142,8 +172,8 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
         }
     }
 
-    if ((flags & RF_SHOW_STACK) != 0u) {
-        let stack_distance = stack_overlay(position);
+    if ((flags & RF_SHOW_STACK) != 0u && slice_height > 0.0001f && has_model_bounds()) {
+        let stack_distance = stack_overlay(position, slice_height);
         if (stack_distance < sample.distance) {
             sample.distance = stack_distance;
             sample.color = vec3<f32>(0.5f + model.w * 0.05f);

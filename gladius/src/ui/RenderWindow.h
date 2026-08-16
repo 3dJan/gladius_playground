@@ -230,6 +230,7 @@ namespace gladius::ui
 
         [[nodiscard]] bool isAsyncBackendActive() const noexcept;
         [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
+        [[nodiscard]] bool updateCameraCentering();
 
         // Async bounding box computation
         void scheduleAsyncBboxUpdate(
@@ -385,6 +386,7 @@ namespace gladius::ui
         bool shouldRecalculateCenter();
         CameraState getCurrentCameraState();
         void onCameraManuallyMoved();
+        [[nodiscard]] bool isNeutralDocumentReady();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         async_rendering::NeutralRenderScheduler m_neutralRenderScheduler{
@@ -434,7 +436,20 @@ namespace gladius::ui
 
               try
               {
-                  return compute::OpenCLRenderRequestFactory::create(*resources, viewport, freshness);
+                  auto request = compute::OpenCLRenderRequestFactory::create(*resources,
+                                                                              viewport,
+                                                                              freshness);
+                  if (auto const boundingBox = m_core->getBoundingBox(); boundingBox.has_value())
+                  {
+                      compute::RenderBounds const modelBounds{
+                        .min = {boundingBox->min.x, boundingBox->min.y, boundingBox->min.z},
+                        .max = {boundingBox->max.x, boundingBox->max.y, boundingBox->max.z}};
+                      if (modelBounds.isValid())
+                      {
+                          request.modelBounds = modelBounds;
+                      }
+                  }
+                  return request;
               }
               catch (...)
               {
@@ -449,7 +464,6 @@ namespace gladius::ui
         std::uint64_t m_neutralSceneGeneration{0u};
         std::uint32_t m_neutralViewportWidth{0u};
         std::uint32_t m_neutralViewportHeight{0u};
-        std::atomic<uint64_t> m_neutralRenderRequestCounter{0};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};

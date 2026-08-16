@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/ComputeBackend.h"
+#include "compute/RenderContracts.h"
 
 #include <array>
 #include <cstdint>
@@ -67,6 +68,7 @@ namespace gladius::compute
         float normalOffset{0.001f};
         std::uint32_t renderingFlags{};
         std::uint32_t renderingMode{};
+        std::optional<RenderBounds> modelBounds{};
         std::string shaderSource;
         std::vector<float> parameterValues;
     };

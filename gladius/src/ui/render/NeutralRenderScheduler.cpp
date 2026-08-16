@@ -17,7 +17,8 @@ namespace gladius::ui::async_rendering
 
     bool NeutralRenderScheduler::submit(RenderTaskRequest const & task, compute::IComputeRenderer & renderer)
     {
-        if (!isSupportedDisplayTask(task.type) || !renderer.isAvailable())
+        if (!isSupportedDisplayTask(task.type) || !renderer.isAvailable() ||
+            !matches(task.stamp, m_workflow.latestStamp(), RenderStampMask::displayFrame()))
         {
             return false;
         }
@@ -43,7 +44,8 @@ namespace gladius::ui::async_rendering
                                         compute::IRenderScene const & scene)
     {
         if (!isSupportedDisplayTask(task.type) || !renderer.isAvailable() ||
-            scene.getBackendKind() != renderer.getBackendKind())
+            scene.getBackendKind() != renderer.getBackendKind() ||
+            !matches(task.stamp, m_workflow.latestStamp(), RenderStampMask::displayFrame()))
         {
             return false;
         }
@@ -68,7 +70,9 @@ namespace gladius::ui::async_rendering
                                         compute::RenderBackendSession & session)
     {
         if (!isSupportedDisplayTask(task.type) || !session.isAvailable() ||
-            !session.hasMaterializedScene() || task.stamp.sceneEpoch != session.getSceneGeneration())
+            !session.hasMaterializedScene() ||
+            !matches(task.stamp, m_workflow.latestStamp(), RenderStampMask::displayFrame()) ||
+            task.stamp.sceneEpoch != session.getSceneGeneration())
         {
             return false;
         }

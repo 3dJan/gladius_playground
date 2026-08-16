@@ -9,7 +9,25 @@ namespace gladius::compute
         auto const configuredBackend =
           configManager.getValue<std::string>("compute", "backend", "opencl");
         auto const backend = parseComputeBackend(configuredBackend).value_or(ComputeBackendKind::OpenCL);
-        // LOG: Backend selection - using <backend> (config=<value>, available=<bool>)
+
+        if (isComputeBackendBuilt(backend))
+        {
+            return backend;
+        }
+
+        // A persisted preference can outlive the build configuration that created it.
+        // Select the other compiled backend instead of reporting an unavailable one to
+        // the viewport and backend factory.
+        if (isComputeBackendBuilt(ComputeBackendKind::OpenCL))
+        {
+            return ComputeBackendKind::OpenCL;
+        }
+
+        if (isComputeBackendBuilt(ComputeBackendKind::WebGPU))
+        {
+            return ComputeBackendKind::WebGPU;
+        }
+
         return backend;
     }
 

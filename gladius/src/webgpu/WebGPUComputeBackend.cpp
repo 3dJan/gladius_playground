@@ -19,8 +19,11 @@ namespace gladius::webgpu
     namespace
     {
         constexpr std::uint32_t MAX_FRAME_DIMENSION = 4096u;
-        constexpr std::size_t MAX_FRAME_PIXELS = 4u * 1024u * 1024u;
-        constexpr std::uint32_t MAX_FRAME_RAY_STEPS = 512u;
+        // Keep the explicit allocation guard, but allow common desktop viewport sizes such as
+        // 3685x1855 (approximately 6.8 million pixels). MAX_FRAME_RAY_ITERATIONS remains the
+        // separate total-work guard and reduces ray steps as the frame grows.
+        constexpr std::size_t MAX_FRAME_PIXELS = 10u * 1024u * 1024u;
+        constexpr std::uint32_t MAX_FRAME_RAY_STEPS = 2048u;
         constexpr std::size_t MAX_FRAME_RAY_ITERATIONS = 64u * 1024u * 1024u;
 
         std::string toString(wgpu::StringView const value)
@@ -382,6 +385,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("WebGPU frame dimensions exceed the safe limit");
                 }
+                if (request.modelBounds.has_value() && !request.modelBounds->isValid())
+                {
+                    throw std::invalid_argument("WebGPU frame model bounds are invalid");
+                }
 
                 auto const framePixelCount = static_cast<std::size_t>(request.width) *
                                               static_cast<std::size_t>(request.height);
@@ -397,6 +404,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                      static_cast<std::uint32_t>(rayStepsForSafeWorkload)});
 
                 auto const rowCount = request.endRow - request.firstRow;
+                auto const modelBounds = request.modelBounds.value_or(compute::RenderBounds{});
                 m_buffers.resize(
                   m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
                 m_buffers.writeUniforms(
@@ -428,7 +436,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                               request.sliceHeight,
                                               request.quality,
                                               request.normalOffset},
-                    .flagsModeReserved = {request.renderingFlags, request.renderingMode, 0u, 0u}});
+                    .flagsModeReserved = {request.renderingFlags,
+                                          request.renderingMode,
+                                          request.modelBounds.has_value() ? 1u : 0u,
+                                          0u},
+                    .clippingBoxMin = {modelBounds.min[0], modelBounds.min[1], modelBounds.min[2], 0.0f},
+                    .clippingBoxMax = {modelBounds.max[0], modelBounds.max[1], modelBounds.max[2], 0.0f}});
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())

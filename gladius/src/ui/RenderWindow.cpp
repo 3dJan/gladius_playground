@@ -5,7 +5,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <fmt/core.h>
-#include <iostream>
 #include <iterator>
 #include <thread>
 
@@ -56,6 +55,7 @@ namespace gladius::ui
                 {
                     return true;
                 }
+
                 try
                 {
                     auto const status = m_event.getInfo<CL_EVENT_COMMAND_EXECUTION_STATUS>();
@@ -163,6 +163,20 @@ namespace gladius::ui
         constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
         constexpr float kAdaptivePreviewResizeThresholdPercent = 20.0f;
 
+        [[nodiscard]] bool isRenderableBoundingBox(std::optional<BoundingBox> const & boundingBox)
+        {
+            if (!boundingBox.has_value())
+            {
+                return false;
+            }
+
+            auto const & box = *boundingBox;
+            auto const isFinite = [](float const value) { return std::isfinite(value); };
+            return isFinite(box.min.x) && isFinite(box.min.y) && isFinite(box.min.z) &&
+                   isFinite(box.max.x) && isFinite(box.max.y) && isFinite(box.max.z) &&
+                   box.max.x > box.min.x && box.max.y > box.min.y && box.max.z > box.min.z;
+        }
+
         struct AsyncPreviewLaunch
         {
             cl::Event event{};
@@ -229,14 +243,6 @@ namespace gladius::ui
                          : compute::ComputeBackendKind::OpenCL;
         m_neutralBackendActive = configuredBackend == compute::ComputeBackendKind::WebGPU;
 
-        std::cout << "[ComputeBackend] viewport configured="
-              << compute::toString(configuredBackend)
-              << " selected="
-              << compute::toString(m_neutralBackendActive
-                         ? compute::ComputeBackendKind::WebGPU
-                         : compute::ComputeBackendKind::OpenCL)
-              << std::endl;
-
         // Initialize settings when core is ready
         if (m_core && m_core->isRendererReady())
         {
@@ -286,17 +292,9 @@ namespace gladius::ui
                 m_renderBackendSession = compute::ComputeRendererFactory::createRenderBackendSession(
                   *m_configManager,
                                     compute::ComputeBackendKind::WebGPU);
-                if (m_renderBackendSession)
-                {
-                    std::cout << "[ComputeBackend] viewport active="
-                              << compute::toString(m_renderBackendSession->getBackendKind())
-                              << std::endl;
-                }
             }
-            catch (std::exception const & error)
+            catch (std::exception const &)
             {
-                std::cout << "[ComputeBackend] viewport initialization failed: "
-                          << error.what() << std::endl;
                 m_renderBackendSession.reset();
             }
         }
@@ -359,11 +357,19 @@ namespace gladius::ui
                 (void) m_neutralFramePresenter->present(accepted.frame);
             }
         }
+        for (auto const & command : pollResult.commands)
+        {
+            if (command.type == async_rendering::RenderCommandType::StartTask)
+            {
+                m_pendingRenderCommands.push_back(command);
+            }
+        }
 
         auto pendingCommands = std::move(m_pendingRenderCommands);
         m_pendingRenderCommands.clear();
-        for (auto const & command : pendingCommands)
+        for (std::size_t commandIndex = 0u; commandIndex < pendingCommands.size(); ++commandIndex)
         {
+            auto const & command = pendingCommands[commandIndex];
             if (command.type != async_rendering::RenderCommandType::StartTask)
             {
                 continue;
@@ -378,6 +384,9 @@ namespace gladius::ui
             {
                 if (m_neutralRenderScheduler.submit(command.task, *m_renderBackendSession))
                 {
+                    m_pendingRenderCommands.insert(m_pendingRenderCommands.end(),
+                                                   pendingCommands.begin() + commandIndex + 1u,
+                                                   pendingCommands.end());
                     return true;
                 }
                 queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
@@ -937,7 +946,13 @@ namespace gladius::ui
         bool const isFileLoading = m_document && m_document->isLoadingInProgress();
         auto const renderProgramReady = m_core ? m_core->tryIsRenderProgramReady()
                                                : std::optional<bool>{false};
-        if (isFileLoading && !renderProgramReady.value_or(false))
+        if (isFileLoading && (m_neutralBackendActive || !renderProgramReady.value_or(false)))
+        {
+            renderLoadingOverlay();
+            return;
+        }
+
+        if (m_neutralBackendActive && !isNeutralDocumentReady())
         {
             renderLoadingOverlay();
             return;
@@ -1591,6 +1606,7 @@ namespace gladius::ui
         if (!m_enableHQRendering)
         {
             // Clear dirty flag — with HQ disabled, low-res preview is the final output.
+            // Without this, m_dirty stays true forever and the UI loop never settles.
             m_dirty = false;
             return;
         }
@@ -2052,6 +2068,13 @@ namespace gladius::ui
 
         if (m_neutralBackendActive)
         {
+            if (updateCameraCentering())
+            {
+                // The neutral backend can submit a frame immediately after loading. Apply the
+                // initial centering target before that first submission instead of rendering the
+                // camera's old interpolated position for several hundred frames.
+                m_camera.snapToTarget();
+            }
             m_core->applyCamera(m_camera);
             (void) tryRenderWithNeutralBackend(state);
             return;
@@ -2142,6 +2165,101 @@ namespace gladius::ui
         return m_core->getBoundingBox();
     }
 
+    bool RenderWindow::updateCameraCentering()
+    {
+        bool const firstTimeBoundingBoxAvailable =
+          !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();
+        bool const shouldCenter =
+          m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
+        if (!shouldCenter)
+        {
+            return false;
+        }
+
+        auto boundingBox = m_core->getBoundingBox();
+        if (!boundingBox.has_value() && m_neutralBackendActive)
+        {
+            // The neutral path does not initialize the legacy async controller, so request the
+            // backend-independent bounding box directly when the document has finished loading.
+            // If the slicer is still settling, retry on the next frame instead of centering on
+            // the empty document.
+            (void) m_core->updateBBox();
+            boundingBox = m_core->getBoundingBox();
+        }
+
+        bool boundingBoxValid = boundingBox.has_value();
+        if (boundingBoxValid)
+        {
+            auto const & bb = *boundingBox;
+            boundingBoxValid = (fabs(bb.max.x - bb.min.x > 0.f) &&
+                                fabs(bb.max.y - bb.min.y > 0.f) &&
+                                fabs(bb.max.z - bb.min.z > 0.f));
+
+            if (boundingBoxValid)
+            {
+                m_camera.centerView(bb);
+                m_camera.adjustDistanceToTarget(
+                  bb, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
+
+                if (m_permanentCenteringEnabled)
+                {
+                    updateCameraStateTracking();
+                    m_modelModifiedSinceLastCenter = false;
+                    m_viewportSizeChangedSinceLastCenter = false;
+                    m_lastViewportSize = m_renderWindowSize_px;
+                }
+
+                m_centerViewRequested = false;
+                if (firstTimeBoundingBoxAvailable)
+                {
+                    m_boundingBoxEverAvailable = true;
+                }
+            }
+        }
+
+        if (!boundingBoxValid && m_neutralBackendActive)
+        {
+            // The neutral path must not render an empty or transient scene. The viewport readiness
+            // check retries bbox computation before this helper is called.
+            return false;
+        }
+
+        if (!boundingBoxValid)
+        {
+            m_camera.setLookAt({200.0, 200.0, 50.0});
+
+            if (m_permanentCenteringEnabled)
+            {
+                updateCameraStateTracking();
+                m_modelModifiedSinceLastCenter = false;
+                m_viewportSizeChangedSinceLastCenter = false;
+                m_lastViewportSize = m_renderWindowSize_px;
+            }
+        }
+
+        // Route camera changes through the workflow so the neutral backend renders the centered
+        // view instead of retaining a task created for the pre-load camera.
+        invalidateCameraView();
+        return true;
+    }
+
+    bool RenderWindow::isNeutralDocumentReady()
+    {
+        if (!m_neutralBackendActive || !m_core || !m_document ||
+            m_document->isLoadingInProgress())
+        {
+            return !m_neutralBackendActive;
+        }
+
+        if (isRenderableBoundingBox(m_core->getBoundingBox()))
+        {
+            return true;
+        }
+
+        (void) m_core->updateBBox();
+        return isRenderableBoundingBox(m_core->getBoundingBox());
+    }
+
     void RenderWindow::renderSync(RenderWindowState & state)
     {
         ProfileFunction;
@@ -2166,447 +2284,6 @@ namespace gladius::ui
         {
             m_view->startAnimationMode();
         }
-
-        bool const firstTimeBoundingBoxAvailable =
-          !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();
-
-        bool const shouldCenter =
-          m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
-
-        if (shouldCenter)
-        {
-            bool boundingBoxValid = m_core->getBoundingBox().has_value();
-            if (boundingBoxValid)
-            {
-                auto bb = m_core->getBoundingBox().value();
-                boundingBoxValid =
-                  (fabs(bb.max.x - bb.min.x > 0.f) && fabs(bb.max.y - bb.min.y > 0.f) &&
-                   fabs(bb.max.z - bb.min.z > 0.f));
-
-                if (boundingBoxValid)
-                {
-                    m_camera.centerView(bb);
-                    m_camera.adjustDistanceToTarget(
-                      bb, m_renderWindowSize_px.x, m_renderWindowSize_px.y);
-
-                    if (m_permanentCenteringEnabled)
-                    {
-                        updateCameraStateTracking();
-                        m_modelModifiedSinceLastCenter = false;
-                        m_viewportSizeChangedSinceLastCenter = false;
-                        m_lastViewportSize = m_renderWindowSize_px;
-                    }
-
-                    m_centerViewRequested = false;
-
-                    if (firstTimeBoundingBoxAvailable)
-                    {
-                        m_boundingBoxEverAvailable = true;
-                    }
-                }
-            }
-
-            if (!boundingBoxValid)
-            {
-                m_camera.setLookAt({200.0, 200.0, 50.0});
-
-                if (m_permanentCenteringEnabled)
-                {
-                    updateCameraStateTracking();
-                    m_modelModifiedSinceLastCenter = false;
-                    m_viewportSizeChangedSinceLastCenter = false;
-                    m_lastViewportSize = m_renderWindowSize_px;
-                }
-            }
-
-            invalidateView();
-        }
-        if (state.isMoving)
-        {
-            if (m_preComputedSdfDirty)
-            {
-                m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
-            }
-        }
-
-        // Defer buffer reallocation during resize to preserve visible content
-        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
-        
-        if (!shouldDeferResize &&
-            m_core->setScreenResolution(
-              static_cast<int>(
-                std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f)),
-              static_cast<int>(
-                std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f))))
-        {
-            invalidateView();
-        }
-
-        bool previewResolutionChanged = false;
-
-        std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
-
-        int newWidth = static_cast<int>(
-          std::clamp(m_renderWindowSize_px.x * state.renderQualityWhileMoving, 1.f, 16000.f));
-        int newHeight = static_cast<int>(
-          std::clamp(m_renderWindowSize_px.y * state.renderQualityWhileMoving, 1.f, 16000.f));
-
-        float widthChangePercent = std::abs(newWidth - lowResPreviewResolution.first) /
-                                   static_cast<float>(lowResPreviewResolution.first) * 100.0f;
-        float heightChangePercent = std::abs(newHeight - lowResPreviewResolution.second) /
-                                    static_cast<float>(lowResPreviewResolution.second) * 100.0f;
-
-        float currentAspectRatio =
-          static_cast<float>(lowResPreviewResolution.first) / lowResPreviewResolution.second;
-        float newAspectRatio = static_cast<float>(newWidth) / newHeight;
-
-        if (widthChangePercent > 20.0f || heightChangePercent > 20.0f ||
-            std::abs(currentAspectRatio - newAspectRatio) > 0.01f)
-        {
-            m_core->setLowResPreviewResolution(newWidth, newHeight);
-            previewResolutionChanged = true;
-        }
-        state.isRendering = true;
-        auto const renderFrame = [&]()
-        {
-            renderScene(state);
-
-            auto const img = m_core->getResultImage();
-            img->bind();
-            img->unbind();
-        };
-
-        // PID controller tuning for adaptive rendering resolution
-        // These values are tuned to provide smooth resolution adjustment during camera movement
-        // kp: Proportional gain - primary response to frame time error
-        // ki: Integral gain - eliminates steady-state error (low to prevent windup)
-        // kd: Derivative gain - dampens oscillation
-        float constexpr kp = 0.001f;
-        float constexpr ki = 0.00001f;
-        float constexpr kd = 0.000001f;
-
-        auto const executionDuration_ms =
-          measure<std::chrono::milliseconds>::execution(renderFrame);
-
-        // Progressive rendering: cap the time the UI thread spends blocked
-        // inside a single renderScene() chunk. Each call to renderScene queues
-        // ONE OpenCL kernel covering [currentLine, currentLine+stepSize) and
-        // waits for it to complete, so a too-large step on a heavy SDF can
-        // freeze the UI for hundreds of milliseconds. The adaptive logic below
-        // shrinks the step when a chunk exceeds this target and grows it back
-        // when chunks are comfortably under it.
-        auto constexpr progressiveTargetRenderTime_ms = 150;
-        auto constexpr tolerance_ms = 1;
-        auto constexpr targetFrameTime_ms = 25; // Target ~40 FPS during interaction
-        float error = targetFrameTime_ms - executionDuration_ms;
-        if (!previewResolutionChanged && (state.isMoving || m_core->isAnyCompilationInProgressNonBlocking()) &&
-            executionDuration_ms > 0 && fabs(error) > 0)
-        {
-            state.fpsIntegral *= 0.8f;
-            state.fpsIntegral += error;
-
-            float derivative = error - state.fpsPreviousError;
-            float adjustment = kp * error + ki * state.fpsIntegral + kd * derivative;
-
-            state.renderQualityWhileMoving += adjustment;
-            state.renderQualityWhileMoving =
-              std::clamp(state.renderQualityWhileMoving, 0.05f, state.renderQuality);
-        }
-        if (!state.isMoving && !m_core->isAnyCompilationInProgressNonBlocking() && executionDuration_ms > 0)
-        {
-            if (executionDuration_ms > progressiveTargetRenderTime_ms + tolerance_ms)
-            {
-                auto const fraction = m_preComputedSdfDirty ? 0.1f : 0.5f;
-                state.renderingStepSize =
-                  std::clamp(static_cast<size_t>(state.renderingStepSize * fraction),
-                             size_t{2},
-                             m_core->getResultImage()->getHeight());
-            }
-
-            if (executionDuration_ms < progressiveTargetRenderTime_ms - tolerance_ms)
-            {
-                state.renderingStepSize =
-                  std::clamp(static_cast<size_t>(state.renderingStepSize * 1.5 + 1),
-                             size_t{1},
-                             m_core->getResultImage()->getHeight());
-            }
-        }
-
-        state.fpsPreviousError = error;
-        state.isMoving = false;
-        state.isRendering = false;
-    }
-
-    void RenderWindow::renderAsync(RenderWindowState & state)
-    {
-        ProfileFunction;
-
-        // Skip all GPU rendering work while an export is in progress.
-        // The export pipeline uses the same OpenCL context and contending for it
-        // causes the UI to block on synchronous image reads.
-        if (m_exportState != nullptr && m_exportState->isExportInProgress())
-        {
-            return;
-        }
-
-        // Update camera now that we know core is ready
-        m_core->applyCamera(m_camera);
-        processAsyncResults(state);
-
-        // Process async preview results (separate from HQ progressive results)
-        processAsyncPreviewResults();
-
-                int const desiredScreenWidth = static_cast<int>(
-                    std::clamp(m_renderWindowSize_px.x * state.renderQuality, 1.f, 16000.f));
-                int const desiredScreenHeight = static_cast<int>(
-                    std::clamp(m_renderWindowSize_px.y * state.renderQuality, 1.f, 16000.f));
-                auto const resultImage = m_core->getResultImage();
-                bool screenResizeRequired =
-                    resultImage && (static_cast<int>(resultImage->getWidth()) != desiredScreenWidth ||
-                                                    static_cast<int>(resultImage->getHeight()) != desiredScreenHeight);
-
-        // Treat render-target resize as a scheduling barrier: the pure coordinator's
-        // viewport stamp must not be advanced until the concrete CL/GL images have the
-        // matching size. Otherwise an old-size render job can complete with the new
-        // viewport stamp, making HQ/static catch-up and Auto realtime learning believe
-        // the resized viewport is already current.
-        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
-        bool const hqRenderInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
-        if (!shouldDeferResize && screenResizeRequired)
-        {
-            if (hqRenderInFlight)
-            {
-                m_dirty = true;
-                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-                state.isRendering = false;
-                return;
-            }
-
-            if (m_asyncController && m_asyncProgressiveBuffer != nullptr)
-            {
-                [[maybe_unused]] bool const released =
-                  m_asyncController->tryTransitionBuffer(m_asyncProgressiveBuffer,
-                                                         async_rendering::FrameState::Writing,
-                                                         async_rendering::FrameState::Idle);
-                m_asyncProgressiveBuffer = nullptr;
-                m_asyncProgressiveEpoch.store(0, std::memory_order_release);
-                m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
-                state.currentLine = 0;
-                state.isRendering = false;
-            }
-
-            bool const resized = m_core->setScreenResolution(desiredScreenWidth, desiredScreenHeight);
-            auto const latestImage = m_core->getResultImage();
-            bool const resizeStillRequired =
-              !latestImage || static_cast<int>(latestImage->getWidth()) != desiredScreenWidth ||
-              static_cast<int>(latestImage->getHeight()) != desiredScreenHeight;
-            if (resizeStillRequired)
-            {
-                // setScreenResolution can legitimately fail while another compute operation
-                // holds the token. Keep the old frame visible and retry next UI frame instead
-                // of scheduling work against stale dimensions.
-                m_dirty = true;
-                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-                state.isRendering = false;
-                return;
-            }
-
-            screenResizeRequired = false;
-            if (resized)
-            {
-                invalidateView();
-            }
-        }
-        
-        // Clear preserve flags once rendering may resume. The early render() guard normally
-        // handles this on the first stable-size frame; this branch is a defensive fallback.
-        if (shouldDeferResize && m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire))
-        {
-            m_preserveContentDuringResize = false;
-            m_deferredResizePending = false;
-        }
-
-        if (m_asyncController && m_asyncController->isRunning())
-        {
-                        queueRenderDecision(m_renderUpdateCoordinator.configureViewport(
-                            static_cast<uint32_t>(desiredScreenWidth), static_cast<uint32_t>(desiredScreenHeight)));
-
-            m_renderUpdateCoordinator.setRealtimeGuards(
-              async_rendering::RealtimeRaymarchGuards{
-                .hardBlocker = !m_enableHQRendering ||
-                               m_asyncSdfJobInFlight.load(std::memory_order_acquire) ||
-                               m_asyncBboxJobInFlight.load(std::memory_order_acquire) ||
-                               m_core->isAnyCompilationInProgressNonBlocking(),
-                .renderJobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire),
-                .previewJobInFlight = m_asyncPreviewJobInFlight.load(std::memory_order_acquire),
-                .streamingActive = m_streamingPreviewActive.load(std::memory_order_acquire),
-                .streamingJobInFlight = m_streamingJobInFlight.load(std::memory_order_acquire),
-                .resizePending = m_deferredResizePending || screenResizeRequired});
-
-            // Defer transition from CameraInteracting to Static state until camera has been idle
-            // for at least 1 second. This prevents HQ progressive rendering from starting and
-            // getting aborted repeatedly during stop-and-go camera movements.
-            if (!state.isMoving &&
-                m_renderUpdateCoordinator.interactionState() ==
-                  async_rendering::RenderInteractionState::CameraInteracting)
-            {
-                auto const now = std::chrono::system_clock::now();
-                if (m_lastCameraIdleTime == TimeStamp{})
-                {
-                    // First frame idle — record the time
-                    m_lastCameraIdleTime = now;
-                }
-                else
-                {
-                    auto const timeSinceIdle = now - m_lastCameraIdleTime;
-                    if (timeSinceIdle >= std::chrono::seconds(1))
-                    {
-                        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
-                        m_lastCameraIdleTime = TimeStamp{}; // Reset for next interaction
-                    }
-                }
-            }
-
-            // Parameter-drag settle: once no parameter change has arrived for the debounce
-            // window, end the parameter interaction so the coordinator's static catch-up
-            // (bbox -> SDF -> high-quality) resumes and the static view shows full detail.
-            //
-            // This MUST run here, before the early-returning executeQueuedRenderCommands()
-            // below. In Auto mode that is not yet proven fast (and in any streaming-preview
-            // case) an interactive low-res preview frame is scheduled on every tick, so
-            // executeQueuedRenderCommands() returns true and renderAsync() returns early.
-            // The legacy settle path further down would then never be reached, leaving the
-            // view stuck on the low-res preview until the next camera move forces a
-            // notifyCameraInteractionEnded() transition. Driving the settle from here makes
-            // the transition independent of which interactive feedback path is active.
-            bool const paramInteracting =
-              m_renderUpdateCoordinator.interactionState() ==
-              async_rendering::RenderInteractionState::ParameterInteracting;
-            bool const bboxStaleForSettle = m_core->isBoundingBoxStale();
-            bool const bboxJobForSettle = m_asyncBboxJobInFlight.load(std::memory_order_acquire);
-            bool const sdfJobForSettle = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
-            auto const sinceParamChange =
-              std::chrono::steady_clock::now() - m_lastParameterChangeTime;
-            bool const debounceElapsedForSettle = sinceParamChange >= kBboxDebounceDelay;
-
-            if (paramInteracting && bboxStaleForSettle && !bboxJobForSettle && !sdfJobForSettle &&
-                debounceElapsedForSettle)
-            {
-                // Parameter drag has ended. This is a semantic interaction transition,
-                // independent of whether the active feedback path used streaming preview
-                // (Force mode does not start streaming preview at all).
-                finishParameterInteraction();
-
-                m_core->recomputeStaleBoundingBox();
-                m_core->setSdfValid(false);
-                m_preComputedSdfDirty.store(true, std::memory_order_release);
-
-                // Bump epoch to invalidate the stale HQ/preview front buffer from before the
-                // drag so the fresh bbox -> SDF -> HQ pipeline starts clean.
-                notifyAsyncEpochIncrement();
-                m_suppressHQDisplay.store(false, std::memory_order_release);
-            }
-
-            queueRenderDecision(m_renderUpdateCoordinator.tick());
-            bool const queuedWorkStarted = executeQueuedRenderCommands(state);
-
-            if (queuedWorkStarted)
-            {
-                return;
-            }
-        }
-
-        if (m_asyncController && m_asyncController->isRunning())
-        {
-            bool const sdfDirty = m_preComputedSdfDirty.load(std::memory_order_acquire);
-            bool const sdfJobActive = m_asyncSdfJobInFlight.load(std::memory_order_acquire);
-            bool const lowResPending = m_lowResFeedbackPending.load(std::memory_order_acquire);
-            bool const bboxPending = m_asyncBboxUpdatePending.load(std::memory_order_acquire);
-            bool const bboxJobActive = m_asyncBboxJobInFlight.load(std::memory_order_acquire);
-
-            // Debounce SDF scheduling when bbox is stale (parameter drag in progress).
-            // During rapid slider changes the precomputed SDF is invalidated on every
-            // tick.  Computing a new SDF only to have it immediately discarded wastes
-            // GPU time.  Low-res preview already works via direct function evaluation,
-            // so we can safely wait until the drag stops (same debounce as bbox).
-            bool const bboxStale = m_core->isBoundingBoxStale();
-            bool const sdfDebounceElapsed =
-              !bboxStale ||
-              (std::chrono::steady_clock::now() - m_lastParameterChangeTime >= kBboxDebounceDelay);
-
-            // Don't schedule SDF precomputation while the camera is actively moving in
-            // realtime mode: the realtime renderer evaluates SDF on-the-fly and doesn't
-            // need the precomputed version. Starting the SDF job now would set
-            // hardBlocker=true, preventing canAttemptRealtime() from returning true for
-            // the entire SDF compute duration. The coordinator will schedule SDF via
-            // scheduleStaticCatchUp() once notifyCameraInteractionEnded() fires.
-            bool const cameraInteracting =
-              m_renderUpdateCoordinator.interactionState() ==
-              async_rendering::RenderInteractionState::CameraInteracting;
-            bool const isRealtimeForSdfGuard =
-              m_renderUpdateCoordinator.realtimeConfig().mode !=
-              async_rendering::RealtimeRaymarchMode::Off;
-            bool const suppressSdfDuringCameraInteraction =
-              cameraInteracting && isRealtimeForSdfGuard;
-
-            if (sdfDirty && !sdfJobActive && sdfDebounceElapsed && !suppressSdfDuringCameraInteraction)
-            {
-                async_rendering::RenderJob sdfJob{};
-                sdfJob.type = async_rendering::RenderJobType::SDFPrecomputation;
-                sdfJob.epoch = m_asyncCurrentEpoch.load(std::memory_order_acquire);
-                if (sdfJob.epoch == 0)
-                {
-                    sdfJob.epoch = m_asyncEpochCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
-                    m_asyncCurrentEpoch.store(sdfJob.epoch, std::memory_order_release);
-                }
-                m_asyncController->setLatestEpoch(sdfJob.epoch);
-                m_asyncSdfJobInFlight.store(true, std::memory_order_release);
-                m_asyncSdfInFlightEpoch.store(sdfJob.epoch, std::memory_order_release);
-                m_asyncController->enqueueJob(sdfJob);
-            }
-
-            // Schedule bbox update if pending and no bbox/SDF job is currently in flight.
-            // We check sdfJobActive (captured at frame start, before new SDF scheduling)
-            // rather than sdfDirty to avoid permanently blocking bbox when SDF keeps
-            // failing (e.g., updateBBox() returns false because bbox was reset).
-            // When SDF succeeds it computes bbox as a side effect, so bboxPending
-            // is cleared in processAsyncResults to avoid redundant jobs.
-            if (bboxPending && !bboxJobActive && !sdfJobActive)
-            {
-                scheduleAsyncBboxUpdate();
-            }
-
-            // Note: the parameter-drag settle transition (finishParameterInteraction +
-            // stale-bbox recompute + epoch bump) now runs earlier, in the coordinator block
-            // above, so it cannot be skipped by the early return when an interactive preview
-            // frame is scheduled. See the ParameterInteracting settle block in this function.
-
-            if (lowResPending)
-            {
-                // Delay progressive rendering until low-res feedback is presented
-                state.isRendering = false;
-            }
-        }
-
-        if (!m_asyncController || !m_asyncController->isRunning())
-        {
-            renderSync(state);
-            return;
-        }
-
-        bool const jobInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
-        bool const pendingPreviewWork =
-          m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire) ||
-          m_lowResFeedbackPending.load(std::memory_order_acquire);
-
-        m_view->stopAnimationMode();
-
-        if (!m_dirty && !state.isRendering && !jobInFlight && !pendingPreviewWork)
-        {
-            return;
-        }
-
-        m_view->startAnimationMode();
 
         bool const firstTimeBoundingBoxAvailable =
           !m_boundingBoxEverAvailable && m_core->getBoundingBox().has_value();

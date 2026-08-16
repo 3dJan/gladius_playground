@@ -224,4 +224,17 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_TRUE(scheduler.workflow().presentedFrame().has_value());
         EXPECT_EQ(scheduler.workflow().presentedFrame()->frameId, 1u);
     }
+
+    TEST(NeutralRenderScheduler, Submit_WithStaleViewportTask_RejectsSubmission)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        ImmediateRenderer renderer;
+
+        auto task = makeTask(RenderTaskType::RealtimeFullFrame);
+        auto const viewportDecision = scheduler.workflow().configureViewport(640u, 480u);
+        ASSERT_FALSE(viewportDecision.commands.empty());
+
+        EXPECT_FALSE(scheduler.submit(task, renderer));
+        EXPECT_FALSE(scheduler.hasInFlightSubmissions());
+    }
 }

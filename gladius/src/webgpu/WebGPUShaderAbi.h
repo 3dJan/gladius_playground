@@ -37,8 +37,12 @@ namespace gladius::webgpu
         std::array<float, 4> firstRowAndCount{};
         std::array<float, 4> timeSliceQualityNormal{};
         std::array<std::uint32_t, 4> flagsModeReserved{};
+        std::array<float, 4> clippingBoxMin{};
+        std::array<float, 4> clippingBoxMax{};
     };
 
     static_assert(alignof(FrameUniforms) == 16u);
-    static_assert(sizeof(FrameUniforms) == 128u);
+    static_assert(offsetof(FrameUniforms, clippingBoxMin) == 128u);
+    static_assert(offsetof(FrameUniforms, clippingBoxMax) == 144u);
+    static_assert(sizeof(FrameUniforms) == 160u);
 }

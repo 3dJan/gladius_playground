@@ -10,7 +10,10 @@ namespace gladius
 namespace gladius::compute
 {
     /**
-     * @brief Gets the configured compute backend, defaulting to OpenCL for existing users.
+     * @brief Gets the configured and available compute backend, defaulting to OpenCL for existing users.
+     *
+     * Falls back to another backend compiled into the current binary when a persisted preference
+     * refers to a backend that is not available in this build.
      */
     [[nodiscard]] ComputeBackendKind getConfiguredComputeBackend(ConfigManager const & configManager);
 

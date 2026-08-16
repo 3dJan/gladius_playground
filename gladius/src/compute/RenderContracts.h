@@ -6,6 +6,7 @@
 #include <compare>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace gladius::compute
@@ -69,6 +70,27 @@ namespace gladius::compute
         {
             auto const squaredLength = value[0] * value[0] + value[1] * value[1] + value[2] * value[2];
             return hasFiniteComponents(value) && std::isfinite(squaredLength) && squaredLength > 0.0f;
+        }
+    };
+
+    /**
+     * @brief World-space model bounds used by clipping and SDF visualization overlays.
+     */
+    struct RenderBounds
+    {
+        std::array<float, 3> min{0.0f, 0.0f, 0.0f};
+        std::array<float, 3> max{400.0f, 400.0f, 400.0f};
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            auto const hasFiniteComponents = [](std::array<float, 3> const & value)
+            {
+                return std::isfinite(value[0]) && std::isfinite(value[1]) &&
+                       std::isfinite(value[2]);
+            };
+
+            return hasFiniteComponents(min) && hasFiniteComponents(max) && max[0] > min[0] &&
+                   max[1] > min[1] && max[2] > min[2];
         }
     };
 
@@ -182,12 +204,14 @@ namespace gladius::compute
         RenderCamera camera{};
         RenderFrustum frustum{};
         RenderSettingsSnapshot settings{};
+        std::optional<RenderBounds> modelBounds{};
         RenderViewport viewport{};
         RenderFreshnessStamp freshness{};
 
         [[nodiscard]] bool isValid() const noexcept
         {
-            return camera.isValid() && frustum.isValid() && settings.isValid() && viewport.isValid();
+            return camera.isValid() && frustum.isValid() && settings.isValid() &&
+                   (!modelBounds.has_value() || modelBounds->isValid()) && viewport.isValid();
         }
     };
 
