@@ -16,6 +16,7 @@ namespace gladius::webgpu
             explicit WebGPUAnalyticRenderScene(compute::RenderSceneSnapshot snapshot)
                 : m_snapshot{std::move(snapshot)}
             {
+                m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot.analyticEvaluatorWgsl);
             }
 
             [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
@@ -38,8 +39,14 @@ namespace gladius::webgpu
                 return m_snapshot;
             }
 
+            [[nodiscard]] std::string const & getComposedShader() const noexcept
+            {
+                return m_composedShader;
+            }
+
           private:
             compute::RenderSceneSnapshot m_snapshot;
+            std::string m_composedShader;
         };
 
         class WebGPUFrameRenderSubmission final : public compute::IRenderSubmission
@@ -130,6 +137,7 @@ namespace gladius::webgpu
         };
 
         [[nodiscard]] compute::FrameRequest createFrameRequest(compute::RenderSceneSnapshot const & scene,
+                                                               std::string const & composedShader,
                                                                compute::RenderRequest const & request)
         {
             return {.width = request.viewport.width,
@@ -151,7 +159,7 @@ namespace gladius::webgpu
                     .renderingFlags = request.settings.flags,
                     .renderingMode = static_cast<std::uint32_t>(request.settings.mode),
                     .modelBounds = request.modelBounds,
-                    .shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl),
+                    .shaderSource = composedShader,
                     .parameterValues = scene.parameterValues};
         }
     }
@@ -211,7 +219,9 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU renderer received a scene from another backend");
         }
 
-        auto frameSubmission = m_backend->submitFrame(createFrameRequest(analyticScene->getSnapshot(), request));
+        auto frameSubmission = m_backend->submitFrame(createFrameRequest(analyticScene->getSnapshot(),
+                                                                          analyticScene->getComposedShader(),
+                                                                          request));
         return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission), std::move(request));
     }
 

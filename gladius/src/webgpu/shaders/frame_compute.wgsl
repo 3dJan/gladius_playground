@@ -136,17 +136,17 @@ fn stack_overlay(position: vec3<f32>, slice_height: f32) -> f32 {
 }
 
 fn evaluate_surface(position: vec3<f32>) -> SceneSample {
-    let model = evaluateModel(position);
+    let model =  evaluateModel(position);
     var sample = SceneSample(model.w, model.xyz, 1.0f);
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;
-    if ((flags & RF_CUT_OFF_OBJECT) != 0u && slice_height > 0.0001f) {
-        var clipping_distance = position.z - slice_height;
-        if (has_model_bounds()) {
-            clipping_distance = clipping_box_distance(position, slice_height);
-        }
-        sample.distance = max(sample.distance, clipping_distance);
-    }
+    // if ((flags & RF_CUT_OFF_OBJECT) != 0u && slice_height > 0.0001f) {
+    //     var clipping_distance = position.z - slice_height;
+    //     if (has_model_bounds()) {
+    //         clipping_distance = clipping_box_distance(position, slice_height);
+    //     }
+    //     sample.distance = max(sample.distance, clipping_distance);
+    // }
 
     if ((flags & RF_SHOW_BUILDPLATE) != 0u) {
         let platform_distance = build_platform(position);
@@ -157,29 +157,29 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
         }
     }
 
-    if ((flags & RF_SHOW_FIELD) != 0u && slice_height > 0.0001f && has_model_bounds()) {
-        let field_distance = field_overlay(position, slice_height);
-        if (field_distance < sample.distance) {
-            sample.distance = field_distance;
-            sample.color = vec3<f32>(
-                select(0.0f, 0.5f + 0.5f * fract(abs(model.w)), model.w < 0.0f),
-                fract(abs(model.w) * 0.01f),
-                fract(abs(model.w) * 0.1f));
-            if (abs(model.w) < 0.05f) {
-                sample.color = sample.color + vec3<f32>(abs(0.05f - model.w) * 10.0f);
-            }
-            sample.object_type = 3.0f;
-        }
-    }
+    // if ((flags & RF_SHOW_FIELD) != 0u && slice_height > 0.0001f && has_model_bounds()) {
+    //     let field_distance = field_overlay(position, slice_height);
+    //     if (field_distance < sample.distance) {
+    //         sample.distance = field_distance;
+    //         sample.color = vec3<f32>(
+    //             select(0.0f, 0.5f + 0.5f * fract(abs(model.w)), model.w < 0.0f),
+    //             fract(abs(model.w) * 0.01f),
+    //             fract(abs(model.w) * 0.1f));
+    //         if (abs(model.w) < 0.05f) {
+    //             sample.color = sample.color + vec3<f32>(abs(0.05f - model.w) * 10.0f);
+    //         }
+    //         sample.object_type = 3.0f;
+    //     }
+    // }
 
-    if ((flags & RF_SHOW_STACK) != 0u && slice_height > 0.0001f && has_model_bounds()) {
-        let stack_distance = stack_overlay(position, slice_height);
-        if (stack_distance < sample.distance) {
-            sample.distance = stack_distance;
-            sample.color = vec3<f32>(0.5f + model.w * 0.05f);
-            sample.object_type = 3.0f;
-        }
-    }
+    // if ((flags & RF_SHOW_STACK) != 0u && slice_height > 0.0001f && has_model_bounds()) {
+    //     let stack_distance = stack_overlay(position, slice_height);
+    //     if (stack_distance < sample.distance) {
+    //         sample.distance = stack_distance;
+    //         sample.color = vec3<f32>(0.5f + model.w * 0.05f);
+    //         sample.object_type = 3.0f;
+    //     }
+    // }
 
     if ((flags & RF_SHOW_COORDINATE_SYSTEM) != 0u) {
         let axis_radius = 0.1f;
