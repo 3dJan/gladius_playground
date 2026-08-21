@@ -3357,6 +3357,7 @@ namespace gladius::ui
         {
             if (m_parameterDirty)
             {
+                m_doc->updateFlatAssembly();
                 m_renderWindow.invalidateViewDueToParameterChange();
             }
             m_parameterDirty = false;

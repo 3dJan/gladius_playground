@@ -88,6 +88,24 @@ namespace gladius::tests
 
     }
 
+    TEST(WebGPU3mfRendering, CorelessDocumentLoad_PublishesFlatAssembly)
+    {
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document(logger);
+
+        auto const filePath = std::filesystem::path("testdata") / "SimpleGyroid.3mf";
+        ASSERT_TRUE(std::filesystem::exists(filePath)) << filePath;
+        ASSERT_NO_THROW(document.load(filePath));
+
+        auto const flatAssembly = document.getFlatAssembly();
+        ASSERT_NE(flatAssembly, nullptr);
+        ASSERT_NE(flatAssembly->assemblyModel(), nullptr);
+
+        auto const snapshot = compute::ComputeRendererFactory::materializeScene(
+          flatAssembly.get(), *flatAssembly->assemblyModel(), /*generation=*/1u);
+        ASSERT_TRUE(snapshot.isValid());
+    }
+
     TEST(WebGPU3mfRendering, CorelessDocumentFallbackBounds_DoesNotFillVolumeWithBox)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
@@ -105,10 +123,13 @@ namespace gladius::tests
         auto const assembly = document.getAssembly();
         ASSERT_NE(assembly, nullptr);
         ASSERT_NE(assembly->assemblyModel(), nullptr);
+        auto const flatAssembly = document.getFlatAssembly();
+        ASSERT_NE(flatAssembly, nullptr);
+        ASSERT_NE(flatAssembly->assemblyModel(), nullptr);
 
         auto const snapshot =
-          compute::ComputeRendererFactory::materializeScene(assembly.get(),
-                                                             *assembly->assemblyModel(),
+          compute::ComputeRendererFactory::materializeScene(flatAssembly.get(),
+                                                             *flatAssembly->assemblyModel(),
                                                              /*generation=*/1u);
         ASSERT_TRUE(snapshot.isValid()) << "materializeScene failed without OpenCL core";
 
@@ -141,7 +162,7 @@ namespace gladius::tests
           right[0] * forward[1] - right[1] * forward[0]};
 
         auto request = webgpu::WebGPUModelSliceRequestFactory::createFrame(
-          *assembly,
+          *flatAssembly,
           compute::FrameRequest{.width = 128u,
                                 .height = 128u,
                                 .firstRow = 0u,

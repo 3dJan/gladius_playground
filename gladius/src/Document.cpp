@@ -867,6 +867,10 @@ namespace gladius
 #endif
         }
         resetGeneratorContext();
+        if (!m_core)
+        {
+            updateFlatAssembly();
+        }
     }
 
     void Document::newEmptyModel()
@@ -893,6 +897,10 @@ namespace gladius
 #endif
         }
         resetGeneratorContext();
+        if (!m_core)
+        {
+            updateFlatAssembly();
+        }
     }
 
     void Document::newFromTemplate()
@@ -1276,6 +1284,7 @@ namespace gladius
 
             if (!m_core)
             {
+                updateFlatAssembly();
                 return;
             }
 
@@ -1353,6 +1362,7 @@ namespace gladius
                       validateAssembly(nodes::ValidationContext::FileLoad);
                       if (!m_core)
                       {
+                          updateFlatAssembly();
                           return;
                       }
 
@@ -3111,6 +3121,7 @@ namespace gladius
 
         if (!m_core)
         {
+            updateFlatAssembly();
             return true;
         }
 
