@@ -128,7 +128,7 @@ namespace gladius::ui
         if (!session->hasMaterializedScene() ||
             session->getSceneGeneration() != m_neutralSceneGeneration)
         {
-            auto const assembly = m_document->getAssembly();
+            auto const assembly = m_document->getFlatAssembly();
             if (!assembly || !assembly->assemblyModel())
             {
                 return false;
