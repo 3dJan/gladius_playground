@@ -26,6 +26,7 @@ namespace gladius::ui::async_rendering
         RenderTaskRequest task{};
         RenderTaskResult result{};
         RenderStamp stamp{};
+        RenderStampMask presentationMask{RenderStampMask::displayFrame()};
     };
 
     struct RenderUpdateDecision
@@ -160,12 +161,16 @@ namespace gladius::ui::async_rendering
             return decision;
         }
 
-        [[nodiscard]] RenderUpdateDecision notifyCameraChanged()
+        /// @brief Notify the workflow that the camera changed.
+        /// @param replaceStaleInteractiveInFlight Allow uncancellable backends to replace an
+        ///        interactive frame on every camera update while retaining the backend submission
+        ///        until its terminal callback.
+        [[nodiscard]] RenderUpdateDecision notifyCameraChanged(bool replaceStaleInteractiveInFlight = false)
         {
             RenderUpdateDecision decision{};
             auto const previousState = m_interactionState;
             ++m_latestStamp.viewEpoch;
-            if (previousState != RenderInteractionState::CameraInteracting)
+            if (replaceStaleInteractiveInFlight || previousState != RenderInteractionState::CameraInteracting)
             {
                 releaseStaleInteractiveInFlight();
             }
@@ -218,7 +223,6 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] RenderUpdateDecision notifyEmbeddedParameterChanged(bool interactionActive)
         {
             RenderUpdateDecision decision{};
-            auto const previousState = m_interactionState;
             // The WebGPU scene embeds parameter values and is immutable after materialization.
             // Rebuilding it therefore creates a new scene generation as well as a new parameter
             // generation; both must match the backend session and submitted frame freshness.
@@ -230,10 +234,11 @@ namespace gladius::ui::async_rendering
             m_sdfStamp.reset();
             m_interactionState = interactionActive ? RenderInteractionState::ParameterInteracting
                                                    : RenderInteractionState::Static;
-            if (interactionActive && previousState != RenderInteractionState::ParameterInteracting)
-            {
-                releaseStaleInteractiveInFlight();
-            }
+            // Embedded-parameter backends can submit the replacement scene immediately while the
+            // backend retains the old submission for resource lifetime. Drop every stale
+            // coordinator-side interactive record on each edit; retaining one from an earlier
+            // edit would make the type-only backpressure guard reject all later replacements.
+            releaseStaleInteractiveInFlight();
             return decision;
         }
 
@@ -300,13 +305,20 @@ namespace gladius::ui::async_rendering
         }
 
         [[nodiscard]] RenderUpdateDecision completeTask(RenderTaskResult const & result,
-                                bool scheduleFollowUp = true)
+                                                        bool scheduleFollowUp = true)
         {
             RenderUpdateDecision decision{};
             removeInFlight(result);
 
             auto const mask = freshnessMaskFor(result.type);
-            if (!result.isCurrentFor(m_latestStamp, mask))
+            bool const current = result.isCurrentFor(m_latestStamp, mask);
+            bool const cameraCompatibleDisplay =
+              result.succeeded() && result.producedDisplayFrame &&
+              (result.type == RenderTaskType::RealtimeFullFrame ||
+               result.type == RenderTaskType::LowResolutionPreview ||
+               result.type == RenderTaskType::StreamingPreview) &&
+              isCameraCompatible(result.stamp, m_latestStamp);
+            if (!current && !cameraCompatibleDisplay)
             {
                 decision.commands.push_back(RenderCommand{.type = RenderCommandType::DiscardTaskResult,
                                                           .result = result,
@@ -335,7 +347,7 @@ namespace gladius::ui::async_rendering
             case RenderTaskType::StreamingPreview:
                 if (result.producedDisplayFrame)
                 {
-                    if (result.completedFrame &&
+                    if (current && result.completedFrame &&
                         (result.type == RenderTaskType::ProgressiveHighQualityChunk ||
                          result.type == RenderTaskType::RealtimeFullFrame ||
                          result.type == RenderTaskType::StaticFullFrameProbe))
@@ -344,7 +356,10 @@ namespace gladius::ui::async_rendering
                     }
                     decision.commands.push_back(RenderCommand{.type = RenderCommandType::PresentFrame,
                                                               .result = result,
-                                                              .stamp = result.stamp});
+                                                              .stamp = result.stamp,
+                                                              .presentationMask = current
+                                                                                   ? RenderStampMask::displayFrame()
+                                                                                   : RenderStampMask::cameraCompatibleFrame()});
                 }
                 break;
             }
@@ -485,15 +500,23 @@ namespace gladius::ui::async_rendering
                 return;
             }
 
-            size_t const requestedLines = lineCount == 0 ? static_cast<size_t>(m_height) : lineCount;
+            uint32_t requestWidth = m_width;
+            uint32_t requestHeight = m_height;
+            if (type == RenderTaskType::LowResolutionPreview)
+            {
+                requestWidth = std::max(1u, (m_width + 1u) / 2u);
+                requestHeight = std::max(1u, (m_height + 1u) / 2u);
+            }
+
+            size_t const requestedLines = lineCount == 0 ? static_cast<size_t>(requestHeight) : lineCount;
             size_t const clampedLineCount =
-                std::clamp(requestedLines, size_t{1}, static_cast<size_t>(m_height));
+              std::clamp(requestedLines, size_t{1}, static_cast<size_t>(requestHeight));
 
             RenderTaskRequest request{.requestId = m_nextRequestId++,
                                       .type = type,
                                       .stamp = stamp,
-                                      .width = m_width,
-                                      .height = m_height,
+                                      .width = requestWidth,
+                                      .height = requestHeight,
                                       .startLine = 0,
                                       .lineCount = clampedLineCount};
             m_inFlight.push_back(InFlightTask{.requestId = request.requestId,

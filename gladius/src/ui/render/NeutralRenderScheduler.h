@@ -19,15 +19,15 @@ namespace gladius::ui::async_rendering
         FramePresentationCandidate candidate;
     };
 
-      /**
-       * @brief Terminal submission data and workflow commands produced by one non-blocking poll.
-       */
-      struct NeutralRenderPollResult
-      {
+    /**
+     * @brief Terminal submission data and workflow commands produced by one non-blocking poll.
+     */
+    struct NeutralRenderPollResult
+    {
         std::vector<AcceptedNeutralFrame> acceptedFrames;
         std::vector<NeutralFrameSubmissionResult> completions;
         std::vector<RenderCommand> commands;
-      };
+    };
 
     /**
      * @brief Connects coordinator display tasks to an IComputeRenderer without owning UI policy.
@@ -46,10 +46,10 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] bool submit(RenderTaskRequest const & task, compute::IComputeRenderer & renderer);
         [[nodiscard]] bool submit(RenderTaskRequest const & task,
-                compute::IComputeRenderer & renderer,
-                compute::IRenderScene const & scene);
+                 compute::IComputeRenderer & renderer,
+                 compute::IRenderScene const & scene);
         [[nodiscard]] bool submit(RenderTaskRequest const & task,
-                compute::RenderBackendSession & session);
+                 compute::RenderBackendSession & session);
         void requestCancellationForStale() noexcept;
         void requestCancellationForAll() noexcept;
         [[nodiscard]] NeutralRenderPollResult poll(bool scheduleFollowUp = true);
@@ -58,6 +58,7 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] RenderWorkflowController & workflow() noexcept;
         [[nodiscard]] RenderWorkflowController const & workflow() const noexcept;
+        [[nodiscard]] bool hasCurrentInFlightSubmission() const noexcept;
         [[nodiscard]] bool hasInFlightSubmissions() const noexcept;
 
       private:

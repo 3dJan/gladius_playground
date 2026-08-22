@@ -39,6 +39,7 @@ namespace gladius::ui::async_rendering
         void requestCancellationForAll() noexcept;
         [[nodiscard]] std::vector<NeutralFrameSubmissionResult> poll();
         [[nodiscard]] std::vector<NeutralFrameSubmissionResult> drain();
+        [[nodiscard]] bool hasInFlightSubmission(RenderStamp const & stamp) const noexcept;
         [[nodiscard]] bool empty() const noexcept;
 
       private:

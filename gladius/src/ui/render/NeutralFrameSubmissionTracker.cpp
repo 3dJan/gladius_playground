@@ -4,16 +4,16 @@
 
 namespace gladius::ui::async_rendering
 {
-  NeutralFrameSubmissionTracker::~NeutralFrameSubmissionTracker()
-  {
-    try
+    NeutralFrameSubmissionTracker::~NeutralFrameSubmissionTracker()
     {
-      (void) drain();
+        try
+        {
+            (void) drain();
+        }
+        catch (...)
+        {
+        }
     }
-    catch (...)
-    {
-    }
-  }
 
     bool NeutralFrameSubmissionTracker::track(RenderTaskRequest task,
                                               std::unique_ptr<compute::IRenderSubmission> submission)
@@ -36,82 +36,99 @@ namespace gladius::ui::async_rendering
     {
         for (auto const & tracked : m_submissions)
         {
-            if (!matches(tracked.task.stamp, currentStamp, RenderStampMask::displayFrame()))
+            bool const isInteractiveDisplayTask =
+              tracked.task.type == RenderTaskType::RealtimeFullFrame ||
+              tracked.task.type == RenderTaskType::LowResolutionPreview ||
+              tracked.task.type == RenderTaskType::StreamingPreview;
+            // A camera-only change does not invalidate an interactive physical submission. Dawn
+            // cannot cancel a dispatch reliably after queue submission, and its completed image is
+            // still useful as an intermediate frame while the replacement camera request waits.
+            // Static/progressive work is never accepted with a camera-compatible mask, so cancel
+            // it even when only the view epoch changed.
+            if (!isInteractiveDisplayTask || !isCameraCompatible(tracked.task.stamp, currentStamp))
             {
                 tracked.submission->requestCancellation();
             }
         }
     }
 
-      void NeutralFrameSubmissionTracker::requestCancellationForAll() noexcept
-      {
+    void NeutralFrameSubmissionTracker::requestCancellationForAll() noexcept
+    {
         for (auto const & tracked : m_submissions)
         {
-          tracked.submission->requestCancellation();
+            tracked.submission->requestCancellation();
         }
-      }
+    }
 
     std::vector<NeutralFrameSubmissionResult> NeutralFrameSubmissionTracker::poll()
     {
         std::vector<NeutralFrameSubmissionResult> results;
-        auto const retainedEnd = std::remove_if(m_submissions.begin(),
-                                                m_submissions.end(),
-                                                [&results](TrackedSubmission & tracked)
-                                                {
-                                                  tracked.submission->progress();
-                                                    auto const status = tracked.submission->getStatus();
-                                                    if (status == compute::RenderSubmissionStatus::Pending)
-                                                    {
-                                                        return false;
-                                                    }
+                auto const retainedEnd = std::remove_if(
+                    m_submissions.begin(),
+                    m_submissions.end(),
+                    [&results](TrackedSubmission & tracked)
+                    {
+                            tracked.submission->progress();
+                            auto const status = tracked.submission->getStatus();
+                            if (status == compute::RenderSubmissionStatus::Pending)
+                            {
+                                    return false;
+                            }
 
-                                                    if (status == compute::RenderSubmissionStatus::Succeeded)
-                                                    {
-                                                        auto frame = tracked.submission->takeFrame();
-                                                        if (frame.has_value() && matchesTask(*frame, tracked.task))
-                                                        {
-                                                            auto const completedFrame = frame->firstRow == 0u &&
-                                                                                        frame->endRow == frame->height;
-                                                            results.push_back(
-                                                              NeutralFrameSubmissionResult{
-                                                                .taskResult = makeTerminalResult(
-                                                                  tracked, RenderTaskStatus::Completed, true, completedFrame),
-                                                                .frame = std::move(frame)});
-                                                        }
-                                                        else
-                                                        {
-                                                            results.push_back(
-                                                              NeutralFrameSubmissionResult{
-                                                                .taskResult = makeTerminalResult(
-                                                                  tracked, RenderTaskStatus::Failed, false, false),
-                                                                .errorMessage = "Backend frame did not match its render task"});
-                                                        }
-                                                    }
-                                                    else
-                                                    {
-                                                        auto const taskStatus = status == compute::RenderSubmissionStatus::Cancelled
-                                                                                  ? RenderTaskStatus::Cancelled
-                                                                                  : RenderTaskStatus::Failed;
-                                                        results.push_back(
-                                                          NeutralFrameSubmissionResult{
-                                                            .taskResult = makeTerminalResult(tracked, taskStatus, false, false),
-                                                            .errorMessage = tracked.submission->getErrorMessage()});
-                                                    }
-                                                    return true;
-                                                });
+                            if (status == compute::RenderSubmissionStatus::Succeeded)
+                            {
+                                    auto frame = tracked.submission->takeFrame();
+                                    if (frame.has_value() && matchesTask(*frame, tracked.task))
+                                    {
+                                            auto const completedFrame = frame->firstRow == 0u && frame->endRow == frame->height;
+                                            results.push_back(NeutralFrameSubmissionResult{
+                                                .taskResult = makeTerminalResult(
+                                                    tracked, RenderTaskStatus::Completed, true, completedFrame),
+                                                .frame = std::move(frame)});
+                                    }
+                                    else
+                                    {
+                                            results.push_back(NeutralFrameSubmissionResult{
+                                                .taskResult = makeTerminalResult(tracked, RenderTaskStatus::Failed, false, false),
+                                                .errorMessage = "Backend frame did not match its render task"});
+                                    }
+                            }
+                            else
+                            {
+                                    auto const taskStatus = status == compute::RenderSubmissionStatus::Cancelled
+                                                                                         ? RenderTaskStatus::Cancelled
+                                                                                         : RenderTaskStatus::Failed;
+                                    results.push_back(NeutralFrameSubmissionResult{
+                                        .taskResult = makeTerminalResult(tracked, taskStatus, false, false),
+                                        .errorMessage = tracked.submission->getErrorMessage()});
+                            }
+                            return true;
+                    });
         m_submissions.erase(retainedEnd, m_submissions.end());
         return results;
     }
 
-      std::vector<NeutralFrameSubmissionResult> NeutralFrameSubmissionTracker::drain()
-      {
+    std::vector<NeutralFrameSubmissionResult> NeutralFrameSubmissionTracker::drain()
+    {
         requestCancellationForAll();
         for (auto const & tracked : m_submissions)
         {
-          tracked.submission->wait();
+            tracked.submission->wait();
         }
         return poll();
-      }
+    }
+
+    bool NeutralFrameSubmissionTracker::hasInFlightSubmission(RenderStamp const & stamp) const noexcept
+    {
+        return std::any_of(m_submissions.begin(),
+                           m_submissions.end(),
+                           [stamp](TrackedSubmission const & tracked)
+                           {
+                               return matches(tracked.task.stamp,
+                                              stamp,
+                                              RenderStampMask::displayFrame());
+                           });
+    }
 
     bool NeutralFrameSubmissionTracker::empty() const noexcept
     {

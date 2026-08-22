@@ -150,8 +150,8 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(workflow.presentedFrame()->quality, FramePresentationQuality::FullQuality);
     }
 
-    TEST(RenderWorkflowController,
-         CameraChanged_DuringParameterPreview_PreemptsAndRejectsStaleParameterPreview)
+        TEST(RenderWorkflowController,
+            CameraChanged_DuringParameterPreview_PresentsCameraCompatibleOldPreview)
     {
         RenderWorkflowController workflow;
         workflow.configureRealtime(modeConfig(RealtimeRaymarchMode::Off));
@@ -174,10 +174,10 @@ namespace gladius::ui::async_rendering::tests
                             RenderStampMask::displayFrame()));
 
         decision = workflow.completeTask(completed(*parameterPreview, true, true));
-        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
-        EXPECT_TRUE(decision.acceptedFrames.empty());
+        EXPECT_FALSE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+        ASSERT_EQ(decision.acceptedFrames.size(), 1u);
         ASSERT_TRUE(workflow.presentedFrame().has_value());
-        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::HeldFrame);
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
 
         decision = workflow.completeTask(completed(*cameraPreview, true, true));
         ASSERT_EQ(decision.acceptedFrames.size(), 1u);

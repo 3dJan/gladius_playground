@@ -162,6 +162,11 @@ namespace gladius::ui::async_rendering
         return m_workflow;
     }
 
+    bool NeutralRenderScheduler::hasCurrentInFlightSubmission() const noexcept
+    {
+        return m_submissions.hasInFlightSubmission(m_workflow.latestStamp());
+    }
+
     bool NeutralRenderScheduler::hasInFlightSubmissions() const noexcept
     {
         return !m_submissions.empty();

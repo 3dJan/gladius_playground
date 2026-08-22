@@ -1636,7 +1636,8 @@ namespace gladius::ui
 
         // Process render window shortcuts after rendering so current-frame hover/focus state is
         // available. This lets mouse-wheel zoom work as soon as the cursor is over the preview.
-        if (m_renderWindow.isVisible() && m_renderWindow.isHovered())
+        if (m_renderWindow.isVisible() && m_renderWindow.isHovered() &&
+            !m_renderWindow.isNeutralBackendActive())
         {
             processShortcuts(ShortcutContext::RenderWindow);
         }

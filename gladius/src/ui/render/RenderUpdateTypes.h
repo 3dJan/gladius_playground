@@ -89,6 +89,15 @@ namespace gladius::ui::async_rendering
                     .quality = false};
         }
 
+        [[nodiscard]] static constexpr RenderStampMask cameraCompatibleFrame() noexcept
+        {
+            return {.scene = true,
+                    .parameters = true,
+                    .view = false,
+                    .viewport = true,
+                    .quality = true};
+        }
+
         [[nodiscard]] static constexpr RenderStampMask heavyGeometryTask() noexcept
         {
             return sceneAndParameters();
@@ -115,6 +124,13 @@ namespace gladius::ui::async_rendering
                (mask.view && candidate.viewEpoch < required.viewEpoch) ||
                (mask.viewport && candidate.viewportEpoch < required.viewportEpoch) ||
                (mask.quality && candidate.qualityEpoch < required.qualityEpoch);
+    }
+
+    [[nodiscard]] constexpr bool isCameraCompatible(RenderStamp const & candidate,
+                                                     RenderStamp const & required) noexcept
+    {
+        return matches(candidate, required, RenderStampMask::cameraCompatibleFrame()) &&
+               candidate.viewEpoch <= required.viewEpoch;
     }
 
     /**

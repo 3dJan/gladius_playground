@@ -2,12 +2,14 @@
 
 #include "../ConfigManager.h"
 #include "../Document.h"
+#include "ShortcutManager.h"
 #include "compute/ComputeRendererFactory.h"
 #include "imgui.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <utility>
 
 namespace gladius::ui
@@ -54,12 +56,17 @@ namespace gladius::ui
 
     void RenderWindow::setBackendRuntime(compute::IBackendRuntime * runtime)
     {
+        // A runtime replacement can disable the neutral render loop entirely. Drain before
+        // releasing the old session so its physical submissions cannot remain unpolled forever.
+        if (m_neutralRenderScheduler.hasInFlightSubmissions())
+        {
+            (void) m_neutralRenderScheduler.drain(false);
+        }
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
         m_neutralBackendActive = runtime != nullptr &&
                                  runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
-        m_neutralRenderScheduler.requestCancellationForAll();
     }
 
     compute::RenderSettingsSnapshot & RenderWindow::getNeutralRenderSettings() noexcept
@@ -74,6 +81,7 @@ namespace gladius::ui
 
     void RenderWindow::setDocument(Document * doc)
     {
+        m_neutralRenderScheduler.requestCancellationForAll();
         m_document = doc;
         m_renderBackendSession.reset();
         m_neutralViewportWidth = 0u;
@@ -82,7 +90,6 @@ namespace gladius::ui
         {
             m_neutralFramePresenter->release();
         }
-        m_neutralRenderScheduler.requestCancellationForAll();
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
     }
 
@@ -133,7 +140,7 @@ namespace gladius::ui
             }
 
             auto const snapshot = compute::ComputeRendererFactory::materializeScene(
-                            assembly.get(), *assembly->assemblyModel(), sceneGeneration);
+              assembly.get(), *assembly->assemblyModel(), sceneGeneration);
             if (!session->replaceScene(snapshot))
             {
                 return false;
@@ -166,7 +173,7 @@ namespace gladius::ui
             queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
         }
 
-        auto pollResult = m_neutralRenderScheduler.poll(false);
+        auto pollResult = m_neutralRenderScheduler.poll(true);
         for (auto & accepted : pollResult.acceptedFrames)
         {
             if (accepted.frame.isValid())
@@ -174,34 +181,82 @@ namespace gladius::ui
                 (void) m_neutralFramePresenter->present(accepted.frame);
             }
         }
+        queueRenderDecision(async_rendering::RenderWorkflowDecision{
+          .commands = std::move(pollResult.commands)});
 
-        if (m_neutralRenderScheduler.hasInFlightSubmissions())
+                bool const hasPendingStartTask = std::any_of(
+                    m_pendingRenderCommands.begin(),
+                    m_pendingRenderCommands.end(),
+                    [](async_rendering::RenderCommand const & command)
+                    { return command.type == async_rendering::RenderCommandType::StartTask; });
+                if (!hasPendingStartTask)
         {
-            return true;
+            queueRenderDecision(m_neutralRenderScheduler.workflow().tick());
         }
 
-        auto const decision = m_neutralRenderScheduler.workflow().startDisplayTask(
-          async_rendering::RenderTaskType::RealtimeFullFrame);
-        for (auto const & command : decision.commands)
+        auto pendingCommands = std::move(m_pendingRenderCommands);
+        m_pendingRenderCommands.clear();
+        auto retainPendingCommands = [&](std::size_t const firstCommand)
         {
+            for (std::size_t index = firstCommand; index < pendingCommands.size(); ++index)
+            {
+                if (pendingCommands[index].type != async_rendering::RenderCommandType::StartTask)
+                {
+                    continue;
+                }
+                async_rendering::RenderWorkflowDecision pendingDecision{};
+                pendingDecision.commands.push_back(std::move(pendingCommands[index]));
+                queueRenderDecision(std::move(pendingDecision));
+            }
+        };
+
+        for (std::size_t commandIndex = 0u; commandIndex < pendingCommands.size(); ++commandIndex)
+        {
+            auto const & command = pendingCommands[commandIndex];
             if (command.type != async_rendering::RenderCommandType::StartTask)
             {
                 continue;
             }
 
-            if (m_neutralRenderScheduler.submit(command.task, *session))
+            bool const isDisplayTask =
+              command.task.type == async_rendering::RenderTaskType::RealtimeFullFrame ||
+              command.task.type == async_rendering::RenderTaskType::StaticFullFrameProbe ||
+              command.task.type == async_rendering::RenderTaskType::ProgressiveHighQualityChunk ||
+              command.task.type == async_rendering::RenderTaskType::LowResolutionPreview;
+            if (isDisplayTask)
             {
-                return true;
-            }
+                // Dawn submissions remain physically owned by the backend until their terminal
+                // callback. Keep at most one such submission and one newest pending command.
+                if (m_neutralRenderScheduler.hasInFlightSubmissions())
+                {
+                    retainPendingCommands(commandIndex);
+                    return true;
+                }
 
-            queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
-              async_rendering::RenderTaskResult{.requestId = command.task.requestId,
-                                                .type = command.task.type,
-                                                .stamp = command.task.stamp,
-                                                .status = async_rendering::RenderTaskStatus::Failed},
-              false));
+                if (m_neutralRenderScheduler.submit(command.task, *session))
+                {
+                    retainPendingCommands(commandIndex + 1u);
+                    return true;
+                }
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Failed},
+                  true));
+            }
+            else
+            {
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Completed},
+                  true));
+            }
         }
-        return m_neutralRenderScheduler.hasInFlightSubmissions();
+
+        return m_neutralRenderScheduler.hasInFlightSubmissions() || !m_pendingRenderCommands.empty();
     }
 
     void RenderWindow::renderWindow()
@@ -216,24 +271,54 @@ namespace gladius::ui
             return;
         }
 
-        render(m_renderWindowState);
-        auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
-        if (textureId == 0u)
-        {
-            return;
-        }
-
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
         ImGui::Begin("Preview", &m_isVisible, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar);
         m_isWindowHovered = ImGui::IsWindowHovered();
         m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        m_contentAreaMin = ImGui::GetWindowContentRegionMin();
+        m_contentAreaMax = ImGui::GetWindowContentRegionMax();
+
+        auto const previousSize = m_renderWindowSize_px;
         m_renderWindowSize_px = {ImGui::GetWindowWidth(),
                                  ImGui::GetWindowContentRegionMax().y -
                                    ImGui::GetWindowContentRegionMin().y};
         m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, 1.0f);
         m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, 1.0f);
-        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
-                     {m_renderWindowSize_px.x, m_renderWindowSize_px.y});
+
+        auto const contentMin =
+          ImVec2{ImGui::GetWindowPos().x + m_contentAreaMin.x,
+                 ImGui::GetWindowPos().y + m_contentAreaMin.y};
+        auto const contentMax =
+          ImVec2{ImGui::GetWindowPos().x + m_contentAreaMax.x,
+                 ImGui::GetWindowPos().y + m_contentAreaMax.y};
+
+        float constexpr tolerance = 1.E-4f;
+        bool const sizeChanged =
+          std::abs(previousSize.x - m_renderWindowSize_px.x) > tolerance ||
+          std::abs(previousSize.y - m_renderWindowSize_px.y) > tolerance;
+        if (sizeChanged)
+        {
+            m_deferredResizePending = true;
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lastLowResRenderTime = std::chrono::system_clock::now();
+            m_dirty = true;
+        }
+        else if (m_deferredResizePending)
+        {
+            m_deferredResizePending = false;
+        }
+
+        m_cameraInputInvalidatedThisFrame = false;
+        processNeutralCameraInput(contentMin, contentMax);
+        render(m_renderWindowState);
+
+        auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
+        if (textureId != 0u)
+        {
+            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+                         {m_renderWindowSize_px.x, m_renderWindowSize_px.y});
+        }
+
         ImGui::End();
         ImGui::PopStyleVar();
     }
@@ -242,13 +327,70 @@ namespace gladius::ui
     {
         if (m_neutralBackendActive)
         {
+            // Keep the previously presented texture visible while the viewport dimensions
+            // settle. The next frame submits with the stable size and replaces it safely.
+            if (m_deferredResizePending)
+            {
+                return;
+            }
+
             (void) updateCameraCentering();
+            auto const cameraActuallyMoving = m_camera.update(ImGui::GetIO().DeltaTime * 1000.0f);
+            if (cameraActuallyMoving)
+            {
+                m_cameraIdleFrames = 0;
+                state.isMoving = true;
+                m_lastCameraIdleTime = TimeStamp{};
+                if (!m_cameraInputInvalidatedThisFrame)
+                {
+                    invalidateCameraView();
+                }
+            }
+            else
+            {
+                ++m_cameraIdleFrames;
+                state.isMoving = m_cameraIdleFrames < 10;
+            }
+
+            if (!state.isMoving &&
+                m_renderUpdateCoordinator.interactionState() ==
+                  async_rendering::RenderInteractionState::CameraInteracting)
+            {
+                auto const now = std::chrono::system_clock::now();
+                if (m_lastCameraIdleTime == TimeStamp{})
+                {
+                    m_lastCameraIdleTime = now;
+                }
+                else if (now - m_lastCameraIdleTime >= std::chrono::seconds(1))
+                {
+                    queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
+                    m_lastCameraIdleTime = TimeStamp{};
+                }
+            }
+
+            m_dirty = m_dirty || state.isMoving;
             (void) tryRenderWithNeutralBackend(state);
+
+            if (m_view != nullptr)
+            {
+                if (state.isMoving ||
+                    m_neutralRenderScheduler.hasInFlightSubmissions() ||
+                    m_renderUpdateCoordinator.interactionState() ==
+                      async_rendering::RenderInteractionState::CameraInteracting)
+                {
+                    m_view->startAnimationMode();
+                }
+                else
+                {
+                    m_view->stopAnimationMode();
+                }
+            }
         }
     }
 
     void RenderWindow::updateCamera()
     {
+        (void) m_camera.update(ImGui::GetIO().DeltaTime * 1000.0f);
     }
 
     bool RenderWindow::isRenderingInProgress() const
@@ -263,9 +405,14 @@ namespace gladius::ui
 
     void RenderWindow::invalidateView()
     {
+        m_cameraInputInvalidatedThisFrame = true;
         m_dirty = true;
         notifyAsyncEpochIncrement();
-        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged());
+        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged(true));
+        if (m_view != nullptr)
+        {
+            m_view->startAnimationMode();
+        }
     }
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
@@ -317,6 +464,57 @@ namespace gladius::ui
         return m_renderUpdateCoordinator.isRealtimeActive();
     }
 
+    bool RenderWindow::isNeutralBackendActive() const noexcept
+    {
+        return m_neutralBackendActive;
+    }
+
+    void RenderWindow::processNeutralCameraInput(ImVec2 const & contentMin,
+                                                 ImVec2 const & contentMax)
+    {
+        if (!m_isWindowHovered || ImGui::IsAnyItemActive())
+        {
+            return;
+        }
+
+        auto & io = ImGui::GetIO();
+        io.MouseDragThreshold = 1.0f;
+        auto const mousePos = io.MousePos;
+        bool const contentHovered = ImGui::IsMouseHoveringRect(contentMin, contentMax);
+
+        if (m_shortcutManager && contentHovered)
+        {
+            m_shortcutManager->processInput(ShortcutContext::RenderWindow);
+        }
+
+        if (contentHovered && m_camera.mouseMotionHandler(mousePos.x, mousePos.y))
+        {
+            invalidateCameraView();
+        }
+        if (!ImGui::IsAnyMouseDown())
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Left, -1, mousePos.x, mousePos.y);
+        }
+
+        if (!contentHovered)
+        {
+            return;
+        }
+
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Left, 0, mousePos.x, mousePos.y);
+        }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Right, 0, mousePos.x, mousePos.y);
+        }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Middle, 0, mousePos.x, mousePos.y);
+        }
+    }
+
     bool RenderWindow::isForceRealtimeMode() const noexcept
     {
         return realtimeRaymarchMode() == async_rendering::RealtimeRaymarchMode::Force;
@@ -350,30 +548,168 @@ namespace gladius::ui
         invalidateView();
     }
 
-    void RenderWindow::setTopView() { m_camera.setAngle(0.0f, 0.0f); invalidateCameraView(); }
-    void RenderWindow::setFrontView() { m_camera.setAngle(0.0f, -1.5708f); invalidateCameraView(); }
-    void RenderWindow::setLeftView() { m_camera.setAngle(0.0f, 3.14159f); invalidateCameraView(); }
-    void RenderWindow::setRightView() { m_camera.setAngle(0.0f, 0.0f); invalidateCameraView(); }
-    void RenderWindow::setBackView() { m_camera.setAngle(0.0f, 1.5708f); invalidateCameraView(); }
-    void RenderWindow::setBottomView() { m_camera.setAngle(-1.5708f, 0.0f); invalidateCameraView(); }
-    void RenderWindow::setIsometricView() { m_camera.setAngle(0.6f, -1.6f); invalidateCameraView(); }
-    void RenderWindow::togglePerspective() { invalidateCameraView(); }
+    void RenderWindow::setTopView()
+    {
+        m_camera.setAngle(std::numbers::pi_v<float> / 2.0f, 0.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
 
-    void RenderWindow::zoomIn() { m_camera.zoom(-10.0f); invalidateCameraView(); }
-    void RenderWindow::zoomOut() { m_camera.zoom(10.0f); invalidateCameraView(); }
-    void RenderWindow::resetZoom() { m_camera.zoom(0.0f); invalidateCameraView(); }
-    void RenderWindow::zoomExtents() { centerView(); }
-    void RenderWindow::zoomSelected() { centerView(); }
-    void RenderWindow::frameAll() { centerView(); }
+    void RenderWindow::setFrontView()
+    {
+        m_camera.setAngle(0.0f, -std::numbers::pi_v<float> / 2.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
 
-    void RenderWindow::panLeft() { invalidateCameraView(); }
-    void RenderWindow::panRight() { invalidateCameraView(); }
-    void RenderWindow::panUp() { invalidateCameraView(); }
-    void RenderWindow::panDown() { invalidateCameraView(); }
-    void RenderWindow::rotateLeft() { m_camera.rotate(0.0f, -0.1f); invalidateCameraView(); }
-    void RenderWindow::rotateRight() { m_camera.rotate(0.0f, 0.1f); invalidateCameraView(); }
-    void RenderWindow::rotateUp() { m_camera.rotate(0.1f, 0.0f); invalidateCameraView(); }
-    void RenderWindow::rotateDown() { m_camera.rotate(-0.1f, 0.0f); invalidateCameraView(); }
+    void RenderWindow::setLeftView()
+    {
+        m_camera.setAngle(0.0f, 0.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::setRightView()
+    {
+        m_camera.setAngle(0.0f, std::numbers::pi_v<float>);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::setBackView()
+    {
+        m_camera.setAngle(0.0f, std::numbers::pi_v<float> / 2.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::setBottomView()
+    {
+        m_camera.setAngle(-std::numbers::pi_v<float> / 2.0f, 0.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::setIsometricView()
+    {
+        float const pitch = -std::atan(1.0f / std::sqrt(2.0f));
+        float const yaw = std::numbers::pi_v<float> / 4.0f;
+        m_camera.setAngle(pitch, yaw);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::togglePerspective()
+    {
+        saveCurrentView();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::zoomIn()
+    {
+        m_camera.zoom(-0.1f);
+        invalidateCameraView();
+    }
+
+    void RenderWindow::zoomOut()
+    {
+        m_camera.zoom(0.1f);
+        invalidateCameraView();
+    }
+
+    void RenderWindow::resetZoom()
+    {
+        auto const boundingBox = tryFetchBoundingBox(true);
+        if (!boundingBox.has_value())
+        {
+            return;
+        }
+
+        m_camera.adjustDistanceToTarget(*boundingBox,
+                                        m_renderWindowSize_px.x,
+                                        m_renderWindowSize_px.y);
+        invalidateCameraView();
+    }
+
+    void RenderWindow::zoomExtents()
+    {
+        resetZoom();
+    }
+
+    void RenderWindow::zoomSelected()
+    {
+        zoomExtents();
+    }
+
+    void RenderWindow::frameAll()
+    {
+        centerView();
+        zoomExtents();
+    }
+
+    void RenderWindow::panLeft()
+    {
+        auto const currentLookAt = m_camera.getLookAt();
+        m_camera.setLookAt(
+          Position{currentLookAt.x - m_panSensitivity, currentLookAt.y, currentLookAt.z});
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::panRight()
+    {
+        auto const currentLookAt = m_camera.getLookAt();
+        m_camera.setLookAt(
+          Position{currentLookAt.x + m_panSensitivity, currentLookAt.y, currentLookAt.z});
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::panUp()
+    {
+        auto const currentLookAt = m_camera.getLookAt();
+        m_camera.setLookAt(
+          Position{currentLookAt.x, currentLookAt.y, currentLookAt.z + m_panSensitivity});
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::panDown()
+    {
+        auto const currentLookAt = m_camera.getLookAt();
+        m_camera.setLookAt(
+          Position{currentLookAt.x, currentLookAt.y, currentLookAt.z - m_panSensitivity});
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::rotateLeft()
+    {
+        m_camera.rotate(0.0f, -m_rotateSensitivity);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::rotateRight()
+    {
+        m_camera.rotate(0.0f, m_rotateSensitivity);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::rotateUp()
+    {
+        m_camera.rotate(m_rotateSensitivity, 0.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
+
+    void RenderWindow::rotateDown()
+    {
+        m_camera.rotate(-m_rotateSensitivity, 0.0f);
+        onCameraManuallyMoved();
+        invalidateCameraView();
+    }
 
     void RenderWindow::previousView() { }
     void RenderWindow::nextView() { }
@@ -421,10 +757,16 @@ namespace gladius::ui
 
     void RenderWindow::invalidateCameraView()
     {
+        m_cameraInputInvalidatedThisFrame = true;
         m_renderWindowState.isMoving = true;
         m_renderWindowState.currentLine = 0u;
         m_dirty = true;
-        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged());
+        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged(true));
+        m_neutralRenderScheduler.requestCancellationForStale();
+        if (m_view != nullptr)
+        {
+            m_view->startAnimationMode();
+        }
     }
 
     void RenderWindow::adjustProgressFromDuration(RenderWindowState &, std::uint64_t) { }
@@ -453,11 +795,31 @@ namespace gladius::ui
 
     void RenderWindow::queueRenderDecision(async_rendering::RenderWorkflowDecision decision)
     {
-        for (auto const & command : decision.commands)
+        auto const isInteractiveDisplayTask = [](async_rendering::RenderTaskType const type)
+        {
+            return type == async_rendering::RenderTaskType::RealtimeFullFrame ||
+                   type == async_rendering::RenderTaskType::LowResolutionPreview ||
+                   type == async_rendering::RenderTaskType::StreamingPreview;
+        };
+
+        for (auto & command : decision.commands)
         {
             if (command.type == async_rendering::RenderCommandType::StartTask)
             {
-                m_pendingRenderCommands.push_back(command);
+                if (isInteractiveDisplayTask(command.task.type))
+                {
+                    auto const oldEnd = m_pendingRenderCommands.end();
+                    auto const newEnd = std::remove_if(
+                      m_pendingRenderCommands.begin(),
+                      oldEnd,
+                      [&isInteractiveDisplayTask](async_rendering::RenderCommand const & pending)
+                      {
+                          return pending.type == async_rendering::RenderCommandType::StartTask &&
+                                 isInteractiveDisplayTask(pending.task.type);
+                      });
+                    m_pendingRenderCommands.erase(newEnd, oldEnd);
+                }
+                m_pendingRenderCommands.push_back(std::move(command));
             }
         }
     }

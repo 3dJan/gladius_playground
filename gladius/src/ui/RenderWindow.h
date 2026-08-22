@@ -113,6 +113,7 @@ namespace gladius::ui
         /// sustain realtime frames at the current resolution (Auto mode) or when Force mode
         /// is active.  Mirrors @ref RenderUpdateCoordinator::isRealtimeSchedulingActive().
         [[nodiscard]] bool isRealtimeActive() const noexcept;
+        [[nodiscard]] bool isNeutralBackendActive() const noexcept;
 
         /// Cancel all in-flight async work (streaming preview, SDF, bbox, render jobs)
         /// by stopping streaming and bumping the epoch. Call before operations that
@@ -218,6 +219,7 @@ namespace gladius::ui
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void notifyAsyncEpochIncrement();
         void invalidateCameraView();
+        void processNeutralCameraInput(ImVec2 const & contentMin, ImVec2 const & contentMax);
         void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
         [[nodiscard]] async_rendering::RealtimeRaymarchConfig loadRealtimeRaymarchConfig() const;
         void saveRealtimeRaymarchMode(async_rendering::RealtimeRaymarchMode mode) const;
@@ -542,6 +544,7 @@ namespace gladius::ui
         std::atomic<uint64_t> m_lastLowResPreviewViewEpoch{0};
         bool m_asyncInitialized{false};
         bool m_compilationInvalidated{false};
+        bool m_cameraInputInvalidatedThisFrame{false};
 
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};

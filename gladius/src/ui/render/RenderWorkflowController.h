@@ -88,6 +88,11 @@ namespace gladius::ui::async_rendering
             return m_coordinator.interactionState();
         }
 
+        [[nodiscard]] bool isHighQualityFrameCurrent() const noexcept
+        {
+            return m_coordinator.isHighQualityFrameCurrent();
+        }
+
         [[nodiscard]] std::optional<PresentedFrame> const & presentedFrame() const noexcept
         {
             return m_presentedFrames.presentedFrame();
@@ -108,9 +113,9 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.configureViewport(width, height));
         }
 
-        [[nodiscard]] RenderWorkflowDecision notifyCameraChanged()
+        [[nodiscard]] RenderWorkflowDecision notifyCameraChanged(bool replaceStaleInteractiveInFlight = false)
         {
-            return applyCoordinatorDecision(m_coordinator.notifyCameraChanged());
+            return applyCoordinatorDecision(m_coordinator.notifyCameraChanged(replaceStaleInteractiveInFlight));
         }
 
         [[nodiscard]] RenderWorkflowDecision notifyCameraInteractionEnded()
@@ -175,6 +180,13 @@ namespace gladius::ui::async_rendering
                                             RenderStamp const & requiredStamp) noexcept
         {
             return m_presentedFrames.presentCandidate(candidate, requiredStamp);
+        }
+
+        [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate,
+                                            RenderStamp const & requiredStamp,
+                                            RenderStampMask const mask) noexcept
+        {
+            return m_presentedFrames.presentCandidate(candidate, requiredStamp, mask);
         }
 
       private:
@@ -262,7 +274,7 @@ namespace gladius::ui::async_rendering
                 }
 
                 auto candidate = makeCandidate(command.result);
-                if (presentCandidate(candidate))
+                if (presentCandidate(candidate, latestStamp(), command.presentationMask))
                 {
                     workflowDecision.acceptedFrames.push_back(candidate);
                     workflowDecision.presentedFrameChanged = true;

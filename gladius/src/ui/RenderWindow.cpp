@@ -239,14 +239,13 @@ namespace gladius::ui
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_view = view;
-        m_shortcutManager = shortcutManager;
+        m_shortcutManager = std::move(shortcutManager);
         m_configManager = configManager;
         auto const configuredBackend = m_configManager != nullptr
-                         ? compute::getConfiguredComputeBackend(*m_configManager)
-                         : compute::ComputeBackendKind::OpenCL;
+                                         ? compute::getConfiguredComputeBackend(*m_configManager)
+                                         : compute::ComputeBackendKind::OpenCL;
         m_neutralBackendActive = configuredBackend == compute::ComputeBackendKind::WebGPU;
 
-        // Initialize settings when core is ready
         if (m_core && m_core->isRendererReady())
         {
             auto & settings = m_core->getResourceContext()->getRenderingSettings();
@@ -254,28 +253,28 @@ namespace gladius::ui
             m_renderWindowState.renderQualityWhileMoving = settings.quality * 0.5f;
         }
 
-        // Load permanent centering state from config
         if (m_configManager)
         {
             m_permanentCenteringEnabled =
               m_configManager->getValue<bool>("renderWindow", "permanentCenteringEnabled", false);
         }
 
-        auto const realtimeConfig = loadRealtimeRaymarchConfig();
-        m_renderUpdateCoordinator.configureRealtime(realtimeConfig);
-
-        // Don't initialize async rendering here - will be done lazily on first render
+        m_renderUpdateCoordinator.configureRealtime(loadRealtimeRaymarchConfig());
     }
 
     void RenderWindow::setBackendRuntime(compute::IBackendRuntime * runtime)
     {
+        // A runtime replacement can disable the neutral render loop entirely. Drain before
+        // releasing the old session so its physical submissions cannot remain unpolled forever.
+        if (m_neutralRenderScheduler.hasInFlightSubmissions())
+        {
+            (void) m_neutralRenderScheduler.drain(false);
+        }
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
-        if (m_neutralBackendActive)
-        {
-            m_neutralRenderScheduler.requestCancellationForAll();
-        }
+        m_neutralBackendActive = runtime != nullptr &&
+                                 runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
     }
 
     compute::RenderSettingsSnapshot & RenderWindow::getNeutralRenderSettings() noexcept
@@ -290,6 +289,7 @@ namespace gladius::ui
 
     void RenderWindow::setDocument(Document * doc)
     {
+        m_neutralRenderScheduler.requestCancellationForAll();
         m_document = doc;
         m_renderBackendSession.reset();
         m_neutralViewportWidth = 0u;
@@ -380,7 +380,7 @@ namespace gladius::ui
             queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
         }
 
-        auto const pollResult = m_neutralRenderScheduler.poll(false);
+        auto pollResult = m_neutralRenderScheduler.poll(true);
         for (auto & accepted : pollResult.acceptedFrames)
         {
             if (accepted.frame.isValid())
@@ -388,16 +388,36 @@ namespace gladius::ui
                 (void) m_neutralFramePresenter->present(accepted.frame);
             }
         }
-        for (auto const & command : pollResult.commands)
+        queueRenderDecision(async_rendering::RenderWorkflowDecision{
+          .commands = std::move(pollResult.commands)});
+
+                bool const hasPendingStartTask = std::any_of(
+                    m_pendingRenderCommands.begin(),
+                    m_pendingRenderCommands.end(),
+                    [](async_rendering::RenderCommand const & command)
+                    { return command.type == async_rendering::RenderCommandType::StartTask; });
+                if (!hasPendingStartTask)
         {
-            if (command.type == async_rendering::RenderCommandType::StartTask)
-            {
-                m_pendingRenderCommands.push_back(command);
-            }
+            queueRenderDecision(m_neutralRenderScheduler.workflow().tick());
         }
 
         auto pendingCommands = std::move(m_pendingRenderCommands);
         m_pendingRenderCommands.clear();
+        auto retainPendingCommands = [&](std::size_t const firstCommand)
+        {
+            for (std::size_t index = firstCommand; index < pendingCommands.size(); ++index)
+            {
+                if (pendingCommands[index].type != async_rendering::RenderCommandType::StartTask)
+                {
+                    continue;
+                }
+
+                async_rendering::RenderWorkflowDecision pendingDecision{};
+                pendingDecision.commands.push_back(std::move(pendingCommands[index]));
+                queueRenderDecision(std::move(pendingDecision));
+            }
+        };
+
         for (std::size_t commandIndex = 0u; commandIndex < pendingCommands.size(); ++commandIndex)
         {
             auto const & command = pendingCommands[commandIndex];
@@ -413,19 +433,26 @@ namespace gladius::ui
               command.task.type == async_rendering::RenderTaskType::LowResolutionPreview;
             if (isDisplayTask)
             {
-                if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
+                // Keep one physical submission active. Uncancellable stale work remains tracked
+                // until terminal completion, while the newest logical task waits in the queue.
+                if (m_neutralRenderScheduler.hasInFlightSubmissions())
                 {
-                    m_pendingRenderCommands.insert(m_pendingRenderCommands.end(),
-                                                   pendingCommands.begin() + commandIndex + 1u,
-                                                   pendingCommands.end());
+                    retainPendingCommands(commandIndex);
                     return true;
                 }
+
+                if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
+                {
+                    retainPendingCommands(commandIndex + 1u);
+                    return true;
+                }
+
                 queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
                   async_rendering::RenderTaskResult{.requestId = command.task.requestId,
                                                     .type = command.task.type,
                                                     .stamp = command.task.stamp,
                                                     .status = async_rendering::RenderTaskStatus::Failed},
-                  false));
+                  true));
             }
             else
             {
@@ -434,36 +461,11 @@ namespace gladius::ui
                                                     .type = command.task.type,
                                                     .stamp = command.task.stamp,
                                                     .status = async_rendering::RenderTaskStatus::Completed},
-                  false));
+                  true));
             }
         }
 
-        if (m_neutralRenderScheduler.hasInFlightSubmissions())
-        {
-            return true;
-        }
-
-        auto const taskDecision = m_neutralRenderScheduler.workflow().startDisplayTask(
-          async_rendering::RenderTaskType::RealtimeFullFrame);
-        for (auto const & command : taskDecision.commands)
-        {
-            if (command.type != async_rendering::RenderCommandType::StartTask)
-            {
-                continue;
-            }
-            if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
-            {
-                return true;
-            }
-
-            queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
-              async_rendering::RenderTaskResult{.requestId = command.task.requestId,
-                                                .type = command.task.type,
-                                                .stamp = command.task.stamp,
-                                                .status = async_rendering::RenderTaskStatus::Failed}));
-        }
-
-        return false;
+        return m_neutralRenderScheduler.hasInFlightSubmissions() || !m_pendingRenderCommands.empty();
     }
 
     void RenderWindow::setExportState(ExportState const * exportState)
@@ -580,6 +582,7 @@ namespace gladius::ui
     void RenderWindow::invalidateCameraView()
     {
         ProfileFunction;
+        m_cameraInputInvalidatedThisFrame = true;
         m_dirty = true;
         // Camera interaction supersedes parameter streaming. Leaving the streaming flag
         // latched blocks realtime admission and makes Force mode hold a stale frame even
@@ -607,7 +610,12 @@ namespace gladius::ui
         {
             m_asyncController->setLatestViewEpoch(newViewEpoch);
         }
-        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged());
+        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraChanged(m_neutralBackendActive));
+
+        if (m_neutralBackendActive)
+        {
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
 
         if (m_core)
         {
@@ -659,9 +667,32 @@ namespace gladius::ui
 
     void RenderWindow::queueRenderDecision(async_rendering::RenderWorkflowDecision decision)
     {
-        m_pendingRenderCommands.insert(m_pendingRenderCommands.end(),
-                                       std::make_move_iterator(decision.commands.begin()),
-                                       std::make_move_iterator(decision.commands.end()));
+        auto const isInteractiveDisplayTask = [](async_rendering::RenderTaskType const type)
+        {
+            return type == async_rendering::RenderTaskType::RealtimeFullFrame ||
+                   type == async_rendering::RenderTaskType::LowResolutionPreview ||
+                   type == async_rendering::RenderTaskType::StreamingPreview;
+        };
+
+        for (auto & command : decision.commands)
+        {
+            if (m_neutralBackendActive &&
+                command.type == async_rendering::RenderCommandType::StartTask &&
+                isInteractiveDisplayTask(command.task.type))
+            {
+                auto const oldEnd = m_pendingRenderCommands.end();
+                auto const newEnd = std::remove_if(
+                  m_pendingRenderCommands.begin(),
+                  oldEnd,
+                  [&isInteractiveDisplayTask](async_rendering::RenderCommand const & pending)
+                  {
+                      return pending.type == async_rendering::RenderCommandType::StartTask &&
+                             isInteractiveDisplayTask(pending.task.type);
+                  });
+                m_pendingRenderCommands.erase(newEnd, oldEnd);
+            }
+            m_pendingRenderCommands.push_back(std::move(command));
+        }
     }
 
     bool RenderWindow::executeQueuedRenderCommands(RenderWindowState & state)
@@ -989,6 +1020,53 @@ namespace gladius::ui
             return;
         }
 
+        bool const previewWindowBegunBeforeRender = m_neutralBackendActive;
+        if (previewWindowBegunBeforeRender)
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+            ImGui::Begin("Preview", &m_isVisible, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar);
+            m_isWindowHovered = ImGui::IsWindowHovered();
+            m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+            m_contentAreaMin = ImGui::GetWindowContentRegionMin();
+            m_contentAreaMax = ImGui::GetWindowContentRegionMax();
+
+            auto const previousSize = m_renderWindowSize_px;
+            m_renderWindowSize_px = {ImGui::GetWindowWidth(),
+                                     ImGui::GetWindowContentRegionMax().y -
+                                       ImGui::GetWindowContentRegionMin().y};
+            m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, 1.0f);
+            m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, 1.0f);
+
+            float constexpr tolerance = 1.E-4f;
+            bool const sizeChanged =
+              fabs(previousSize.x - m_renderWindowSize_px.x) > tolerance ||
+              fabs(previousSize.y - m_renderWindowSize_px.y) > tolerance;
+            if (sizeChanged)
+            {
+                m_preserveContentDuringResize = true;
+                m_deferredResizePending = true;
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                m_lastLowResRenderTime = std::chrono::system_clock::now();
+                m_dirty = true;
+                if (m_permanentCenteringEnabled)
+                {
+                    m_viewportSizeChangedSinceLastCenter = true;
+                }
+            }
+            else if (m_deferredResizePending)
+            {
+                m_deferredResizePending = false;
+                m_preserveContentDuringResize = false;
+            }
+
+            m_cameraInputInvalidatedThisFrame = false;
+            auto const contentMin = ImVec2{ImGui::GetWindowPos().x + m_contentAreaMin.x,
+                                           ImGui::GetWindowPos().y + m_contentAreaMin.y};
+            auto const contentMax = ImVec2{ImGui::GetWindowPos().x + m_contentAreaMax.x,
+                                           ImGui::GetWindowPos().y + m_contentAreaMax.y};
+            processNeutralCameraInput(contentMin, contentMax);
+        }
+
         // Execute rendering logic FIRST - this processes async results and promotes buffers.
         // Do NOT gate this on the compute token: processAsyncResults() and
         // processAsyncPreviewResults() must run every frame to consume completed async
@@ -1073,6 +1151,11 @@ namespace gladius::ui
         {
             // No image yet (early init / between resize and re-allocation).
             // Skip drawing this frame instead of dereferencing a null shared_ptr.
+            if (previewWindowBegunBeforeRender)
+            {
+                ImGui::End();
+                ImGui::PopStyleVar();
+            }
             if (isFileLoading)
             {
                 renderLoadingOverlay();
@@ -1086,19 +1169,22 @@ namespace gladius::ui
             textureId = displayImage->GetTextureId();
         }
         auto & io = ImGui::GetIO();
-        ImGuiWindowFlags const window_flags =
-          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
-        ImGui::SetNextWindowBgAlpha(1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
-        ImGui::Begin("Preview", &m_isVisible, window_flags);
-
-        // Cache window state for isHovered() and isFocused() methods
-        m_isWindowHovered = ImGui::IsWindowHovered();
-        if (m_isWindowHovered && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                if (!previewWindowBegunBeforeRender)
         {
-            ImGui::SetWindowFocus();
+                        ImGuiWindowFlags const window_flags =
+                            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar;
+                        ImGui::SetNextWindowBgAlpha(1.0f);
+                        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+                        ImGui::Begin("Preview", &m_isVisible, window_flags);
+
+                        // Cache window state for isHovered() and isFocused() methods
+                        m_isWindowHovered = ImGui::IsWindowHovered();
+                        if (m_isWindowHovered && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                        {
+                                ImGui::SetWindowFocus();
+                        }
+                        m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         }
-        m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
         // if has focus, but not any item has focus, handle key input and content area is hovered
         if (ImGui::IsWindowFocused() && !ImGui::IsAnyItemFocused() &&
@@ -1302,42 +1388,45 @@ namespace gladius::ui
         m_contentAreaMin = ImGui::GetWindowContentRegionMin();
         m_contentAreaMax = ImGui::GetWindowContentRegionMax();
 
-        auto const prevRenderWindowSize = m_renderWindowSize_px;
-        m_renderWindowSize_px = {
-          {ImGui::GetWindowWidth(),
-           ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y}};
-        
-        // Defensive check: ensure minimum viewport dimensions
-        float constexpr minDimension = 1.0f;
-        m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, minDimension);
-        m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, minDimension);
-        
-        float constexpr tolerance = 1.E-4f;
-        bool const sizeChanged =
-          fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
-          fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance;
-        if (sizeChanged)
+        if (!previewWindowBegunBeforeRender)
         {
-            // Preserve existing framebuffer content during resize to prevent flicker
-            // Schedule low-res preview at new dimensions without clearing current display
-            m_preserveContentDuringResize = true;
-            m_deferredResizePending = true;
-            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
-            m_lastLowResRenderTime = std::chrono::system_clock::now();
-            m_dirty = true;
+            auto const prevRenderWindowSize = m_renderWindowSize_px;
+            m_renderWindowSize_px = {
+              {ImGui::GetWindowWidth(),
+               ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y}};
 
-            // Mark viewport size as changed for permanent centering
-            if (m_permanentCenteringEnabled)
+            // Defensive check: ensure minimum viewport dimensions
+            float constexpr minDimension = 1.0f;
+            m_renderWindowSize_px.x = std::max(m_renderWindowSize_px.x, minDimension);
+            m_renderWindowSize_px.y = std::max(m_renderWindowSize_px.y, minDimension);
+
+            float constexpr tolerance = 1.E-4f;
+            bool const sizeChanged =
+              fabs(prevRenderWindowSize.x - m_renderWindowSize_px.x) > tolerance ||
+              fabs(prevRenderWindowSize.y - m_renderWindowSize_px.y) > tolerance;
+            if (sizeChanged)
             {
-                m_viewportSizeChangedSinceLastCenter = true;
+                // Preserve existing framebuffer content during resize to prevent flicker
+                // Schedule low-res preview at new dimensions without clearing current display
+                m_preserveContentDuringResize = true;
+                m_deferredResizePending = true;
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                m_lastLowResRenderTime = std::chrono::system_clock::now();
+                m_dirty = true;
+
+                // Mark viewport size as changed for permanent centering
+                if (m_permanentCenteringEnabled)
+                {
+                    m_viewportSizeChangedSinceLastCenter = true;
+                }
             }
-        }
-        else if (m_deferredResizePending)
-        {
-            // Size has stabilized — allow render() to proceed next frame and
-            // reallocate GPU buffers to the new dimensions.
-            m_deferredResizePending = false;
-            m_preserveContentDuringResize = false;
+            else if (m_deferredResizePending)
+            {
+                // Size has stabilized — allow render() to proceed next frame and
+                // reallocate GPU buffers to the new dimensions.
+                m_deferredResizePending = false;
+                m_preserveContentDuringResize = false;
+            }
         }
 
         ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
@@ -1354,28 +1443,34 @@ namespace gladius::ui
         auto const windowCenter =
           ImVec2(0.5f * (contentMin.x + contentMax.x), 0.5f * (contentMin.y + contentMax.y));
 
-        // Update camera and set isMoving based on whether camera is currently animating.
-        // Note: Parameter changes use forceLowResRender and lowResFeedbackPending flags,
-        // not isMoving. isMoving is specifically for camera movement.
-        bool const cameraActuallyMoving = m_camera.update(io.DeltaTime * 1000.f);
-        if (cameraActuallyMoving) {
-            m_cameraIdleFrames = 0;
-            m_renderWindowState.isMoving = true;
-            // Reset idle timer when camera starts moving again
-            m_lastCameraIdleTime = TimeStamp{};
-        } else {
-            m_cameraIdleFrames++;
-            // Keep isMoving true for 10 frames after last movement to debounce fast refresh rates
-            m_renderWindowState.isMoving = m_cameraIdleFrames < 10;
+        if (!previewWindowBegunBeforeRender)
+        {
+            // Update camera and set isMoving based on whether camera is currently animating.
+            // Note: Parameter changes use forceLowResRender and lowResFeedbackPending flags,
+            // not isMoving. isMoving is specifically for camera movement.
+            bool const cameraActuallyMoving = m_camera.update(io.DeltaTime * 1000.f);
+            if (cameraActuallyMoving)
+            {
+                m_cameraIdleFrames = 0;
+                m_renderWindowState.isMoving = true;
+                // Reset idle timer when camera starts moving again
+                m_lastCameraIdleTime = TimeStamp{};
+            }
+            else
+            {
+                m_cameraIdleFrames++;
+                // Keep isMoving true for 10 frames after last movement to debounce fast refresh rates
+                m_renderWindowState.isMoving = m_cameraIdleFrames < 10;
+            }
+            m_dirty = m_dirty || m_renderWindowState.isMoving;
         }
-        m_dirty = m_dirty || m_renderWindowState.isMoving;
 
         // Floating cut-height slider overlay (inside the Preview window)
         slider(contentMin, contentMax);
 
         // Event handling — skip camera input while slider widgets are being dragged
         bool const sliderActive = ImGui::IsAnyItemActive();
-        if (ImGui::IsWindowHovered() && !sliderActive)
+        if (!previewWindowBegunBeforeRender && ImGui::IsWindowHovered() && !sliderActive)
         {
 
             io.MouseDragThreshold = 1.f;
@@ -2161,6 +2256,23 @@ namespace gladius::ui
                 // camera's old interpolated position for several hundred frames.
                 m_camera.snapToTarget();
             }
+            auto const cameraActuallyMoving = m_camera.update(ImGui::GetIO().DeltaTime * 1000.0f);
+            if (cameraActuallyMoving)
+            {
+                m_cameraIdleFrames = 0;
+                state.isMoving = true;
+                m_lastCameraIdleTime = TimeStamp{};
+                if (!m_cameraInputInvalidatedThisFrame)
+                {
+                    invalidateCameraView();
+                }
+            }
+            else
+            {
+                ++m_cameraIdleFrames;
+                state.isMoving = m_cameraIdleFrames < 10;
+            }
+            m_dirty = m_dirty || state.isMoving;
             if (m_core)
             {
                 m_core->applyCamera(m_camera);
@@ -4915,6 +5027,57 @@ namespace gladius::ui
     bool RenderWindow::isRealtimeActive() const noexcept
     {
         return m_renderUpdateCoordinator.isRealtimeSchedulingActive();
+    }
+
+    bool RenderWindow::isNeutralBackendActive() const noexcept
+    {
+        return m_neutralBackendActive;
+    }
+
+    void RenderWindow::processNeutralCameraInput(ImVec2 const & contentMin,
+                                                 ImVec2 const & contentMax)
+    {
+        if (!m_isWindowHovered || ImGui::IsAnyItemActive())
+        {
+            return;
+        }
+
+        auto & io = ImGui::GetIO();
+        io.MouseDragThreshold = 1.0f;
+        auto const mousePos = io.MousePos;
+        bool const contentHovered = ImGui::IsMouseHoveringRect(contentMin, contentMax);
+
+        if (m_shortcutManager && contentHovered)
+        {
+            m_shortcutManager->processInput(ShortcutContext::RenderWindow);
+        }
+
+        if (contentHovered && m_camera.mouseMotionHandler(mousePos.x, mousePos.y))
+        {
+            invalidateCameraView();
+        }
+        if (!ImGui::IsAnyMouseDown())
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Left, -1, mousePos.x, mousePos.y);
+        }
+
+        if (!contentHovered)
+        {
+            return;
+        }
+
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Left, 0, mousePos.x, mousePos.y);
+        }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Right, 0, mousePos.x, mousePos.y);
+        }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle))
+        {
+            m_camera.mouseInputHandler(ImGuiMouseButton_Middle, 0, mousePos.x, mousePos.y);
+        }
     }
 
     void RenderWindow::refreshStreamingParameterInteraction()

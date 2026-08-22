@@ -144,6 +144,25 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
     }
 
+    TEST(RenderUpdateCoordinator, CameraChanged_WithReplacementEnabled_StartsLatestInteractiveFrame)
+    {
+        RenderUpdateCoordinator coordinator;
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+
+        auto firstDecision = coordinator.notifyCameraChanged();
+        auto firstFrame = findStartedTask(firstDecision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(firstFrame.has_value());
+
+        auto secondDecision = coordinator.notifyCameraChanged(true);
+        auto secondFrame = findStartedTask(secondDecision, RenderTaskType::LowResolutionPreview);
+
+        ASSERT_TRUE(secondFrame.has_value());
+        EXPECT_NE(secondFrame->requestId, firstFrame->requestId);
+        EXPECT_TRUE(matches(secondFrame->stamp,
+                            coordinator.latestStamp(),
+                            RenderStampMask::displayFrame()));
+    }
+
     TEST(RenderUpdateCoordinator, StaticCatchUp_AfterFastProgressiveEstimate_StartsStaticFullFrameProbe)
     {
         RenderUpdateCoordinator coordinator;
@@ -370,7 +389,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
     }
 
-    TEST(RenderUpdateCoordinator, CameraInteractionEnded_WithStaleAutoRealtime_StartsHqNotPreview)
+    TEST(RenderUpdateCoordinator, CameraInteractionEnded_WithStaleAutoRealtime_PresentsOldViewAndStartsHq)
     {
         RenderUpdateCoordinator coordinator;
         auto const viewportDecision = coordinator.configureViewport(640, 480);
@@ -385,7 +404,8 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
 
         decision = coordinator.completeTask(completed(*realtime, true, true));
-        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::PresentFrame));
+        EXPECT_FALSE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
 
         decision = coordinator.notifyCameraInteractionEnded();
 
@@ -501,6 +521,32 @@ namespace gladius::ui::async_rendering::tests
 
         frameDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
         EXPECT_TRUE(hasStartedTask(frameDecision, RenderTaskType::RealtimeFullFrame));
+    }
+
+    TEST(RenderUpdateCoordinator, RepeatedEmbeddedParameterChanges_AllowLatestInteractiveFrame)
+    {
+        RenderUpdateCoordinator coordinator;
+        coordinator.configureRealtime(forcedRealtimeConfig());
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+
+        auto firstDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
+        auto firstFrame = findStartedTask(firstDecision, RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(firstFrame.has_value());
+
+        (void) coordinator.notifyEmbeddedParameterChanged(true);
+        auto secondDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
+        auto secondFrame = findStartedTask(secondDecision, RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(secondFrame.has_value());
+        EXPECT_NE(secondFrame->requestId, firstFrame->requestId);
+
+        (void) coordinator.notifyEmbeddedParameterChanged(true);
+        auto thirdDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
+        auto thirdFrame = findStartedTask(thirdDecision, RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(thirdFrame.has_value());
+        EXPECT_NE(thirdFrame->requestId, secondFrame->requestId);
+        EXPECT_TRUE(matches(thirdFrame->stamp,
+                            coordinator.latestStamp(),
+                            RenderStampMask::displayFrame()));
     }
 
     TEST(RenderUpdateCoordinator, ParameterDrag_WithForcedRealtimeGuardBlocker_KeepsCurrentFrame)
@@ -708,7 +754,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(matches(hq->stamp, coordinator.latestStamp(), RenderStampMask::displayFrame()));
     }
 
-    TEST(RenderUpdateCoordinator, CameraBackpressure_KeepsCurrentFrameUntilOldPreviewCompletes)
+    TEST(RenderUpdateCoordinator, CameraBackpressure_PresentsOldViewAndSchedulesLatestPreview)
     {
         RenderUpdateCoordinator coordinator;
         auto decision = coordinator.notifyCameraChanged();
@@ -721,7 +767,19 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
 
         decision = coordinator.completeTask(completed(*preview, true, true));
-        EXPECT_TRUE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::PresentFrame));
+        EXPECT_FALSE(hasCommand(decision, RenderCommandType::DiscardTaskResult));
+        for (auto const & command : decision.commands)
+        {
+            if (command.type == RenderCommandType::PresentFrame)
+            {
+                EXPECT_FALSE(command.presentationMask.view);
+                EXPECT_TRUE(command.presentationMask.scene);
+                EXPECT_TRUE(command.presentationMask.parameters);
+                EXPECT_TRUE(command.presentationMask.viewport);
+                EXPECT_TRUE(command.presentationMask.quality);
+            }
+        }
 
         decision = coordinator.tick();
         auto latestPreview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
