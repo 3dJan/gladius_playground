@@ -479,6 +479,30 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
     }
 
+    TEST(RenderUpdateCoordinator, EmbeddedParameterChange_DoesNotCreateUploadTask)
+    {
+        RenderUpdateCoordinator coordinator;
+        coordinator.configureRealtime(forcedRealtimeConfig());
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+
+        auto const before = coordinator.latestStamp();
+        auto frameDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
+        ASSERT_TRUE(hasStartedTask(frameDecision, RenderTaskType::RealtimeFullFrame));
+
+        auto const decision = coordinator.notifyEmbeddedParameterChanged(true);
+        auto const after = coordinator.latestStamp();
+
+        EXPECT_EQ(after.sceneEpoch, before.sceneEpoch + 1u);
+        EXPECT_EQ(after.parameterEpoch, before.parameterEpoch + 1u);
+
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+
+        frameDecision = coordinator.startDisplayTask(RenderTaskType::RealtimeFullFrame);
+        EXPECT_TRUE(hasStartedTask(frameDecision, RenderTaskType::RealtimeFullFrame));
+    }
+
     TEST(RenderUpdateCoordinator, ParameterDrag_WithForcedRealtimeGuardBlocker_KeepsCurrentFrame)
     {
         RenderUpdateCoordinator coordinator;

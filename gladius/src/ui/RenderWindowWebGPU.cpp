@@ -59,7 +59,6 @@ namespace gladius::ui
         m_renderBackendSession.reset();
         m_neutralBackendActive = runtime != nullptr &&
                                  runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
-        ++m_neutralSceneGeneration;
         m_neutralRenderScheduler.requestCancellationForAll();
     }
 
@@ -83,7 +82,6 @@ namespace gladius::ui
         {
             m_neutralFramePresenter->release();
         }
-        ++m_neutralSceneGeneration;
         m_neutralRenderScheduler.requestCancellationForAll();
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
     }
@@ -125,8 +123,8 @@ namespace gladius::ui
             return false;
         }
 
-        if (!session->hasMaterializedScene() ||
-            session->getSceneGeneration() != m_neutralSceneGeneration)
+        auto const sceneGeneration = m_renderUpdateCoordinator.latestStamp().sceneEpoch;
+        if (!session->hasMaterializedScene() || session->getSceneGeneration() != sceneGeneration)
         {
             auto const assembly = m_document->getFlatAssembly();
             if (!assembly || !assembly->assemblyModel())
@@ -135,7 +133,7 @@ namespace gladius::ui
             }
 
             auto const snapshot = compute::ComputeRendererFactory::materializeScene(
-              assembly.get(), *assembly->assemblyModel(), m_neutralSceneGeneration);
+                            assembly.get(), *assembly->assemblyModel(), sceneGeneration);
             if (!session->replaceScene(snapshot))
             {
                 return false;
@@ -272,20 +270,18 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDuetoModelUpdate()
     {
-        ++m_neutralSceneGeneration;
         m_renderBackendSession.reset();
-        m_neutralRenderScheduler.requestCancellationForStale();
         m_dirty = true;
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
+        m_neutralRenderScheduler.requestCancellationForStale();
     }
 
     void RenderWindow::invalidateViewDueToParameterChange()
     {
-        ++m_neutralSceneGeneration;
         m_renderBackendSession.reset();
-        m_neutralRenderScheduler.requestCancellationForStale();
         m_dirty = true;
-        queueRenderDecision(m_renderUpdateCoordinator.notifyParameterChanged(true));
+        queueRenderDecision(m_neutralRenderScheduler.workflow().notifyEmbeddedParameterChanged(true));
+        m_neutralRenderScheduler.requestCancellationForStale();
     }
 
     void RenderWindow::suppressHQDisplay()

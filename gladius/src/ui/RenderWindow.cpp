@@ -274,7 +274,6 @@ namespace gladius::ui
         m_renderBackendSession.reset();
         if (m_neutralBackendActive)
         {
-            ++m_neutralSceneGeneration;
             m_neutralRenderScheduler.requestCancellationForAll();
         }
     }
@@ -299,7 +298,6 @@ namespace gladius::ui
         {
             m_neutralFramePresenter->release();
         }
-        ++m_neutralSceneGeneration;
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
     }
 
@@ -336,8 +334,9 @@ namespace gladius::ui
             return false;
         }
 
+        auto const sceneGeneration = m_renderUpdateCoordinator.latestStamp().sceneEpoch;
         if (!renderBackendSession->hasMaterializedScene() ||
-            renderBackendSession->getSceneGeneration() != m_neutralSceneGeneration)
+            renderBackendSession->getSceneGeneration() != sceneGeneration)
         {
             auto const assembly = m_document->getFlatAssembly();
             if (assembly && assembly->assemblyModel())
@@ -345,7 +344,7 @@ namespace gladius::ui
                 auto const snapshot = compute::ComputeRendererFactory::materializeScene(
                   assembly.get(),
                   *assembly->assemblyModel(),
-                  m_neutralSceneGeneration);
+                  sceneGeneration);
                 if (!renderBackendSession->replaceScene(snapshot))
                 {
                     return false;
@@ -1537,9 +1536,7 @@ namespace gladius::ui
 
         if (m_neutralBackendActive)
         {
-            ++m_neutralSceneGeneration;
             m_renderBackendSession.reset();
-            m_neutralRenderScheduler.requestCancellationForStale();
         }
 
         // CRITICAL: Mark SDF as invalid immediately so renderer uses direct function evaluation
@@ -1552,6 +1549,10 @@ namespace gladius::ui
         // Force a low-res render on next frame for immediate visual feedback
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
+        if (m_neutralBackendActive)
+        {
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
 
         invalidateView();
         
@@ -1600,9 +1601,7 @@ namespace gladius::ui
 
         if (m_neutralBackendActive)
         {
-            ++m_neutralSceneGeneration;
             m_renderBackendSession.reset();
-            m_neutralRenderScheduler.requestCancellationForStale();
         }
 
         m_dirty = true;
@@ -1634,7 +1633,15 @@ namespace gladius::ui
         m_parameterDirty.store(true, std::memory_order_release);
         m_modelModifiedSinceLastCenter = true;
         m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
-        queueRenderDecision(m_renderUpdateCoordinator.notifyParameterChanged(true));
+        if (m_neutralBackendActive)
+        {
+            queueRenderDecision(m_neutralRenderScheduler.workflow().notifyEmbeddedParameterChanged(true));
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
+        else
+        {
+            queueRenderDecision(m_renderUpdateCoordinator.notifyParameterChanged(true));
+        }
 
         // Mark bbox stale instead of resetting — preserves cached bbox for reuse with extra margin.
         // Coreless backends use their backend-neutral scene bounds and have no legacy bbox state.

@@ -213,6 +213,30 @@ namespace gladius::ui::async_rendering
             return decision;
         }
 
+        /// Notify the workflow that parameter values were rebuilt into the materialized scene.
+        /// Backends with embedded parameters do not need a separate upload task.
+        [[nodiscard]] RenderUpdateDecision notifyEmbeddedParameterChanged(bool interactionActive)
+        {
+            RenderUpdateDecision decision{};
+            auto const previousState = m_interactionState;
+            // The WebGPU scene embeds parameter values and is immutable after materialization.
+            // Rebuilding it therefore creates a new scene generation as well as a new parameter
+            // generation; both must match the backend session and submitted frame freshness.
+            ++m_latestStamp.sceneEpoch;
+            ++m_latestStamp.parameterEpoch;
+            resetRealtimeLearning();
+            m_parameterUploadStamp = m_latestStamp;
+            m_boundingBoxStamp.reset();
+            m_sdfStamp.reset();
+            m_interactionState = interactionActive ? RenderInteractionState::ParameterInteracting
+                                                   : RenderInteractionState::Static;
+            if (interactionActive && previousState != RenderInteractionState::ParameterInteracting)
+            {
+                releaseStaleInteractiveInFlight();
+            }
+            return decision;
+        }
+
         [[nodiscard]] RenderUpdateDecision notifyParameterInteractionEnded()
         {
             RenderUpdateDecision decision{};

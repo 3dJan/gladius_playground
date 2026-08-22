@@ -509,7 +509,6 @@ namespace gladius::ui
         compute::RenderBackendSession * m_runtimeRenderBackendSession{nullptr};
         std::unique_ptr<async_rendering::OpenGLFramePresenter> m_neutralFramePresenter;
         bool m_neutralBackendActive{false};
-        std::uint64_t m_neutralSceneGeneration{0u};
         std::uint32_t m_neutralViewportWidth{0u};
         std::uint32_t m_neutralViewportHeight{0u};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
