@@ -16,8 +16,10 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace gladius::ui
@@ -62,6 +64,36 @@ namespace gladius::ui
                         std::shared_ptr<ShortcutManager> shortcutManager,
                         gladius::ConfigManager * configManager,
                         compute::IBackendRuntime * runtime = nullptr);
+
+        /**
+         * @brief Set the callback invoked after a user changes rendering preferences.
+         * @param callback Callback used to persist the updated preferences.
+         */
+        void setRenderSettingsChangedCallback(std::function<void()> callback)
+        {
+            m_renderSettingsChangedCallback = std::move(callback);
+        }
+
+        /**
+         * @brief Set the render quality used for current and interactive frames.
+         * @param quality Render quality multiplier.
+         */
+        void setRenderQuality(float quality) noexcept
+        {
+            m_renderWindowState.renderQuality = quality;
+            m_renderWindowState.renderQualityWhileMoving = quality * 0.5f;
+        }
+
+        void setHighQualityRenderingEnabled(bool enabled) noexcept
+        {
+            m_enableHQRendering = enabled;
+        }
+
+        [[nodiscard]] bool isHighQualityRenderingEnabled() const noexcept
+        {
+            return m_enableHQRendering;
+        }
+
         void setBackendRuntime(compute::IBackendRuntime * runtime);
         [[nodiscard]] compute::RenderSettingsSnapshot & getNeutralRenderSettings() noexcept;
         [[nodiscard]] compute::RenderSettingsSnapshot const & getNeutralRenderSettings() const noexcept;
@@ -297,7 +329,8 @@ namespace gladius::ui
         Document * m_document{nullptr};
         ExportState const * m_exportState{nullptr};
         std::shared_ptr<ShortcutManager> m_shortcutManager;
-        gladius::ConfigManager * m_configManager;
+        gladius::ConfigManager * m_configManager{nullptr};
+        std::function<void()> m_renderSettingsChangedCallback;
 
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};

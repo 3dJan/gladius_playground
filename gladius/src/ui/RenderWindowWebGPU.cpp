@@ -51,6 +51,7 @@ namespace gladius::ui
             m_permanentCenteringEnabled =
               m_configManager->getValue<bool>("renderWindow", "permanentCenteringEnabled", false);
         }
+        setRenderQuality(m_neutralRenderSettings.quality);
         m_renderUpdateCoordinator.configureRealtime(loadRealtimeRaymarchConfig());
     }
 

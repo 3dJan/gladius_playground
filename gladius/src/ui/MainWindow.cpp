@@ -7,6 +7,8 @@
 #include "Theme.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fmt/format.h>
@@ -135,6 +137,7 @@ namespace gladius::ui
                 m_renderWindow.initialize(
                   nullptr, &m_mainView, m_shortcutManager, m_configManager, m_runtime.get());
             #endif
+        m_renderWindow.setRenderSettingsChangedCallback([this]() { saveRenderSettings(); });
         m_renderWindow.setDocument(m_doc.get());
         m_renderWindow.setExportState(&m_exportState);
             #if defined(GLADIUS_ENABLE_OPENCL)
@@ -271,13 +274,14 @@ namespace gladius::ui
                     ImGui::Separator();
                 }
 
-                ImGui::SliderFloat("Ray marching tolerance",
-                                   &m_core->getResourceContext()->getRenderingSettings().quality,
-                                   0.1f,
-                                   20.0f);
-
                 // Toggle SDF visualization using rendering flags
                 auto & rs = m_core->getResourceContext()->getRenderingSettings();
+                if (ImGui::SliderFloat("Ray marching tolerance", &rs.quality, 0.1f, 20.0f))
+                {
+                    m_renderWindow.setRenderQuality(rs.quality);
+                    saveRenderSettings();
+                }
+
                 bool enableSdfRendering = (rs.flags & RF_SHOW_FIELD) != 0u;
                 if (ImGui::Checkbox("Show Distance field", &enableSdfRendering))
                 {
@@ -286,6 +290,7 @@ namespace gladius::ui
                     else
                         rs.flags &= ~RF_SHOW_FIELD;
                     refreshModel();
+                    saveRenderSettings();
                 }
             }
 #else
@@ -307,7 +312,11 @@ namespace gladius::ui
                     ImGui::Separator();
                 }
 
-                ImGui::SliderFloat("Ray marching tolerance", &settings.quality, 0.1f, 20.0f);
+                if (ImGui::SliderFloat("Ray marching tolerance", &settings.quality, 0.1f, 20.0f))
+                {
+                    m_renderWindow.setRenderQuality(settings.quality);
+                    saveRenderSettings();
+                }
                 bool enableSdfRendering = (settings.flags & RF_SHOW_FIELD) != 0u;
                 if (ImGui::Checkbox("Show Distance field", &enableSdfRendering))
                 {
@@ -320,6 +329,7 @@ namespace gladius::ui
                         settings.flags &= ~RF_SHOW_FIELD;
                     }
                     m_renderWindow.invalidateViewDueToParameterChange();
+                    saveRenderSettings();
                 }
             }
 #endif
@@ -4207,19 +4217,33 @@ namespace gladius::ui
         if (m_computeAvailable && (m_core || m_runtime))
         {
             nlohmann::json renderJson;
+            auto const saveSettings = [&](float const quality, std::uint32_t const flags)
+            {
+                auto const hasFlag = [flags](std::uint32_t const flag)
+                {
+                    return (flags & flag) != 0u;
+                };
+
+                renderJson["quality"] = quality;
+                renderJson["showBuildPlate"] = hasFlag(RF_SHOW_BUILDPLATE);
+                renderJson["cutOffObject"] = hasFlag(RF_CUT_OFF_OBJECT);
+                // Keep the established key for compatibility with existing settings files.
+                renderJson["sdfVisEnabled"] = hasFlag(RF_SHOW_FIELD);
+                renderJson["showStack"] = hasFlag(RF_SHOW_STACK);
+                renderJson["showCoordinateSystem"] = hasFlag(RF_SHOW_COORDINATE_SYSTEM);
+                renderJson["highQualityEnabled"] = m_renderWindow.isHighQualityRenderingEnabled();
+            };
 #if defined(GLADIUS_ENABLE_OPENCL)
             if (m_core)
             {
                 auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
-                renderJson["quality"] = renderSettings.quality;
-                renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+                saveSettings(renderSettings.quality, static_cast<std::uint32_t>(renderSettings.flags));
             }
             else
 #endif
             {
                 auto const & renderSettings = m_renderWindow.getNeutralRenderSettings();
-                renderJson["quality"] = renderSettings.quality;
-                renderJson["sdfVisEnabled"] = (renderSettings.flags & RF_SHOW_FIELD) != 0u;
+                saveSettings(renderSettings.quality, renderSettings.flags);
             }
 
             m_configManager->setValue("rendering", "settings", renderJson);
@@ -4268,46 +4292,90 @@ namespace gladius::ui
           "rendering", "settings", nlohmann::json::object());
 
         // Skip if there are no saved settings
-        if (renderJson.empty())
+        if (!renderJson.is_object() || renderJson.empty())
         {
             return;
         }
 
-        auto setSettings = [&](float const quality, bool const showDistanceField)
-        {
+        float quality = m_renderWindow.getNeutralRenderSettings().quality;
+        std::uint32_t currentFlags = m_renderWindow.getNeutralRenderSettings().flags;
 #if defined(GLADIUS_ENABLE_OPENCL)
-            if (m_core)
-            {
-                auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
-                renderSettings.quality = quality;
-                if (showDistanceField)
-                    renderSettings.flags |= RF_SHOW_FIELD;
-                else
-                    renderSettings.flags &= ~RF_SHOW_FIELD;
-                return;
-            }
+        if (m_core)
+        {
+            auto const & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+            quality = renderSettings.quality;
+            currentFlags = static_cast<std::uint32_t>(renderSettings.flags);
+        }
 #endif
 
-            auto & renderSettings = m_renderWindow.getNeutralRenderSettings();
-            renderSettings.quality = quality;
-            if (showDistanceField)
-                renderSettings.flags |= RF_SHOW_FIELD;
-            else
-                renderSettings.flags &= ~RF_SHOW_FIELD;
+        auto const readBool = [&renderJson](char const * const key, bool const defaultValue)
+        {
+            auto const value = renderJson.find(key);
+            return value != renderJson.end() && value->is_boolean() ? value->get<bool>()
+                                                                      : defaultValue;
         };
 
-        // Update settings from config
-        auto const quality = renderJson.contains("quality")
-                               ? renderJson["quality"].get<float>()
-                               : m_renderWindow.getNeutralRenderSettings().quality;
-        auto const showDistanceField = renderJson.contains("sdfVisEnabled")
-                                         ? renderJson["sdfVisEnabled"].get<bool>()
-                                         : (m_renderWindow.getNeutralRenderSettings().flags &
-                                            RF_SHOW_FIELD) != 0u;
-        if (renderJson.contains("quality") || renderJson.contains("sdfVisEnabled"))
+        auto const qualityValue = renderJson.find("quality");
+        if (qualityValue != renderJson.end() && qualityValue->is_number())
         {
-            setSettings(quality, showDistanceField);
+            try
+            {
+                auto const configuredQuality = qualityValue->get<float>();
+                if (std::isfinite(configuredQuality) && configuredQuality > 0.0f)
+                {
+                    quality = configuredQuality;
+                }
+            }
+            catch (nlohmann::json::exception const &)
+            {
+                // Ignore malformed numeric values and retain the active quality.
+            }
         }
+
+        auto const highQualityValue = renderJson.find("highQualityEnabled");
+        if (highQualityValue != renderJson.end() && highQualityValue->is_boolean())
+        {
+            m_renderWindow.setHighQualityRenderingEnabled(highQualityValue->get<bool>());
+        }
+
+        auto persistentFlags = currentFlags;
+        auto const applyFlag = [&persistentFlags](std::uint32_t const flag, bool const enabled)
+        {
+            if (enabled)
+            {
+                persistentFlags |= flag;
+            }
+            else
+            {
+                persistentFlags &= ~flag;
+            }
+        };
+        applyFlag(RF_SHOW_BUILDPLATE,
+                  readBool("showBuildPlate", (currentFlags & RF_SHOW_BUILDPLATE) != 0u));
+        applyFlag(RF_CUT_OFF_OBJECT,
+                  readBool("cutOffObject", (currentFlags & RF_CUT_OFF_OBJECT) != 0u));
+        applyFlag(RF_SHOW_FIELD,
+                  readBool("sdfVisEnabled", (currentFlags & RF_SHOW_FIELD) != 0u));
+        applyFlag(RF_SHOW_STACK,
+                  readBool("showStack", (currentFlags & RF_SHOW_STACK) != 0u));
+        applyFlag(RF_SHOW_COORDINATE_SYSTEM,
+                  readBool("showCoordinateSystem", (currentFlags & RF_SHOW_COORDINATE_SYSTEM) != 0u));
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core)
+        {
+            auto & renderSettings = m_core->getResourceContext()->getRenderingSettings();
+            renderSettings.quality = quality;
+            renderSettings.flags = static_cast<int>(persistentFlags);
+        }
+        else
+#endif
+        {
+            auto & renderSettings = m_renderWindow.getNeutralRenderSettings();
+            renderSettings.quality = quality;
+            renderSettings.flags = persistentFlags;
+        }
+        m_renderWindow.setRenderQuality(quality);
 
         // Log success
         m_logger->addEvent({"Rendering settings loaded", events::Severity::Info});

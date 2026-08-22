@@ -249,8 +249,7 @@ namespace gladius::ui
         if (m_core && m_core->isRendererReady())
         {
             auto & settings = m_core->getResourceContext()->getRenderingSettings();
-            m_renderWindowState.renderQuality = settings.quality;
-            m_renderWindowState.renderQualityWhileMoving = settings.quality * 0.5f;
+            setRenderQuality(settings.quality);
         }
 
         if (m_configManager)
@@ -1248,9 +1247,15 @@ namespace gladius::ui
             overflow.item(ICON_FA_ROBOT "\tHQ",
                           [&]
                           {
+                              bool const wasHighQualityEnabled = m_enableHQRendering;
                               toggleButton(
                                 {reinterpret_cast<const char *>(ICON_FA_ROBOT "\tHQ")},
                                 &m_enableHQRendering);
+                              if (wasHighQualityEnabled != m_enableHQRendering &&
+                                  m_renderSettingsChangedCallback)
+                              {
+                                  m_renderSettingsChangedCallback();
+                              }
                           });
 
                         overflow.item("Rendering Options",
@@ -1273,6 +1278,7 @@ namespace gladius::ui
                                                             }
 
                                                             bool flagsChanged = false;
+                                                            bool settingsChanged = false;
                                                             if (ImGui::BeginMenu("..."))
                                                             {
                                                                     flagsChanged |= ImGui::CheckboxFlags(
@@ -1309,8 +1315,8 @@ namespace gladius::ui
                                       {
                                           m_neutralRenderSettings.quality = quality;
                                       }
-                                      m_renderWindowState.renderQuality = quality;
-                                      m_renderWindowState.renderQualityWhileMoving = quality * 0.5f;
+                                      setRenderQuality(quality);
+                                      settingsChanged = true;
                                       invalidateView();
                                   }
                                   m_renderWindowState.renderQuality = quality;
@@ -1357,11 +1363,6 @@ namespace gladius::ui
                                   ImGui::EndMenu();
                               }
 
-                              if (flagsChanged)
-                              {
-                                  invalidateView();
-                              }
-
                               if (hasOpenCLCore)
                               {
                                   m_core->getResourceContext()->getRenderingSettings().flags =
@@ -1371,6 +1372,16 @@ namespace gladius::ui
                               {
                                   m_neutralRenderSettings.flags =
                                     static_cast<std::uint32_t>(renderingFlags);
+                              }
+
+                              if (flagsChanged)
+                              {
+                                  settingsChanged = true;
+                                  invalidateView();
+                              }
+                              if (settingsChanged && m_renderSettingsChangedCallback)
+                              {
+                                  m_renderSettingsChangedCallback();
                               }
                           });
 
@@ -3987,6 +3998,10 @@ namespace gladius::ui
                 }
                 settings.flags = renderingFlags;
                 invalidateView();
+                if (m_renderSettingsChangedCallback)
+                {
+                    m_renderSettingsChangedCallback();
+                }
             }
 
             // Vertical slider (thin)
