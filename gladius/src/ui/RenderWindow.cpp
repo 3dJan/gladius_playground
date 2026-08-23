@@ -269,6 +269,15 @@ namespace gladius::ui
         {
             (void) m_neutralRenderScheduler.drain(false);
         }
+        if (m_neutralBoundsSubmission)
+        {
+            m_neutralBoundsSubmission->requestCancellation();
+            m_neutralBoundsSubmission->wait();
+            m_neutralBoundsSubmission.reset();
+        }
+        m_neutralModelBounds.reset();
+        m_neutralBoundsFreshness = {};
+        m_neutralBoundsFailed = false;
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
@@ -289,6 +298,13 @@ namespace gladius::ui
     void RenderWindow::setDocument(Document * doc)
     {
         m_neutralRenderScheduler.requestCancellationForAll();
+        if (m_neutralBoundsSubmission)
+        {
+            m_neutralBoundsSubmission->requestCancellation();
+        }
+        m_neutralModelBounds.reset();
+        m_neutralBoundsFreshness = {};
+        m_neutralBoundsFailed = false;
         m_document = doc;
         m_renderBackendSession.reset();
         m_neutralViewportWidth = 0u;
@@ -306,6 +322,95 @@ namespace gladius::ui
                                                         : m_renderBackendSession.get();
     }
 
+    bool RenderWindow::updateNeutralModelBounds(compute::RenderBackendSession & session)
+    {
+        auto const stamp = m_renderUpdateCoordinator.latestStamp();
+        auto const freshness = compute::RenderFreshnessStamp{
+          .sceneGeneration = stamp.sceneEpoch,
+          .viewGeneration = stamp.viewEpoch,
+          .parameterGeneration = stamp.parameterEpoch};
+
+        if (!m_neutralBoundsFreshness.hasSameModelGeneration(freshness))
+        {
+            if (m_neutralBoundsSubmission)
+            {
+                m_neutralBoundsSubmission->requestCancellation();
+            }
+            m_neutralBoundsFreshness = freshness;
+            m_neutralModelBounds.reset();
+            m_neutralBoundsFailed = false;
+        }
+
+        auto * const boundsService = session.getBoundsService();
+        if (boundsService == nullptr || !boundsService->isAvailable())
+        {
+            m_neutralBoundsFailed = true;
+            return false;
+        }
+
+        if (m_neutralBoundsSubmission)
+        {
+            m_neutralBoundsSubmission->progress();
+            if (m_neutralBoundsSubmission->getStatus() ==
+                compute::BoundsSubmissionStatus::Pending)
+            {
+                return false;
+            }
+
+            auto result = m_neutralBoundsSubmission->takeResult();
+            m_neutralBoundsSubmission.reset();
+            if (result.has_value() && result->freshness.hasSameModelGeneration(freshness) &&
+                result->isUsable())
+            {
+                m_neutralModelBounds = result->modelBounds;
+                m_neutralBoundsFreshness = result->freshness;
+                m_neutralBoundsFailed = false;
+                return true;
+            }
+
+            if (result.has_value() && !result->freshness.hasSameModelGeneration(freshness))
+            {
+                return false;
+            }
+
+            m_neutralBoundsFailed = true;
+            return false;
+        }
+
+        if (m_neutralModelBounds.has_value() &&
+            m_neutralBoundsFreshness.hasSameModelGeneration(freshness))
+        {
+            return true;
+        }
+
+        if (auto const cached = boundsService->getCachedResult(freshness);
+            cached.has_value() && cached->isUsable())
+        {
+            m_neutralModelBounds = cached->modelBounds;
+            m_neutralBoundsFreshness = cached->freshness;
+            m_neutralBoundsFailed = false;
+            return true;
+        }
+
+        if (m_neutralBoundsFailed)
+        {
+            return false;
+        }
+
+        compute::BoundsRequest request;
+        request.freshness = freshness;
+        try
+        {
+            m_neutralBoundsSubmission = boundsService->submit(std::move(request));
+        }
+        catch (...)
+        {
+            m_neutralBoundsFailed = true;
+            return false;
+        }
+        return false;
+    }
+
     bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
     {
         if (!m_neutralBackendActive || !m_document)
@@ -318,8 +423,7 @@ namespace gladius::ui
             try
             {
                 m_renderBackendSession = compute::ComputeRendererFactory::createRenderBackendSession(
-                  *m_configManager,
-                                    compute::ComputeBackendKind::WebGPU);
+                  *m_configManager, compute::ComputeBackendKind::WebGPU);
             }
             catch (std::exception const &)
             {
@@ -356,6 +460,12 @@ namespace gladius::ui
             return false;
         }
 
+        bool const modelBoundsReady = updateNeutralModelBounds(*renderBackendSession);
+        if (!modelBoundsReady && m_view != nullptr && m_neutralBoundsSubmission)
+        {
+            m_view->startAnimationMode();
+        }
+
         if (!m_neutralFramePresenter)
         {
             m_neutralFramePresenter = std::make_unique<async_rendering::OpenGLFramePresenter>();
@@ -387,8 +497,8 @@ namespace gladius::ui
                 (void) m_neutralFramePresenter->present(accepted.frame);
             }
         }
-        queueRenderDecision(async_rendering::RenderWorkflowDecision{
-          .commands = std::move(pollResult.commands)});
+                queueRenderDecision(async_rendering::RenderWorkflowDecision{
+                    .commands = std::move(pollResult.commands)});
 
                 bool const hasPendingStartTask = std::any_of(
                     m_pendingRenderCommands.begin(),
@@ -2351,7 +2461,13 @@ namespace gladius::ui
     {
         if (m_core == nullptr)
         {
-            return std::nullopt;
+            auto const modelBounds = getNeutralModelBounds();
+            if (!modelBounds.has_value())
+            {
+                return std::nullopt;
+            }
+            return BoundingBox{{modelBounds->min[0], modelBounds->min[1], modelBounds->min[2], 0.0f},
+                               {modelBounds->max[0], modelBounds->max[1], modelBounds->max[2], 0.0f}};
         }
 
         auto bbox = m_core->getBoundingBox();
@@ -2382,7 +2498,7 @@ namespace gladius::ui
                 bool const firstTimeBoundingBoxAvailable =
                     !m_boundingBoxEverAvailable &&
                     ((m_core && m_core->getBoundingBox().has_value()) ||
-                     (m_neutralBackendActive && m_document != nullptr));
+                     (m_neutralBackendActive && getNeutralModelBounds().has_value()));
         bool const shouldCenter =
           m_centerViewRequested || shouldRecalculateCenter() || firstTimeBoundingBoxAvailable;
         if (!shouldCenter)
@@ -2397,7 +2513,17 @@ namespace gladius::ui
             }
             else if (m_neutralBackendActive && m_document)
             {
-                boundingBox = m_document->computeBoundingBox();
+                if (auto const modelBounds = getNeutralModelBounds())
+                {
+                    boundingBox = BoundingBox{{modelBounds->min[0],
+                                               modelBounds->min[1],
+                                               modelBounds->min[2],
+                                               0.0f},
+                                              {modelBounds->max[0],
+                                               modelBounds->max[1],
+                                               modelBounds->max[2],
+                                               0.0f}};
+                }
             }
 
         if (!boundingBox.has_value() && m_neutralBackendActive)
@@ -2484,10 +2610,7 @@ namespace gladius::ui
                 return false;
             }
 
-            auto const boundingBox = m_document->computeBoundingBox();
-            return boundingBox.max.x > boundingBox.min.x &&
-                   boundingBox.max.y > boundingBox.min.y &&
-                   boundingBox.max.z > boundingBox.min.z;
+              return assembly && assembly->assemblyModel();
         }
 
         if (isRenderableBoundingBox(m_core->getBoundingBox()))
@@ -2506,19 +2629,32 @@ namespace gladius::ui
             return std::nullopt;
         }
 
-        try
+        auto const stamp = m_renderUpdateCoordinator.latestStamp();
+        auto const freshness = compute::RenderFreshnessStamp{
+          .sceneGeneration = stamp.sceneEpoch,
+          .viewGeneration = stamp.viewEpoch,
+          .parameterGeneration = stamp.parameterEpoch};
+        if (m_neutralModelBounds.has_value() &&
+            m_neutralBoundsFreshness.hasSameModelGeneration(freshness))
         {
-            auto const boundingBox = m_document->computeBoundingBox();
-            compute::RenderBounds const modelBounds{
-              .min = {boundingBox.min.x, boundingBox.min.y, boundingBox.min.z},
-              .max = {boundingBox.max.x, boundingBox.max.y, boundingBox.max.z}};
-            return modelBounds.isValid() ? std::optional<compute::RenderBounds>{modelBounds}
-                                         : std::nullopt;
+            return m_neutralModelBounds;
         }
-        catch (...)
+
+        auto * const session = const_cast<RenderWindow *>(this)->getActiveRenderBackendSession();
+        if (session != nullptr)
         {
-            return std::nullopt;
+            auto * const boundsService = session->getBoundsService();
+            if (boundsService != nullptr)
+            {
+                if (auto const cached = boundsService->getCachedResult(freshness);
+                    cached.has_value() && cached->isUsable())
+                {
+                    return cached->modelBounds;
+                }
+            }
         }
+
+        return std::nullopt;
     }
 
     void RenderWindow::renderSync(RenderWindowState & state)

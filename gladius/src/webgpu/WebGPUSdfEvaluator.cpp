@@ -150,6 +150,9 @@ namespace gladius::webgpu
         {
             throw std::runtime_error("WebGPU compute context is unavailable");
         }
+        // Serialize all device/queue access: this may run on a worker thread while the
+        // UI thread submits frames through the same Dawn device.
+        WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
         if (request.shaderSource.empty())
         {
             throw std::invalid_argument("WebGPU SDF evaluator shader source must not be empty");

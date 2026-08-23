@@ -2618,13 +2618,13 @@ namespace gladius::io
             return;
         }
 
-    #if defined(GLADIUS_ENABLE_OPENCL)
-        auto core = doc.getCore();
-        auto computeToken = core->waitForComputeToken();
-    #endif
-
-        try
+        // The merge body is executed while holding the compute token (when a core
+        // exists). The document may be coreless when the WebGPU backend is active;
+        // merging must not depend on an OpenCL compute core in that case.
+        auto mergeBody = [&]()
         {
+            try
+            {
             // backup the list of function ids
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions
@@ -2717,6 +2717,17 @@ namespace gladius::io
                    events::Severity::Error});
             }
         }
+        };
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (auto core = doc.getCore())
+        {
+            auto computeToken = core->waitForComputeToken();
+            mergeBody();
+            return;
+        }
+#endif
+        mergeBody();
     }
 
     Lib3MF::PWrapper Importer3mf::get3mfWrapper() const

@@ -121,6 +121,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::runtime_error("WebGPU compute context is unavailable");
                 }
+                // Serialize all device/queue access: Dawn instance processing and queue
+                // submission must not run concurrently from multiple threads.
+                WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
 
                 auto const dispatchSize = calculateSliceDispatchSize(request.width, request.height);
                 if (!dispatchSize.has_value())
@@ -364,6 +367,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::runtime_error("WebGPU compute context is unavailable");
                 }
+                // Serialize all device/queue access: Dawn instance processing and queue
+                // submission must not run concurrently from multiple threads.
+                WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
                 if (request.endRow == 0u)
                 {
                     request.endRow = request.height;
@@ -402,44 +408,57 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 }
 
                 auto const rowCount = request.endRow - request.firstRow;
-                auto const modelBounds = request.modelBounds.value_or(compute::RenderBounds{});
+                FrameUniforms uniforms{
+                  .eyeAndMaxDistance = {request.eyePosition[0],
+                                        request.eyePosition[1],
+                                        request.eyePosition[2],
+                                        request.maxTravelDistance},
+                  .forwardAndHorizontalScale = {request.forwardDirection[0],
+                                                request.forwardDirection[1],
+                                                request.forwardDirection[2],
+                                                request.horizontalScale},
+                  .rightAndWidth = {request.rightDirection[0],
+                                    request.rightDirection[1],
+                                    request.rightDirection[2],
+                                    static_cast<float>(request.width)},
+                  .upAndHeight = {request.upDirection[0],
+                                  request.upDirection[1],
+                                  request.upDirection[2],
+                                  static_cast<float>(request.height)},
+                  .verticalScaleAndMaxSteps = {request.verticalScale,
+                                               static_cast<float>(request.maxRaySteps),
+                                               0.0f,
+                                               0.0f},
+                  .firstRowAndCount = {static_cast<float>(request.firstRow),
+                                       static_cast<float>(rowCount),
+                                       0.0f,
+                                       0.0f},
+                  .timeSliceQualityNormal = {request.timeSeconds,
+                                             request.sliceHeight,
+                                             request.quality,
+                                             request.normalOffset},
+                  .flagsModeReserved = {request.renderingFlags,
+                                        request.renderingMode,
+                                        request.modelBounds.has_value() ? 1u : 0u,
+                                        0u},
+                  .clippingBoxMin = {},
+                  .clippingBoxMax = {}};
+                if (request.modelBounds.has_value())
+                {
+                    uniforms.clippingBoxMin = {request.modelBounds->min[0],
+                                               request.modelBounds->min[1],
+                                               request.modelBounds->min[2],
+                                               0.0f};
+                    uniforms.clippingBoxMax = {request.modelBounds->max[0],
+                                               request.modelBounds->max[1],
+                                               request.modelBounds->max[2],
+                                               0.0f};
+                }
                 m_buffers.resize(
                   m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
                 m_buffers.writeUniforms(
                   m_context->getQueue(),
-                  FrameUniforms{
-                    .eyeAndMaxDistance = {request.eyePosition[0],
-                                          request.eyePosition[1],
-                                          request.eyePosition[2],
-                                          request.maxTravelDistance},
-                    .forwardAndHorizontalScale = {request.forwardDirection[0],
-                                                  request.forwardDirection[1],
-                                                  request.forwardDirection[2],
-                                                  request.horizontalScale},
-                    .rightAndWidth = {request.rightDirection[0],
-                                      request.rightDirection[1],
-                                      request.rightDirection[2],
-                                      static_cast<float>(request.width)},
-                    .upAndHeight = {request.upDirection[0],
-                                    request.upDirection[1],
-                                    request.upDirection[2],
-                                    static_cast<float>(request.height)},
-                    .verticalScaleAndMaxSteps =
-                      {request.verticalScale, static_cast<float>(request.maxRaySteps), 0.0f, 0.0f},
-                    .firstRowAndCount = {static_cast<float>(request.firstRow),
-                                         static_cast<float>(rowCount),
-                                         0.0f,
-                                         0.0f},
-                    .timeSliceQualityNormal = {request.timeSeconds,
-                                              request.sliceHeight,
-                                              request.quality,
-                                              request.normalOffset},
-                    .flagsModeReserved = {request.renderingFlags,
-                                          request.renderingMode,
-                                          request.modelBounds.has_value() ? 1u : 0u,
-                                          0u},
-                    .clippingBoxMin = {modelBounds.min[0], modelBounds.min[1], modelBounds.min[2], 0.0f},
-                    .clippingBoxMax = {modelBounds.max[0], modelBounds.max[1], modelBounds.max[2], 0.0f}});
+                  uniforms);
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())
@@ -563,8 +582,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
         };
     }
 
-    WebGPUComputeBackend::WebGPUComputeBackend()
-        : m_context(std::make_shared<WebGPUComputeContext>())
+    WebGPUComputeBackend::WebGPUComputeBackend(std::shared_ptr<WebGPUComputeContext> context)
+        : m_context(context ? std::move(context) : std::make_shared<WebGPUComputeContext>())
     {
     }
 

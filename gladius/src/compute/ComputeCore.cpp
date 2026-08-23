@@ -68,6 +68,7 @@ namespace gladius
 
         (void) beginOptimizedSourceGeneration();
         m_boundingBox.reset();
+        m_boundingBoxSource.store(BoundingBoxComputationSource::None, std::memory_order_release);
         m_boundingBoxStale.store(false, std::memory_order_release);
         m_programs->reset();
         setSliceHeight(0.f);
@@ -688,6 +689,11 @@ namespace gladius
         return m_boundingBox; // Return a copy instead of a reference
     }
 
+    BoundingBoxComputationSource ComputeCore::getBoundingBoxComputationSource() const noexcept
+    {
+        return m_boundingBoxSource.load(std::memory_order_acquire);
+    }
+
     bool ComputeCore::isBoundingBoxMeaningful(BoundingBox const & box)
     {
         auto const values =
@@ -799,6 +805,11 @@ namespace gladius
 
         if (m_boundingBox && isBoundingBoxMeaningful(*m_boundingBox))
         {
+            if (m_boundingBoxSource.load(std::memory_order_acquire) == BoundingBoxComputationSource::None)
+            {
+                m_boundingBoxSource.store(BoundingBoxComputationSource::NumericalProbe,
+                                          std::memory_order_release);
+            }
             m_boundingBoxComputationInProgress.store(false);
             return true;
         }
@@ -824,6 +835,8 @@ namespace gladius
         auto const & vertices = m_resources->getConvexHullVertices().getData();
 
         m_boundingBox = BoundingBox{};
+        m_boundingBoxSource.store(BoundingBoxComputationSource::None,
+                      std::memory_order_release);
 
         if (!m_programs->getSlicerProgram()->isValid())
         {
@@ -930,13 +943,27 @@ namespace gladius
                 logMsg("updateBoundingBoxFast: using primitive metadata bounding box fallback");
                 m_boundingBox = std::move(*primitiveBox);
                 boundingBoxValid = isBoundingBoxMeaningful(*m_boundingBox);
+                if (boundingBoxValid)
+                {
+                    m_boundingBoxSource.store(BoundingBoxComputationSource::PrimitiveMetadata,
+                                              std::memory_order_release);
+                }
             }
+        }
+
+        if (boundingBoxValid &&
+            m_boundingBoxSource.load(std::memory_order_acquire) == BoundingBoxComputationSource::None)
+        {
+            m_boundingBoxSource.store(BoundingBoxComputationSource::NumericalProbe,
+                                      std::memory_order_release);
         }
 
         if (!boundingBoxValid)
         {
             logMsg("updateBoundingBoxFast: falling back to default build volume bounding box");
             m_boundingBox = BoundingBox{{0.f, 0.f, 0.f, 0.f}, {400.f, 400.f, 400.f, 0.f}};
+            m_boundingBoxSource.store(BoundingBoxComputationSource::BuildVolumeFallback,
+                                      std::memory_order_release);
         }
         LOG_LOCATION;
         m_boundingBoxComputationInProgress.store(false);
@@ -973,6 +1000,7 @@ namespace gladius
     void ComputeCore::resetBoundingBox()
     {
         m_boundingBox.reset();
+        m_boundingBoxSource.store(BoundingBoxComputationSource::None, std::memory_order_release);
         m_boundingBoxStale.store(false, std::memory_order_release);
     }
 
@@ -989,6 +1017,7 @@ namespace gladius
             return;
         }
         m_boundingBox.reset();
+        m_boundingBoxSource.store(BoundingBoxComputationSource::None, std::memory_order_release);
         m_boundingBoxStale.store(false, std::memory_order_release);
     }
 

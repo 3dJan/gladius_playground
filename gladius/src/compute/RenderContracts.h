@@ -28,6 +28,7 @@ namespace gladius::compute
         Contours = 1u << 8u,
         Export = 1u << 9u,
         FramePresentation = 1u << 10u,
+        BoundingBoxDetermination = 1u << 11u,
     };
 
     [[nodiscard]] constexpr RendererCapability operator|(RendererCapability const left,
@@ -78,10 +79,12 @@ namespace gladius::compute
      */
     struct RenderBounds
     {
-        std::array<float, 3> min{0.0f, 0.0f, 0.0f};
-        std::array<float, 3> max{400.0f, 400.0f, 400.0f};
+        // An omitted model bound must not accidentally become the build volume. Use the named
+        // RenderEvaluationDomain below when a finite dispatch domain is required.
+        std::array<float, 3> min{};
+        std::array<float, 3> max{};
 
-        [[nodiscard]] bool isValid() const noexcept
+        [[nodiscard]] bool isFiniteOrdered() const noexcept
         {
             auto const hasFiniteComponents = [](std::array<float, 3> const & value)
             {
@@ -89,8 +92,61 @@ namespace gladius::compute
                        std::isfinite(value[2]);
             };
 
-            return hasFiniteComponents(min) && hasFiniteComponents(max) && max[0] > min[0] &&
-                   max[1] > min[1] && max[2] > min[2];
+            return hasFiniteComponents(min) && hasFiniteComponents(max) && max[0] >= min[0] &&
+                   max[1] >= min[1] && max[2] >= min[2];
+        }
+
+        [[nodiscard]] bool hasPositiveExtent(float const epsilon = 0.0f) const noexcept
+        {
+            return isFiniteOrdered() && std::isfinite(epsilon) && epsilon >= 0.0f &&
+                   max[0] - min[0] > epsilon && max[1] - min[1] > epsilon &&
+                   max[2] - min[2] > epsilon;
+        }
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return hasPositiveExtent();
+        }
+
+        [[nodiscard]] RenderBounds expanded(float const margin) const noexcept
+        {
+            return {.min = {min[0] - margin, min[1] - margin, min[2] - margin},
+                    .max = {max[0] + margin, max[1] + margin, max[2] + margin}};
+        }
+    };
+
+    /**
+     * @brief Finite world-space domain used to evaluate or dispatch a model.
+     *
+     * This is deliberately distinct from RenderBounds: a domain describes where an evaluator is
+     * allowed to search, not the geometry that was found there.
+     */
+    struct RenderEvaluationDomain
+    {
+        std::array<float, 3> min{0.0f, 0.0f, 0.0f};
+        std::array<float, 3> max{400.0f, 400.0f, 400.0f};
+
+        [[nodiscard]] bool isFiniteOrdered() const noexcept
+        {
+            auto const hasFiniteComponents = [](std::array<float, 3> const & value)
+            {
+                return std::isfinite(value[0]) && std::isfinite(value[1]) &&
+                       std::isfinite(value[2]);
+            };
+
+            return hasFiniteComponents(min) && hasFiniteComponents(max) && max[0] >= min[0] &&
+                   max[1] >= min[1] && max[2] >= min[2];
+        }
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return isFiniteOrdered() && max[0] > min[0] && max[1] > min[1] && max[2] > min[2];
+        }
+
+        [[nodiscard]] RenderEvaluationDomain expanded(float const margin) const noexcept
+        {
+            return {.min = {min[0] - margin, min[1] - margin, min[2] - margin},
+                    .max = {max[0] + margin, max[1] + margin, max[2] + margin}};
         }
     };
 
@@ -192,8 +248,18 @@ namespace gladius::compute
         std::uint64_t sceneGeneration{};
         std::uint64_t viewGeneration{};
         std::uint64_t parameterGeneration{};
+        std::uint64_t resourceGeneration{};
+        std::uint64_t evaluationGeneration{};
 
         auto operator<=>(RenderFreshnessStamp const &) const = default;
+
+        [[nodiscard]] bool hasSameModelGeneration(RenderFreshnessStamp const & other) const noexcept
+        {
+            return sceneGeneration == other.sceneGeneration &&
+                   parameterGeneration == other.parameterGeneration &&
+                   resourceGeneration == other.resourceGeneration &&
+                   evaluationGeneration == other.evaluationGeneration;
+        }
     };
 
     /**

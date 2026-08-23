@@ -14,6 +14,7 @@ namespace gladius
 namespace gladius::compute
 {
   class RenderBackendSession;
+  class IBoundsService;
 
     /**
      * @brief Owns the services selected for one application compute backend.
@@ -36,6 +37,9 @@ namespace gladius::compute
 
         /// @brief Returns the runtime-owned neutral render session, if the backend exposes one.
         [[nodiscard]] virtual RenderBackendSession * getRenderBackendSession() noexcept = 0;
+
+        /// @brief Returns the bounds service owned by the selected backend runtime.
+        [[nodiscard]] virtual IBoundsService * getBoundsService() noexcept = 0;
     };
 
     /**

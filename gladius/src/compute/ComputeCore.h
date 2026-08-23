@@ -55,6 +55,20 @@ namespace gladius
     };
 
     /**
+     * @brief Provenance of a cached legacy OpenCL bounding-box result.
+     *
+     * This migration-only classification keeps existing bool-returning callers intact while
+     * allowing the backend-neutral bounds adapter to reject the historical build-volume sentinel.
+     */
+    enum class BoundingBoxComputationSource
+    {
+      None,
+      NumericalProbe,
+      PrimitiveMetadata,
+      BuildVolumeFallback,
+    };
+
+    /**
      * @brief Wrapper class for ContourExtractor to maintain backward compatibility
      * with code that expects a reference to ContourExtractor.
      */
@@ -488,6 +502,8 @@ namespace gladius
 
         void generateSdfSlice() const;
         [[nodiscard]] std::optional<BoundingBox> getBoundingBox() const;
+        [[nodiscard]] BoundingBoxComputationSource
+        getBoundingBoxComputationSource() const noexcept;
         void updateClippingAreaWithPadding() const;
         void updateClippingAreaToBoundingBox() const;
         [[nodiscard]] bool isVdbRequired() const;
@@ -725,6 +741,8 @@ namespace gladius
         std::atomic<cl_float> m_lastContourSliceHeight_mm{0.0f};
 
         std::optional<BoundingBox> m_boundingBox{};
+        std::atomic<BoundingBoxComputationSource> m_boundingBoxSource{
+          BoundingBoxComputationSource::None};
         std::atomic<bool> m_boundingBoxStale{false};
         bool m_isComputationTimeLoggingEnabled = false;
 

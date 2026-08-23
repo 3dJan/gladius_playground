@@ -13,10 +13,14 @@ namespace gladius::webgpu
     class WebGPUComputeBackend final : public compute::IComputeBackend
     {
       public:
-        WebGPUComputeBackend();
+        explicit WebGPUComputeBackend(std::shared_ptr<WebGPUComputeContext> context = {});
 
         [[nodiscard]] compute::ComputeBackendKind getKind() const noexcept override;
         [[nodiscard]] bool isAvailable() const noexcept override;
+        [[nodiscard]] std::shared_ptr<WebGPUComputeContext> getContext() const noexcept
+        {
+          return m_context;
+        }
         [[nodiscard]] std::unique_ptr<compute::ISliceSubmission>
         submitSlice(compute::SliceRequest request) override;
         [[nodiscard]] std::unique_ptr<compute::IFrameSubmission>

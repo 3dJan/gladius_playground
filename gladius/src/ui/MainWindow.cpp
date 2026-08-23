@@ -2138,6 +2138,12 @@ namespace gladius::ui
 
     void MainWindow::setStartupFile(std::filesystem::path filename)
     {
+        if (m_computeAvailable && m_doc && !m_doc->isLoadingInProgress())
+        {
+            loadFileDeferred(filename);
+            return;
+        }
+
         m_startupFile = std::move(filename);
     }
 

@@ -134,6 +134,12 @@ int main(int argc, char ** argv)
         }
     }
 
+    // Resolve relative file arguments before changing the working directory to the install path.
+    if (filename && filename->is_relative())
+    {
+        *filename = std::filesystem::absolute(*filename);
+    }
+
     // Set working directory to the executable's directory (robust to wrappers)
     // On Linux, prefer /proc/self/exe to resolve the actual binary path. Fall back to argv[0].
     try

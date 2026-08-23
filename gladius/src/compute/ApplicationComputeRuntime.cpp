@@ -2,9 +2,15 @@
 
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
+#include "compute/OpenCLBoundsService.h"
 #endif
 #include "compute/ComputeRendererFactory.h"
 #include "compute/RenderBackendSession.h"
+#if defined(GLADIUS_ENABLE_WEBGPU)
+#include "webgpu/WebGPUComputeContext.h"
+#include "webgpu/WebGPUBoundsService.h"
+#include "webgpu/WebGPUComputeRenderer.h"
+#endif
 
 #include <stdexcept>
 #include <utility>
@@ -28,9 +34,11 @@ namespace gladius::compute
 
                 try
                 {
+                    auto boundsService = std::make_shared<OpenCLBoundsService>(m_core);
                     m_renderBackendSession = std::make_unique<RenderBackendSession>(
                       ComputeRendererFactory::create(ComputeBackendKind::OpenCL,
-                                                    m_core->createRenderSession()));
+                                                                                                         m_core->createRenderSession()),
+                                            std::move(boundsService));
                 }
                 catch (std::exception const & exception)
                 {
@@ -79,6 +87,11 @@ namespace gladius::compute
                 return m_renderBackendSession.get();
             }
 
+            [[nodiscard]] IBoundsService * getBoundsService() noexcept override
+            {
+                return m_renderBackendSession ? m_renderBackendSession->getBoundsService() : nullptr;
+            }
+
           private:
             std::shared_ptr<gladius::ComputeCore> m_core;
             std::unique_ptr<RenderBackendSession> m_renderBackendSession;
@@ -93,8 +106,11 @@ namespace gladius::compute
             {
                 try
                 {
+                    auto context = std::make_shared<webgpu::WebGPUComputeContext>();
+                    auto boundsService = std::make_shared<webgpu::WebGPUBoundsService>(context);
                     m_renderBackendSession = std::make_unique<RenderBackendSession>(
-                      ComputeRendererFactory::create(ComputeBackendKind::WebGPU));
+                      std::make_unique<webgpu::WebGPUComputeRenderer>(context),
+                      std::move(boundsService));
                 }
                 catch (std::exception const & exception)
                 {
@@ -137,6 +153,11 @@ namespace gladius::compute
             [[nodiscard]] RenderBackendSession * getRenderBackendSession() noexcept override
             {
                 return m_renderBackendSession.get();
+            }
+
+            [[nodiscard]] IBoundsService * getBoundsService() noexcept override
+            {
+                return m_renderBackendSession ? m_renderBackendSession->getBoundsService() : nullptr;
             }
 
           private:

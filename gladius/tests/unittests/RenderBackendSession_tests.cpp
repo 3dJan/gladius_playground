@@ -62,6 +62,38 @@ namespace gladius::compute::tests
             }
         };
 
+        class TestBoundsService final : public IBoundsService
+        {
+          public:
+            [[nodiscard]] RendererCapability getCapabilities() const noexcept override
+            {
+                return RendererCapability::BoundingBoxDetermination;
+            }
+
+            [[nodiscard]] bool isAvailable() const noexcept override
+            {
+                return true;
+            }
+
+            void setSceneSnapshot(std::shared_ptr<const RenderSceneSnapshot> snapshot) noexcept override
+            {
+                m_snapshot = std::move(snapshot);
+            }
+
+            [[nodiscard]] std::optional<BoundsResult>
+            getCachedResult(RenderFreshnessStamp const &) const noexcept override
+            {
+                return std::nullopt;
+            }
+
+            [[nodiscard]] std::unique_ptr<IBoundsSubmission> submit(BoundsRequest) override
+            {
+                throw std::runtime_error("Test bounds service does not submit work");
+            }
+
+            std::shared_ptr<const RenderSceneSnapshot> m_snapshot;
+        };
+
         class TestRenderer final : public IComputeRenderer
         {
           public:
@@ -123,6 +155,22 @@ namespace gladius::compute::tests
         EXPECT_TRUE(session.hasMaterializedScene());
         EXPECT_EQ(session.getSceneGeneration(), 7u);
         EXPECT_TRUE(session.getErrorMessage().empty());
+    }
+
+    TEST(RenderBackendSession, ReplaceScene_WithBoundsService_PublishesSameSnapshot)
+    {
+        auto renderer = std::make_unique<TestRenderer>();
+        auto boundsService = std::make_shared<TestBoundsService>();
+        auto const * boundsServicePointer = boundsService.get();
+        RenderBackendSession session{std::move(renderer), boundsService};
+
+        ASSERT_TRUE(session.replaceScene(makeSnapshot(7u)));
+
+        ASSERT_NE(session.getSceneSnapshot(), nullptr);
+        ASSERT_NE(boundsServicePointer->m_snapshot, nullptr);
+        EXPECT_EQ(session.getSceneSnapshot(), boundsServicePointer->m_snapshot);
+        EXPECT_EQ(session.getSceneSnapshot()->sceneGeneration, 7u);
+        EXPECT_TRUE(hasCapability(session.getCapabilities(), RendererCapability::BoundingBoxDetermination));
     }
 
     TEST(RenderBackendSession, ReplaceScene_WhenMaterializationFails_RetainsPreviousScene)

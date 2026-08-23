@@ -13,10 +13,11 @@ namespace gladius::webgpu
         class WebGPUAnalyticRenderScene final : public compute::IRenderScene
         {
           public:
-            explicit WebGPUAnalyticRenderScene(compute::RenderSceneSnapshot snapshot)
+            explicit WebGPUAnalyticRenderScene(
+              std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
                 : m_snapshot{std::move(snapshot)}
             {
-                m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot.analyticEvaluatorWgsl);
+                m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl);
             }
 
             [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
@@ -26,15 +27,21 @@ namespace gladius::webgpu
 
             [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept override
             {
-                return m_snapshot.sceneGeneration;
+                return m_snapshot->sceneGeneration;
             }
 
             [[nodiscard]] compute::RendererCapability getCapabilities() const noexcept override
             {
-                return m_snapshot.requiredCapabilities;
+                return m_snapshot->requiredCapabilities;
             }
 
             [[nodiscard]] compute::RenderSceneSnapshot const & getSnapshot() const noexcept
+            {
+                return *m_snapshot;
+            }
+
+            [[nodiscard]] std::shared_ptr<const compute::RenderSceneSnapshot>
+            getSharedSnapshot() const noexcept
             {
                 return m_snapshot;
             }
@@ -45,7 +52,7 @@ namespace gladius::webgpu
             }
 
           private:
-            compute::RenderSceneSnapshot m_snapshot;
+            std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
             std::string m_composedShader;
         };
 
@@ -53,9 +60,11 @@ namespace gladius::webgpu
         {
           public:
             WebGPUFrameRenderSubmission(std::unique_ptr<compute::IFrameSubmission> submission,
-                                        compute::RenderRequest request)
+                                        compute::RenderRequest request,
+                                        std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
                 : m_submission{std::move(submission)}
                 , m_request{std::move(request)}
+                , m_snapshot{std::move(snapshot)}
             {
             }
 
@@ -133,6 +142,7 @@ namespace gladius::webgpu
           private:
             std::unique_ptr<compute::IFrameSubmission> m_submission;
             compute::RenderRequest m_request;
+            std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
             std::atomic_bool m_cancelRequested{false};
         };
 
@@ -164,8 +174,8 @@ namespace gladius::webgpu
         }
     }
 
-    WebGPUComputeRenderer::WebGPUComputeRenderer()
-        : m_backend{std::make_shared<WebGPUComputeBackend>()}
+    WebGPUComputeRenderer::WebGPUComputeRenderer(std::shared_ptr<WebGPUComputeContext> context)
+        : m_backend{std::make_shared<WebGPUComputeBackend>(std::move(context))}
     {
     }
 
@@ -203,6 +213,27 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU renderer does not support the scene capabilities");
         }
 
+        return std::make_unique<WebGPUAnalyticRenderScene>(
+          std::make_shared<const compute::RenderSceneSnapshot>(std::move(snapshot)));
+    }
+
+    std::unique_ptr<compute::IRenderScene>
+    WebGPUComputeRenderer::materializeScene(
+      std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
+    {
+        if (!isAvailable())
+        {
+            throw std::runtime_error("WebGPU renderer is unavailable");
+        }
+        if (!snapshot || !snapshot->isValid())
+        {
+            throw std::invalid_argument("WebGPU analytic scene snapshot is invalid");
+        }
+        if (!hasCapability(getCapabilities(), snapshot->requiredCapabilities))
+        {
+            throw std::invalid_argument("WebGPU renderer does not support the scene capabilities");
+        }
+
         return std::make_unique<WebGPUAnalyticRenderScene>(std::move(snapshot));
     }
 
@@ -222,7 +253,9 @@ namespace gladius::webgpu
         auto frameSubmission = m_backend->submitFrame(createFrameRequest(analyticScene->getSnapshot(),
                                                                           analyticScene->getComposedShader(),
                                                                           request));
-        return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission), std::move(request));
+        return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission),
+                                      std::move(request),
+                                      analyticScene->getSharedSnapshot());
     }
 
     std::unique_ptr<compute::IRenderSubmission> WebGPUComputeRenderer::submitFrame(compute::RenderRequest)

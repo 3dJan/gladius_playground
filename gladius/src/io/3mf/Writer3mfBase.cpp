@@ -88,7 +88,19 @@ namespace gladius::io
 
         try
         {
-            auto image = doc.getCore()->createThumbnailPng();
+            // The document may be coreless when the WebGPU backend is active.
+            auto core = doc.getCore();
+            if (!core)
+            {
+                if (m_logger)
+                {
+                    m_logger->addEvent({"Thumbnail generation is unavailable without a compute core",
+                                        events::Severity::Warning});
+                }
+                return;
+            }
+
+            auto image = core->createThumbnailPng();
 
             if (model3mf->HasPackageThumbnailAttachment())
             {

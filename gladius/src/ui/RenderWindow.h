@@ -320,6 +320,7 @@ namespace gladius::ui
         [[nodiscard]] bool tryRenderRealtimeFrameSync(
           async_rendering::RenderTaskRequest const & task);
         [[nodiscard]] bool tryRenderWithNeutralBackend(RenderWindowState & state);
+        [[nodiscard]] bool updateNeutralModelBounds(compute::RenderBackendSession & session);
         [[nodiscard]] compute::RenderBackendSession * getActiveRenderBackendSession() noexcept;
 
         GLView * m_view{};
@@ -479,10 +480,6 @@ namespace gladius::ui
                   auto const eye = m_camera.getEyePosition();
                   auto const & matrix = m_camera.computeModelViewPerspectiveMatrix();
                   auto const modelBounds = getNeutralModelBounds();
-                  if (!modelBounds.has_value())
-                  {
-                    return std::nullopt;
-                  }
                   compute::RenderRequest request{
                     .camera = {.eyePosition = {eye.x, eye.y, eye.z},
                                .forwardDirection = {matrix.s8, matrix.s9, matrix.sa},
@@ -491,7 +488,7 @@ namespace gladius::ui
                     .frustum = {.horizontalScale = 0.5f,
                                 .verticalScale = 0.5f / static_cast<float>(width) * height},
                     .settings = m_neutralRenderSettings,
-                    .modelBounds = *modelBounds,
+                    .modelBounds = modelBounds,
                     .viewport = viewport,
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
@@ -543,6 +540,10 @@ namespace gladius::ui
         std::unique_ptr<compute::RenderBackendSession> m_renderBackendSession;
         compute::RenderBackendSession * m_runtimeRenderBackendSession{nullptr};
         std::unique_ptr<async_rendering::OpenGLFramePresenter> m_neutralFramePresenter;
+        std::unique_ptr<compute::IBoundsSubmission> m_neutralBoundsSubmission;
+        std::optional<compute::RenderBounds> m_neutralModelBounds;
+        compute::RenderFreshnessStamp m_neutralBoundsFreshness{};
+        bool m_neutralBoundsFailed{false};
         bool m_neutralBackendActive{false};
         std::uint32_t m_neutralViewportWidth{0u};
         std::uint32_t m_neutralViewportHeight{0u};

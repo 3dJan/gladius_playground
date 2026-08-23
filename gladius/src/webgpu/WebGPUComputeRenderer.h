@@ -16,17 +16,24 @@ namespace gladius::webgpu
     class WebGPUComputeRenderer final : public compute::IComputeRenderer
     {
       public:
-        WebGPUComputeRenderer();
+        explicit WebGPUComputeRenderer(std::shared_ptr<WebGPUComputeContext> context = {});
 
         [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override;
         [[nodiscard]] compute::RendererCapability getCapabilities() const noexcept override;
         [[nodiscard]] bool isAvailable() const noexcept override;
         [[nodiscard]] std::unique_ptr<compute::IRenderScene>
         materializeScene(compute::RenderSceneSnapshot snapshot) override;
+        [[nodiscard]] std::unique_ptr<compute::IRenderScene> materializeScene(
+          std::shared_ptr<const compute::RenderSceneSnapshot> snapshot) override;
         [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
         submitFrame(compute::IRenderScene const & scene, compute::RenderRequest request) override;
         [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
         submitFrame(compute::RenderRequest request) override;
+
+        [[nodiscard]] std::shared_ptr<WebGPUComputeContext> getContext() const noexcept
+        {
+          return m_backend ? m_backend->getContext() : nullptr;
+        }
 
       private:
         std::shared_ptr<WebGPUComputeBackend> m_backend;

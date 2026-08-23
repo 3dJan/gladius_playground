@@ -80,6 +80,21 @@ namespace gladius::compute
           throw std::runtime_error("This renderer does not materialize scene snapshots");
         }
 
+        /// @brief Materialize a shared immutable snapshot without copying its neutral payload.
+        ///
+        /// Renderers that need to retain the exact snapshot object can override this overload.
+        /// The default delegates to the established by-value entry point for compatibility with
+        /// existing renderer implementations and tests.
+        [[nodiscard]] virtual std::unique_ptr<IRenderScene>
+        materializeScene(std::shared_ptr<const RenderSceneSnapshot> snapshot)
+        {
+            if (!snapshot)
+            {
+                throw std::invalid_argument("Render scene snapshot must not be null");
+            }
+            return materializeScene(*snapshot);
+        }
+
         /// @brief Submit a frame against a materialized scene.
         [[nodiscard]] virtual std::unique_ptr<IRenderSubmission>
         submitFrame(IRenderScene const & scene, RenderRequest request)

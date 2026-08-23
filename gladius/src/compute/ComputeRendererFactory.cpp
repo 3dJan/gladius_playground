@@ -9,6 +9,7 @@
 #endif
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
+#  include "webgpu/WebGPUBoundsService.h"
 #  include "webgpu/WebGPUComputeRenderer.h"
 #endif
 
@@ -95,7 +96,9 @@ namespace gladius::compute
         if (configured == ComputeBackendKind::WebGPU)
         {
             auto renderer = std::make_unique<webgpu::WebGPUComputeRenderer>();
-            return std::make_unique<RenderBackendSession>(std::move(renderer));
+            auto boundsService = std::make_shared<webgpu::WebGPUBoundsService>(renderer->getContext());
+            return std::make_unique<RenderBackendSession>(std::move(renderer),
+                                                          std::move(boundsService));
         }
 #endif
 
@@ -135,7 +138,9 @@ namespace gladius::compute
         if (configured == ComputeBackendKind::WebGPU)
         {
             auto renderer = std::make_unique<webgpu::WebGPUComputeRenderer>();
-            return std::make_unique<RenderBackendSession>(std::move(renderer));
+            auto boundsService = std::make_shared<webgpu::WebGPUBoundsService>(renderer->getContext());
+            return std::make_unique<RenderBackendSession>(std::move(renderer),
+                                                          std::move(boundsService));
         }
 #endif
 

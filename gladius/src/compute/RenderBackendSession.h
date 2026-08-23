@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/IBoundsService.h"
 #include "compute/IComputeRenderer.h"
 
 #include <memory>
@@ -18,13 +19,17 @@ namespace gladius::compute
     class RenderBackendSession
     {
       public:
-        explicit RenderBackendSession(std::unique_ptr<IComputeRenderer> renderer);
+        explicit RenderBackendSession(std::unique_ptr<IComputeRenderer> renderer,
+                                      std::shared_ptr<IBoundsService> boundsService = {});
 
         [[nodiscard]] ComputeBackendKind getBackendKind() const noexcept;
         [[nodiscard]] RendererCapability getCapabilities() const noexcept;
         [[nodiscard]] bool isAvailable() const noexcept;
         [[nodiscard]] bool hasMaterializedScene() const noexcept;
         [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept;
+        [[nodiscard]] std::shared_ptr<const RenderSceneSnapshot>
+        getSceneSnapshot() const noexcept;
+        [[nodiscard]] IBoundsService * getBoundsService() noexcept;
         [[nodiscard]] std::string const & getErrorMessage() const noexcept;
 
         /// @brief Materialize and atomically replace the active scene on success.
@@ -36,6 +41,8 @@ namespace gladius::compute
       private:
         std::unique_ptr<IComputeRenderer> m_renderer;
         std::unique_ptr<IRenderScene> m_scene;
+        std::shared_ptr<const RenderSceneSnapshot> m_snapshot;
+        std::shared_ptr<IBoundsService> m_boundsService;
         std::string m_errorMessage;
     };
 }

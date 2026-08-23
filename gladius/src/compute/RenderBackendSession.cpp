@@ -5,8 +5,10 @@
 
 namespace gladius::compute
 {
-    RenderBackendSession::RenderBackendSession(std::unique_ptr<IComputeRenderer> renderer)
+    RenderBackendSession::RenderBackendSession(std::unique_ptr<IComputeRenderer> renderer,
+                                               std::shared_ptr<IBoundsService> boundsService)
         : m_renderer{std::move(renderer)}
+        , m_boundsService{std::move(boundsService)}
     {
         if (!m_renderer)
         {
@@ -21,7 +23,12 @@ namespace gladius::compute
 
     RendererCapability RenderBackendSession::getCapabilities() const noexcept
     {
-        return m_renderer->getCapabilities();
+        auto capabilities = m_renderer->getCapabilities();
+        if (m_boundsService)
+        {
+            capabilities = capabilities | m_boundsService->getCapabilities();
+        }
+        return capabilities;
     }
 
     bool RenderBackendSession::isAvailable() const noexcept
@@ -37,6 +44,16 @@ namespace gladius::compute
     std::uint64_t RenderBackendSession::getSceneGeneration() const noexcept
     {
         return m_scene ? m_scene->getSceneGeneration() : 0u;
+    }
+
+    std::shared_ptr<const RenderSceneSnapshot> RenderBackendSession::getSceneSnapshot() const noexcept
+    {
+        return m_snapshot;
+    }
+
+    IBoundsService * RenderBackendSession::getBoundsService() noexcept
+    {
+        return m_boundsService.get();
     }
 
     std::string const & RenderBackendSession::getErrorMessage() const noexcept
@@ -64,13 +81,19 @@ namespace gladius::compute
                 return false;
             }
 
-            auto scene = m_renderer->materializeScene(std::move(snapshot));
+            auto sharedSnapshot = std::make_shared<const RenderSceneSnapshot>(std::move(snapshot));
+            auto scene = m_renderer->materializeScene(sharedSnapshot);
             if (!scene || scene->getBackendKind() != m_renderer->getBackendKind())
             {
                 m_errorMessage = "Render backend returned an invalid materialized scene";
                 return false;
             }
 
+            if (m_boundsService)
+            {
+                m_boundsService->setSceneSnapshot(sharedSnapshot);
+            }
+            m_snapshot = std::move(sharedSnapshot);
             m_scene = std::move(scene);
             m_errorMessage.clear();
             return true;

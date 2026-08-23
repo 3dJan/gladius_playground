@@ -39,8 +39,16 @@ namespace gladius::webgpu
         return m_errorMessage;
     }
 
+    WebGPUComputeContext::DeviceLock::DeviceLock(WebGPUComputeContext const & context)
+        : m_lock(context.m_deviceMutex)
+    {
+    }
+
+    WebGPUComputeContext::DeviceLock::~DeviceLock() = default;
+
     void WebGPUComputeContext::processEvents() const
     {
+        DeviceLock const lock(*this);
         if (m_instance)
         {
             m_instance.ProcessEvents();
