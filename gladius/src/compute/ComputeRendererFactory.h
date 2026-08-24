@@ -14,6 +14,7 @@
 namespace gladius
 {
     class ConfigManager;
+    class ResourceManager;
 }
 
 namespace gladius::nodes
@@ -91,11 +92,13 @@ namespace gladius::compute
          * @param assembly The assembly to materialize from (may be null).
          * @param model The model to materialize from (required if assembly is null).
          * @param generation Scene generation counter for freshness tracking.
+         * @param resourceManager Optional resource manager providing mesh payloads.
          * @return A valid RenderSceneSnapshot, or an invalid one on failure.
          */
         [[nodiscard]] static RenderSceneSnapshot materializeScene(
             nodes::Assembly const * assembly,
             nodes::Model & model,
-            std::uint64_t generation);
+            std::uint64_t generation,
+            ResourceManager const * resourceManager = nullptr);
     };
 }

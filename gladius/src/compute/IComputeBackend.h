@@ -71,6 +71,9 @@ namespace gladius::compute
         std::optional<RenderBounds> modelBounds{};
         std::string shaderSource;
         std::vector<float> parameterValues;
+        /// Mesh payloads indexed by mesh resource id (empty slots = no mesh).
+        /// Only used when the shader source was composed with mesh support.
+        std::vector<std::vector<float>> meshPayloadTable;
     };
 
     /**

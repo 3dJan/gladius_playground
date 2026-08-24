@@ -820,4 +820,57 @@ namespace gladius::nodes
             return;
         }
     }
+
+    namespace
+    {
+        /// Resolve the resource id referenced by a mesh-distance node's Mesh input.
+        [[nodiscard]] ResourceId resolveMeshResourceId(NodeBase & meshNode)
+        {
+            auto & meshParameter = meshNode.parameter().at(FieldNames::Mesh);
+            auto const source = meshParameter.getSource();
+            if (!source.has_value() || source->port == nullptr || source->port->getParent() == nullptr)
+            {
+                throw std::runtime_error("WGSL evaluator: mesh node has no connected mesh resource");
+            }
+
+            auto * resourceNode = dynamic_cast<Resource *>(source->port->getParent());
+            if (resourceNode == nullptr)
+            {
+                throw std::runtime_error("WGSL evaluator: mesh input is not connected to a resource node");
+            }
+            return resourceNode->getResourceId();
+        }
+    }
+
+    void ToWgslVisitor::visit(SignedDistanceToMesh & signedDistanceToMesh)
+    {
+        if (!beginNode(signedDistanceToMesh))
+        {
+            return;
+        }
+
+        auto const resourceId = resolveMeshResourceId(signedDistanceToMesh);
+        emitValue(signedDistanceToMesh,
+                  FieldNames::Distance,
+                  "f32",
+                  fmt::format("gladiusSignedDistanceToMesh({}, {}u)",
+                              resolveParameter(signedDistanceToMesh.parameter().at(FieldNames::Pos)),
+                              resourceId));
+    }
+
+    void ToWgslVisitor::visit(UnsignedDistanceToMesh & unsignedDistanceToMesh)
+    {
+        if (!beginNode(unsignedDistanceToMesh))
+        {
+            return;
+        }
+
+        auto const resourceId = resolveMeshResourceId(unsignedDistanceToMesh);
+        emitValue(unsignedDistanceToMesh,
+                  FieldNames::Distance,
+                  "f32",
+                  fmt::format("gladiusUnsignedDistanceToMesh({}, {}u)",
+                              resolveParameter(unsignedDistanceToMesh.parameter().at(FieldNames::Pos)),
+                              resourceId));
+    }
 }

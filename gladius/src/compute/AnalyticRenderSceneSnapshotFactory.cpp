@@ -1,5 +1,9 @@
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 
+#include "MeshPayloadSerializer.h"
+#include "MeshResourceBase.h"
+#include "ResourceManager.h"
+#include "SpatialMeshResource.h"
 #include "nodes/Assembly.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/Model.h"
@@ -126,8 +130,91 @@ namespace gladius::compute
                 .parameterValues = std::move(parameterValues)};
     }
 
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(
+      nodes::Model & model, std::uint64_t const sceneGeneration, ResourceManager const & resourceManager)
+    {
+        auto snapshot = create(model, sceneGeneration);
+
+        // Collect mesh resource ids referenced by the lowered model. The visitor emits
+        // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
+        std::set<ResourceId> referencedMeshIds;
+        for (auto const & node : model)
+        {
+            auto * meshNode = dynamic_cast<nodes::SignedDistanceToMesh *>(node.second.get());
+            if (meshNode == nullptr)
+            {
+                continue;
+            }
+            try
+            {
+                // Re-resolve the connected resource node the same way the visitor does.
+                auto & meshParameter = meshNode->parameter().at(nodes::FieldNames::Mesh);
+                auto const source = meshParameter.getSource();
+                if (!source.has_value() || source->port == nullptr ||
+                    source->port->getParent() == nullptr)
+                {
+                    continue;
+                }
+                auto * resourceNode = dynamic_cast<nodes::Resource *>(source->port->getParent());
+                if (resourceNode == nullptr)
+                {
+                    continue;
+                }
+                referencedMeshIds.insert(resourceNode->getResourceId());
+            }
+            catch (std::exception const &)
+            {
+                throw std::runtime_error(
+                  "Analytic render scene contains a mesh node without a valid mesh resource");
+            }
+        }
+
+        if (referencedMeshIds.empty())
+        {
+            return snapshot;
+        }
+
+        for (auto const resourceId : referencedMeshIds)
+        {
+            // getResourcePtr is non-const in the ResourceManager API; the snapshot
+            // factory only reads the resource, so use a const_cast at this boundary.
+            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
+            auto * resource = mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::Mesh});
+            if (resource == nullptr)
+            {
+                throw std::runtime_error("Analytic render scene references a missing mesh resource");
+            }
+            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+            if (spatialMesh == nullptr)
+            {
+                throw std::runtime_error(
+                  "WebGPU render scenes support SpatialMesh resources only (no VDB meshes)");
+            }
+
+            MeshResourcePayload payload;
+            payload.data = io::serializeSpatialMeshPayload(spatialMesh->getData());
+            auto const index = static_cast<std::size_t>(resourceId);
+            if (index >= snapshot.meshResources.size())
+            {
+                snapshot.meshResources.resize(index + 1u);
+            }
+            snapshot.meshResources[index] = std::move(payload);
+        }
+
+        snapshot.requiredCapabilities =
+          snapshot.requiredCapabilities | RendererCapability::MeshSdf;
+        return snapshot;
+    }
+
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Assembly const & assembly,
                                                                     std::uint64_t const sceneGeneration)
+    {
+        return create(assembly, sceneGeneration, nullptr);
+    }
+
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Assembly const & assembly,
+                                                                    std::uint64_t const sceneGeneration,
+                                                                    ResourceManager const * resourceManager)
     {
         nodes::GraphFlattener flattener(assembly);
         auto flattenedAssembly = flattener.flatten();
@@ -137,6 +224,10 @@ namespace gladius::compute
             throw std::runtime_error("Analytic render scene could not obtain a flattened assembly model");
         }
 
+        if (resourceManager != nullptr)
+        {
+            return create(*flattenedModel, sceneGeneration, *resourceManager);
+        }
         return create(*flattenedModel, sceneGeneration);
     }
 }

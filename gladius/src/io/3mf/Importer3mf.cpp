@@ -1695,7 +1695,7 @@ namespace gladius::io
             // Check if mesh object has a beam lattice (same pattern as in
             // loadBeamLatticeIfNecessary)
             Lib3MF::PBeamLattice beamLattice = meshObject->BeamLattice();
-            if (beamLattice)
+            if (beamLattice && beamLattice->GetBeamCount() > 0)
             {
                 float const units_per_mm = computeUnitsPerMM(model);
                 auto coordinateSystemPort = builder.addTransformationToInputCs(

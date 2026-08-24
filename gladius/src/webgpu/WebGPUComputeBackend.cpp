@@ -460,6 +460,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                   m_context->getQueue(),
                   uniforms);
                 m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
+                if (!request.meshPayloadTable.empty())
+                {
+                    m_buffers.setMeshPayloads(m_context->getDevice(),
+                                              m_context->getQueue(),
+                                              request.meshPayloadTable);
+                }
 
                 if (request.shaderSource.empty())
                 {
@@ -472,7 +478,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 shaderDescriptor.nextInChain = &wgsl;
                 auto const shader = m_context->getDevice().CreateShaderModule(&shaderDescriptor);
 
-                wgpu::BindGroupLayoutEntry bindings[3]{};
+                bool const hasMeshPayloads = m_buffers.hasMeshPayloads();
+                wgpu::BindGroupLayoutEntry bindings[5]{};
                 bindings[0].binding = 0u;
                 bindings[0].visibility = wgpu::ShaderStage::Compute;
                 bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -485,9 +492,22 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindings[2].visibility = wgpu::ShaderStage::Compute;
                 bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
                 bindings[2].buffer.minBindingSize = sizeof(float);
+                std::size_t const bindingCount =
+                  hasMeshPayloads ? std::size(bindings) : std::size_t{3u};
+                if (hasMeshPayloads)
+                {
+                    bindings[3].binding = 4u;
+                    bindings[3].visibility = wgpu::ShaderStage::Compute;
+                    bindings[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[3].buffer.minBindingSize = sizeof(float);
+                    bindings[4].binding = 5u;
+                    bindings[4].visibility = wgpu::ShaderStage::Compute;
+                    bindings[4].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[4].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                }
 
                 wgpu::BindGroupLayoutDescriptor layoutDescriptor;
-                layoutDescriptor.entryCount = std::size(bindings);
+                layoutDescriptor.entryCount = bindingCount;
                 layoutDescriptor.entries = bindings;
                 auto const bindGroupLayout =
                   m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
@@ -505,7 +525,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 auto const pipeline =
                   m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
 
-                wgpu::BindGroupEntry bindGroupEntries[3]{};
+                wgpu::BindGroupEntry bindGroupEntries[5]{};
                 bindGroupEntries[0].binding = 0u;
                 bindGroupEntries[0].buffer = m_buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(FrameUniforms);
@@ -515,10 +535,20 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindGroupEntries[2].binding = 2u;
                 bindGroupEntries[2].buffer = m_buffers.getParameterBuffer();
                 bindGroupEntries[2].size = m_buffers.getParameterSizeBytes();
+                std::size_t const bindGroupEntryCount = bindingCount;
+                if (hasMeshPayloads)
+                {
+                    bindGroupEntries[3].binding = 4u;
+                    bindGroupEntries[3].buffer = m_buffers.getMeshPayloadBuffer();
+                    bindGroupEntries[3].size = m_buffers.getMeshPayloadBuffer().GetSize();
+                    bindGroupEntries[4].binding = 5u;
+                    bindGroupEntries[4].buffer = m_buffers.getMeshOffsetTableBuffer();
+                    bindGroupEntries[4].size = m_buffers.getMeshOffsetTableBuffer().GetSize();
+                }
 
                 wgpu::BindGroupDescriptor bindGroupDescriptor;
                 bindGroupDescriptor.layout = bindGroupLayout;
-                bindGroupDescriptor.entryCount = std::size(bindGroupEntries);
+                bindGroupDescriptor.entryCount = bindGroupEntryCount;
                 bindGroupDescriptor.entries = bindGroupEntries;
                 auto const bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
 

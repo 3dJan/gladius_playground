@@ -1,6 +1,7 @@
 #include "webgpu/WebGPUFrameBufferSet.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace gladius::webgpu
@@ -73,12 +74,82 @@ namespace gladius::webgpu
         queue.WriteBuffer(m_parameterBuffer, 0u, data, size);
     }
 
+    void WebGPUFrameBufferSet::setMeshPayloads(wgpu::Device const & device,
+                                               wgpu::Queue const & queue,
+                                               std::vector<std::vector<float>> const & meshPayloadTable)
+    {
+        std::vector<std::uint32_t> offsetTable(meshPayloadTable.size() * 2u, 0u);
+        std::size_t totalFloats = 0u;
+        for (std::size_t slot = 0u; slot < meshPayloadTable.size(); ++slot)
+        {
+            auto const & payload = meshPayloadTable[slot];
+            if (payload.empty())
+            {
+                continue;
+            }
+            if (totalFloats > std::numeric_limits<std::uint32_t>::max() ||
+                payload.size() > std::numeric_limits<std::uint32_t>::max() - totalFloats)
+            {
+                throw std::length_error("WebGPU mesh payload table exceeds 32-bit addressing");
+            }
+            offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalFloats);
+            offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
+            totalFloats += payload.size();
+        }
+
+        if (totalFloats == 0u)
+        {
+            m_meshPayloadBuffer = nullptr;
+            m_meshOffsetTableBuffer = nullptr;
+            return;
+        }
+
+        auto const totalBytes = totalFloats * sizeof(float);
+        if (!m_meshPayloadBuffer || m_meshPayloadBufferSize < totalBytes)
+        {
+            wgpu::BufferDescriptor descriptor;
+            descriptor.label = "Gladius mesh payloads";
+            descriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+            descriptor.size = totalBytes;
+            m_meshPayloadBuffer = device.CreateBuffer(&descriptor);
+            m_meshPayloadBufferSize = totalBytes;
+        }
+
+        if (!m_meshOffsetTableBuffer)
+        {
+            wgpu::BufferDescriptor descriptor;
+            descriptor.label = "Gladius mesh offset table";
+            descriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+            descriptor.size = offsetTable.size() * sizeof(std::uint32_t);
+            m_meshOffsetTableBuffer = device.CreateBuffer(&descriptor);
+        }
+        queue.WriteBuffer(m_meshOffsetTableBuffer,
+                          0u,
+                          offsetTable.data(),
+                          offsetTable.size() * sizeof(std::uint32_t));
+
+        std::size_t offset = 0u;
+        for (auto const & payload : meshPayloadTable)
+        {
+            if (payload.empty())
+            {
+                continue;
+            }
+            auto const bytes = payload.size() * sizeof(float);
+            queue.WriteBuffer(m_meshPayloadBuffer, offset, payload.data(), bytes);
+            offset += bytes;
+        }
+    }
+
     void WebGPUFrameBufferSet::reset()
     {
         m_stagingBuffer = nullptr;
         m_parameterBuffer = nullptr;
         m_outputBuffer = nullptr;
         m_uniformBuffer = nullptr;
+        m_meshPayloadBuffer = nullptr;
+        m_meshOffsetTableBuffer = nullptr;
+        m_meshPayloadBufferSize = 0u;
         m_width = 0u;
         m_height = 0u;
         m_outputSizeBytes = 0u;

@@ -161,13 +161,18 @@ namespace gladius::compute
     RenderSceneSnapshot ComputeRendererFactory::materializeScene(
         nodes::Assembly const * assembly,
         nodes::Model & model,
-        std::uint64_t generation)
+        std::uint64_t generation,
+        ResourceManager const * resourceManager)
     {
         try
         {
             if (assembly != nullptr)
             {
-                return AnalyticRenderSceneSnapshotFactory::create(*assembly, generation);
+                return AnalyticRenderSceneSnapshotFactory::create(*assembly, generation, resourceManager);
+            }
+            if (resourceManager != nullptr)
+            {
+                return AnalyticRenderSceneSnapshotFactory::create(model, generation, *resourceManager);
             }
             return AnalyticRenderSceneSnapshotFactory::create(model, generation);
         }

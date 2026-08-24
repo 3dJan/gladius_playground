@@ -80,6 +80,8 @@ namespace gladius::nodes
         void visit(Transformation & transformation) override;
         void visit(Transpose & transpose) override;
         void visit(Resource & resource) override;
+        void visit(SignedDistanceToMesh & signedDistanceToMesh) override;
+        void visit(UnsignedDistanceToMesh & unsignedDistanceToMesh) override;
 
       private:
         [[nodiscard]] bool beginNode(NodeBase const & node);

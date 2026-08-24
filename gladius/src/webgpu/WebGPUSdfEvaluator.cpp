@@ -37,7 +37,8 @@ namespace gladius::webgpu
           public:
             void create(wgpu::Device const & device,
                         std::size_t const pointCount,
-                        std::size_t const parameterCount)
+                        std::size_t const parameterCount,
+                        std::vector<std::vector<float>> const & meshPayloadTable)
             {
                 auto const parameterSize = std::max(sizeof(float), parameterCount * sizeof(float));
                 auto const positionSize = pointCount * sizeof(EvaluationPosition);
@@ -80,6 +81,71 @@ namespace gladius::webgpu
 
                 m_outputSize = outputSize;
                 m_parameterSize = parameterSize;
+
+                createMeshPayloads(device, meshPayloadTable);
+            }
+
+            /// Upload mesh payloads (concatenated) plus a per-resource offset table.
+            void createMeshPayloads(wgpu::Device const & device,
+                                    std::vector<std::vector<float>> const & meshPayloadTable)
+            {
+                std::vector<std::uint32_t> offsetTable(meshPayloadTable.size() * 2u, 0u);
+                std::size_t totalFloats = 0u;
+                for (std::size_t slot = 0u; slot < meshPayloadTable.size(); ++slot)
+                {
+                    auto const & payload = meshPayloadTable[slot];
+                    if (payload.empty())
+                    {
+                        continue;
+                    }
+                    if (totalFloats > std::numeric_limits<std::uint32_t>::max() ||
+                        payload.size() > std::numeric_limits<std::uint32_t>::max() - totalFloats)
+                    {
+                        throw std::length_error("WebGPU mesh payload table exceeds 32-bit addressing");
+                    }
+                    offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalFloats);
+                    offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
+                    totalFloats += payload.size();
+                }
+
+                if (totalFloats == 0u)
+                {
+                    return;
+                }
+
+                m_meshPayloadData.clear();
+                m_meshPayloadData.reserve(totalFloats);
+                for (auto const & payload : meshPayloadTable)
+                {
+                    m_meshPayloadData.insert(m_meshPayloadData.end(), payload.begin(), payload.end());
+                }
+                m_meshOffsetTableData = std::move(offsetTable);
+
+                wgpu::BufferDescriptor payloadDescriptor;
+                payloadDescriptor.label = "Gladius SDF evaluation mesh payloads";
+                payloadDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                payloadDescriptor.size = m_meshPayloadData.size() * sizeof(float);
+                m_meshPayload = device.CreateBuffer(&payloadDescriptor);
+
+                wgpu::BufferDescriptor offsetDescriptor;
+                offsetDescriptor.label = "Gladius SDF evaluation mesh offset table";
+                offsetDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                offsetDescriptor.size = m_meshOffsetTableData.size() * sizeof(std::uint32_t);
+                m_meshOffsetTable = device.CreateBuffer(&offsetDescriptor);
+
+                if (!m_meshPayload || !m_meshOffsetTable)
+                {
+                    throw std::runtime_error("Unable to allocate WebGPU mesh payload buffers");
+                }
+            }
+
+            [[nodiscard]] bool hasMeshPayloads() const noexcept { return m_meshPayload && m_meshOffsetTable; }
+            [[nodiscard]] wgpu::Buffer const & meshPayload() const noexcept { return m_meshPayload; }
+            [[nodiscard]] wgpu::Buffer const & meshOffsetTable() const noexcept { return m_meshOffsetTable; }
+            [[nodiscard]] std::vector<float> const & meshPayloadData() const noexcept { return m_meshPayloadData; }
+            [[nodiscard]] std::vector<std::uint32_t> const & meshOffsetTableData() const noexcept
+            {
+                return m_meshOffsetTableData;
             }
 
             void write(wgpu::Queue const & queue,
@@ -115,6 +181,10 @@ namespace gladius::webgpu
             wgpu::Buffer m_output;
             wgpu::Buffer m_staging;
             wgpu::Buffer m_parameters;
+            wgpu::Buffer m_meshPayload;
+            wgpu::Buffer m_meshOffsetTable;
+            std::vector<float> m_meshPayloadData;
+            std::vector<std::uint32_t> m_meshOffsetTableData;
         };
     }
 
@@ -170,7 +240,10 @@ namespace gladius::webgpu
         }
 
         EvaluationBuffers buffers;
-        buffers.create(m_context->getDevice(), positions.size(), request.parameterValues.size());
+        buffers.create(m_context->getDevice(),
+                       positions.size(),
+                       request.parameterValues.size(),
+                       request.meshPayloadTable);
         buffers.write(m_context->getQueue(),
                       EvaluationUniforms{request.isoValue,
                                          static_cast<std::uint32_t>(positions.size()),
@@ -178,6 +251,18 @@ namespace gladius::webgpu
                                          0u},
                       positions,
                       request.parameterValues);
+
+        if (buffers.hasMeshPayloads())
+        {
+            m_context->getQueue().WriteBuffer(buffers.meshPayload(),
+                                              0u,
+                                              buffers.meshPayloadData().data(),
+                                              buffers.meshPayloadData().size() * sizeof(float));
+            m_context->getQueue().WriteBuffer(buffers.meshOffsetTable(),
+                                              0u,
+                                              buffers.meshOffsetTableData().data(),
+                                              buffers.meshOffsetTableData().size() * sizeof(std::uint32_t));
+        }
 
         wgpu::ShaderSourceWGSL wgsl;
         wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
@@ -203,9 +288,30 @@ namespace gladius::webgpu
         bindings[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
         bindings[3].buffer.minBindingSize = sizeof(float);
 
+        bool const hasMeshPayloads = buffers.hasMeshPayloads();
+        wgpu::BindGroupLayoutEntry meshBindings[2]{};
+        if (hasMeshPayloads)
+        {
+            meshBindings[0].binding = 4u;
+            meshBindings[0].visibility = wgpu::ShaderStage::Compute;
+            meshBindings[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+            meshBindings[0].buffer.minBindingSize = sizeof(float);
+            meshBindings[1].binding = 5u;
+            meshBindings[1].visibility = wgpu::ShaderStage::Compute;
+            meshBindings[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+            meshBindings[1].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+        }
+
+        std::vector<wgpu::BindGroupLayoutEntry> allBindings(bindings, bindings + std::size(bindings));
+        if (hasMeshPayloads)
+        {
+            allBindings.push_back(meshBindings[0]);
+            allBindings.push_back(meshBindings[1]);
+        }
+
         wgpu::BindGroupLayoutDescriptor layoutDescriptor;
-        layoutDescriptor.entryCount = std::size(bindings);
-        layoutDescriptor.entries = bindings;
+        layoutDescriptor.entryCount = static_cast<std::uint32_t>(allBindings.size());
+        layoutDescriptor.entries = allBindings.data();
         auto const bindGroupLayout = m_context->getDevice().CreateBindGroupLayout(&layoutDescriptor);
 
         wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
@@ -233,10 +339,26 @@ namespace gladius::webgpu
         bindGroupEntries[3].buffer = buffers.parameters();
         bindGroupEntries[3].size = buffers.parameterSize();
 
+        std::vector<wgpu::BindGroupEntry> allEntries(bindGroupEntries, bindGroupEntries + std::size(bindGroupEntries));
+        if (hasMeshPayloads)
+        {
+            wgpu::BindGroupEntry payloadEntry{};
+            payloadEntry.binding = 4u;
+            payloadEntry.buffer = buffers.meshPayload();
+            payloadEntry.size = buffers.meshPayloadData().size() * sizeof(float);
+            allEntries.push_back(payloadEntry);
+
+            wgpu::BindGroupEntry offsetEntry{};
+            offsetEntry.binding = 5u;
+            offsetEntry.buffer = buffers.meshOffsetTable();
+            offsetEntry.size = buffers.meshOffsetTableData().size() * sizeof(std::uint32_t);
+            allEntries.push_back(offsetEntry);
+        }
+
         wgpu::BindGroupDescriptor bindGroupDescriptor;
         bindGroupDescriptor.layout = bindGroupLayout;
-        bindGroupDescriptor.entryCount = std::size(bindGroupEntries);
-        bindGroupDescriptor.entries = bindGroupEntries;
+        bindGroupDescriptor.entryCount = static_cast<std::uint32_t>(allEntries.size());
+        bindGroupDescriptor.entries = allEntries.data();
         auto const bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
 
         auto const workgroupCount = (static_cast<std::uint32_t>(positions.size()) + WORKGROUP_SIZE - 1u) /

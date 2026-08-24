@@ -17,7 +17,15 @@ namespace gladius::webgpu
               std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
                 : m_snapshot{std::move(snapshot)}
             {
-                m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl);
+                if (!m_snapshot->meshResources.empty())
+                {
+                    m_composedShader =
+                      WebGPUFrameShaderComposer::composeWithMeshSupport(m_snapshot->analyticEvaluatorWgsl);
+                }
+                else
+                {
+                    m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl);
+                }
             }
 
             [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
@@ -170,7 +178,19 @@ namespace gladius::webgpu
                     .renderingMode = static_cast<std::uint32_t>(request.settings.mode),
                     .modelBounds = request.modelBounds,
                     .shaderSource = composedShader,
-                    .parameterValues = scene.parameterValues};
+                    .parameterValues = scene.parameterValues,
+                    .meshPayloadTable = scene.meshResources.size() > 0u
+                                          ? ([&]()
+                                             {
+                                                 std::vector<std::vector<float>> table;
+                                                 table.reserve(scene.meshResources.size());
+                                                 for (auto const & mesh : scene.meshResources)
+                                                 {
+                                                     table.push_back(mesh.data);
+                                                 }
+                                                 return table;
+                                             })()
+                                          : std::vector<std::vector<float>>{}};
         }
     }
 
@@ -187,6 +207,7 @@ namespace gladius::webgpu
     compute::RendererCapability WebGPUComputeRenderer::getCapabilities() const noexcept
     {
         return compute::RendererCapability::AnalyticRendering |
+               compute::RendererCapability::MeshSdf |
                compute::RendererCapability::ProgressiveRendering |
                compute::RendererCapability::LowResolutionPreview |
                compute::RendererCapability::FramePresentation;

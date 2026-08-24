@@ -12,5 +12,9 @@ namespace gladius::webgpu
     {
       public:
         [[nodiscard]] static std::string compose(std::string_view modelEvaluator);
+
+        /// Compose an evaluation shader including the mesh SDF module. The
+        /// generated evaluator may call gladiusSignedDistanceToMesh(pos, resourceId).
+        [[nodiscard]] static std::string composeWithMeshSupport(std::string_view modelEvaluator);
     };
 }

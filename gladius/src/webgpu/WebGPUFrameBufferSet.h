@@ -25,13 +25,28 @@ namespace gladius::webgpu
         void writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters) const;
         void reset();
 
+        /// Upload mesh payloads (concatenated, one entry per resource slot).
+        /// @param meshPayloadTable Flattened payload data; empty entries are zero-length.
+        void setMeshPayloads(wgpu::Device const & device,
+                             wgpu::Queue const & queue,
+                             std::vector<std::vector<float>> const & meshPayloadTable);
+
         [[nodiscard]] bool isValid() const noexcept;
         [[nodiscard]] std::size_t getOutputSizeBytes() const noexcept;
         [[nodiscard]] std::size_t getParameterSizeBytes() const noexcept;
+        [[nodiscard]] bool hasMeshPayloads() const noexcept { return m_meshPayloadBuffer != nullptr; }
         [[nodiscard]] wgpu::Buffer const & getUniformBuffer() const noexcept;
         [[nodiscard]] wgpu::Buffer const & getOutputBuffer() const noexcept;
         [[nodiscard]] wgpu::Buffer const & getStagingBuffer() const noexcept;
         [[nodiscard]] wgpu::Buffer const & getParameterBuffer() const noexcept;
+        [[nodiscard]] wgpu::Buffer const & getMeshPayloadBuffer() const noexcept
+        {
+            return m_meshPayloadBuffer;
+        }
+        [[nodiscard]] wgpu::Buffer const & getMeshOffsetTableBuffer() const noexcept
+        {
+            return m_meshOffsetTableBuffer;
+        }
 
       private:
         std::uint32_t m_width{};
@@ -42,5 +57,8 @@ namespace gladius::webgpu
         wgpu::Buffer m_outputBuffer;
         wgpu::Buffer m_stagingBuffer;
         wgpu::Buffer m_parameterBuffer;
+        wgpu::Buffer m_meshPayloadBuffer;
+        wgpu::Buffer m_meshOffsetTableBuffer;
+        std::size_t m_meshPayloadBufferSize{};
     };
 }
