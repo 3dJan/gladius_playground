@@ -6,6 +6,7 @@
 
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 CMRC_DECLARE(gladius_resources);
 
@@ -28,7 +29,7 @@ namespace gladius::webgpu
 
         std::string insertEvaluator(std::string_view const shaderPath,
                                     std::string_view const modelEvaluator,
-                                    std::string const & meshModule)
+                                    std::vector<std::string> const & modules)
         {
             constexpr std::string_view evaluatorMarker = "// GLADIUS_MODEL_EVALUATOR";
 
@@ -44,10 +45,27 @@ namespace gladius::webgpu
                 throw std::runtime_error("WebGPU SDF evaluation shader has no evaluator insertion point");
             }
 
-            std::string const replacement =
-              meshModule.empty() ? std::string{modelEvaluator} : meshModule + "\n" + std::string{modelEvaluator};
+            std::string replacement;
+            for (auto const & module : modules)
+            {
+                replacement += module + "\n";
+            }
+            replacement += std::string{modelEvaluator};
             shader.replace(markerPosition, evaluatorMarker.size(), replacement);
             return shader;
+        }
+
+        /// Load a shader module and strip its marker comment header.
+        std::string loadEmbeddedModule(std::string_view const modulePath,
+                                       std::string_view const moduleMarker)
+        {
+            std::string module = loadEmbeddedShader(modulePath);
+            auto const markerPosition = module.find(moduleMarker);
+            if (markerPosition != std::string::npos)
+            {
+                module.erase(markerPosition, moduleMarker.size());
+            }
+            return module;
         }
     }
 
@@ -58,15 +76,24 @@ namespace gladius::webgpu
 
     std::string WebGPUSdfShaderComposer::composeWithMeshSupport(std::string_view const modelEvaluator)
     {
-        constexpr std::string_view MESH_MODULE_PATH = "src/webgpu/shaders/mesh_sdf.wgsl";
-        constexpr std::string_view MESH_MODULE_MARKER = "// GLADIUS_MESH_SDF_MODULE";
+        std::vector<std::string> const modules{loadEmbeddedModule(
+          "src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE")};
+        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, modules);
+    }
 
-        std::string meshModule = loadEmbeddedShader(MESH_MODULE_PATH);
-        auto const markerPosition = meshModule.find(MESH_MODULE_MARKER);
-        if (markerPosition != std::string::npos)
-        {
-            meshModule.erase(markerPosition, MESH_MODULE_MARKER.size());
-        }
-        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, meshModule);
+    std::string WebGPUSdfShaderComposer::composeWithBeamSupport(std::string_view const modelEvaluator)
+    {
+        std::vector<std::string> const modules{loadEmbeddedModule(
+          "src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE")};
+        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, modules);
+    }
+
+    std::string WebGPUSdfShaderComposer::composeWithMeshAndBeamSupport(
+      std::string_view const modelEvaluator)
+    {
+        std::vector<std::string> const modules{
+          loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"),
+          loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE")};
+        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, modules);
     }
 }

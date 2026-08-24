@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -60,72 +61,83 @@ namespace gladius::webgpu
             auto const file = filesystem.open(shaderPath.data());
             return std::string{file.begin(), file.end()};
         }
+
+        /// Load a shader module and strip its marker comment header.
+        std::string loadEmbeddedModule(std::string_view const modulePath,
+                                       std::string_view const moduleMarker)
+        {
+            std::string module = loadEmbeddedShader(modulePath);
+            auto const markerPosition = module.find(moduleMarker);
+            if (markerPosition != std::string::npos)
+            {
+                module.erase(markerPosition, moduleMarker.size());
+            }
+            return module;
+        }
+
+        /// Insert the given modules (in order) plus the model evaluator at the
+        /// evaluator marker of the frame shader template.
+        std::string composeFrameShader(std::vector<std::string> modules,
+                                       std::string_view const modelEvaluator)
+        {
+            constexpr std::string_view SHADER_PATH = "src/webgpu/shaders/frame_compute.wgsl";
+            constexpr std::string_view EVALUATOR_MARKER = "// GLADIUS_MODEL_EVALUATOR";
+
+            if (modelEvaluator.empty())
+            {
+                throw std::invalid_argument("WGSL model evaluator source must not be empty");
+            }
+
+            std::string shader = loadEmbeddedShader(SHADER_PATH);
+            auto const markerPosition = shader.find(EVALUATOR_MARKER);
+            if (markerPosition == std::string::npos)
+            {
+                throw std::runtime_error(
+                  "WebGPU frame shader template has no model evaluator insertion point");
+            }
+
+            std::string replacement;
+            for (auto const & module : modules)
+            {
+                replacement += module + "\n";
+            }
+            replacement += std::string{modelEvaluator};
+
+            shader.replace(markerPosition, EVALUATOR_MARKER.size(), replacement);
+
+            dumpShader(shader, "frame_compute_composed.wgsl");
+
+            return shader;
+        }
     }
 
     std::string WebGPUFrameShaderComposer::composeWithMeshSupport(std::string_view const modelEvaluator)
     {
-        constexpr std::string_view SHADER_PATH = "src/webgpu/shaders/frame_compute.wgsl";
-        constexpr std::string_view MESH_MODULE_PATH = "src/webgpu/shaders/mesh_sdf.wgsl";
-        constexpr std::string_view EVALUATOR_MARKER = "// GLADIUS_MODEL_EVALUATOR";
-        constexpr std::string_view MESH_MODULE_MARKER = "// GLADIUS_MESH_SDF_MODULE";
-
-        if (modelEvaluator.empty())
-        {
-            throw std::invalid_argument("WGSL model evaluator source must not be empty");
-        }
-
-        std::string shader = loadEmbeddedShader(SHADER_PATH);
-        std::string meshModule = loadEmbeddedShader(MESH_MODULE_PATH);
-
         // The mesh module declares its payload and offset-table bindings and the mesh
-        // SDF entry points; strip its marker comment header before injection.
-        auto const meshMarkerPosition = meshModule.find(MESH_MODULE_MARKER);
-        if (meshMarkerPosition != std::string::npos)
-        {
-            meshModule.erase(meshMarkerPosition, MESH_MODULE_MARKER.size());
-        }
-
-        auto const markerPosition = shader.find(EVALUATOR_MARKER);
-        if (markerPosition == std::string::npos)
-        {
-            throw std::runtime_error("WebGPU frame shader template has no model evaluator insertion point");
-        }
-
-        shader.replace(markerPosition, EVALUATOR_MARKER.size(), meshModule + "\n" + std::string{modelEvaluator});
-
-        dumpShader(shader, "frame_compute_composed.wgsl");
-
-        return shader;
+        // SDF entry points; its marker comment header is stripped before injection.
+        std::vector<std::string> modules{loadEmbeddedModule(
+          "src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE")};
+        return composeFrameShader(std::move(modules), modelEvaluator);
     }
 
     std::string WebGPUFrameShaderComposer::compose(std::string_view const modelEvaluator)
     {
-        constexpr std::string_view SHADER_PATH = "src/webgpu/shaders/frame_compute.wgsl";
-        constexpr std::string_view EVALUATOR_MARKER = "// GLADIUS_MODEL_EVALUATOR";
+        return composeFrameShader({}, modelEvaluator);
+    }
 
-        if (modelEvaluator.empty())
-        {
-            throw std::invalid_argument("WGSL model evaluator source must not be empty");
-        }
+    std::string WebGPUFrameShaderComposer::composeWithBeamSupport(std::string_view const modelEvaluator)
+    {
+        std::vector<std::string> modules{loadEmbeddedModule(
+          "src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE")};
+        return composeFrameShader(std::move(modules), modelEvaluator);
+    }
 
-        auto const filesystem = cmrc::gladius_resources::get_filesystem();
-        if (!filesystem.exists(SHADER_PATH.data()) || !filesystem.is_file(SHADER_PATH.data()))
-        {
-            throw std::runtime_error("Missing embedded WebGPU frame shader template");
-        }
-
-        auto const file = filesystem.open(SHADER_PATH.data());
-        std::string shader{file.begin(), file.end()};
-        auto const markerPosition = shader.find(EVALUATOR_MARKER);
-        if (markerPosition == std::string::npos)
-        {
-            throw std::runtime_error("WebGPU frame shader template has no model evaluator insertion point");
-        }
-
-        shader.replace(markerPosition, EVALUATOR_MARKER.size(), modelEvaluator);
-
-        dumpShader(shader, "frame_compute_composed.wgsl");
-
-        return shader;
+    std::string WebGPUFrameShaderComposer::composeWithMeshAndBeamSupport(
+      std::string_view const modelEvaluator)
+    {
+        std::vector<std::string> modules{
+          loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"),
+          loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE")};
+        return composeFrameShader(std::move(modules), modelEvaluator);
     }
 }

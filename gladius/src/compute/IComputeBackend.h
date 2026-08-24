@@ -74,6 +74,9 @@ namespace gladius::compute
         /// Mesh payloads indexed by mesh resource id (empty slots = no mesh).
         /// Only used when the shader source was composed with mesh support.
         std::vector<std::vector<float>> meshPayloadTable;
+        /// Beam lattice payloads indexed by beam resource id (empty slots = none).
+        /// Only used when the shader source was composed with beam support.
+        std::vector<std::vector<float>> beamPayloadTable;
     };
 
     /**

@@ -17,11 +17,24 @@ namespace gladius::webgpu
               std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
                 : m_snapshot{std::move(snapshot)}
             {
-                if (!m_snapshot->meshResources.empty())
+                                bool const hasMeshes = !m_snapshot->meshResources.empty();
+                                bool const hasBeams = !m_snapshot->beamLatticeResources.empty();
+                                if (hasMeshes && hasBeams)
                 {
                     m_composedShader =
-                      WebGPUFrameShaderComposer::composeWithMeshSupport(m_snapshot->analyticEvaluatorWgsl);
+                      WebGPUFrameShaderComposer::composeWithMeshAndBeamSupport(
+                        m_snapshot->analyticEvaluatorWgsl);
                 }
+                                else if (hasMeshes)
+                                {
+                                        m_composedShader = WebGPUFrameShaderComposer::composeWithMeshSupport(
+                                            m_snapshot->analyticEvaluatorWgsl);
+                                }
+                                else if (hasBeams)
+                                {
+                                        m_composedShader = WebGPUFrameShaderComposer::composeWithBeamSupport(
+                                            m_snapshot->analyticEvaluatorWgsl);
+                                }
                 else
                 {
                     m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl);
@@ -190,6 +203,18 @@ namespace gladius::webgpu
                                                  }
                                                  return table;
                                              })()
+                                          : std::vector<std::vector<float>>{},
+                    .beamPayloadTable = scene.beamLatticeResources.size() > 0u
+                                          ? ([&]()
+                                             {
+                                                 std::vector<std::vector<float>> table;
+                                                 table.reserve(scene.beamLatticeResources.size());
+                                                 for (auto const & beam : scene.beamLatticeResources)
+                                                 {
+                                                     table.push_back(beam.data);
+                                                 }
+                                                 return table;
+                                             })()
                                           : std::vector<std::vector<float>>{}};
         }
     }
@@ -208,6 +233,7 @@ namespace gladius::webgpu
     {
         return compute::RendererCapability::AnalyticRendering |
                compute::RendererCapability::MeshSdf |
+             compute::RendererCapability::BeamLattice |
                compute::RendererCapability::ProgressiveRendering |
                compute::RendererCapability::LowResolutionPreview |
                compute::RendererCapability::FramePresentation;

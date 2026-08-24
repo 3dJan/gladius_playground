@@ -82,6 +82,7 @@ namespace gladius::nodes
         void visit(Resource & resource) override;
         void visit(SignedDistanceToMesh & signedDistanceToMesh) override;
         void visit(UnsignedDistanceToMesh & unsignedDistanceToMesh) override;
+        void visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice) override;
 
       private:
         [[nodiscard]] bool beginNode(NodeBase const & node);

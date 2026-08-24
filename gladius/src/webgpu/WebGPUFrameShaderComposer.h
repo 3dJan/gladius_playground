@@ -17,5 +17,12 @@ namespace gladius::webgpu
         /// Compose a frame shader including the mesh SDF module. The generated
         /// evaluator may call gladiusSignedDistanceToMesh(pos, resourceId).
         [[nodiscard]] static std::string composeWithMeshSupport(std::string_view modelEvaluator);
+
+        /// Compose a frame shader including the beam lattice SDF module. The generated
+        /// evaluator may call gladiusSignedDistanceToBeamLattice(pos, resourceId).
+        [[nodiscard]] static std::string composeWithBeamSupport(std::string_view modelEvaluator);
+
+        /// Compose a frame shader including both the mesh and beam lattice SDF modules.
+        [[nodiscard]] static std::string composeWithMeshAndBeamSupport(std::string_view modelEvaluator);
     };
 }

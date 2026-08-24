@@ -42,6 +42,8 @@ namespace gladius::compute
         std::vector<float> parameterValues;
         /// Mesh payloads indexed by mesh resource id (sparse; empty entries are invalid).
         std::vector<MeshResourcePayload> meshResources;
+        /// Beam lattice payloads indexed by beam resource id (sparse; empty entries invalid).
+        std::vector<MeshResourcePayload> beamLatticeResources;
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -77,7 +79,29 @@ namespace gladius::compute
                 hasValidPayload = true;
                 break;
             }
-            return !declaresMesh || hasValidPayload;
+            if (declaresMesh && !hasValidPayload)
+            {
+                return false;
+            }
+
+            bool const declaresBeams =
+              hasCapability(requiredCapabilities, RendererCapability::BeamLattice);
+            bool const hasBeams = !beamLatticeResources.empty();
+            if (declaresBeams != hasBeams)
+            {
+                return false;
+            }
+            bool hasValidBeamPayload = false;
+            for (auto const & beam : beamLatticeResources)
+            {
+                if (!beam.isValid())
+                {
+                    continue;
+                }
+                hasValidBeamPayload = true;
+                break;
+            }
+            return !declaresBeams || hasValidBeamPayload;
         }
     };
 }

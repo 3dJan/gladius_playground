@@ -1,5 +1,7 @@
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 
+#include "BeamLatticeResource.h"
+#include "BeamPayloadSerializer.h"
 #include "MeshPayloadSerializer.h"
 #include "MeshResourceBase.h"
 #include "ResourceManager.h"
@@ -138,18 +140,22 @@ namespace gladius::compute
         // Collect mesh resource ids referenced by the lowered model. The visitor emits
         // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
         std::set<ResourceId> referencedMeshIds;
+        std::set<ResourceId> referencedBeamLatticeIds;
         for (auto const & node : model)
         {
             auto * meshNode = dynamic_cast<nodes::SignedDistanceToMesh *>(node.second.get());
-            if (meshNode == nullptr)
+            auto * beamNode = dynamic_cast<nodes::SignedDistanceToBeamLattice *>(node.second.get());
+            if (meshNode == nullptr && beamNode == nullptr)
             {
                 continue;
             }
             try
             {
                 // Re-resolve the connected resource node the same way the visitor does.
-                auto & meshParameter = meshNode->parameter().at(nodes::FieldNames::Mesh);
-                auto const source = meshParameter.getSource();
+                auto const & fieldName =
+                  meshNode != nullptr ? nodes::FieldNames::Mesh : nodes::FieldNames::BeamLattice;
+                auto & resourceParameter = node.second->parameter().at(fieldName);
+                auto const source = resourceParameter.getSource();
                 if (!source.has_value() || source->port == nullptr ||
                     source->port->getParent() == nullptr)
                 {
@@ -160,16 +166,23 @@ namespace gladius::compute
                 {
                     continue;
                 }
-                referencedMeshIds.insert(resourceNode->getResourceId());
+                if (meshNode != nullptr)
+                {
+                    referencedMeshIds.insert(resourceNode->getResourceId());
+                }
+                else
+                {
+                    referencedBeamLatticeIds.insert(resourceNode->getResourceId());
+                }
             }
             catch (std::exception const &)
             {
                 throw std::runtime_error(
-                  "Analytic render scene contains a mesh node without a valid mesh resource");
+                  "Analytic render scene contains a distance node without a valid resource");
             }
         }
 
-        if (referencedMeshIds.empty())
+        if (referencedMeshIds.empty() && referencedBeamLatticeIds.empty())
         {
             return snapshot;
         }
@@ -201,8 +214,44 @@ namespace gladius::compute
             snapshot.meshResources[index] = std::move(payload);
         }
 
-        snapshot.requiredCapabilities =
-          snapshot.requiredCapabilities | RendererCapability::MeshSdf;
+            if (!referencedMeshIds.empty())
+            {
+                snapshot.requiredCapabilities =
+                  snapshot.requiredCapabilities | RendererCapability::MeshSdf;
+            }
+
+        for (auto const resourceId : referencedBeamLatticeIds)
+        {
+            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
+            auto * resource =
+              mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::BeamLattice});
+            if (resource == nullptr)
+            {
+                throw std::runtime_error(
+                  "Analytic render scene references a missing beam lattice resource");
+            }
+            auto * beamLattice = dynamic_cast<BeamLatticeResource *>(resource);
+            if (beamLattice == nullptr)
+            {
+                throw std::runtime_error("Referenced beam lattice resource has an unexpected type");
+            }
+
+            MeshResourcePayload payload;
+            payload.data =
+              io::serializeBeamLatticePayload(beamLattice->getBeams(), beamLattice->getBalls());
+            auto const index = static_cast<std::size_t>(resourceId);
+            if (index >= snapshot.beamLatticeResources.size())
+            {
+                snapshot.beamLatticeResources.resize(index + 1u);
+            }
+            snapshot.beamLatticeResources[index] = std::move(payload);
+        }
+
+        if (!referencedBeamLatticeIds.empty())
+        {
+            snapshot.requiredCapabilities =
+              snapshot.requiredCapabilities | RendererCapability::BeamLattice;
+        }
         return snapshot;
     }
 

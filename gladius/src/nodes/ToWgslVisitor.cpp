@@ -840,6 +840,26 @@ namespace gladius::nodes
             }
             return resourceNode->getResourceId();
         }
+
+        /// Resolve the resource id referenced by a beam-lattice distance node's input.
+        [[nodiscard]] ResourceId resolveBeamLatticeResourceId(NodeBase & beamNode)
+        {
+            auto & beamParameter = beamNode.parameter().at(FieldNames::BeamLattice);
+            auto const source = beamParameter.getSource();
+            if (!source.has_value() || source->port == nullptr || source->port->getParent() == nullptr)
+            {
+                throw std::runtime_error(
+                  "WGSL evaluator: beam lattice node has no connected beam lattice resource");
+            }
+
+            auto * resourceNode = dynamic_cast<Resource *>(source->port->getParent());
+            if (resourceNode == nullptr)
+            {
+                throw std::runtime_error(
+                  "WGSL evaluator: beam lattice input is not connected to a resource node");
+            }
+            return resourceNode->getResourceId();
+        }
     }
 
     void ToWgslVisitor::visit(SignedDistanceToMesh & signedDistanceToMesh)
@@ -871,6 +891,22 @@ namespace gladius::nodes
                   "f32",
                   fmt::format("gladiusUnsignedDistanceToMesh({}, {}u)",
                               resolveParameter(unsignedDistanceToMesh.parameter().at(FieldNames::Pos)),
+                              resourceId));
+    }
+
+    void ToWgslVisitor::visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice)
+    {
+        if (!beginNode(signedDistanceToBeamLattice))
+        {
+            return;
+        }
+
+        auto const resourceId = resolveBeamLatticeResourceId(signedDistanceToBeamLattice);
+        emitValue(signedDistanceToBeamLattice,
+                  FieldNames::Distance,
+                  "f32",
+                  fmt::format("gladiusSignedDistanceToBeamLattice({}, {}u)",
+                              resolveParameter(signedDistanceToBeamLattice.parameter().at(FieldNames::Pos)),
                               resourceId));
     }
 }

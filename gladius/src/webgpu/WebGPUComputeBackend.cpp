@@ -466,6 +466,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                               m_context->getQueue(),
                                               request.meshPayloadTable);
                 }
+                if (!request.beamPayloadTable.empty())
+                {
+                    m_buffers.setBeamPayloads(m_context->getDevice(),
+                                              m_context->getQueue(),
+                                              request.beamPayloadTable);
+                }
 
                 if (request.shaderSource.empty())
                 {
@@ -479,7 +485,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 auto const shader = m_context->getDevice().CreateShaderModule(&shaderDescriptor);
 
                 bool const hasMeshPayloads = m_buffers.hasMeshPayloads();
-                wgpu::BindGroupLayoutEntry bindings[5]{};
+                bool const hasBeamPayloads = m_buffers.hasBeamPayloads();
+                wgpu::BindGroupLayoutEntry bindings[7]{};
                 bindings[0].binding = 0u;
                 bindings[0].visibility = wgpu::ShaderStage::Compute;
                 bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -492,18 +499,32 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindings[2].visibility = wgpu::ShaderStage::Compute;
                 bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
                 bindings[2].buffer.minBindingSize = sizeof(float);
-                std::size_t const bindingCount =
-                  hasMeshPayloads ? std::size(bindings) : std::size_t{3u};
+                std::size_t bindingCount = 3u;
                 if (hasMeshPayloads)
                 {
-                    bindings[3].binding = 4u;
-                    bindings[3].visibility = wgpu::ShaderStage::Compute;
-                    bindings[3].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[3].buffer.minBindingSize = sizeof(float);
-                    bindings[4].binding = 5u;
-                    bindings[4].visibility = wgpu::ShaderStage::Compute;
-                    bindings[4].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[4].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    bindings[bindingCount].binding = 4u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                    ++bindingCount;
+                    bindings[bindingCount].binding = 5u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    ++bindingCount;
+                }
+                if (hasBeamPayloads)
+                {
+                    bindings[bindingCount].binding = 6u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                    ++bindingCount;
+                    bindings[bindingCount].binding = 7u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    ++bindingCount;
                 }
 
                 wgpu::BindGroupLayoutDescriptor layoutDescriptor;
@@ -525,7 +546,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 auto const pipeline =
                   m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
 
-                wgpu::BindGroupEntry bindGroupEntries[5]{};
+                wgpu::BindGroupEntry bindGroupEntries[7]{};
                 bindGroupEntries[0].binding = 0u;
                 bindGroupEntries[0].buffer = m_buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(FrameUniforms);
@@ -535,15 +556,32 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindGroupEntries[2].binding = 2u;
                 bindGroupEntries[2].buffer = m_buffers.getParameterBuffer();
                 bindGroupEntries[2].size = m_buffers.getParameterSizeBytes();
-                std::size_t const bindGroupEntryCount = bindingCount;
+                std::size_t bindGroupEntryCount = 3u;
                 if (hasMeshPayloads)
                 {
-                    bindGroupEntries[3].binding = 4u;
-                    bindGroupEntries[3].buffer = m_buffers.getMeshPayloadBuffer();
-                    bindGroupEntries[3].size = m_buffers.getMeshPayloadBuffer().GetSize();
-                    bindGroupEntries[4].binding = 5u;
-                    bindGroupEntries[4].buffer = m_buffers.getMeshOffsetTableBuffer();
-                    bindGroupEntries[4].size = m_buffers.getMeshOffsetTableBuffer().GetSize();
+                    bindGroupEntries[bindGroupEntryCount].binding = 4u;
+                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getMeshPayloadBuffer();
+                    bindGroupEntries[bindGroupEntryCount].size =
+                      m_buffers.getMeshPayloadBuffer().GetSize();
+                    ++bindGroupEntryCount;
+                    bindGroupEntries[bindGroupEntryCount].binding = 5u;
+                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getMeshOffsetTableBuffer();
+                    bindGroupEntries[bindGroupEntryCount].size =
+                      m_buffers.getMeshOffsetTableBuffer().GetSize();
+                    ++bindGroupEntryCount;
+                }
+                if (hasBeamPayloads)
+                {
+                    bindGroupEntries[bindGroupEntryCount].binding = 6u;
+                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getBeamPayloadBuffer();
+                    bindGroupEntries[bindGroupEntryCount].size =
+                      m_buffers.getBeamPayloadBuffer().GetSize();
+                    ++bindGroupEntryCount;
+                    bindGroupEntries[bindGroupEntryCount].binding = 7u;
+                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getBeamOffsetTableBuffer();
+                    bindGroupEntries[bindGroupEntryCount].size =
+                      m_buffers.getBeamOffsetTableBuffer().GetSize();
+                    ++bindGroupEntryCount;
                 }
 
                 wgpu::BindGroupDescriptor bindGroupDescriptor;

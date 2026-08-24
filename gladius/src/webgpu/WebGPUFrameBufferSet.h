@@ -31,6 +31,11 @@ namespace gladius::webgpu
                              wgpu::Queue const & queue,
                              std::vector<std::vector<float>> const & meshPayloadTable);
 
+        /// Upload beam lattice payloads (concatenated, one entry per resource slot).
+        void setBeamPayloads(wgpu::Device const & device,
+                             wgpu::Queue const & queue,
+                             std::vector<std::vector<float>> const & beamPayloadTable);
+
         [[nodiscard]] bool isValid() const noexcept;
         [[nodiscard]] std::size_t getOutputSizeBytes() const noexcept;
         [[nodiscard]] std::size_t getParameterSizeBytes() const noexcept;
@@ -47,6 +52,15 @@ namespace gladius::webgpu
         {
             return m_meshOffsetTableBuffer;
         }
+        [[nodiscard]] bool hasBeamPayloads() const noexcept { return m_beamPayloadBuffer != nullptr; }
+        [[nodiscard]] wgpu::Buffer const & getBeamPayloadBuffer() const noexcept
+        {
+            return m_beamPayloadBuffer;
+        }
+        [[nodiscard]] wgpu::Buffer const & getBeamOffsetTableBuffer() const noexcept
+        {
+            return m_beamOffsetTableBuffer;
+        }
 
       private:
         std::uint32_t m_width{};
@@ -60,5 +74,8 @@ namespace gladius::webgpu
         wgpu::Buffer m_meshPayloadBuffer;
         wgpu::Buffer m_meshOffsetTableBuffer;
         std::size_t m_meshPayloadBufferSize{};
+        wgpu::Buffer m_beamPayloadBuffer;
+        wgpu::Buffer m_beamOffsetTableBuffer;
+        std::size_t m_beamPayloadBufferSize{};
     };
 }
