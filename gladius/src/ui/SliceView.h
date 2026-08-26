@@ -3,12 +3,14 @@
 #include "Contour.h"
 #include "imgui.h"
 #include <algorithm>
+#include <chrono>
 #include <cfloat>
 #include <optional>
 
 namespace gladius
 {
     class ComputeCore;
+    class Document;
     class GLView;
 }
 
@@ -30,6 +32,17 @@ namespace gladius::ui
         bool isVisible() const;
         /// \returns Returns true, if the window was rendered
         [[nodiscard]] bool render(ComputeCore & core, GLView & view);
+
+        /// Backend-neutral variant for builds/drivers without an OpenCL core.
+        /// Contours are generated through Document::generateContourWebGpu.
+        /// \returns Returns true, if the window was rendered
+        [[nodiscard]] bool render(Document & doc, GLView & view);
+
+        /// Set the slice height in mm used by the document-based (WebGPU) path
+        void setSliceHeight(float zHeight_mm);
+
+        /// Drop cached contours so they are regenerated on the next frame
+        void invalidateContours();
 
         /**
          * @brief Check if mouse is hovering over the slice view
@@ -59,6 +72,19 @@ namespace gladius::ui
 
       private:
         bool m_visible{false};
+
+        /// Common render implementation shared by both backends. When @p core is
+        /// nullptr, contours are generated via the document (WebGPU) instead.
+        [[nodiscard]] bool renderImpl(ComputeCore * core, GLView & view);
+
+        /// Slice height used by the document-based (WebGPU) contour path
+        float m_sliceZ_mm{10.f};
+        /// True while the cached contours match the last WebGPU generation parameters
+        bool m_webGpuCacheValid{false};
+        /// Time of the last WebGPU contour generation (throttles slider dragging)
+        std::chrono::steady_clock::time_point m_lastWebGpuGeneration{};
+        /// Document used by the document-based (WebGPU) contour path
+        gladius::Document * m_document{nullptr};
 
         float m_zoom = 4.f;
         float m_zoomTarget = 4.f;

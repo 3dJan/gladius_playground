@@ -16,6 +16,11 @@
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #endif
+#if defined(GLADIUS_ENABLE_WEBGPU)
+#include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "webgpu/WebGPUContourGenerator.h"
+#include "webgpu/WebGPUSdfShaderComposer.h"
+#endif
 #include "exceptions.h"
 #include "imguinodeeditor.h"
 #include "io/3mf/BeamLatticeExporter.h"
@@ -38,7 +43,6 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
-#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
@@ -339,6 +343,10 @@ namespace gladius
 
     Document::~Document()
     {
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        // Destroy the generator before any other members it may reference.
+        m_webGpuContourGenerator.reset();
+#endif
         // Join in-flight async workers before any member is destroyed. The workers
         // (refreshWorker / file-load) capture `this` and touch members such as
         // m_isLoading, m_loadingError and m_buildItems that are declared after the
@@ -1650,13 +1658,11 @@ namespace gladius
     PolyLines Document::generateContour(float z, nodes::SliceParameter const & sliceParameter) const
     {
 #if !defined(GLADIUS_ENABLE_OPENCL)
-        (void) z;
-        (void) sliceParameter;
-        throw std::runtime_error("Contour generation is unavailable for the selected backend");
+        return generateContourWebGpu(z, sliceParameter);
 #else
         if (!m_core)
         {
-            throw std::runtime_error("Contour generation is unavailable for the selected backend");
+            return generateContourWebGpu(z, sliceParameter);
         }
 
         if (z != m_core->getSliceHeight())
@@ -1673,6 +1679,88 @@ namespace gladius
         }
         return contours;
     #endif
+    }
+
+    PolyLines Document::generateContourWebGpu(float z, nodes::SliceParameter const & sliceParameter) const
+    {
+#if !defined(GLADIUS_ENABLE_WEBGPU)
+        (void) z;
+        (void) sliceParameter;
+        throw std::runtime_error("Contour generation is unavailable for the selected backend");
+#else
+        auto const flatAssembly = getFlatAssembly();
+        if (!flatAssembly || flatAssembly->assemblyModel() == nullptr)
+        {
+            throw std::runtime_error("Contour generation requires a loaded model");
+        }
+
+        if (!m_webGpuContourGenerator)
+        {
+            m_webGpuContourGenerator = std::make_unique<webgpu::WebGPUContourGenerator>();
+        }
+        auto & generator = *m_webGpuContourGenerator;
+        if (!generator.isAvailable())
+        {
+            throw std::runtime_error("WebGPU device is unavailable: " + generator.getErrorMessage());
+        }
+
+        // Lower the flattened model into a WGSL evaluator and compose it with the
+        // resource modules referenced by the snapshot.
+        auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
+          *flatAssembly->assemblyModel(), 1u);
+        if (!snapshot.isValid())
+        {
+            throw std::runtime_error("Failed to create analytic scene for contour generation");
+        }
+
+        compute::SdfEvaluationRequest baseRequest;
+        baseRequest.isoValue = 0.0f;
+        baseRequest.parameterValues = std::move(snapshot.parameterValues);
+
+        bool const hasMeshes = !snapshot.meshResources.empty();
+        bool const hasBeams = !snapshot.beamLatticeResources.empty();
+        bool const hasImages = !snapshot.imageResources.empty();
+        baseRequest.shaderSource =
+          webgpu::WebGPUSdfShaderComposer::composeWithResourceSupport(
+            snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+
+        for (auto const & mesh : snapshot.meshResources)
+        {
+            baseRequest.meshPayloadTable.push_back(mesh.data);
+        }
+        for (auto const & beam : snapshot.beamLatticeResources)
+        {
+            baseRequest.beamPayloadTable.push_back(beam.data);
+        }
+        for (auto const & image : snapshot.imageResources)
+        {
+            baseRequest.imagePayloadTable.push_back(image.data);
+        }
+
+        webgpu::ContourGridRequest gridRequest;
+        gridRequest.zHeight_mm = z;
+        gridRequest.useAdaptiveContour = sliceParameter.useAdaptiveContour;
+        gridRequest.minFeatureSize_mm = sliceParameter.minFeatureSize_mm;
+
+        // Sample over the model bounds with padding so contours are not clipped.
+        constexpr float padding_mm = 2.0f;
+        BoundingBox const bbox = computeBoundingBox();
+        gridRequest.clippingArea = {bbox.min.x - padding_mm,
+                                    bbox.min.y - padding_mm,
+                                    bbox.max.x + padding_mm,
+                                    bbox.max.y + padding_mm};
+
+        // Resolution: match the native slicer resolution (~0.1 mm cells), bounded.
+        auto const domainW = gridRequest.clippingArea.z - gridRequest.clippingArea.x;
+        auto const domainH = gridRequest.clippingArea.w - gridRequest.clippingArea.y;
+        constexpr float targetCellSize_mm = 0.1f;
+        gridRequest.width = static_cast<int>(std::clamp(
+          domainW / targetCellSize_mm + 1.0f, 32.0f, 2048.0f));
+        gridRequest.height = static_cast<int>(std::clamp(
+          domainH / targetCellSize_mm + 1.0f, 32.0f, 2048.0f));
+
+        return generator.generateAdaptiveContours(baseRequest, gridRequest, getSharedLogger());
+#endif
     }
 
     BoundingBox Document::computeBoundingBox() const

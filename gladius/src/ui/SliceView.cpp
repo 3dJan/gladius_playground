@@ -45,6 +45,30 @@ namespace gladius::ui
         {
             return false;
         }
+        return renderImpl(&core, view);
+    }
+
+    bool SliceView::render(Document & doc, GLView & view)
+    {
+        // Document-based path is implemented in SliceViewWebGPU.cpp (only compiled
+        // without OpenCL). In OpenCL builds the core-based overload is used instead.
+        (void)doc;
+        (void)view;
+        return false;
+    }
+
+    void SliceView::setSliceHeight(float zHeight_mm)
+    {
+        m_sliceZ_mm = zHeight_mm;
+    }
+
+    void SliceView::invalidateContours()
+    {
+        m_contoursNeedRefetch = true;
+    }
+
+    bool SliceView::renderImpl(ComputeCore * core, GLView & view)
+    {
         bool windowIsActuallyVisible = false;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0., 0.));
         if (ImGui::Begin("Slice", &m_visible, ImGuiWindowFlags_MenuBar))
@@ -71,7 +95,7 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Adaptive contour", &m_useAdaptiveContour))
                 {
-                    core.invalidateContourCache();
+                    core->invalidateContourCache();
                     m_contoursNeedRefetch = true;
                 }
                 if (m_useAdaptiveContour)
@@ -83,7 +107,7 @@ namespace gladius::ui
                     if (ImGui::InputFloat("Min feature (mm)", &m_minFeatureSize_mm, 0.0f, 0.0f, "%.3f"))
                     {
                         m_minFeatureSize_mm = std::max(0.01f, m_minFeatureSize_mm);
-                        core.invalidateContourCache();
+                        core->invalidateContourCache();
                         m_contoursNeedRefetch = true;
                     }
                 }
@@ -310,22 +334,22 @@ namespace gladius::ui
                 }
             };
 
-            if (!core.isSlicingInProgress())
+            if (!core->isSlicingInProgress())
             {
                 auto sliceParameter = contourOnlyParameter();
-                sliceParameter.zHeight_mm = core.getSliceHeight();
+                sliceParameter.zHeight_mm = core->getSliceHeight();
                 sliceParameter.useAdaptiveContour = m_useAdaptiveContour;
                 sliceParameter.minFeatureSize_mm = m_minFeatureSize_mm;
-                if (core.requestContourUpdate(sliceParameter))
+                if (core->requestContourUpdate(sliceParameter))
                 {
                     m_contoursNeedRefetch = true;
                 }
             }
 
-            if ((!m_contours.has_value() || m_contoursNeedRefetch) && !core.isSlicingInProgress())
+            if ((!m_contours.has_value() || m_contoursNeedRefetch) && !core->isSlicingInProgress())
             {
-                auto const & contourExtractor = core.getContour();
-                std::lock_guard<std::mutex> lockContourExtractor(core.getContourExtractorMutex());
+                auto const & contourExtractor = core->getContour();
+                std::lock_guard<std::mutex> lockContourExtractor(core->getContourExtractorMutex());
                 m_contours = contourExtractor->getContour();
                 m_contoursNeedRefetch = false;
 
@@ -356,7 +380,7 @@ namespace gladius::ui
 
                 if (m_renderNormals)
                 {
-                    auto const & normals = core.getContour()->getNormals();
+                    auto const & normals = core->getContour()->getNormals();
 
                     ImGuiCol constexpr lightBlue IM_COL32(200, 200, 255, 255);
 
@@ -368,7 +392,7 @@ namespace gladius::ui
 
                 if (m_renderSourceVertices)
                 {
-                    auto const vertices = core.getContour()->getSourceVertices();
+                    auto const vertices = core->getContour()->getSourceVertices();
                     for (auto const & vertex : vertices)
                     {
                         ImGuiCol const lightGreen = IM_COL32(static_cast<char>(5.f * vertex.w),
@@ -411,7 +435,7 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar();
-        if (core.isSlicingInProgress() || core.isAnyCompilationInProgressNonBlocking())
+        if (core->isSlicingInProgress() || core->isAnyCompilationInProgressNonBlocking())
         {
             view.startAnimationMode();
             ImGuiWindowFlags window_flags =

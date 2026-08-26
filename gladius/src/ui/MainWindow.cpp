@@ -409,6 +409,30 @@ namespace gladius::ui
         {
             m_logView.show();
         }
+#else
+        if (!m_computeAvailable || !m_doc)
+        {
+            ImGui::End();
+            return;
+        }
+
+        // WebGPU backend: derive the slider range from the model bounding box.
+        auto const bb = m_doc->computeBoundingBox();
+        float zMin = (bb.min.z < FLT_MAX) ? bb.min.z : 0.f;
+        float zMax = (bb.max.z > -FLT_MAX) ? bb.max.z : 100.f;
+        zMin = std::min(zMin, -1.f);
+        zMax = std::max(zMax, zMin + 1.f);
+
+        if (ImGui::SliderFloat("Slice Position [mm]", &m_uiSliceHeight_mm, zMin, zMax))
+        {
+            m_sliceView.setSliceHeight(m_uiSliceHeight_mm);
+            m_contoursDirty = true;
+        }
+
+        if (ImGui::Button("Show Events"))
+        {
+            m_logView.show();
+        }
 #endif
         ImGui::End();
     }
@@ -1964,11 +1988,34 @@ namespace gladius::ui
     void MainWindow::sliceWindow()
     {
 #if !defined(GLADIUS_ENABLE_OPENCL)
-        m_isSlicePreviewVisible = false;
-        return;
+        if (!m_doc)
+        {
+            m_isSlicePreviewVisible = false;
+            return;
+        }
+        m_isSlicePreviewVisible = m_sliceView.render(*m_doc, m_mainView);
+
+        // Process slice window shortcuts if visible and hovered
+        if (m_isSlicePreviewVisible && m_sliceView.isHovered())
+        {
+            processShortcuts(ShortcutContext::SlicePreview);
+        }
 #else
         updateContours();
-        m_isSlicePreviewVisible = m_sliceView.render(*m_core, m_mainView);
+        if (!m_core)
+        {
+            // WebGPU backend active in an OpenCL-enabled build: no ComputeCore exists.
+            if (!m_doc)
+            {
+                m_isSlicePreviewVisible = false;
+                return;
+            }
+            m_isSlicePreviewVisible = m_sliceView.render(*m_doc, m_mainView);
+        }
+        else
+        {
+            m_isSlicePreviewVisible = m_sliceView.render(*m_core, m_mainView);
+        }
 
         // Process slice window shortcuts if visible and hovered
         if (m_isSlicePreviewVisible && m_sliceView.isHovered())
@@ -2027,8 +2074,13 @@ namespace gladius::ui
     void MainWindow::updateContours()
     {
 #if !defined(GLADIUS_ENABLE_OPENCL)
-        m_contoursDirty = false;
-        return;
+        // WebGPU path: contour regeneration is handled inside SliceView's
+        // document-based render loop; just forward invalidation requests.
+        if (m_contoursDirty)
+        {
+            m_sliceView.invalidateContours();
+            m_contoursDirty = false;
+        }
 #else
         if (!m_core || !m_contoursDirty || !m_isSlicePreviewVisible)
         {

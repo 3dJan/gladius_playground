@@ -12,6 +12,24 @@
 
 namespace gladius::ui
 {
+    namespace
+    {
+        /// @brief Returns the signed shortest angular difference from "from" to "to".
+        [[nodiscard]] float shortestAngleDelta(float from, float to)
+        {
+            auto const twoPi = 2.0f * std::numbers::pi_v<float>;
+            float delta = std::fmod(to - from, twoPi);
+            if (delta > std::numbers::pi_v<float>)
+            {
+                delta -= twoPi;
+            }
+            else if (delta < -std::numbers::pi_v<float>)
+            {
+                delta += twoPi;
+            }
+            return delta;
+        }
+    }
 
     void OrbitalCamera::mouseInputHandler(int button, int state, float x, float y)
     {
@@ -105,22 +123,34 @@ namespace gladius::ui
     bool OrbitalCamera::update(float deltaTime_ms)
     {
         bool changed = false;
-        auto constexpr tolerance = 0.1f;
+        auto constexpr tolerance = 0.001f;
         auto const speedFactor = 15.E-3f;
         deltaTime_ms = std::min(deltaTime_ms, 50.f);
 
-        auto const pitchDelta = (m_pitchTarget - m_pitch);
+        // Interpolate angles along the shortest arc so wrapped targets (see fmod in
+        // mouseMotionHandler) are approached directly instead of spinning the long way round.
+        auto const pitchDelta = shortestAngleDelta(m_pitch, m_pitchTarget);
         if (fabs(pitchDelta) > tolerance)
         {
             changed = true;
             m_pitch += pitchDelta * deltaTime_ms * speedFactor;
         }
+        else if (m_pitch != m_pitchTarget)
+        {
+            changed = true;
+            m_pitch = m_pitchTarget;
+        }
 
-        auto const yawDelta = (m_yawTarget - m_yaw);
+        auto const yawDelta = shortestAngleDelta(m_yaw, m_yawTarget);
         if (fabs(yawDelta) > tolerance)
         {
             changed = true;
             m_yaw += yawDelta * deltaTime_ms * speedFactor;
+        }
+        else if (m_yaw != m_yawTarget)
+        {
+            changed = true;
+            m_yaw = m_yawTarget;
         }
 
         auto const eyeDistDelta = (m_eyeDistTarget - m_eyeDist);

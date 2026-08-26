@@ -311,6 +311,8 @@ namespace gladius::ui
 
         bool m_showMainMenu{false};
         bool m_isSlicePreviewVisible{false};
+        /// Slice height (mm) used by the WebGPU slice preview slider
+        float m_uiSliceHeight_mm{10.f};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
         bool m_showExportInProgressWarning{false};

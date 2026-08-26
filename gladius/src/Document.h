@@ -12,6 +12,11 @@ namespace gladius
     class ComputeCore;
 }
 #endif
+
+namespace gladius::webgpu
+{
+    class WebGPUContourGenerator;
+}
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
@@ -272,6 +277,12 @@ namespace gladius
 
         [[nodiscard]] PolyLines generateContour(float z,
                                                 nodes::SliceParameter const & sliceParameter) const;
+
+        /// WebGPU contour path used when no OpenCL core is available. Evaluates the
+        /// flattened model analytically on a grid via WebGPU and extracts contours on
+        /// the CPU through GridContourBuilder.
+        [[nodiscard]] PolyLines generateContourWebGpu(float z,
+                                                      nodes::SliceParameter const & sliceParameter) const;
 
         [[nodiscard]] BoundingBox computeBoundingBox() const;
 
@@ -538,6 +549,11 @@ namespace gladius
         void saveBackup();
 
         std::unique_ptr<nodes::GeneratorContext> m_generatorContext;
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        /// Lazily created WebGPU contour generator used when no OpenCL core exists.
+        /// The out-of-line destructor keeps the incomplete type safe here.
+        mutable std::unique_ptr<webgpu::WebGPUContourGenerator> m_webGpuContourGenerator;
+#endif
         nodes::SharedAssembly m_assembly;
         nodes::SharedAssembly m_flatAssembly;
 
