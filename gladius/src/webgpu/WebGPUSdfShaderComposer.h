@@ -23,5 +23,14 @@ namespace gladius::webgpu
 
         /// Compose an evaluation shader including both mesh and beam lattice modules.
         [[nodiscard]] static std::string composeWithMeshAndBeamSupport(std::string_view modelEvaluator);
+
+        /// Compose an evaluation shader including image stack sampling.
+        [[nodiscard]] static std::string composeWithImageSupport(std::string_view modelEvaluator);
+
+        /// Compose exactly the resource modules required by an evaluation.
+        [[nodiscard]] static std::string composeWithResourceSupport(std::string_view modelEvaluator,
+                                                                    bool includeMesh,
+                                                                    bool includeBeam,
+                                                                    bool includeImage);
     };
 }

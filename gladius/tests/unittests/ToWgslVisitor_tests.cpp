@@ -210,7 +210,7 @@ namespace gladius::nodes::tests
         EXPECT_NE(shader.find("select("), std::string::npos);
     }
 
-    TEST(ToWgslVisitor, VisitTransformation_WithRowMajorTranslation_EmitsColumnMajorWgslMatrix)
+    TEST(ToWgslVisitor, VisitTransformation_WithOpenClLayoutTranslation_EmitsColumnMajorWgslMatrix)
     {
         Model model;
         model.createBeginEndWithDefaultInAndOuts();
@@ -234,9 +234,9 @@ namespace gladius::nodes::tests
         translation[1][1] = 1.0f;
         translation[2][2] = 1.0f;
         translation[3][3] = 1.0f;
-        translation[0][3] = 2.0f;
-        translation[1][3] = 3.0f;
-        translation[2][3] = 4.0f;
+        translation[3][0] = 2.0f;
+        translation[3][1] = 3.0f;
+        translation[3][2] = 4.0f;
         transformation->parameter().at(FieldNames::Transformation).setValue(translation);
         transformation->parameter().at(FieldNames::Transformation).setModifiable(false);
 

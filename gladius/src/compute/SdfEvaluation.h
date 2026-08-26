@@ -22,6 +22,9 @@ namespace gladius::compute
         /// Beam lattice payloads indexed by beam resource id (empty slots = none).
         /// Only used when the shader source was composed with beam support.
         std::vector<std::vector<float>> beamPayloadTable;
+        /// Image stack payloads indexed by image resource id (empty slots = none).
+        /// Only used when the shader source was composed with image support.
+        std::vector<std::vector<float>> imagePayloadTable;
     };
 
     /**

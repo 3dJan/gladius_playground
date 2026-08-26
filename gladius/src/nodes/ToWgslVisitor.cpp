@@ -195,10 +195,10 @@ namespace gladius::nodes
 
     std::string ToWgslVisitor::composeMatrixExpression(std::array<std::string, 16> const & values)
     {
-        return fmt::format("mat4x4<f32>(vec4<f32>({0}, {4}, {8}, {12}), "
-                           "vec4<f32>({1}, {5}, {9}, {13}), "
-                           "vec4<f32>({2}, {6}, {10}, {14}), "
-                           "vec4<f32>({3}, {7}, {11}, {15}))",
+        return fmt::format("mat4x4<f32>(vec4<f32>({0}, {1}, {2}, {3}), "
+                           "vec4<f32>({4}, {5}, {6}, {7}), "
+                           "vec4<f32>({8}, {9}, {10}, {11}), "
+                           "vec4<f32>({12}, {13}, {14}, {15}))",
                            values[0], values[1], values[2], values[3],
                            values[4], values[5], values[6], values[7],
                            values[8], values[9], values[10], values[11],
@@ -819,6 +819,29 @@ namespace gladius::nodes
         {
             return;
         }
+    }
+
+    void ToWgslVisitor::visit(ImageSampler & imageSampler)
+    {
+        if (!beginNode(imageSampler))
+        {
+            return;
+        }
+
+        auto const resourceId = imageSampler.getImageResourceId();
+        auto const & colorOutput = imageSampler.getOutputs().at(FieldNames::Color);
+        auto const rgbaName = colorOutput.getUniqueName() + "_rgba";
+        m_definition << fmt::format(
+          "let {}: vec4<f32> = gladiusSampleImage({}, {}u, vec3<u32>({}u, {}u, {}u), {}u);\n",
+          rgbaName,
+          resolveParameter(imageSampler.parameter().at(FieldNames::UVW)),
+          resourceId,
+          static_cast<unsigned int>(imageSampler.getTileStyleU()),
+          static_cast<unsigned int>(imageSampler.getTileStyleV()),
+          static_cast<unsigned int>(imageSampler.getTileStyleW()),
+          static_cast<unsigned int>(imageSampler.getFilter()));
+        emitValue(imageSampler, FieldNames::Color, "vec3<f32>", rgbaName + ".xyz");
+        emitValue(imageSampler, FieldNames::Alpha, "f32", rgbaName + ".w");
     }
 
     namespace

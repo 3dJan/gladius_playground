@@ -1990,17 +1990,17 @@ namespace gladius::nodes
             {
                 auto & resMan = generatorContext.resourceManager;
 
-                // Resolve resource using typed keys (ResourceKey now includes type)
-                // Try ImageStack first
+                                // Resolve resource using typed keys (ResourceKey now includes type).
+                                // Prefer VDB when a grayscale stack retains both representations.
                 IResource * resPtr =
-                  resMan.getResourcePtr(ResourceKey{imageResourceId, ResourceType::ImageStack});
-                bool isImageStack = resPtr != nullptr;
-                bool isVdb = false;
+                                    resMan.getResourcePtr(ResourceKey{imageResourceId, ResourceType::Vdb});
+                                bool isVdb = resPtr != nullptr;
+                                bool isImageStack = false;
                 if (!resPtr)
                 {
-                    // Fallback: VDB resource
-                    resPtr = resMan.getResourcePtr(ResourceKey{imageResourceId, ResourceType::Vdb});
-                    isVdb = (resPtr != nullptr);
+                                        resPtr = resMan.getResourcePtr(
+                                            ResourceKey{imageResourceId, ResourceType::ImageStack});
+                                        isImageStack = resPtr != nullptr;
                 }
 
                 if (!resPtr)

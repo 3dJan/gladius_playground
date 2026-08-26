@@ -29,10 +29,9 @@ namespace gladius::compute
     /**
      * @brief Immutable CPU payload for a supported analytic render scene.
      *
-     * The initial payload deliberately covers only resource-independent analytic graphs. The
-     * evaluator is WGSL because it is produced by the current analytic graph lowering path; mesh,
-     * image, VDB, beam, command-stream, and precomputed-SDF payloads will extend this contract
-     * with backend-independent resource descriptors rather than backend handles.
+    * The evaluator is WGSL because it is produced by the current analytic graph lowering path.
+    * Mesh, beam-lattice, and image-stack data use backend-independent payloads; VDB,
+    * command-stream, and precomputed-SDF resources can extend the same contract later.
      */
     struct RenderSceneSnapshot
     {
@@ -44,6 +43,8 @@ namespace gladius::compute
         std::vector<MeshResourcePayload> meshResources;
         /// Beam lattice payloads indexed by beam resource id (sparse; empty entries invalid).
         std::vector<MeshResourcePayload> beamLatticeResources;
+        /// Image stack payloads indexed by image resource id (sparse; empty entries invalid).
+        std::vector<MeshResourcePayload> imageResources;
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -101,7 +102,29 @@ namespace gladius::compute
                 hasValidBeamPayload = true;
                 break;
             }
-            return !declaresBeams || hasValidBeamPayload;
+            if (declaresBeams && !hasValidBeamPayload)
+            {
+                return false;
+            }
+
+            bool const declaresImages =
+              hasCapability(requiredCapabilities, RendererCapability::ImageSampling);
+            bool const hasImages = !imageResources.empty();
+            if (declaresImages != hasImages)
+            {
+                return false;
+            }
+            bool hasValidImagePayload = false;
+            for (auto const & image : imageResources)
+            {
+                if (!image.isValid())
+                {
+                    continue;
+                }
+                hasValidImagePayload = true;
+                break;
+            }
+            return !declaresImages || hasValidImagePayload;
         }
     };
 }

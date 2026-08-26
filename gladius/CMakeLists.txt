@@ -251,7 +251,7 @@ else()
   set(KERNEL_FILES)
 endif()
 if(GLADIUS_ENABLE_WEBGPU)
-  file(GLOB WEBGPU_SHADER_FILES "src/webgpu/shaders/*")
+  file(GLOB WEBGPU_SHADER_FILES CONFIGURE_DEPENDS "src/webgpu/shaders/*")
   list(APPEND KERNEL_FILES ${WEBGPU_SHADER_FILES})
 endif()
 

@@ -2,6 +2,8 @@
 
 #include "BeamLatticeResource.h"
 #include "BeamPayloadSerializer.h"
+#include "ImagePayloadSerializer.h"
+#include "ImageStackResource.h"
 #include "MeshPayloadSerializer.h"
 #include "MeshResourceBase.h"
 #include "ResourceManager.h"
@@ -141,19 +143,23 @@ namespace gladius::compute
         // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
         std::set<ResourceId> referencedMeshIds;
         std::set<ResourceId> referencedBeamLatticeIds;
+        std::set<ResourceId> referencedImageIds;
         for (auto const & node : model)
         {
             auto * meshNode = dynamic_cast<nodes::SignedDistanceToMesh *>(node.second.get());
             auto * beamNode = dynamic_cast<nodes::SignedDistanceToBeamLattice *>(node.second.get());
-            if (meshNode == nullptr && beamNode == nullptr)
+            auto * imageNode = dynamic_cast<nodes::ImageSampler *>(node.second.get());
+            if (meshNode == nullptr && beamNode == nullptr && imageNode == nullptr)
             {
                 continue;
             }
             try
             {
                 // Re-resolve the connected resource node the same way the visitor does.
-                auto const & fieldName =
-                  meshNode != nullptr ? nodes::FieldNames::Mesh : nodes::FieldNames::BeamLattice;
+                auto const & fieldName = meshNode != nullptr
+                                          ? nodes::FieldNames::Mesh
+                                          : beamNode != nullptr ? nodes::FieldNames::BeamLattice
+                                                                : nodes::FieldNames::ResourceId;
                 auto & resourceParameter = node.second->parameter().at(fieldName);
                 auto const source = resourceParameter.getSource();
                 if (!source.has_value() || source->port == nullptr ||
@@ -170,19 +176,24 @@ namespace gladius::compute
                 {
                     referencedMeshIds.insert(resourceNode->getResourceId());
                 }
-                else
+                else if (beamNode != nullptr)
                 {
                     referencedBeamLatticeIds.insert(resourceNode->getResourceId());
+                }
+                else
+                {
+                    referencedImageIds.insert(resourceNode->getResourceId());
                 }
             }
             catch (std::exception const &)
             {
                 throw std::runtime_error(
-                  "Analytic render scene contains a distance node without a valid resource");
+                                    "Analytic render scene contains a resource node without a valid resource");
             }
         }
 
-        if (referencedMeshIds.empty() && referencedBeamLatticeIds.empty())
+        if (referencedMeshIds.empty() && referencedBeamLatticeIds.empty() &&
+            referencedImageIds.empty())
         {
             return snapshot;
         }
@@ -251,6 +262,38 @@ namespace gladius::compute
         {
             snapshot.requiredCapabilities =
               snapshot.requiredCapabilities | RendererCapability::BeamLattice;
+        }
+
+        for (auto const resourceId : referencedImageIds)
+        {
+            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
+            auto * resource = mutableManager.getResourcePtr(
+              ResourceKey{resourceId, ResourceType::ImageStack});
+            if (resource == nullptr)
+            {
+                throw std::runtime_error(
+                  "Analytic render scene references a missing image stack resource");
+            }
+            auto * imageStack = dynamic_cast<ImageStackResource *>(resource);
+            if (imageStack == nullptr || imageStack->getImageStack() == nullptr)
+            {
+                throw std::runtime_error("Referenced image stack resource has an unexpected type");
+            }
+
+            MeshResourcePayload payload;
+            payload.data = io::serializeImageStackPayload(*imageStack->getImageStack());
+            auto const index = static_cast<std::size_t>(resourceId);
+            if (index >= snapshot.imageResources.size())
+            {
+                snapshot.imageResources.resize(index + 1u);
+            }
+            snapshot.imageResources[index] = std::move(payload);
+        }
+
+        if (!referencedImageIds.empty())
+        {
+            snapshot.requiredCapabilities =
+              snapshot.requiredCapabilities | RendererCapability::ImageSampling;
         }
         return snapshot;
     }

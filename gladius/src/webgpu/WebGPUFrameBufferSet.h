@@ -36,6 +36,11 @@ namespace gladius::webgpu
                              wgpu::Queue const & queue,
                              std::vector<std::vector<float>> const & beamPayloadTable);
 
+        /// Upload image stack payloads (concatenated, one entry per resource slot).
+        void setImagePayloads(wgpu::Device const & device,
+                              wgpu::Queue const & queue,
+                              std::vector<std::vector<float>> const & imagePayloadTable);
+
         [[nodiscard]] bool isValid() const noexcept;
         [[nodiscard]] std::size_t getOutputSizeBytes() const noexcept;
         [[nodiscard]] std::size_t getParameterSizeBytes() const noexcept;
@@ -61,6 +66,15 @@ namespace gladius::webgpu
         {
             return m_beamOffsetTableBuffer;
         }
+        [[nodiscard]] bool hasImagePayloads() const noexcept { return m_imagePayloadBuffer != nullptr; }
+        [[nodiscard]] wgpu::Buffer const & getImagePayloadBuffer() const noexcept
+        {
+            return m_imagePayloadBuffer;
+        }
+        [[nodiscard]] wgpu::Buffer const & getImageOffsetTableBuffer() const noexcept
+        {
+            return m_imageOffsetTableBuffer;
+        }
 
       private:
         std::uint32_t m_width{};
@@ -77,5 +91,8 @@ namespace gladius::webgpu
         wgpu::Buffer m_beamPayloadBuffer;
         wgpu::Buffer m_beamOffsetTableBuffer;
         std::size_t m_beamPayloadBufferSize{};
+        wgpu::Buffer m_imagePayloadBuffer;
+        wgpu::Buffer m_imageOffsetTableBuffer;
+        std::size_t m_imagePayloadBufferSize{};
     };
 }

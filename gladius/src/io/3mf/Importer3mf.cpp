@@ -2279,7 +2279,10 @@ namespace gladius::io
                     auto key = ResourceKey{image3d->GetModelResourceID(), resourceType};
 
                     // Check if resource already exists
-                    if (resMan.hasResource(key))
+                                        auto const imageStackKey =
+                                            ResourceKey{image3d->GetModelResourceID(), ResourceType::ImageStack};
+                                        if (resMan.hasResource(key) &&
+                                                (!useVdb || resMan.hasResource(imageStackKey)))
                     {
                         continue;
                     }
@@ -2296,15 +2299,24 @@ namespace gladius::io
                     }
                     if (useVdb)
                     {
-                        auto grid = extractor.loadAsVdbGrid(fileList, FileLoaderType::Archive);
-                        resMan.addResource(key, std::move(grid));
-                        if (m_eventLogger)
+                        if (!resMan.hasResource(key))
                         {
-                            m_eventLogger->addEvent(
-                              {fmt::format("Added VDB resource id={} (sheets: {})",
-                                           image3d->GetModelResourceID(),
-                                           imageStack3mf->GetSheetCount()),
-                               events::Severity::Info});
+                            auto grid = extractor.loadAsVdbGrid(fileList, FileLoaderType::Archive);
+                            resMan.addResource(key, std::move(grid));
+                            if (m_eventLogger)
+                            {
+                                m_eventLogger->addEvent(
+                                  {fmt::format("Added VDB resource id={} (sheets: {})",
+                                               image3d->GetModelResourceID(),
+                                               imageStack3mf->GetSheetCount()),
+                                   events::Severity::Info});
+                            }
+                        }
+                        if (!resMan.hasResource(imageStackKey))
+                        {
+                            auto imageStack = extractor.loadImageStack(fileList);
+                            imageStack.setResourceId(image3d->GetModelResourceID());
+                            resMan.addResource(imageStackKey, std::move(imageStack));
                         }
                     }
                     else

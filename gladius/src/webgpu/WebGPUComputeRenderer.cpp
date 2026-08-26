@@ -19,21 +19,11 @@ namespace gladius::webgpu
             {
                                 bool const hasMeshes = !m_snapshot->meshResources.empty();
                                 bool const hasBeams = !m_snapshot->beamLatticeResources.empty();
-                                if (hasMeshes && hasBeams)
-                {
-                    m_composedShader =
-                      WebGPUFrameShaderComposer::composeWithMeshAndBeamSupport(
-                        m_snapshot->analyticEvaluatorWgsl);
-                }
-                                else if (hasMeshes)
+                                bool const hasImages = !m_snapshot->imageResources.empty();
+                                if (hasMeshes || hasBeams || hasImages)
                                 {
-                                        m_composedShader = WebGPUFrameShaderComposer::composeWithMeshSupport(
-                                            m_snapshot->analyticEvaluatorWgsl);
-                                }
-                                else if (hasBeams)
-                                {
-                                        m_composedShader = WebGPUFrameShaderComposer::composeWithBeamSupport(
-                                            m_snapshot->analyticEvaluatorWgsl);
+                                        m_composedShader = WebGPUFrameShaderComposer::composeWithResourceSupport(
+                                            m_snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
                                 }
                 else
                 {
@@ -215,7 +205,19 @@ namespace gladius::webgpu
                                                  }
                                                  return table;
                                              })()
-                                          : std::vector<std::vector<float>>{}};
+                                          : std::vector<std::vector<float>>{},
+                    .imagePayloadTable = scene.imageResources.size() > 0u
+                                           ? ([&]()
+                                              {
+                                                  std::vector<std::vector<float>> table;
+                                                  table.reserve(scene.imageResources.size());
+                                                  for (auto const & image : scene.imageResources)
+                                                  {
+                                                      table.push_back(image.data);
+                                                  }
+                                                  return table;
+                                              })()
+                                           : std::vector<std::vector<float>>{}};
         }
     }
 
@@ -234,6 +236,7 @@ namespace gladius::webgpu
         return compute::RendererCapability::AnalyticRendering |
                compute::RendererCapability::MeshSdf |
              compute::RendererCapability::BeamLattice |
+               compute::RendererCapability::ImageSampling |
                compute::RendererCapability::ProgressiveRendering |
                compute::RendererCapability::LowResolutionPreview |
                compute::RendererCapability::FramePresentation;

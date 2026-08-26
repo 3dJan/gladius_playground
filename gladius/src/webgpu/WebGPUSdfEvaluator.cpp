@@ -39,7 +39,8 @@ namespace gladius::webgpu
                         std::size_t const pointCount,
                         std::size_t const parameterCount,
                         std::vector<std::vector<float>> const & meshPayloadTable,
-                        std::vector<std::vector<float>> const & beamPayloadTable)
+                        std::vector<std::vector<float>> const & beamPayloadTable,
+                        std::vector<std::vector<float>> const & imagePayloadTable)
             {
                 auto const parameterSize = std::max(sizeof(float), parameterCount * sizeof(float));
                 auto const positionSize = pointCount * sizeof(EvaluationPosition);
@@ -85,6 +86,61 @@ namespace gladius::webgpu
 
                 createMeshPayloads(device, meshPayloadTable);
                 createBeamPayloads(device, beamPayloadTable);
+                createImagePayloads(device, imagePayloadTable);
+            }
+
+            /// Upload image stack payloads (concatenated) plus a per-resource offset table.
+            void createImagePayloads(wgpu::Device const & device,
+                                     std::vector<std::vector<float>> const & imagePayloadTable)
+            {
+                std::vector<std::uint32_t> offsetTable(imagePayloadTable.size() * 2u, 0u);
+                std::size_t totalFloats = 0u;
+                for (std::size_t slot = 0u; slot < imagePayloadTable.size(); ++slot)
+                {
+                    auto const & payload = imagePayloadTable[slot];
+                    if (payload.empty())
+                    {
+                        continue;
+                    }
+                    if (totalFloats > std::numeric_limits<std::uint32_t>::max() ||
+                        payload.size() > std::numeric_limits<std::uint32_t>::max() - totalFloats)
+                    {
+                        throw std::length_error("WebGPU image payload table exceeds 32-bit addressing");
+                    }
+                    offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalFloats);
+                    offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
+                    totalFloats += payload.size();
+                }
+
+                if (totalFloats == 0u)
+                {
+                    return;
+                }
+
+                m_imagePayloadData.clear();
+                m_imagePayloadData.reserve(totalFloats);
+                for (auto const & payload : imagePayloadTable)
+                {
+                    m_imagePayloadData.insert(m_imagePayloadData.end(), payload.begin(), payload.end());
+                }
+                m_imageOffsetTableData = std::move(offsetTable);
+
+                wgpu::BufferDescriptor payloadDescriptor;
+                payloadDescriptor.label = "Gladius SDF evaluation image payloads";
+                payloadDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                payloadDescriptor.size = m_imagePayloadData.size() * sizeof(float);
+                m_imagePayload = device.CreateBuffer(&payloadDescriptor);
+
+                wgpu::BufferDescriptor offsetDescriptor;
+                offsetDescriptor.label = "Gladius SDF evaluation image offset table";
+                offsetDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                offsetDescriptor.size = m_imageOffsetTableData.size() * sizeof(std::uint32_t);
+                m_imageOffsetTable = device.CreateBuffer(&offsetDescriptor);
+
+                if (!m_imagePayload || !m_imageOffsetTable)
+                {
+                    throw std::runtime_error("Unable to allocate WebGPU image payload buffers");
+                }
             }
 
             /// Upload beam lattice payloads (concatenated) plus a per-resource offset table.
@@ -212,6 +268,23 @@ namespace gladius::webgpu
             {
                 return m_beamOffsetTableData;
             }
+            [[nodiscard]] bool hasImagePayloads() const noexcept
+            {
+                return m_imagePayload && m_imageOffsetTable;
+            }
+            [[nodiscard]] wgpu::Buffer const & imagePayload() const noexcept { return m_imagePayload; }
+            [[nodiscard]] wgpu::Buffer const & imageOffsetTable() const noexcept
+            {
+                return m_imageOffsetTable;
+            }
+            [[nodiscard]] std::vector<float> const & imagePayloadData() const noexcept
+            {
+                return m_imagePayloadData;
+            }
+            [[nodiscard]] std::vector<std::uint32_t> const & imageOffsetTableData() const noexcept
+            {
+                return m_imageOffsetTableData;
+            }
 
             void write(wgpu::Queue const & queue,
                        EvaluationUniforms const & uniforms,
@@ -254,6 +327,10 @@ namespace gladius::webgpu
             wgpu::Buffer m_beamOffsetTable;
             std::vector<float> m_beamPayloadData;
             std::vector<std::uint32_t> m_beamOffsetTableData;
+            wgpu::Buffer m_imagePayload;
+            wgpu::Buffer m_imageOffsetTable;
+            std::vector<float> m_imagePayloadData;
+            std::vector<std::uint32_t> m_imageOffsetTableData;
         };
     }
 
@@ -313,7 +390,8 @@ namespace gladius::webgpu
                        positions.size(),
                        request.parameterValues.size(),
                        request.meshPayloadTable,
-                       request.beamPayloadTable);
+                       request.beamPayloadTable,
+                       request.imagePayloadTable);
         buffers.write(m_context->getQueue(),
                       EvaluationUniforms{request.isoValue,
                                          static_cast<std::uint32_t>(positions.size()),
@@ -346,6 +424,18 @@ namespace gladius::webgpu
                                               buffers.beamOffsetTableData().size() * sizeof(std::uint32_t));
         }
 
+        if (buffers.hasImagePayloads())
+        {
+            m_context->getQueue().WriteBuffer(buffers.imagePayload(),
+                                              0u,
+                                              buffers.imagePayloadData().data(),
+                                              buffers.imagePayloadData().size() * sizeof(float));
+            m_context->getQueue().WriteBuffer(buffers.imageOffsetTable(),
+                                              0u,
+                                              buffers.imageOffsetTableData().data(),
+                                              buffers.imageOffsetTableData().size() * sizeof(std::uint32_t));
+        }
+
         wgpu::ShaderSourceWGSL wgsl;
         wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
         wgpu::ShaderModuleDescriptor shaderDescriptor;
@@ -372,6 +462,7 @@ namespace gladius::webgpu
 
         bool const hasMeshPayloads = buffers.hasMeshPayloads();
         bool const hasBeamPayloads = buffers.hasBeamPayloads();
+        bool const hasImagePayloads = buffers.hasImagePayloads();
         wgpu::BindGroupLayoutEntry meshBindings[2]{};
         if (hasMeshPayloads)
         {
@@ -398,6 +489,19 @@ namespace gladius::webgpu
             beamBindings[1].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
         }
 
+        wgpu::BindGroupLayoutEntry imageBindings[2]{};
+        if (hasImagePayloads)
+        {
+            imageBindings[0].binding = 8u;
+            imageBindings[0].visibility = wgpu::ShaderStage::Compute;
+            imageBindings[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+            imageBindings[0].buffer.minBindingSize = sizeof(float);
+            imageBindings[1].binding = 9u;
+            imageBindings[1].visibility = wgpu::ShaderStage::Compute;
+            imageBindings[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+            imageBindings[1].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+        }
+
         std::vector<wgpu::BindGroupLayoutEntry> allBindings(bindings, bindings + std::size(bindings));
         if (hasMeshPayloads)
         {
@@ -408,6 +512,11 @@ namespace gladius::webgpu
         {
             allBindings.push_back(beamBindings[0]);
             allBindings.push_back(beamBindings[1]);
+        }
+        if (hasImagePayloads)
+        {
+            allBindings.push_back(imageBindings[0]);
+            allBindings.push_back(imageBindings[1]);
         }
 
         wgpu::BindGroupLayoutDescriptor layoutDescriptor;
@@ -468,6 +577,21 @@ namespace gladius::webgpu
             offsetEntry.binding = 7u;
             offsetEntry.buffer = buffers.beamOffsetTable();
             offsetEntry.size = buffers.beamOffsetTableData().size() * sizeof(std::uint32_t);
+            allEntries.push_back(offsetEntry);
+        }
+
+        if (hasImagePayloads)
+        {
+            wgpu::BindGroupEntry payloadEntry{};
+            payloadEntry.binding = 8u;
+            payloadEntry.buffer = buffers.imagePayload();
+            payloadEntry.size = buffers.imagePayloadData().size() * sizeof(float);
+            allEntries.push_back(payloadEntry);
+
+            wgpu::BindGroupEntry offsetEntry{};
+            offsetEntry.binding = 9u;
+            offsetEntry.buffer = buffers.imageOffsetTable();
+            offsetEntry.size = buffers.imageOffsetTableData().size() * sizeof(std::uint32_t);
             allEntries.push_back(offsetEntry);
         }
 

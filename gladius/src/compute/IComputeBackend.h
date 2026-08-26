@@ -77,6 +77,9 @@ namespace gladius::compute
         /// Beam lattice payloads indexed by beam resource id (empty slots = none).
         /// Only used when the shader source was composed with beam support.
         std::vector<std::vector<float>> beamPayloadTable;
+        /// Image stack payloads indexed by image resource id (empty slots = none).
+        /// Only used when the shader source was composed with image support.
+        std::vector<std::vector<float>> imagePayloadTable;
     };
 
     /**
@@ -103,24 +106,24 @@ namespace gladius::compute
         [[nodiscard]] virtual std::string getErrorMessage() const = 0;
     };
 
-        /**
-         * @brief Represents a headless frame render and owns its asynchronous completion state.
-         */
-        class IFrameSubmission
+    /**
+     * @brief Represents a headless frame render and owns its asynchronous completion state.
+     */
+    class IFrameSubmission
+    {
+      public:
+        virtual ~IFrameSubmission() = default;
+
+        /// @brief Advance backend callbacks without blocking the calling thread.
+        virtual void progress() noexcept
         {
-            public:
-                virtual ~IFrameSubmission() = default;
+        }
 
-                /// @brief Advance backend callbacks without blocking the calling thread.
-                virtual void progress() noexcept
-                {
-                }
-
-                [[nodiscard]] virtual ComputeCompletionStatus getStatus() const noexcept = 0;
-                virtual void wait() = 0;
-                [[nodiscard]] virtual std::optional<FrameResult> takeResult() = 0;
-                [[nodiscard]] virtual std::string getErrorMessage() const = 0;
-        };
+        [[nodiscard]] virtual ComputeCompletionStatus getStatus() const noexcept = 0;
+        virtual void wait() = 0;
+        [[nodiscard]] virtual std::optional<FrameResult> takeResult() = 0;
+        [[nodiscard]] virtual std::string getErrorMessage() const = 0;
+    };
 
     /**
      * @brief Physical compute backend interface for API-independent compute operations.

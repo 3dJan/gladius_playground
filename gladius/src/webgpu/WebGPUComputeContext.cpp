@@ -166,7 +166,11 @@ namespace gladius::webgpu
     void WebGPUComputeContext::setUncapturedError(wgpu::ErrorType const type,
                                                    wgpu::StringView const message)
     {
-        m_errorMessage = "WebGPU error (" + std::to_string(static_cast<unsigned int>(type)) + "): " +
-                         toString(message);
+        if (!m_errorMessage.empty())
+        {
+            m_errorMessage += '\n';
+        }
+        m_errorMessage += "WebGPU error (" + std::to_string(static_cast<unsigned int>(type)) + "): " +
+                          toString(message);
     }
 }
