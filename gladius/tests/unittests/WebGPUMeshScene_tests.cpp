@@ -2,7 +2,9 @@
 #include "compute/RenderSceneSnapshot.h"
 #include "testhelper.h"
 #include "webgpu/WebGPUComputeRenderer.h"
+#include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUFrameShaderComposer.h"
+#include "webgpu/WebGPUSdfShaderComposer.h"
 
 #include <BeamLatticeResource.h>
 #include <Document.h>
@@ -200,6 +202,55 @@ namespace gladius_tests
     }
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
+    TEST_F(WebGPUMeshScene_Test, ContourBeamOnlyScene_WithWebGpu_ProducesClosedContour)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        auto const snapshot = createBeamOnlySnapshot(5u);
+        ASSERT_TRUE(snapshot.isValid());
+
+        webgpu::WebGPUContourGenerator generator;
+        if (!generator.isAvailable())
+        {
+            GTEST_SKIP() << "WebGPU device unavailable";
+        }
+
+        compute::SdfEvaluationRequest evaluationRequest;
+        evaluationRequest.shaderSource =
+          webgpu::WebGPUSdfShaderComposer::composeWithResourceSupport(
+            snapshot.analyticEvaluatorWgsl, false, true, false);
+        evaluationRequest.parameterValues = snapshot.parameterValues;
+        for (auto const & beam : snapshot.beamLatticeResources)
+        {
+            evaluationRequest.beamPayloadTable.push_back(beam.data);
+        }
+
+        auto const contours = generator.generateAdaptiveContours(
+          evaluationRequest,
+          webgpu::ContourGridRequest{.zHeight_mm = 0.0f,
+                                     .clippingArea = {-1.0f, -1.0f, 11.0f, 1.0f},
+                                     .width = 241,
+                                     .height = 41,
+                                     .minFeatureSize_mm = 0.1f,
+                                     .useAdaptiveContour = true},
+          std::make_shared<events::Logger>());
+
+        ASSERT_FALSE(contours.empty());
+        EXPECT_TRUE(std::any_of(contours.begin(),
+                                contours.end(),
+                                [](PolyLine const & contour)
+                                {
+                                    return contour.isClosed &&
+                                           contour.vertices.size() >= 4u &&
+                                           contour.contourMode !=
+                                             ContourMode::ExcludeFromSlice &&
+                                           std::abs(contour.area) > 0.0f;
+                                }));
+    }
+
     TEST_F(WebGPUMeshScene_Test, RenderBeamOnlyScene_WithWebGpu_ProducesShadedPixels)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)

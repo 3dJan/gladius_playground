@@ -72,6 +72,7 @@ namespace gladius::ui
         m_neutralModelBounds.reset();
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
+        m_neutralSliceHeightInitialized = false;
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
@@ -99,6 +100,7 @@ namespace gladius::ui
         m_neutralModelBounds.reset();
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
+        m_neutralSliceHeightInitialized = false;
         m_document = doc;
         m_renderBackendSession.reset();
         m_neutralViewportWidth = 0u;
@@ -425,8 +427,6 @@ namespace gladius::ui
         }
 
         m_cameraInputInvalidatedThisFrame = false;
-        processNeutralCameraInput(contentMin, contentMax);
-        render(m_renderWindowState);
 
         auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
         if (textureId != 0u)
@@ -434,6 +434,14 @@ namespace gladius::ui
             ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
                          {m_renderWindowSize_px.x, m_renderWindowSize_px.y});
         }
+
+        slider(contentMin, contentMax);
+
+        if (!ImGui::IsAnyItemActive())
+        {
+            processNeutralCameraInput(contentMin, contentMax);
+        }
+        render(m_renderWindowState);
 
         ImGui::End();
         ImGui::PopStyleVar();
@@ -850,7 +858,6 @@ namespace gladius::ui
     void RenderWindow::renderBusyOverlay() { }
     void RenderWindow::renderExistingFrame(std::shared_ptr<GLImageBuffer> const &) { }
     void RenderWindow::showProgressSpinner(ImVec2 const &, char const *, ImVec4 const &) { }
-    void RenderWindow::slider(ImVec2 const &, ImVec2 const &) { }
     void RenderWindow::initializeAsyncRendering() { m_asyncInitialized = true; }
     void RenderWindow::renderSync(RenderWindowState &) { }
     void RenderWindow::renderAsync(RenderWindowState &) { }
@@ -996,6 +1003,11 @@ namespace gladius::ui
         }
 
         return std::nullopt;
+    }
+
+    std::optional<compute::RenderBounds> RenderWindow::getCurrentModelBounds() const
+    {
+        return getNeutralModelBounds();
     }
 
     bool RenderWindow::updateCameraCentering()

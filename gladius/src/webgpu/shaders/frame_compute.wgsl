@@ -60,9 +60,10 @@ fn has_model_bounds() -> bool {
 }
 
 fn clipping_box_distance(position: vec3<f32>, slice_height: f32) -> f32 {
+    let maximum_z = max(slice_height - 0.1f, frame.clipping_box_min.z);
     let maximum = vec3<f32>(frame.clipping_box_max.x,
                             frame.clipping_box_max.y,
-                            slice_height - 0.1f);
+                            maximum_z);
     return bounding_box_distance(position, frame.clipping_box_min.xyz, maximum);
 }
 
@@ -140,7 +141,7 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
     var sample = SceneSample(model.w, model.xyz, 1.0f);
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;
-    if ((flags & RF_CUT_OFF_OBJECT) != 0u && slice_height > 0.0001f) {
+    if ((flags & RF_CUT_OFF_OBJECT) != 0u) {
         var clipping_distance = position.z - slice_height;
         if (has_model_bounds()) {
             clipping_distance = clipping_box_distance(position, slice_height);

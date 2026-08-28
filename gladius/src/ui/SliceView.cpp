@@ -4,13 +4,18 @@
 #include "../compute/ComputeCore.h"
 #endif
 
-#include "imgui.h"
-#include <fmt/format.h>
-
+#include "../Document.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
-#include "ContourExtractor.h"
 #include "GLView.h"
 #include "Widgets.h"
+
+#include "imgui.h"
+#include <fmt/format.h>
+#include <utility>
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+#include "ContourExtractor.h"
+#endif
 
 namespace gladius
 {
@@ -19,6 +24,11 @@ namespace gladius
 
 namespace gladius::ui
 {
+    SliceView::~SliceView()
+    {
+        waitForPendingContourGeneration();
+    }
+
     void SliceView::show()
     {
         m_visible = true;
@@ -39,6 +49,21 @@ namespace gladius::ui
         return ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) && isVisible();
     }
 
+    bool SliceView::isSlicingInProgress() const
+    {
+        return m_webGpuContourFuture.valid() &&
+               m_webGpuContourFuture.wait_for(std::chrono::milliseconds(0)) !=
+                 std::future_status::ready;
+    }
+
+    void SliceView::waitForPendingContourGeneration()
+    {
+        if (m_webGpuContourFuture.valid())
+        {
+            m_webGpuContourFuture.wait();
+        }
+    }
+
     bool SliceView::render(gladius::ComputeCore & core, GLView & view)
     {
         if (!isVisible())
@@ -50,25 +75,135 @@ namespace gladius::ui
 
     bool SliceView::render(Document & doc, GLView & view)
     {
-        // Document-based path is implemented in SliceViewWebGPU.cpp (only compiled
-        // without OpenCL). In OpenCL builds the core-based overload is used instead.
-        (void)doc;
-        (void)view;
-        return false;
+        m_document = &doc;
+        return renderImpl(nullptr, view);
     }
 
     void SliceView::setSliceHeight(float zHeight_mm)
     {
-        m_sliceZ_mm = zHeight_mm;
+        if (m_sliceZ_mm != zHeight_mm)
+        {
+            m_sliceZ_mm = zHeight_mm;
+            invalidateContours();
+        }
+    }
+
+    void SliceView::setModelBounds(std::optional<compute::RenderBounds> modelBounds)
+    {
+        bool const changed = m_modelBounds.has_value() != modelBounds.has_value() ||
+                             (m_modelBounds.has_value() &&
+                              (m_modelBounds->min != modelBounds->min ||
+                               m_modelBounds->max != modelBounds->max));
+        if (!changed)
+        {
+            return;
+        }
+
+        m_modelBounds = std::move(modelBounds);
+        ++m_modelBoundsGeneration;
+        invalidateContours();
     }
 
     void SliceView::invalidateContours()
     {
+        m_webGpuCacheValid = false;
         m_contoursNeedRefetch = true;
     }
 
     bool SliceView::renderImpl(ComputeCore * core, GLView & view)
     {
+        if (!isVisible())
+        {
+            return false;
+        }
+
+        if (core == nullptr && m_document != nullptr)
+        {
+            if (m_document->hasStructuralEditPending())
+            {
+                (void)m_document->dispatchStructuralUpdateIfReady();
+            }
+
+            if (m_webGpuContourFuture.valid() &&
+                m_webGpuContourFuture.wait_for(std::chrono::milliseconds(0)) ==
+                  std::future_status::ready)
+            {
+                try
+                {
+                    auto contours = m_webGpuContourFuture.get();
+                    bool const requestIsCurrent =
+                      m_webGpuPendingSliceZ_mm == m_sliceZ_mm &&
+                      m_webGpuPendingMinFeatureSize_mm == m_minFeatureSize_mm &&
+                      m_webGpuPendingAdaptiveContour == m_useAdaptiveContour &&
+                      m_webGpuPendingStructuralEditEpoch == m_document->structuralEditEpoch() &&
+                      m_webGpuPendingBoundsGeneration == m_modelBoundsGeneration;
+                    if (requestIsCurrent)
+                    {
+                        m_contours = std::move(contours);
+                        m_webGpuCacheValid = true;
+                        m_contoursNeedRefetch = false;
+                        m_webGpuCachedSliceZ_mm = m_webGpuPendingSliceZ_mm;
+                        m_webGpuCachedMinFeatureSize_mm = m_webGpuPendingMinFeatureSize_mm;
+                        m_webGpuCachedAdaptiveContour = m_webGpuPendingAdaptiveContour;
+                        m_webGpuCachedStructuralEditEpoch =
+                          m_webGpuPendingStructuralEditEpoch;
+
+                        if (m_contours->empty())
+                        {
+                            m_contourWasEmpty = true;
+                        }
+                    }
+                }
+                catch (std::exception const & e)
+                {
+                    if (m_document->getSharedLogger())
+                    {
+                        m_document->getSharedLogger()->addEvent(
+                          {std::string("Slice preview (WebGPU) failed: ") + e.what(),
+                           events::Severity::Error});
+                    }
+                }
+            }
+
+            uint64_t const structuralEditEpoch = m_document->structuralEditEpoch();
+            bool const paramsChanged =
+              !m_webGpuCacheValid || m_webGpuCachedSliceZ_mm != m_sliceZ_mm ||
+              m_webGpuCachedMinFeatureSize_mm != m_minFeatureSize_mm ||
+              m_webGpuCachedAdaptiveContour != m_useAdaptiveContour ||
+              m_webGpuCachedStructuralEditEpoch != structuralEditEpoch;
+            auto const now = std::chrono::steady_clock::now();
+            auto const elapsed = now - m_lastWebGpuGeneration;
+            constexpr auto throttleInterval = std::chrono::milliseconds(100);
+            if (paramsChanged && m_modelBounds.has_value() &&
+                !m_webGpuContourFuture.valid() &&
+                (m_webGpuCacheValid || elapsed > throttleInterval))
+            {
+                nodes::SliceParameter sliceParameter;
+                sliceParameter.zHeight_mm = m_sliceZ_mm;
+                sliceParameter.useAdaptiveContour = m_useAdaptiveContour;
+                sliceParameter.minFeatureSize_mm = m_minFeatureSize_mm;
+
+                m_webGpuPendingSliceZ_mm = m_sliceZ_mm;
+                m_webGpuPendingMinFeatureSize_mm = m_minFeatureSize_mm;
+                m_webGpuPendingAdaptiveContour = m_useAdaptiveContour;
+                m_webGpuPendingStructuralEditEpoch = structuralEditEpoch;
+                                m_webGpuPendingBoundsGeneration = m_modelBoundsGeneration;
+                m_webGpuCacheValid = false;
+                m_lastWebGpuGeneration = now;
+
+                Document * const document = m_document;
+                float const sliceZ = m_sliceZ_mm;
+                                auto const modelBounds = m_modelBounds;
+                m_webGpuContourFuture = std::async(
+                  std::launch::async,
+                                    [document, sliceZ, sliceParameter, modelBounds]()
+                                    {
+                                            return document->generateContourWebGpu(
+                                                sliceZ, sliceParameter, modelBounds);
+                                    });
+            }
+        }
+
         bool windowIsActuallyVisible = false;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0., 0.));
         if (ImGui::Begin("Slice", &m_visible, ImGuiWindowFlags_MenuBar))
@@ -95,8 +230,13 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Checkbox("Adaptive contour", &m_useAdaptiveContour))
                 {
-                    core->invalidateContourCache();
-                    m_contoursNeedRefetch = true;
+#if defined(GLADIUS_ENABLE_OPENCL)
+                    if (core != nullptr)
+                    {
+                        core->invalidateContourCache();
+                    }
+#endif
+                    invalidateContours();
                 }
                 if (m_useAdaptiveContour)
                 {
@@ -107,8 +247,13 @@ namespace gladius::ui
                     if (ImGui::InputFloat("Min feature (mm)", &m_minFeatureSize_mm, 0.0f, 0.0f, "%.3f"))
                     {
                         m_minFeatureSize_mm = std::max(0.01f, m_minFeatureSize_mm);
-                        core->invalidateContourCache();
-                        m_contoursNeedRefetch = true;
+#if defined(GLADIUS_ENABLE_OPENCL)
+                        if (core != nullptr)
+                        {
+                            core->invalidateContourCache();
+                        }
+#endif
+                        invalidateContours();
                     }
                 }
             }
@@ -334,7 +479,8 @@ namespace gladius::ui
                 }
             };
 
-            if (!core->isSlicingInProgress())
+#if defined(GLADIUS_ENABLE_OPENCL)
+            if (core != nullptr && !core->isSlicingInProgress())
             {
                 auto sliceParameter = contourOnlyParameter();
                 sliceParameter.zHeight_mm = core->getSliceHeight();
@@ -346,7 +492,8 @@ namespace gladius::ui
                 }
             }
 
-            if ((!m_contours.has_value() || m_contoursNeedRefetch) && !core->isSlicingInProgress())
+            if (core != nullptr && (!m_contours.has_value() || m_contoursNeedRefetch) &&
+                !core->isSlicingInProgress())
             {
                 auto const & contourExtractor = core->getContour();
                 std::lock_guard<std::mutex> lockContourExtractor(core->getContourExtractorMutex());
@@ -359,6 +506,7 @@ namespace gladius::ui
                     m_contourWasEmpty = true;
                 }
             }
+#endif
 
             if (m_contours.has_value())
             {
@@ -380,31 +528,48 @@ namespace gladius::ui
 
                 if (m_renderNormals)
                 {
-                    auto const & normals = core->getContour()->getNormals();
-
-                    ImGuiCol constexpr lightBlue IM_COL32(200, 200, 255, 255);
-
-                    for (const auto & [normal, position, successor] : normals)
+#if defined(GLADIUS_ENABLE_OPENCL)
+                    if (core != nullptr)
                     {
-                        drawLine(position, position + 0.2f * normal, lightBlue, 1.f);
+                        auto const & normals = core->getContour()->getNormals();
+
+                        ImGuiCol constexpr lightBlue IM_COL32(200, 200, 255, 255);
+
+                        for (const auto & [normal, position, successor] : normals)
+                        {
+                            drawLine(position, position + 0.2f * normal, lightBlue, 1.f);
+                        }
                     }
+#endif
                 }
 
                 if (m_renderSourceVertices)
                 {
-                    auto const vertices = core->getContour()->getSourceVertices();
-                    for (auto const & vertex : vertices)
+#if defined(GLADIUS_ENABLE_OPENCL)
+                    if (core != nullptr)
                     {
-                        ImGuiCol const lightGreen = IM_COL32(static_cast<char>(5.f * vertex.w),
-                                                             static_cast<char>(20.f * vertex.w),
-                                                             static_cast<char>(5.f * vertex.w),
-                                                             255);
-                        ImGuiCol constexpr lightRed = IM_COL32(250, 150, 150, 255);
+                        auto const vertices = core->getContour()->getSourceVertices();
+                        for (auto const & vertex : vertices)
+                        {
+                            ImGuiCol const lightGreen = IM_COL32(
+                              static_cast<char>(5.f * vertex.w),
+                              static_cast<char>(20.f * vertex.w),
+                              static_cast<char>(5.f * vertex.w),
+                              255);
+                            ImGuiCol constexpr lightRed = IM_COL32(250, 150, 150, 255);
 
-                        drawList->AddCircleFilled(worldToCanvasPos(Vector2{vertex.x, vertex.y}),
-                                                  vertex.w * vertex.w,
-                                                  (vertex.z < FLT_MAX) ? lightGreen : lightRed);
+                            drawList->AddCircleFilled(
+                              worldToCanvasPos(Vector2{vertex.x, vertex.y}),
+                              vertex.w * vertex.w,
+                              (vertex.z < FLT_MAX) ? lightGreen : lightRed);
+                        }
                     }
+#endif
+                }
+
+                if (core == nullptr && (m_renderNormals || m_renderSourceVertices))
+                {
+                    ImGui::TextDisabled("Normals / source vertices require the OpenCL backend");
                 }
 
                 if (m_distanceMeasurement.start.has_value() &&
@@ -435,7 +600,15 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar();
-        if (core->isSlicingInProgress() || core->isAnyCompilationInProgressNonBlocking())
+        bool showProgress = core == nullptr && (!m_webGpuCacheValid || isSlicingInProgress());
+    #if defined(GLADIUS_ENABLE_OPENCL)
+        if (core != nullptr)
+        {
+            showProgress =
+              core->isSlicingInProgress() || core->isAnyCompilationInProgressNonBlocking();
+        }
+    #endif
+        if (showProgress)
         {
             view.startAnimationMode();
             ImGuiWindowFlags window_flags =

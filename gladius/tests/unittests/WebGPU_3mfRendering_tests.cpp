@@ -15,7 +15,9 @@
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <numeric>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -337,6 +339,82 @@ namespace gladius::tests
         auto const clippedPixels = countNonBackground(clippedResult->pixels);
         EXPECT_GT(unboundedPixels, 16u);
         EXPECT_LT(clippedPixels, unboundedPixels / 4u);
+    }
+
+    TEST(WebGPU3mfRendering, CutoffAtNegativeHeight_ClipsOnlyWhenEnabled)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        constexpr std::string_view evaluator = R"(
+        fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
+            let distance = length(position - vec3<f32>(50.0, 50.0, -10.0)) - 20.0;
+            return vec4<f32>(vec3<f32>(0.8, 0.4, 0.2), distance);
+        }
+        )";
+
+        auto createRequest = [&evaluator](float const sliceHeight, std::uint32_t const flags)
+        {
+            return compute::FrameRequest{.width = 64u,
+                                          .height = 64u,
+                                          .firstRow = 0u,
+                                          .endRow = 64u,
+                                          .eyePosition = {50.0f, 50.0f, 100.0f},
+                                          .forwardDirection = {0.0f, 0.0f, -1.0f},
+                                          .rightDirection = {1.0f, 0.0f, 0.0f},
+                                          .upDirection = {0.0f, 1.0f, 0.0f},
+                                          .horizontalScale = 0.5f,
+                                          .verticalScale = 0.5f,
+                                          .maxRaySteps = 512u,
+                                          .maxTravelDistance = 300.0f,
+                                          .sliceHeight = sliceHeight,
+                                          .renderingFlags = flags,
+                                          .modelBounds = compute::RenderBounds{
+                                            .min = {0.0f, 0.0f, -40.0f},
+                                            .max = {100.0f, 100.0f, 20.0f}},
+                                          .shaderSource =
+                                            webgpu::WebGPUFrameShaderComposer::compose(evaluator)};
+        };
+
+        webgpu::WebGPUComputeBackend backend;
+        ASSERT_TRUE(backend.isAvailable());
+        auto render = [&backend, &createRequest](float const sliceHeight,
+                                                  std::uint32_t const flags)
+        {
+            auto submission = backend.submitFrame(createRequest(sliceHeight, flags));
+            submission->wait();
+            EXPECT_EQ(submission->getStatus(), compute::ComputeCompletionStatus::Succeeded)
+              << submission->getErrorMessage();
+            return submission->takeResult();
+        };
+
+        constexpr std::uint32_t baseFlags = RF_DISABLE_ADAPTIVE_OMEGA;
+        auto unboundedNegative = render(-25.0f, baseFlags);
+        auto unboundedPositive = render(10.0f, baseFlags);
+        auto clippedNegative = render(-25.0f, baseFlags | RF_CUT_OFF_OBJECT);
+        auto clippedZero = render(0.0f, baseFlags | RF_CUT_OFF_OBJECT);
+        ASSERT_TRUE(unboundedNegative.has_value());
+        ASSERT_TRUE(unboundedPositive.has_value());
+        ASSERT_TRUE(clippedNegative.has_value());
+        ASSERT_TRUE(clippedZero.has_value());
+
+        EXPECT_EQ(unboundedNegative->pixels, unboundedPositive->pixels);
+        auto const countChangedPixels = [](std::vector<std::uint32_t> const & lhs,
+                                           std::vector<std::uint32_t> const & rhs)
+        {
+            return std::inner_product(
+              lhs.begin(),
+              lhs.end(),
+              rhs.begin(),
+              std::size_t{0u},
+              std::plus<>(),
+              [](std::uint32_t const lhsPixel, std::uint32_t const rhsPixel)
+              { return lhsPixel != rhsPixel ? 1u : 0u; });
+        };
+        EXPECT_GT(countChangedPixels(unboundedNegative->pixels, clippedNegative->pixels), 16u);
+        EXPECT_GT(countChangedPixels(unboundedNegative->pixels, clippedZero->pixels), 16u);
     }
 
     TEST(WebGPU3mfRendering, FieldOverlayUsesModelBoundingBox)

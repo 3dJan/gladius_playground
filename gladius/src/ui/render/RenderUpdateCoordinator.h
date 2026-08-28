@@ -191,6 +191,20 @@ namespace gladius::ui::async_rendering
             return decision;
         }
 
+        /// @brief Notify that frame-only rendering settings changed.
+        ///
+        /// Slice height, clipping flags, and visualization flags affect frame evaluation but do
+        /// not change the materialized scene, parameter payload, bounds, or precomputed SDF.
+        [[nodiscard]] RenderUpdateDecision notifyRenderSettingsChanged()
+        {
+            RenderUpdateDecision decision{};
+            ++m_latestStamp.qualityEpoch;
+            m_interactionState = RenderInteractionState::Static;
+            releaseStaleInteractiveInFlight();
+            scheduleStaticCatchUp(decision);
+            return decision;
+        }
+
         [[nodiscard]] RenderUpdateDecision notifyParameterChanged(bool interactionActive)
         {
             RenderUpdateDecision decision{};

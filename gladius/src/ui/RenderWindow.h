@@ -74,6 +74,15 @@ namespace gladius::ui
             m_renderSettingsChangedCallback = std::move(callback);
         }
 
+        /// @brief Set the callback invoked when the preview slice height changes.
+        void setSliceHeightChangedCallback(std::function<void(float)> callback)
+        {
+          m_sliceHeightChangedCallback = std::move(callback);
+        }
+
+        /// @brief Update the neutral-backend slice height and request a fresh preview.
+        void setNeutralSliceHeight(float sliceHeight);
+
         /**
          * @brief Set the render quality used for current and interactive frames.
          * @param quality Render quality multiplier.
@@ -119,6 +128,9 @@ namespace gladius::ui
         void updateCamera();
         bool isRenderingInProgress() const;
 
+        /// @brief Return the latest authoritative bounds produced by the active neutral backend.
+        [[nodiscard]] std::optional<compute::RenderBounds> getCurrentModelBounds() const;
+
         /// @brief Returns a snapshot of the current HQ progressive render progress.
         ///
         /// Used by the status bar to visualize progressive rendering, including when a
@@ -127,6 +139,8 @@ namespace gladius::ui
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
         void invalidateViewDueToParameterChange();
+        /// @brief Invalidate frame-only settings without rebuilding the WebGPU scene or bounds.
+        void invalidateViewDueToRenderSettingsChange();
 
         /// Suppress HQ front-buffer display until the next full invalidation.
         /// Lightweight alternative to invalidateView() that does not bump the epoch.
@@ -332,6 +346,7 @@ namespace gladius::ui
         std::shared_ptr<ShortcutManager> m_shortcutManager;
         gladius::ConfigManager * m_configManager{nullptr};
         std::function<void()> m_renderSettingsChangedCallback;
+        std::function<void(float)> m_sliceHeightChangedCallback;
 
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
@@ -437,9 +452,12 @@ namespace gladius::ui
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         compute::RenderSettingsSnapshot m_neutralRenderSettings{
+          .flags = RF_SHOW_BUILDPLATE | RF_SHOW_FIELD | RF_CUT_OFF_OBJECT |
+                   RF_SHOW_COORDINATE_SYSTEM,
           .normalOffset = 0.0001f,
           .maxRaySteps = 2000u,
           .maxTravelDistance = 100000.0f};
+        bool m_neutralSliceHeightInitialized{false};
         async_rendering::NeutralRenderScheduler m_neutralRenderScheduler{
           [this](async_rendering::RenderTaskRequest const & task)
             -> std::optional<compute::RenderRequest> {

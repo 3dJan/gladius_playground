@@ -104,7 +104,10 @@ namespace gladius::ui
         m_mainView.setRequestCloseCallBack([&]() { close(); });
     }
 
-    MainWindow::~MainWindow() = default;
+    MainWindow::~MainWindow()
+    {
+        m_sliceView.waitForPendingContourGeneration();
+    }
 
     void MainWindow::setup(std::shared_ptr<ComputeCore> core,
                            std::shared_ptr<Document> doc,
@@ -138,6 +141,14 @@ namespace gladius::ui
                   nullptr, &m_mainView, m_shortcutManager, m_configManager, m_runtime.get());
             #endif
         m_renderWindow.setRenderSettingsChangedCallback([this]() { saveRenderSettings(); });
+                m_renderWindow.setSliceHeightChangedCallback(
+                    [this](float const sliceHeight)
+                    {
+                            m_uiSliceHeight_mm = sliceHeight;
+                            m_uiSliceHeightInitialized = true;
+                            m_sliceView.setSliceHeight(sliceHeight);
+                            m_contoursDirty = true;
+                    });
         m_renderWindow.setDocument(m_doc.get());
         m_renderWindow.setExportState(&m_exportState);
             #if defined(GLADIUS_ENABLE_OPENCL)
@@ -328,7 +339,7 @@ namespace gladius::ui
                     {
                         settings.flags &= ~RF_SHOW_FIELD;
                     }
-                    m_renderWindow.invalidateViewDueToParameterChange();
+                    m_renderWindow.invalidateViewDueToRenderSettingsChange();
                     saveRenderSettings();
                 }
             }
@@ -388,26 +399,31 @@ namespace gladius::ui
             ImGui::Separator();
         }
 
-    #if defined(GLADIUS_ENABLE_OPENCL)
-        if (!m_computeAvailable || !m_core)
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (!m_computeAvailable || !m_doc)
         {
             ImGui::End();
             return;
         }
 
-        auto z = m_core->getSliceHeight();
-        if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
+        if (m_core)
         {
-            m_core->setSliceHeight(z);
-        }
-        bool tmp_m_dirty = m_dirty.load();
+            auto z = m_core->getSliceHeight();
+            if (ImGui::SliderFloat("Slice Position [mm]", &z, -20.f, 300.))
+            {
+                m_core->setSliceHeight(z);
+            }
+            bool tmp_m_dirty = m_dirty.load();
 
-        ImGui::Checkbox("m_dirty", &tmp_m_dirty);
-        ImGui::Checkbox("m_moving", &m_moving);
+            ImGui::Checkbox("m_dirty", &tmp_m_dirty);
+            ImGui::Checkbox("m_moving", &m_moving);
 
-        if (ImGui::Button("Show Events"))
-        {
-            m_logView.show();
+            if (ImGui::Button("Show Events"))
+            {
+                m_logView.show();
+            }
+            ImGui::End();
+            return;
         }
 #else
         if (!m_computeAvailable || !m_doc)
@@ -415,25 +431,67 @@ namespace gladius::ui
             ImGui::End();
             return;
         }
+#endif
 
-        // WebGPU backend: derive the slider range from the model bounding box.
-        auto const bb = m_doc->computeBoundingBox();
-        float zMin = (bb.min.z < FLT_MAX) ? bb.min.z : 0.f;
-        float zMax = (bb.max.z > -FLT_MAX) ? bb.max.z : 100.f;
+        auto const documentIdentity = m_doc->documentIdentity();
+        auto const structuralEditEpoch = m_doc->structuralEditEpoch();
+        if (m_uiSliceBoundsDocumentIdentity != documentIdentity ||
+            m_uiSliceBoundsStructuralEpoch != structuralEditEpoch)
+        {
+            m_uiSliceBounds.reset();
+            m_uiSliceBoundsDocumentIdentity = documentIdentity;
+            m_uiSliceBoundsStructuralEpoch = structuralEditEpoch;
+            m_uiSliceHeightInitialized = false;
+        }
+
+        if (!m_uiSliceBounds.has_value())
+        {
+            if (auto const bounds = m_renderWindow.getCurrentModelBounds();
+                bounds.has_value() && bounds->isValid())
+            {
+                m_uiSliceBounds = bounds;
+            }
+        }
+
+        float zMin = 0.f;
+        float zMax = 100.f;
+        if (m_uiSliceBounds.has_value())
+        {
+            constexpr float boundsMargin_mm = 1.0f;
+            zMin = m_uiSliceBounds->min[2] - boundsMargin_mm;
+            zMax = m_uiSliceBounds->max[2] + boundsMargin_mm;
+        }
+        else
+        {
+            auto const bb = m_doc->computeBoundingBox();
+            zMin = (bb.min.z < FLT_MAX) ? bb.min.z : 0.f;
+            zMax = (bb.max.z > -FLT_MAX) ? bb.max.z : 100.f;
+        }
         zMin = std::min(zMin, -1.f);
         zMax = std::max(zMax, zMin + 1.f);
 
+        float const previousSliceHeight = m_uiSliceHeight_mm;
+        if (!m_uiSliceHeightInitialized)
+        {
+            m_uiSliceHeight_mm = (zMin + zMax) * 0.5f;
+            m_uiSliceHeightInitialized = true;
+        }
+        m_uiSliceHeight_mm = std::clamp(m_uiSliceHeight_mm, zMin, zMax);
+        bool sliceHeightChanged = m_uiSliceHeight_mm != previousSliceHeight;
+
         if (ImGui::SliderFloat("Slice Position [mm]", &m_uiSliceHeight_mm, zMin, zMax))
         {
-            m_sliceView.setSliceHeight(m_uiSliceHeight_mm);
-            m_contoursDirty = true;
+            sliceHeightChanged = true;
+        }
+        if (sliceHeightChanged)
+        {
+            m_renderWindow.setNeutralSliceHeight(m_uiSliceHeight_mm);
         }
 
         if (ImGui::Button("Show Events"))
         {
             m_logView.show();
         }
-#endif
         ImGui::End();
     }
 
@@ -1993,6 +2051,7 @@ namespace gladius::ui
             m_isSlicePreviewVisible = false;
             return;
         }
+        m_sliceView.setModelBounds(m_renderWindow.getCurrentModelBounds());
         m_isSlicePreviewVisible = m_sliceView.render(*m_doc, m_mainView);
 
         // Process slice window shortcuts if visible and hovered
@@ -2010,6 +2069,7 @@ namespace gladius::ui
                 m_isSlicePreviewVisible = false;
                 return;
             }
+            m_sliceView.setModelBounds(m_renderWindow.getCurrentModelBounds());
             m_isSlicePreviewVisible = m_sliceView.render(*m_doc, m_mainView);
         }
         else
@@ -2073,22 +2133,26 @@ namespace gladius::ui
 
     void MainWindow::updateContours()
     {
-#if !defined(GLADIUS_ENABLE_OPENCL)
-        // WebGPU path: contour regeneration is handled inside SliceView's
-        // document-based render loop; just forward invalidation requests.
         if (m_contoursDirty)
         {
-            m_sliceView.invalidateContours();
+#if defined(GLADIUS_ENABLE_OPENCL)
+            if (m_core)
+            {
+                if (!m_isSlicePreviewVisible)
+                {
+                    return;
+                }
+                m_core->invalidateContourCache();
+            }
+            else
+#endif
+            {
+                // WebGPU contour regeneration is handled inside SliceView's document-based
+                // render loop; forward invalidation even in an OpenCL-enabled mixed build.
+                m_sliceView.invalidateContours();
+            }
             m_contoursDirty = false;
         }
-#else
-        if (!m_core || !m_contoursDirty || !m_isSlicePreviewVisible)
-        {
-            return;
-        }
-        m_core->invalidateContourCache();
-        m_contoursDirty = false;
-#endif
     }
 
     void MainWindow::markFileAsChanged()
@@ -3424,10 +3488,15 @@ namespace gladius::ui
 
         if (!m_core)
         {
+            bool const contoursNeedUpdate = m_parameterDirty || m_contoursDirty;
             if (m_parameterDirty)
             {
                 m_doc->updateFlatAssembly();
                 m_renderWindow.invalidateViewDueToParameterChange();
+            }
+            if (contoursNeedUpdate)
+            {
+                m_sliceView.invalidateContours();
             }
             m_parameterDirty = false;
             m_contoursDirty = false;

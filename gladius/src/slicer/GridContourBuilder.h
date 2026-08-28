@@ -7,8 +7,23 @@
 
 #include <vector>
 
+namespace gladius
+{
+    class ContourExtractor;
+}
+
 namespace gladius::slicer
 {
+    struct ContourGridDefinition
+    {
+        float4 clippingArea{};
+        int width{};
+        int height{};
+    };
+
+    /// Build the canonical sampling lattice used by every adaptive contour backend.
+    [[nodiscard]] ContourGridDefinition makeAdaptiveContourGrid(float4 modelBounds);
+
     /// A dense 2D grid of signed distance samples covering a clipping area.
     ///
     /// Values are stored row-major with node (x, y) located at
@@ -57,6 +72,11 @@ namespace gladius::slicer
                                                      events::SharedLogger const & logger);
 
         /// Adaptive path: Morton quadtree refinement over a bilinear sampler of the grid.
+        void extractAdaptiveContours(SdfGrid const & grid,
+                                     float minFeatureSize_mm,
+                                     ContourExtractor & contourExtractor);
+
+        /// Adaptive path using an internally managed contour extractor.
         [[nodiscard]] PolyLines extractAdaptiveContours(SdfGrid const & grid,
                                                         float minFeatureSize_mm,
                                                         events::SharedLogger const & logger);

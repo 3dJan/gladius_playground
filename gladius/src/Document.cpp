@@ -3,6 +3,7 @@
 #include "io/3mf/Lib3mfLoader.h"
 
 #include "BackupManager.h"
+#include "ContourExtractor.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
 #include "MeshBVH.h"
@@ -1681,7 +1682,10 @@ namespace gladius
     #endif
     }
 
-    PolyLines Document::generateContourWebGpu(float z, nodes::SliceParameter const & sliceParameter) const
+        PolyLines Document::generateContourWebGpu(
+            float z,
+            nodes::SliceParameter const & sliceParameter,
+            std::optional<compute::RenderBounds> modelBounds) const
     {
 #if !defined(GLADIUS_ENABLE_WEBGPU)
         (void) z;
@@ -1707,7 +1711,7 @@ namespace gladius
         // Lower the flattened model into a WGSL evaluator and compose it with the
         // resource modules referenced by the snapshot.
         auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
-          *flatAssembly->assemblyModel(), 1u);
+                    *flatAssembly->assemblyModel(), 1u, getResourceManager());
         if (!snapshot.isValid())
         {
             throw std::runtime_error("Failed to create analytic scene for contour generation");
@@ -1742,24 +1746,34 @@ namespace gladius
         gridRequest.useAdaptiveContour = sliceParameter.useAdaptiveContour;
         gridRequest.minFeatureSize_mm = sliceParameter.minFeatureSize_mm;
 
-        // Sample over the model bounds with padding so contours are not clipped.
-        constexpr float padding_mm = 2.0f;
-        BoundingBox const bbox = computeBoundingBox();
-        gridRequest.clippingArea = {bbox.min.x - padding_mm,
-                                    bbox.min.y - padding_mm,
-                                    bbox.max.x + padding_mm,
-                                    bbox.max.y + padding_mm};
+        float4 contourBounds{};
+        if (modelBounds.has_value() && modelBounds->isValid())
+        {
+            contourBounds = {modelBounds->min[0],
+                             modelBounds->min[1],
+                             modelBounds->max[0],
+                             modelBounds->max[1]};
+        }
+        else
+        {
+            BoundingBox const bbox = computeBoundingBox();
+            contourBounds = {bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y};
+        }
 
-        // Resolution: match the native slicer resolution (~0.1 mm cells), bounded.
-        auto const domainW = gridRequest.clippingArea.z - gridRequest.clippingArea.x;
-        auto const domainH = gridRequest.clippingArea.w - gridRequest.clippingArea.y;
-        constexpr float targetCellSize_mm = 0.1f;
-        gridRequest.width = static_cast<int>(std::clamp(
-          domainW / targetCellSize_mm + 1.0f, 32.0f, 2048.0f));
-        gridRequest.height = static_cast<int>(std::clamp(
-          domainH / targetCellSize_mm + 1.0f, 32.0f, 2048.0f));
+        auto const gridDefinition = slicer::makeAdaptiveContourGrid(contourBounds);
+        gridRequest.clippingArea = gridDefinition.clippingArea;
+        gridRequest.width = gridDefinition.width;
+        gridRequest.height = gridDefinition.height;
 
-        return generator.generateAdaptiveContours(baseRequest, gridRequest, getSharedLogger());
+        auto contours =
+          generator.generateAdaptiveContours(baseRequest, gridRequest, getSharedLogger());
+        if (sliceParameter.offset == 0.0f)
+        {
+            return contours;
+        }
+
+        ContourExtractor offsetGenerator(getSharedLogger());
+        return offsetGenerator.generateOffsetContours(sliceParameter.offset, contours);
 #endif
     }
 

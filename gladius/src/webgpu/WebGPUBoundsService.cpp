@@ -67,6 +67,18 @@ namespace gladius::webgpu
             }
         };
 
+        [[nodiscard]] std::vector<std::vector<float>> toPayloadTable(
+          std::vector<compute::MeshResourcePayload> const & resources)
+        {
+            std::vector<std::vector<float>> payloads;
+            payloads.reserve(resources.size());
+            for (auto const & resource : resources)
+            {
+                payloads.push_back(resource.data);
+            }
+            return payloads;
+        }
+
         [[nodiscard]] bool checkedProduct(std::size_t const left,
                                           std::size_t const right,
                                           std::size_t & result) noexcept
@@ -266,7 +278,14 @@ namespace gladius::webgpu
 
             std::vector<float> values(dimensions->count,
                                       std::numeric_limits<float>::quiet_NaN());
-            auto const shader = WebGPUSdfShaderComposer::compose(snapshot->analyticEvaluatorWgsl);
+                        bool const hasMeshes = !snapshot->meshResources.empty();
+                        bool const hasBeams = !snapshot->beamLatticeResources.empty();
+                        bool const hasImages = !snapshot->imageResources.empty();
+                        auto const shader = WebGPUSdfShaderComposer::composeWithResourceSupport(
+                            snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                        auto const meshPayloadTable = toPayloadTable(snapshot->meshResources);
+                        auto const beamPayloadTable = toPayloadTable(snapshot->beamLatticeResources);
+                        auto const imagePayloadTable = toPayloadTable(snapshot->imageResources);
             WebGPUSdfEvaluator evaluator{context};
 
             auto const & resolution = request.probeSettings.resolution;
@@ -321,7 +340,10 @@ namespace gladius::webgpu
                           .positions = std::move(positions),
                           .isoValue = request.probeSettings.isoValue,
                           .shaderSource = shader,
-                          .parameterValues = snapshot->parameterValues});
+                                                    .parameterValues = snapshot->parameterValues,
+                                                    .meshPayloadTable = meshPayloadTable,
+                                                    .beamPayloadTable = beamPayloadTable,
+                                                    .imagePayloadTable = imagePayloadTable});
                         if (evaluation.values.size() != indices.size())
                         {
                             return makeError(request,

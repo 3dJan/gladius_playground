@@ -739,6 +739,8 @@ namespace gladius
         cl_float m_sliceHeight_mm{0.0f};
 
         std::atomic<cl_float> m_lastContourSliceHeight_mm{0.0f};
+        std::atomic<bool> m_lastContourUseAdaptive{true};
+        std::atomic<float> m_lastContourMinFeatureSize_mm{0.2f};
 
         std::optional<BoundingBox> m_boundingBox{};
         std::atomic<BoundingBoxComputationSource> m_boundingBoxSource{

@@ -3,6 +3,7 @@
 // use 32 bit indices for imgui
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 
@@ -313,6 +314,10 @@ namespace gladius::ui
         bool m_isSlicePreviewVisible{false};
         /// Slice height (mm) used by the WebGPU slice preview slider
         float m_uiSliceHeight_mm{10.f};
+        std::optional<compute::RenderBounds> m_uiSliceBounds;
+        uint64_t m_uiSliceBoundsDocumentIdentity{0};
+        uint64_t m_uiSliceBoundsStructuralEpoch{0};
+        bool m_uiSliceHeightInitialized{false};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
         bool m_showExportInProgressWarning{false};

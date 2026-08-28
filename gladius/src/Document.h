@@ -4,6 +4,7 @@
 #include "BitmapChannel.h"
 #include "Mesh.h"
 #include "MeshSdfMethod.h"
+#include "compute/RenderContracts.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
 #else
@@ -282,7 +283,9 @@ namespace gladius
         /// flattened model analytically on a grid via WebGPU and extracts contours on
         /// the CPU through GridContourBuilder.
         [[nodiscard]] PolyLines generateContourWebGpu(float z,
-                                                      nodes::SliceParameter const & sliceParameter) const;
+                                                                                                            nodes::SliceParameter const & sliceParameter,
+                                                                                                            std::optional<compute::RenderBounds> modelBounds =
+                                                                                                                std::nullopt) const;
 
         [[nodiscard]] BoundingBox computeBoundingBox() const;
 

@@ -120,7 +120,10 @@ namespace gladius::slicer
             ContourSegment seg;
             seg.start = computeEdgeCrossing(cellBounds, corners, entry[0], isoValue);
             seg.end = computeEdgeCrossing(cellBounds, corners, entry[1], isoValue);
-            outSegments.push_back(seg);
+            if ((seg.end - seg.start).squaredNorm() > 1.0e-18F)
+            {
+                outSegments.push_back(seg);
+            }
         }
 
         // Optional second segment (saddle cases 6 and 9)
@@ -129,7 +132,10 @@ namespace gladius::slicer
             ContourSegment seg;
             seg.start = computeEdgeCrossing(cellBounds, corners, entry[2], isoValue);
             seg.end = computeEdgeCrossing(cellBounds, corners, entry[3], isoValue);
-            outSegments.push_back(seg);
+            if ((seg.end - seg.start).squaredNorm() > 1.0e-18F)
+            {
+                outSegments.push_back(seg);
+            }
         }
     }
 

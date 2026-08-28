@@ -6,9 +6,42 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace gladius::slicer
 {
+    ContourGridDefinition makeAdaptiveContourGrid(float4 modelBounds)
+    {
+        constexpr float padding_mm = 2.0f;
+        constexpr float targetCellSize_mm = 0.1f;
+        constexpr int minResolution = 32;
+        constexpr int maxResolution = 2048;
+
+        ContourGridDefinition definition;
+        definition.clippingArea = {modelBounds.x - padding_mm,
+                                   modelBounds.y - padding_mm,
+                                   modelBounds.z + padding_mm,
+                                   modelBounds.w + padding_mm};
+
+        float const domainWidth = definition.clippingArea.z - definition.clippingArea.x;
+        float const domainHeight = definition.clippingArea.w - definition.clippingArea.y;
+        if (!std::isfinite(domainWidth) || !std::isfinite(domainHeight) ||
+            domainWidth <= 0.0f || domainHeight <= 0.0f)
+        {
+            throw std::invalid_argument("Adaptive contour extraction requires valid model bounds");
+        }
+
+                definition.width = static_cast<int>(std::clamp(
+                    std::ceil(domainWidth / targetCellSize_mm) + 1.0f,
+                    static_cast<float>(minResolution),
+                    static_cast<float>(maxResolution)));
+                definition.height = static_cast<int>(std::clamp(
+                    std::ceil(domainHeight / targetCellSize_mm) + 1.0f,
+                    static_cast<float>(minResolution),
+                    static_cast<float>(maxResolution)));
+        return definition;
+    }
+
     float SdfGrid::sample(Eigen::Vector2f const & pos) const
     {
         auto const domainW = clippingArea.z - clippingArea.x;
@@ -102,11 +135,18 @@ namespace gladius::slicer
         return extractor.getContour();
     }
 
-    PolyLines GridContourBuilder::extractAdaptiveContours(SdfGrid const & grid,
-                                                          float minFeatureSize_mm,
-                                                          events::SharedLogger const & logger)
+    void GridContourBuilder::extractAdaptiveContours(SdfGrid const & grid,
+                                                     float minFeatureSize_mm,
+                                                     ContourExtractor & contourExtractor)
     {
-        (void)logger;
+        contourExtractor.clear();
+
+        auto const expectedValueCount =
+                    static_cast<std::size_t>(grid.width) * static_cast<std::size_t>(grid.height);
+        if (grid.width < 2 || grid.height < 2 || grid.values.size() != expectedValueCount)
+        {
+            throw std::invalid_argument("Adaptive contour extraction requires a complete SDF grid");
+        }
 
         float const xMin = grid.clippingArea.x;
         float const yMin = grid.clippingArea.y;
@@ -116,7 +156,7 @@ namespace gladius::slicer
         float const domainH = yMax - yMin;
         if (domainW <= 0.0f || domainH <= 0.0f)
         {
-            return {};
+            return;
         }
 
         auto const sdfFunc = [&](Eigen::Vector2f const & pos)
@@ -125,7 +165,7 @@ namespace gladius::slicer
         };
 
         float const nativeCellSize = domainW / static_cast<float>(grid.width - 1);
-        float const targetCellSize = std::max(minFeatureSize_mm, nativeCellSize * 2.0f);
+        float const targetCellSize = std::max(minFeatureSize_mm * 0.5f, nativeCellSize);
         float const domainSize = std::max(domainW, domainH);
         std::size_t maxDepth = 3U;
         while (maxDepth < 14U && (domainSize / static_cast<float>(1U << maxDepth)) > targetCellSize)
@@ -139,7 +179,7 @@ namespace gladius::slicer
         cfg.initialDepth = 3U;
         cfg.maxDepth = maxDepth;
         cfg.isoValue = 0.0f;
-        cfg.minFeatureSize = minFeatureSize_mm;
+        cfg.minFeatureSize = targetCellSize;
         cfg.enableAdaptiveRefinement = false;
         cfg.maxNodes = 2000000U;
         cfg.refinementPasses = 1U;
@@ -168,7 +208,7 @@ namespace gladius::slicer
         QuadtreeContourExtractor const extractor;
         auto const sparsePolyLines = extractor.extractPolyLines(quadtree, 0.0f, snapTol);
 
-        PolyLines result;
+        auto & result = contourExtractor.getContour();
         result.reserve(sparsePolyLines.size());
         for (auto const & sparsePoly : sparsePolyLines)
         {
@@ -181,6 +221,15 @@ namespace gladius::slicer
             poly.vertices.assign(sparsePoly.vertices.begin(), sparsePoly.vertices.end());
             result.push_back(std::move(poly));
         }
-        return result;
+        contourExtractor.runPostProcessing();
+    }
+
+    PolyLines GridContourBuilder::extractAdaptiveContours(SdfGrid const & grid,
+                                                          float minFeatureSize_mm,
+                                                          events::SharedLogger const & logger)
+    {
+        ContourExtractor contourExtractor(logger);
+        extractAdaptiveContours(grid, minFeatureSize_mm, contourExtractor);
+        return contourExtractor.getContour();
     }
 }

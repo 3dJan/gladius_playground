@@ -37,14 +37,17 @@ endif()
 if(NOT GLADIUS_ENABLE_OPENCL)
   list(REMOVE_ITEM TEST_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/AssemblySnapshot_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeSdfBackendParity_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLattice_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAccelerationReference.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAcceleration_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContourExtractionBackendParity_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringPrototype_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/DualContouringQef_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/FunctionGraphRoundTrip_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/JSONRPC_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ManifoldDualContouringProgress_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/MeshSdfBackendParity_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/SvgWriter_tests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/WebGPU_3mfRendering_tests.cpp"
   )

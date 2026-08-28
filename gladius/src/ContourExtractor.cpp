@@ -24,9 +24,6 @@ namespace gladius
 {
     nodes::SliceParameter contourOnlyParameter()
     {
-        // NOTE: useAdaptiveContour is left false (default) for export / manufacturing
-        // paths.  Callers that know the model exceeds the dense grid memory budget
-        // can set useAdaptiveContour = true for equivalent watertight output.
         nodes::SliceParameter sliceParameter;
         return sliceParameter;
     }
@@ -78,6 +75,7 @@ namespace gladius
     void ContourExtractor::runPostProcessing()
     {
         simplify();
+        calcAreas();
         calcSign();
         updateContourMode();
         measureQuality();

@@ -123,6 +123,11 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.notifyCameraInteractionEnded());
         }
 
+        [[nodiscard]] RenderWorkflowDecision notifyRenderSettingsChanged()
+        {
+            return applyCoordinatorDecision(m_coordinator.notifyRenderSettingsChanged());
+        }
+
         [[nodiscard]] RenderWorkflowDecision notifyParameterChanged(bool interactionActive)
         {
             return applyCoordinatorDecision(m_coordinator.notifyParameterChanged(interactionActive));

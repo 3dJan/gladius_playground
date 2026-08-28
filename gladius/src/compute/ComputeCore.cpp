@@ -33,10 +33,11 @@
 #include "ToCommandStreamVisitor.h"
 #include "ToOCLVisitor.h"
 #include "compute/ComputeCore.h"
+#include "compute/ManifoldDualContouringProgram.h"
 #include "gpgpu.h"
 #include "nodes/OptimizeOutputs.h"
 #include "nodes/Validator.h"
-#include "slicer/QuadtreeContourExtractor.h"
+#include "slicer/GridContourBuilder.h"
 
 namespace gladius
 {
@@ -181,180 +182,70 @@ namespace gladius
         }
         m_contour->runPostProcessing();
         m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
+        m_lastContourUseAdaptive.store(false, std::memory_order_release);
+        m_lastContourMinFeatureSize_mm.store(sliceParameter.minFeatureSize_mm,
+                                             std::memory_order_release);
     }
 
     void ComputeCore::generateContourQuadtree(nodes::SliceParameter const & sliceParameter)
     {
-        ProfileFunction
+        ProfileFunction;
 
-          // --- GPU phase: acquire compute mutex, render SDF, copy data to local buffers ---
-          std::vector<cl_float2>
-            localSdfData;
-        int sdfWidth = 0;
-        int sdfHeight = 0;
-        float xMin = 0.0f, yMin = 0.0f, xMax = 0.0f, yMax = 0.0f;
+        if (!m_boundingBox.has_value())
+        {
+            throw std::runtime_error("Adaptive contour extraction requires model bounds");
+        }
 
+        auto const gridDefinition = slicer::makeAdaptiveContourGrid({m_boundingBox->min.x,
+                                                                     m_boundingBox->min.y,
+                                                                     m_boundingBox->max.x,
+                                                                     m_boundingBox->max.y});
+
+        auto const cellSizeX =
+          (gridDefinition.clippingArea.z - gridDefinition.clippingArea.x) /
+          static_cast<float>(gridDefinition.width - 1);
+        auto const cellSizeY =
+          (gridDefinition.clippingArea.w - gridDefinition.clippingArea.y) /
+          static_cast<float>(gridDefinition.height - 1);
+
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(static_cast<std::size_t>(gridDefinition.width) *
+                          static_cast<std::size_t>(gridDefinition.height));
+        for (int y = 0; y < gridDefinition.height; ++y)
+        {
+            for (int x = 0; x < gridDefinition.width; ++x)
+            {
+                positions.emplace_back(
+                  gridDefinition.clippingArea.x + cellSizeX * static_cast<float>(x),
+                  gridDefinition.clippingArea.y + cellSizeY * static_cast<float>(y),
+                  sliceParameter.zHeight_mm);
+            }
+        }
+
+        std::vector<float> sdfValues;
         {
             std::lock_guard<std::recursive_mutex> lock(m_computeMutex);
-
-            m_resources->requestDistanceMaps();
             m_primitives->write();
-
-            m_programs->getSlicerProgram()->renderLayers(
-              *m_primitives, 0.0f, sliceParameter.zHeight_mm);
-
-            auto const & sdfImage = *m_resources->getDistanceMipMaps().back();
-            sdfWidth = static_cast<int>(sdfImage.getWidth());
-            sdfHeight = static_cast<int>(sdfImage.getHeight());
-
-            if (sdfImage.getData().empty() || sdfWidth < 2 || sdfHeight < 2)
+            auto * const sampler = m_programs->getManifoldDualContouringProgram();
+            if (sampler == nullptr)
             {
-                return;
+                throw std::runtime_error("OpenCL SDF batch evaluator is unavailable");
             }
-
-            // Copy SDF data so we can release the GPU mutex
-            localSdfData = sdfImage.getData();
-
-            auto const clipArea = m_resources->getClippingArea();
-            xMin = clipArea.x;
-            yMin = clipArea.y;
-            xMax = clipArea.z;
-            yMax = clipArea.w;
-        }
-        // --- m_computeMutex released — UI thread is unblocked ---
-
-        float const domainW = xMax - xMin;
-        float const domainH = yMax - yMin;
-
-        if (domainW <= 0.0f || domainH <= 0.0f)
-        {
-            return;
+            sdfValues = sampler->evaluateSdfBatch(positions, *m_primitives, 0.0f);
         }
 
-        // SDF function: bilinear interpolation from the local copy of the GPU SDF grid.
-        auto const sdfFunc = [&](Eigen::Vector2f const & pos) -> float
-        {
-            float const px = (pos.x() - xMin) / domainW * static_cast<float>(sdfWidth - 1);
-            float const py = (pos.y() - yMin) / domainH * static_cast<float>(sdfHeight - 1);
+        slicer::SdfGrid grid;
+        grid.width = gridDefinition.width;
+        grid.height = gridDefinition.height;
+        grid.clippingArea = gridDefinition.clippingArea;
+        grid.values = std::move(sdfValues);
 
-            int const ix = std::clamp(static_cast<int>(px), 0, sdfWidth - 1);
-            int const iy = std::clamp(static_cast<int>(py), 0, sdfHeight - 1);
-            int const ix1 = std::min(ix + 1, sdfWidth - 1);
-            int const iy1 = std::min(iy + 1, sdfHeight - 1);
-
-            float const tx = px - static_cast<float>(ix);
-            float const ty = py - static_cast<float>(iy);
-
-            auto const idx = [&](int x, int y)
-            {
-                return static_cast<std::size_t>(y) * static_cast<std::size_t>(sdfWidth) +
-                       static_cast<std::size_t>(x);
-            };
-
-            float const v00 = localSdfData[idx(ix, iy)].x;
-            float const v10 = localSdfData[idx(ix1, iy)].x;
-            float const v01 = localSdfData[idx(ix, iy1)].x;
-            float const v11 = localSdfData[idx(ix1, iy1)].x;
-
-            return v00 * (1.0f - tx) * (1.0f - ty) + v10 * tx * (1.0f - ty) +
-                   v01 * (1.0f - tx) * ty + v11 * tx * ty;
-        };
-
-        // Compute max depth so that the finest cells match the native GPU resolution
-        // (one cell per GPU pixel) bounded by minFeatureSize.
-        float const nativeCellSize = domainW / static_cast<float>(sdfWidth - 1);
-        float const targetCellSize =
-          std::max(sliceParameter.minFeatureSize_mm, nativeCellSize * 2.0f);
-        float const domainSize = std::max(domainW, domainH);
-        std::size_t maxDepth = 3U;
-        while (maxDepth < 14U && (domainSize / static_cast<float>(1U << maxDepth)) > targetCellSize)
-        {
-            ++maxDepth;
-        }
-
-        slicer::BoundingBox2D const quadBounds{Eigen::Vector2f{xMin, yMin},
-                                               Eigen::Vector2f{xMax, yMax}};
-
-        slicer::MortonQuadtreeConfig cfg;
-        cfg.initialDepth = 3U;
-        cfg.maxDepth = maxDepth;
-        cfg.isoValue = 0.0f;
-        cfg.minFeatureSize = sliceParameter.minFeatureSize_mm;
-        cfg.enableAdaptiveRefinement = false;
-        cfg.maxNodes = 2000000U;
-        cfg.refinementPasses = 1U;
-
-        slicer::MortonQuadtree quadtree(quadBounds);
-        quadtree.build(cfg);
-
-        // Iterative deepening: populate SDF at leaf corners → refine → repeat
-        for (std::size_t depth = cfg.initialDepth; depth < maxDepth; ++depth)
-        {
-            slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
-            quadtree.refineAdaptively(cfg);
-        }
-        slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
-
-        // Ensure all face-neighbors of surface cells are at the same depth.
-        // This eliminates T-junction gaps that would break watertightness.
-        // Loop because balancing may create new leaves that become intersecting.
-        for (int balancePass = 0; balancePass < 8; ++balancePass)
-        {
-            auto const created = quadtree.ensureBalancedSurface(cfg);
-            if (created == 0U)
-            {
-                break;
-            }
-            slicer::QuadtreeContourExtractor::populateCornerValues(quadtree, sdfFunc, 0.0f);
-        }
-
-        // Extract polylines from the adaptive quadtree
-        float const snapTol = std::max(1e-4f, nativeCellSize * 0.1f);
-        slicer::QuadtreeContourExtractor const extractor;
-        auto const sparsePolyLines = extractor.extractPolyLines(quadtree, 0.0f, snapTol);
-
-        // Self-intersection check for manufacturing safety
-        auto const selfIntersectionCount =
-          slicer::QuadtreeContourExtractor::detectSelfIntersections(sparsePolyLines);
-        if (selfIntersectionCount > 0U)
-        {
-            logMsg(fmt::format("WARNING: Adaptive contour has {} self-intersection(s). "
-                               "Result may not be watertight — do not use for manufacturing.",
-                               selfIntersectionCount));
-        }
-
-        // Check for unclosed polylines
-        std::size_t openCount = 0U;
-        for (auto const & poly : sparsePolyLines)
-        {
-            if (!poly.isClosed && poly.vertices.size() >= 2U)
-            {
-                ++openCount;
-            }
-        }
-        if (openCount > 0U)
-        {
-            logMsg(fmt::format("WARNING: Adaptive contour has {} open polyline(s). "
-                               "Result may not be watertight — do not use for manufacturing.",
-                               openCount));
-        }
-
-        // Convert SparsePolyLine → PolyLine and insert into ContourExtractor
-        auto & polylines = m_contour->getContour();
-        for (auto const & sparsePoly : sparsePolyLines)
-        {
-            if (sparsePoly.vertices.size() < 2)
-            {
-                continue;
-            }
-            PolyLine poly;
-            poly.isClosed = sparsePoly.isClosed;
-            poly.vertices.assign(sparsePoly.vertices.begin(), sparsePoly.vertices.end());
-            polylines.push_back(std::move(poly));
-        }
-
-        m_contour->runPostProcessing();
+        slicer::GridContourBuilder::extractAdaptiveContours(
+          grid, sliceParameter.minFeatureSize_mm, *m_contour);
         m_lastContourSliceHeight_mm.store(sliceParameter.zHeight_mm, std::memory_order_release);
+        m_lastContourUseAdaptive.store(true, std::memory_order_release);
+        m_lastContourMinFeatureSize_mm.store(sliceParameter.minFeatureSize_mm,
+                                             std::memory_order_release);
     }
 
     bool ComputeCore::tryToupdateParameter(nodes::Assembly & assembly)
@@ -1180,8 +1071,16 @@ namespace gladius
         }
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
-        if (fabs(m_lastContourSliceHeight_mm.load(std::memory_order_acquire) -
-                 sliceParameter.zHeight_mm) < FLT_EPSILON)
+        bool const sameHeight =
+          fabs(m_lastContourSliceHeight_mm.load(std::memory_order_acquire) -
+               sliceParameter.zHeight_mm) < FLT_EPSILON;
+        bool const sameMode = m_lastContourUseAdaptive.load(std::memory_order_acquire) ==
+                              sliceParameter.useAdaptiveContour;
+        bool const sameFeatureSize =
+          fabs(m_lastContourMinFeatureSize_mm.load(std::memory_order_acquire) -
+               sliceParameter.minFeatureSize_mm) < FLT_EPSILON;
+        if (sameHeight && sameMode &&
+            (!sliceParameter.useAdaptiveContour || sameFeatureSize))
         {
             return false;
         }

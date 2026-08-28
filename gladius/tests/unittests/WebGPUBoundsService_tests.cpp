@@ -1,8 +1,13 @@
 #if defined(GLADIUS_ENABLE_WEBGPU)
 
+#include "compute/AnalyticRenderSceneSnapshotFactory.h"
 #include "compute/BoundingBoxContracts.h"
 #include "webgpu/WebGPUBoundsService.h"
 #include "webgpu/WebGPUComputeContext.h"
+
+#include <BeamLatticeResource.h>
+#include <ResourceManager.h>
+#include <nodes/Builder.h>
 
 #include <gtest/gtest.h>
 
@@ -49,6 +54,32 @@ namespace gladius::tests
             request.probeSettings.tileSize = {8u, 8u, 8u};
             return request;
         }
+
+                [[nodiscard]] std::shared_ptr<const compute::RenderSceneSnapshot> makeBeamSnapshot()
+                {
+                        constexpr ResourceId BEAM_RESOURCE_ID = 7u;
+                        ResourceManager resourceManager(nullptr, {});
+                        auto const resourceKey = ResourceKey{BEAM_RESOURCE_ID, ResourceType::BeamLattice};
+                        std::vector<BeamData> beams{{.startPos = {0.0f, 0.0f, 0.0f, 0.0f},
+                                                                                 .endPos = {10.0f, 0.0f, 0.0f, 0.0f},
+                                                                                 .startRadius = 0.5f,
+                                                                                 .endRadius = 0.5f}};
+                        resourceManager.addResource(
+                            resourceKey,
+                            std::make_unique<BeamLatticeResource>(resourceKey,
+                                                                                                        std::move(beams),
+                                                                                                        std::vector<BallData>{},
+                                                                                                        BeamLatticeBallConfig{}));
+
+                        nodes::Model model;
+                        model.createBeginEndWithDefaultInAndOuts();
+                        nodes::Builder builder;
+                        builder.addBeamLatticeRef(
+                            model, resourceKey, model.getBeginNode()->getOutputs().at(nodes::FieldNames::Pos));
+                        return std::make_shared<const compute::RenderSceneSnapshot>(
+                            compute::AnalyticRenderSceneSnapshotFactory::create(
+                                model, 7u, resourceManager));
+                }
 
         [[nodiscard]] std::unique_ptr<webgpu::WebGPUBoundsService> makeService()
         {
@@ -102,6 +133,42 @@ namespace gladius::tests
         EXPECT_NEAR(result->modelBounds->max[2], 1.0f, 0.05f);
         EXPECT_GT(result->diagnostics.probeCount, 0u);
         EXPECT_GT(result->diagnostics.projectedCount, 0u);
+    }
+
+    TEST(WebGPUBoundsService, BeamResourceSnapshot_ReturnsAuthoritativeModelBounds)
+    {
+        if (!areWebGpuTestsEnabled())
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+        auto service = makeService();
+        if (!service)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable";
+        }
+
+        service->setSceneSnapshot(makeBeamSnapshot());
+        auto request = makeRequest();
+        request.probeDomain = {.min = {-2.0f, -2.0f, -2.0f}, .max = {12.0f, 2.0f, 2.0f}};
+        request.probeSettings.resolution = {28u, 8u, 8u};
+        auto submission = service->submit(request);
+
+        ASSERT_NE(submission, nullptr);
+        submission->wait();
+        ASSERT_EQ(submission->getStatus(), compute::BoundsSubmissionStatus::Succeeded)
+          << submission->getErrorMessage();
+        auto result = submission->takeResult();
+        ASSERT_TRUE(result.has_value());
+        ASSERT_EQ(result->status, compute::BoundsResultStatus::Ready)
+          << result->diagnostics.message;
+        ASSERT_TRUE(result->isUsable());
+        ASSERT_TRUE(result->modelBounds.has_value());
+        EXPECT_NEAR(result->modelBounds->min[0], -0.5f, 0.1f);
+        EXPECT_NEAR(result->modelBounds->max[0], 10.5f, 0.1f);
+        EXPECT_NEAR(result->modelBounds->min[1], -0.5f, 0.1f);
+        EXPECT_NEAR(result->modelBounds->max[1], 0.5f, 0.1f);
+        EXPECT_NEAR(result->modelBounds->min[2], -0.5f, 0.1f);
+        EXPECT_NEAR(result->modelBounds->max[2], 0.5f, 0.1f);
     }
 
     TEST(WebGPUBoundsService, CompletedResult_IsCachedOnlyForMatchingModelGeneration)

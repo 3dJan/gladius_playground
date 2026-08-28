@@ -163,6 +163,39 @@ namespace gladius::ui::async_rendering::tests
                             RenderStampMask::displayFrame()));
     }
 
+    TEST(RenderUpdateCoordinator, RenderSettingsChanged_PreservesModelStateAndStartsFreshFrame)
+    {
+        RenderUpdateCoordinator coordinator;
+        auto decision = coordinator.tick();
+        auto bbox = findStartedTask(decision, RenderTaskType::BoundingBoxUpdate);
+        ASSERT_TRUE(bbox.has_value());
+
+        decision = coordinator.completeTask(completed(*bbox));
+        auto sdf = findStartedTask(decision, RenderTaskType::SdfPrecomputation);
+        ASSERT_TRUE(sdf.has_value());
+
+        decision = coordinator.completeTask(completed(*sdf));
+        auto frame = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+        ASSERT_TRUE(frame.has_value());
+        decision = coordinator.completeTask(completed(*frame, true, true));
+        ASSERT_TRUE(hasCommand(decision, RenderCommandType::PresentFrame));
+        ASSERT_TRUE(coordinator.isHeavyGeometryCurrent());
+        auto const before = coordinator.latestStamp();
+
+        decision = coordinator.notifyRenderSettingsChanged();
+        auto const after = coordinator.latestStamp();
+
+        EXPECT_EQ(after.sceneEpoch, before.sceneEpoch);
+        EXPECT_EQ(after.parameterEpoch, before.parameterEpoch);
+        EXPECT_EQ(after.viewEpoch, before.viewEpoch);
+        EXPECT_EQ(after.viewportEpoch, before.viewportEpoch);
+        EXPECT_EQ(after.qualityEpoch, before.qualityEpoch + 1u);
+        EXPECT_TRUE(coordinator.isHeavyGeometryCurrent());
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::BoundingBoxUpdate));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::SdfPrecomputation));
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
+    }
+
     TEST(RenderUpdateCoordinator, StaticCatchUp_AfterFastProgressiveEstimate_StartsStaticFullFrameProbe)
     {
         RenderUpdateCoordinator coordinator;

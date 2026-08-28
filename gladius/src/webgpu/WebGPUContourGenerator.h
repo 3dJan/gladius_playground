@@ -20,7 +20,7 @@ namespace gladius::webgpu
         int width{256};
         int height{256};
         float minFeatureSize_mm{0.2f};
-        bool useAdaptiveContour{false};
+        bool useAdaptiveContour{true};
     };
 
     /**

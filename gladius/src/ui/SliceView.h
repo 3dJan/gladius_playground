@@ -1,10 +1,13 @@
 #pragma once
 
 #include "Contour.h"
+#include "compute/RenderContracts.h"
 #include "imgui.h"
 #include <algorithm>
 #include <chrono>
 #include <cfloat>
+#include <cstdint>
+#include <future>
 #include <optional>
 
 namespace gladius
@@ -27,6 +30,8 @@ namespace gladius::ui
     class SliceView
     {
       public:
+                ~SliceView();
+
         void show();
         void hide();
         bool isVisible() const;
@@ -41,6 +46,9 @@ namespace gladius::ui
         /// Set the slice height in mm used by the document-based (WebGPU) path
         void setSliceHeight(float zHeight_mm);
 
+        /// Set the authoritative bounds used to limit WebGPU contour sampling.
+        void setModelBounds(std::optional<compute::RenderBounds> modelBounds);
+
         /// Drop cached contours so they are regenerated on the next frame
         void invalidateContours();
 
@@ -49,6 +57,12 @@ namespace gladius::ui
          * @return true if the slice view is being hovered
          */
         bool isHovered() const;
+
+        /// @brief Return whether an asynchronous WebGPU contour request is still running.
+        [[nodiscard]] bool isSlicingInProgress() const;
+
+        /// @brief Wait for an asynchronous contour request before dependent state is destroyed.
+        void waitForPendingContourGeneration();
 
         /**
          * @brief Zoom in the slice view
@@ -83,8 +97,21 @@ namespace gladius::ui
         bool m_webGpuCacheValid{false};
         /// Time of the last WebGPU contour generation (throttles slider dragging)
         std::chrono::steady_clock::time_point m_lastWebGpuGeneration{};
+        /// Input values used for the cached WebGPU contours
+        float m_webGpuCachedSliceZ_mm = 0.0f;
+        float m_webGpuCachedMinFeatureSize_mm = 0.0f;
+        bool m_webGpuCachedAdaptiveContour = true;
+        uint64_t m_webGpuCachedStructuralEditEpoch = 0;
+        float m_webGpuPendingSliceZ_mm = 0.0f;
+        float m_webGpuPendingMinFeatureSize_mm = 0.0f;
+        bool m_webGpuPendingAdaptiveContour = true;
+        uint64_t m_webGpuPendingStructuralEditEpoch = 0;
+        uint64_t m_webGpuPendingBoundsGeneration = 0;
+        std::future<PolyLines> m_webGpuContourFuture;
         /// Document used by the document-based (WebGPU) contour path
         gladius::Document * m_document{nullptr};
+        std::optional<compute::RenderBounds> m_modelBounds;
+        uint64_t m_modelBoundsGeneration = 0;
 
         float m_zoom = 4.f;
         float m_zoomTarget = 4.f;
@@ -98,7 +125,7 @@ namespace gladius::ui
         bool m_showJumps = false;
         bool m_showSelfIntersections = false;
         bool m_hideDeveloperTools = false;
-        bool m_useAdaptiveContour = false;       ///< Toggle for quadtree-based contour extraction
+        bool m_useAdaptiveContour = true;        ///< Toggle for quadtree-based contour extraction
         float m_minFeatureSize_mm = 0.2f;        ///< Min feature size for adaptive contour (mm)
 
         std::optional<PolyLines> m_contours;
