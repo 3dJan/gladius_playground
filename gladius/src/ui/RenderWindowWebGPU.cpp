@@ -396,6 +396,7 @@ namespace gladius::ui
         ImGui::Begin("Preview", &m_isVisible, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar);
         m_isWindowHovered = ImGui::IsWindowHovered();
         m_isWindowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        renderMenuBar(false);
         m_contentAreaMin = ImGui::GetWindowContentRegionMin();
         m_contentAreaMax = ImGui::GetWindowContentRegionMax();
 
@@ -851,8 +852,21 @@ namespace gladius::ui
     void RenderWindow::setPanMode() { m_cameraMode = CameraMode::Pan; }
     void RenderWindow::setZoomMode() { m_cameraMode = CameraMode::Zoom; }
     void RenderWindow::resetOrientation() { setIsometricView(); }
-    void RenderWindow::togglePermanentCentering() { setPermanentCentering(!m_permanentCenteringEnabled); }
-    void RenderWindow::setPermanentCentering(bool enabled) { m_permanentCenteringEnabled = enabled; }
+    void RenderWindow::togglePermanentCentering()
+    {
+        setPermanentCentering(!m_permanentCenteringEnabled);
+        frameAll();
+    }
+
+    void RenderWindow::setPermanentCentering(bool enabled)
+    {
+        m_permanentCenteringEnabled = enabled;
+        if (m_configManager != nullptr)
+        {
+            m_configManager->setValue("renderWindow", "permanentCenteringEnabled", enabled);
+            m_configManager->save();
+        }
+    }
     bool RenderWindow::isPermanentCenteringEnabled() const { return m_permanentCenteringEnabled; }
     bool RenderWindow::isVisible() const { return m_isVisible; }
     void RenderWindow::handleKeyInput() { }
@@ -920,6 +934,7 @@ namespace gladius::ui
         {
             m_configManager->setValue("renderWindow", "realtimeRaymarchMode",
                                       async_rendering::realtimeRaymarchModeToString(mode));
+            m_configManager->save();
         }
     }
 

@@ -1766,7 +1766,8 @@ namespace gladius::ui
             m_mainMenuPosX = -menuWidth;
         };
 
-        ImGui::SetNextWindowBgAlpha(0.9f);
+        ImGui::SetNextWindowBgAlpha(0.95f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.0f, 0.0f, 0.0f, 1.0f});
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {20 * m_uiScale, 20 * m_uiScale});
 
         ImGui::Begin("Menu", &m_showMainMenu, window_flags);
@@ -2034,6 +2035,7 @@ namespace gladius::ui
         ImGui::End();
 
         ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
 
         // Animation
         const auto deltaTime = ImGui::GetIO().DeltaTime;

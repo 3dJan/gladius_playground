@@ -241,6 +241,7 @@ namespace gladius::ui
 
       private:
         void render(RenderWindowState & state);
+        void renderMenuBar(bool includeAdvancedOptions);
         void renderLoadingOverlay();
         void renderBusyOverlay();
         void renderExistingFrame(std::shared_ptr<GLImageBuffer> const & displayImage);
