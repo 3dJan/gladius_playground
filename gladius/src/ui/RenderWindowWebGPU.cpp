@@ -254,7 +254,10 @@ namespace gladius::ui
             }
 
             auto const snapshot = compute::ComputeRendererFactory::materializeScene(
-              assembly.get(), *assembly->assemblyModel(), sceneGeneration);
+                            assembly.get(),
+                            *assembly->assemblyModel(),
+                            sceneGeneration,
+                            &m_document->getResourceManager());
             if (!session->replaceScene(snapshot))
             {
                 return false;
