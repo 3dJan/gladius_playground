@@ -1,6 +1,6 @@
 {
   "name": "imgui",
-  "version": "1.91.0",
+  "version": "1.91.9",
   "description": "Bloat-free Immediate Mode Graphical User interface for C++ with minimal dependencies.",
   "homepage": "https://github.com/ocornut/imgui",
   "license": "MIT",
@@ -119,6 +119,12 @@
       "description": "Make available Vulkan binding",
       "dependencies": [
         "vulkan"
+      ]
+    },
+    "wgpu-binding": {
+      "description": "Make available WebGPU binding",
+      "dependencies": [
+        "dawn"
       ]
     },
     "wchar32": {

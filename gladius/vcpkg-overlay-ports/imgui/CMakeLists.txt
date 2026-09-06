@@ -83,6 +83,13 @@ if(IMGUI_BUILD_OPENGL3_BINDING)
     target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
 endif()
 
+if(IMGUI_BUILD_WGPU_BINDING)
+    find_package(Dawn CONFIG REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PUBLIC dawn::webgpu_dawn)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
+    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp)
+endif()
+
 if(IMGUI_BUILD_OSX_BINDING)
     target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_osx.mm)
 endif()
@@ -223,6 +230,10 @@ if(NOT IMGUI_SKIP_HEADERS)
             DESTINATION
                 include
         )
+    endif()
+
+    if(IMGUI_BUILD_WGPU_BINDING)
+        install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_wgpu.h DESTINATION include)
     endif()
 
     if(IMGUI_BUILD_OSX_BINDING)
