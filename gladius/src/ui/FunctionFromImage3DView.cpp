@@ -318,7 +318,7 @@ namespace gladius::ui
         // Display the preview texture
         if (m_state.previewTextureId != 0)
         {
-            ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(m_state.previewTextureId)),
+            ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(m_state.previewTextureId)),
                          ImVec2(static_cast<float>(m_state.previewWidth),
                                 static_cast<float>(m_state.previewHeight)));
         }

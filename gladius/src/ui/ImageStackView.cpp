@@ -195,7 +195,7 @@ namespace gladius::ui
             // Display the texture
             if (m_layerTexture != 0)
             {
-                ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(m_layerTexture)),
+                ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(m_layerTexture)),
                              ImVec2(displayWidth, displayHeight));
                 
                 m_hovered = ImGui::IsItemHovered();

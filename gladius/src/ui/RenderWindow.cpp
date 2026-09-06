@@ -1548,7 +1548,7 @@ namespace gladius::ui
             }
         }
 
-        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+        ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(textureId)),
                      ImVec2(m_renderWindowSize_px.x, m_renderWindowSize_px.y));
 
         auto const contentMin =
@@ -4118,7 +4118,7 @@ namespace gladius::ui
 
         // Display the last frame (not cleared - shows previous render result)
         auto const textureId = displayImage->GetTextureId();
-        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+        ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(textureId)),
                      ImVec2(static_cast<float>(m_renderWindowSize_px.x),
                             static_cast<float>(m_renderWindowSize_px.y)));
 
@@ -4170,7 +4170,7 @@ namespace gladius::ui
 
         // Display the image
         auto const textureId = displayImage->GetTextureId();
-        ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+        ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(textureId)),
                      ImVec2(static_cast<float>(m_renderWindowSize_px.x),
                             static_cast<float>(m_renderWindowSize_px.y)));
 

@@ -431,7 +431,7 @@ namespace gladius::ui
         auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
         if (textureId != 0u)
         {
-            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(textureId)),
+            ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(textureId)),
                          {m_renderWindowSize_px.x, m_renderWindowSize_px.y});
         }
 

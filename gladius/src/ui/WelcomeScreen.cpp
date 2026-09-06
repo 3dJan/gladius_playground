@@ -935,7 +935,7 @@ namespace gladius::ui
             ImGui::SetCursorPos(
               ImVec2(centerX, ImGui::GetCursorPosY() + (m_thumbnailSize - displayHeight) * 0.5f));
 
-            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(info.thumbnailTextureId)),
+            ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(info.thumbnailTextureId)),
                          ImVec2(displayWidth, displayHeight));
         }
         else if (info.loadState == ThumbnailLoadState::Loading ||

@@ -1116,7 +1116,7 @@ namespace gladius::ui
             bool isAnyKeyTyped = io.InputQueueCharacters.Size > 0;
 
             // Check if backspace is pressed (Backspace isn't in InputQueueCharacters)
-            bool isBackspacePressed = io.KeysDown[ImGui::GetKeyIndex(ImGuiKey_Backspace)];
+            bool isBackspacePressed = ImGui::IsKeyDown(ImGuiKey_Backspace);
 
             // Check if a key was pressed and the filter input doesn't already have focus
             if ((isAnyKeyTyped || isBackspacePressed) && !ImGui::IsItemActive())

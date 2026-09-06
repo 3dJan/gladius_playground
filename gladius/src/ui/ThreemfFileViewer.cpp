@@ -328,7 +328,7 @@ namespace gladius::ui
               centerX, itemPos.y + 5.0f + (m_thumbnailSize - displayHeight) * 0.5f));
 
             ImGui::Image(
-              reinterpret_cast<void *>(static_cast<intptr_t>(info.thumbnailTextureId)),
+                            static_cast<ImTextureID>(static_cast<uintptr_t>(info.thumbnailTextureId)),
               ImVec2(displayWidth, displayHeight));
         }
         else if (info.loadState == ThumbnailLoadState::Loading ||
