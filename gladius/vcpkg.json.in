@@ -2,14 +2,14 @@
   "dependencies": [
     "fmt",
     "openmesh",
-    "glad",
+  @GLADIUS_VCPKG_GLAD_DEPENDENCY@
     "glfw3",
     "eigen3",
     "tinyfiledialogs",
     "gtest",
     "nlopt",
     "platform-folders",
-  @GLADIUS_VCPKG_OPENCL_DEPENDENCY@
+@GLADIUS_VCPKG_OPENCL_DEPENDENCY@
     {
         "name": "dawn",
         "default-features": false,
@@ -48,7 +48,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "opengl2-binding",
+@GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE@
           "win32-binding",
           "test-engine"
         ]
@@ -60,7 +60,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "opengl2-binding",
+@GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE@
           "test-engine"
         ]
     },
@@ -87,7 +87,7 @@
   "overrides": [
     {
       "name": "imgui",
-      "version": "1.89.9"
+      "version": "1.91.9"
     },
     {
       "name": "imgui-node-editor",
