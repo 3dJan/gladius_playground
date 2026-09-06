@@ -31,13 +31,16 @@ if (UNIX)
     target_link_libraries(${BINARY} PRIVATE ${CMAKE_DL_LIBS})
 endif (UNIX)
 
-# OpenGL is needed because gladius_lib links imgui which uses OpenGL
-find_package(OpenGL REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(unofficial-imgui-node-editor CONFIG REQUIRED)
 
 # Note: imgui-node-editor depends on imgui, order matters for static linking
-set(DEPENDENCIES unofficial::imgui-node-editor::imgui-node-editor imgui::imgui GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main Eigen3::Eigen lodepng fmt::fmt OpenGL::GL)
+set(DEPENDENCIES unofficial::imgui-node-editor::imgui-node-editor imgui::imgui GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main Eigen3::Eigen lodepng fmt::fmt)
+
+if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "OPENGL")
+    find_package(OpenGL REQUIRED)
+    list(APPEND DEPENDENCIES OpenGL::GL)
+endif()
 
 # Add MCP-only dependencies for tests that use MCP
 list(APPEND DEPENDENCIES httplib::httplib nlohmann_json::nlohmann_json)
