@@ -63,7 +63,7 @@ namespace gladius::ui::async_rendering
         m_freshness.reset();
     }
 
-    std::uint32_t OpenGLFramePresenter::getTextureId() const noexcept
+    std::uintptr_t OpenGLFramePresenter::getTextureId() const noexcept
     {
         return m_textureId;
     }

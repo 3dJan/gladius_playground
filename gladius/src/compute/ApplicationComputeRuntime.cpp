@@ -92,6 +92,12 @@ namespace gladius::compute
                 return m_renderBackendSession ? m_renderBackendSession->getBoundsService() : nullptr;
             }
 
+            [[nodiscard]] std::shared_ptr<webgpu::WebGPUComputeContext>
+            getWebGPUContext() const noexcept override
+            {
+                return {};
+            }
+
           private:
             std::shared_ptr<gladius::ComputeCore> m_core;
             std::unique_ptr<RenderBackendSession> m_renderBackendSession;
@@ -107,6 +113,7 @@ namespace gladius::compute
                 try
                 {
                     auto context = std::make_shared<webgpu::WebGPUComputeContext>();
+                    m_webgpuContext = context;
                     auto boundsService = std::make_shared<webgpu::WebGPUBoundsService>(context);
                     m_renderBackendSession = std::make_unique<RenderBackendSession>(
                       std::make_unique<webgpu::WebGPUComputeRenderer>(context),
@@ -160,8 +167,15 @@ namespace gladius::compute
                 return m_renderBackendSession ? m_renderBackendSession->getBoundsService() : nullptr;
             }
 
+                        [[nodiscard]] std::shared_ptr<webgpu::WebGPUComputeContext>
+                        getWebGPUContext() const noexcept override
+                        {
+                                return m_webgpuContext;
+                        }
+
           private:
             std::unique_ptr<RenderBackendSession> m_renderBackendSession;
+                        std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
             std::string m_errorMessage;
         };
     }

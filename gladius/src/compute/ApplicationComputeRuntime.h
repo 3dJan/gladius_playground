@@ -11,6 +11,11 @@ namespace gladius
     class ComputeCore;
 }
 
+namespace gladius::webgpu
+{
+  class WebGPUComputeContext;
+}
+
 namespace gladius::compute
 {
   class RenderBackendSession;
@@ -40,6 +45,10 @@ namespace gladius::compute
 
         /// @brief Returns the bounds service owned by the selected backend runtime.
         [[nodiscard]] virtual IBoundsService * getBoundsService() noexcept = 0;
+
+        /// @brief Returns the shared Dawn context for the WebGPU UI, if available.
+        [[nodiscard]] virtual std::shared_ptr<webgpu::WebGPUComputeContext>
+        getWebGPUContext() const noexcept = 0;
     };
 
     /**

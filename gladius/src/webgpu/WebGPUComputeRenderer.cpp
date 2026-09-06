@@ -138,7 +138,7 @@ namespace gladius::webgpu
                 }
 
                 return compute::RenderFrame{.width = result->width,
-                                            .height = result->height,
+                                            .height = m_request.viewport.height,
                                             .firstRow = m_request.viewport.firstRow,
                                             .endRow = m_request.viewport.endRow,
                                             .freshness = m_request.freshness,

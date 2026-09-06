@@ -53,6 +53,8 @@ namespace gladius::webgpu
 
         [[nodiscard]] wgpu::Device const & getDevice() const noexcept;
         [[nodiscard]] wgpu::Queue const & getQueue() const noexcept;
+        [[nodiscard]] wgpu::Instance const & getInstance() const noexcept;
+        [[nodiscard]] wgpu::Adapter const & getAdapter() const noexcept;
 
       private:
         void initialize();

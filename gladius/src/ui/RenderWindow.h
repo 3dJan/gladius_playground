@@ -10,7 +10,7 @@
 #endif
 #include "render/AsyncRenderController.h"
 #include "render/NeutralRenderScheduler.h"
-#include "render/OpenGLFramePresenter.h"
+#include "render/FramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
 #include <algorithm>
 #include <atomic>
@@ -557,7 +557,7 @@ namespace gladius::ui
           m_neutralRenderScheduler.workflow()};
         std::unique_ptr<compute::RenderBackendSession> m_renderBackendSession;
         compute::RenderBackendSession * m_runtimeRenderBackendSession{nullptr};
-        std::unique_ptr<async_rendering::OpenGLFramePresenter> m_neutralFramePresenter;
+        std::unique_ptr<async_rendering::FramePresenter> m_neutralFramePresenter;
         std::unique_ptr<compute::IBoundsSubmission> m_neutralBoundsSubmission;
         std::optional<compute::RenderBounds> m_neutralModelBounds;
         compute::RenderFreshnessStamp m_neutralBoundsFreshness{};

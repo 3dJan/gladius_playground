@@ -2,7 +2,9 @@
 #include "io/3mf/ImageStack.h"
 
 #include <IconsFontAwesome6.h>
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
 #include <glad/glad.h>
+#endif
 #include <algorithm>
 #include <fmt/format.h>
 
@@ -227,6 +229,7 @@ namespace gladius::ui
 
     void ImageStackView::uploadLayerTexture()
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         if (m_imageStack == nullptr || m_imageStack->empty())
         {
             return;
@@ -329,14 +332,22 @@ namespace gladius::ui
                      data.data());
 
         glBindTexture(GL_TEXTURE_2D, 0);
+    #else
+        // Texture upload is provided by the backend-specific texture service.
+        // Keep the decoded image and navigation usable until that service is wired in.
+    #endif
     }
 
     void ImageStackView::cleanupTexture()
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         if (m_layerTexture != 0)
         {
             glDeleteTextures(1, &m_layerTexture);
             m_layerTexture = 0;
         }
+#else
+        m_layerTexture = 0;
+#endif
     }
 }

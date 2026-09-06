@@ -1,5 +1,9 @@
 #include "ThreemfThumbnailExtractor.h"
 
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
+#include <glad/glad.h>
+#endif
+
 #include <algorithm>
 #include <fmt/format.h>
 #include <lodepng.h>
@@ -107,6 +111,7 @@ namespace gladius::ui
 
     void ThreemfThumbnailExtractor::createThumbnailTexture(ThumbnailInfo & info)
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         if (info.thumbnailTextureId != 0 || !info.hasThumbnail || info.thumbnailData.empty())
         {
             return;
@@ -149,19 +154,28 @@ namespace gladius::ui
 
         // Store the texture ID
         info.thumbnailTextureId = textureId;
+    #else
+        (void) info;
+    #endif
     }
 
     void ThreemfThumbnailExtractor::releaseThumbnail(ThumbnailInfo & info)
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         if (info.thumbnailTextureId != 0)
         {
-            glDeleteTextures(1, &info.thumbnailTextureId);
+            auto textureId = static_cast<GLuint>(info.thumbnailTextureId);
+            glDeleteTextures(1, &textureId);
             info.thumbnailTextureId = 0;
         }
+#else
+        info.thumbnailTextureId = 0;
+#endif
 
         info.thumbnailData.clear();
         info.hasThumbnail = false;
         info.thumbnailLoaded = false;
+        info.textureCreated = false;
     }
 
     ThreemfThumbnailExtractor::ThumbnailInfo
@@ -354,6 +368,7 @@ namespace gladius::ui
 
     void ThreemfThumbnailExtractor::createTextureFromPixels(ThumbnailInfo & info)
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         if (info.thumbnailTextureId != 0 || info.decodedPixels.empty())
         {
             return;
@@ -393,5 +408,8 @@ namespace gladius::ui
         // Clear decoded pixels to free memory
         info.decodedPixels.clear();
         info.decodedPixels.shrink_to_fit();
+    #else
+        (void) info;
+    #endif
     }
 }

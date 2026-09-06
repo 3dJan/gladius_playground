@@ -110,9 +110,7 @@ find_package(NLopt CONFIG REQUIRED)
 # Core dependencies (shared by gladius and gladiusmcp)
 set(DEPENDENCIES_CORE
     ${X11_LIBRARIES}
-    ${OPENGL_LIBRARIES}
     glfw
-    glad::glad
     fmt::fmt-header-only
     Eigen3::Eigen
     tinyfiledialogs::tinyfiledialogs
@@ -134,6 +132,13 @@ set(DEPENDENCIES_CORE
     PkgConfig::libcoro
     OpenMP::OpenMP_CXX
 )
+
+if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "OPENGL")
+    list(APPEND DEPENDENCIES_CORE
+        ${OPENGL_LIBRARIES}
+        glad::glad
+    )
+endif()
 
 if(GLADIUS_ENABLE_OPENCL)
     list(APPEND DEPENDENCIES_CORE OpenCL::OpenCL)

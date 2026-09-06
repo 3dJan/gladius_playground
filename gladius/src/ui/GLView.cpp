@@ -1,10 +1,15 @@
 #include "GLView.h"
 #include "Theme.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
 #include <glad/glad.h>
+#include <imgui_impl_opengl2.h>
+#elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+#include <imgui_impl_wgpu.h>
+#include "../webgpu/WebGPUComputeContext.h"
+#endif
 
 #include <imgui_impl_glfw.h>
-#include <imgui_impl_opengl2.h>
 #ifdef _WIN32
 #include <imgui_impl_win32.h>
 #endif
@@ -21,13 +26,19 @@
 
 #include <GLFW/glfw3.h>
 
-#ifdef _WIN32
+#if defined(GLADIUS_UI_BACKEND_WEBGPU) && defined(__linux__)
+#define GLFW_EXPOSE_NATIVE_X11
+#endif
+#if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
+#endif
+#if defined(GLADIUS_UI_BACKEND_WEBGPU) || defined(_WIN32)
 #include <GLFW/glfw3native.h>
 #endif
 #include "Profiling.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
@@ -78,7 +89,23 @@ namespace gladius
                 glfwSetWindowUserPointer(m_window, nullptr);
             }
 
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
             ImGui_ImplOpenGL2_Shutdown();
+#elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+            if (m_webgpuRendererInitialized)
+            {
+                webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+                ImGui_ImplWGPU_Shutdown();
+                m_webgpuRendererInitialized = false;
+                if (m_webgpuSurface)
+                {
+                    m_webgpuSurface.Unconfigure();
+                    m_webgpuSurface = nullptr;
+                }
+            }
+            m_webgpuSurfaceWidth = 0u;
+            m_webgpuSurfaceHeight = 0u;
+#endif
             ImGui_ImplGlfw_Shutdown();
 
 #ifdef ENABLE_UI_TESTING
@@ -91,11 +118,8 @@ namespace gladius
 #endif
 
             ImGui::DestroyContext();
-            if (glfwGetCurrentContext())
-            {
-                // Terminate GLFW only if it was initialized in this process
-                glfwTerminate();
-            }
+            // Terminate GLFW only after this view has released its native window.
+            glfwTerminate();
         }
     }
 
@@ -107,6 +131,17 @@ namespace gladius
             init();
         }
     }
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void GLView::setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_webgpuContext = std::move(context);
+        if (m_initialized && m_webgpuContext && !m_webgpuRendererInitialized)
+        {
+            initializeWebGPURenderer();
+        }
+    }
+#endif
 
     void GLView::storeWindowSettings()
     {
@@ -160,8 +195,12 @@ namespace gladius
         }
 
         glfwSetErrorCallback(errorCallback);
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    #else
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    #endif
 
         m_window = glfwCreateWindow(
           1920, 1080, "Gladius - Advanced Cheese Grater Creator", nullptr, nullptr);
@@ -187,6 +226,7 @@ namespace gladius
         glfwSetWindowUserPointer(m_window, this);
         glfwSetDropCallback(m_window, staticDropCallback);
 
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwMakeContextCurrent(m_window);
         if (!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress))
         {
@@ -197,6 +237,7 @@ namespace gladius
             return;
         }
         glShadeModel(GL_FLAT);
+    #endif
         initImgUI();
 
         // determine hdpi scaling
@@ -351,8 +392,12 @@ namespace gladius
         m_originalStyle = ImGui::GetStyle();
 
         // Setup Platform/Renderer bindings
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         ImGui_ImplGlfw_InitForOpenGL(m_window, true);
         ImGui_ImplOpenGL2_Init();
+    #else
+        ImGui_ImplGlfw_InitForOther(m_window, true);
+    #endif
 
 #ifdef ENABLE_UI_TESTING
         m_testEngine = ImGuiTestEngine_CreateContext();
@@ -364,6 +409,134 @@ namespace gladius
         ImGuiTestEngine_Start(m_testEngine, ImGui::GetCurrentContext());
 #endif
     }
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void GLView::initializeWebGPURenderer()
+    {
+        if (!m_window || !m_webgpuContext || !m_webgpuContext->isValid() || m_webgpuRendererInitialized)
+        {
+            return;
+        }
+
+        webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+
+#if defined(__linux__)
+        wgpu::SurfaceSourceXlibWindow surfaceSource;
+        surfaceSource.display = glfwGetX11Display();
+        surfaceSource.window = static_cast<std::uint64_t>(glfwGetX11Window(m_window));
+#elif defined(_WIN32)
+        wgpu::SurfaceSourceWindowsHWND surfaceSource;
+        surfaceSource.hinstance = GetModuleHandle(nullptr);
+        surfaceSource.hwnd = glfwGetWin32Window(m_window);
+#else
+        std::cerr << "WebGPU surfaces are not implemented for this platform\n";
+        return;
+#endif
+
+        wgpu::SurfaceDescriptor surfaceDescriptor;
+        surfaceDescriptor.nextInChain = &surfaceSource;
+        m_webgpuSurface = m_webgpuContext->getInstance().CreateSurface(&surfaceDescriptor);
+        if (!m_webgpuSurface)
+        {
+            std::cerr << "Unable to create the WebGPU window surface\n";
+            return;
+        }
+
+        wgpu::SurfaceCapabilities capabilities;
+        if (!m_webgpuSurface.GetCapabilities(m_webgpuContext->getAdapter(), &capabilities) ||
+            capabilities.formatCount == 0u || capabilities.alphaModeCount == 0u)
+        {
+            std::cerr << "Unable to query WebGPU surface capabilities\n";
+            m_webgpuSurface = nullptr;
+            return;
+        }
+
+        m_webgpuSurfaceFormat = capabilities.formats[0];
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+        m_webgpuSurfaceWidth = static_cast<std::uint32_t>(std::max(framebufferWidth, 1));
+        m_webgpuSurfaceHeight = static_cast<std::uint32_t>(std::max(framebufferHeight, 1));
+        wgpu::SurfaceConfiguration configuration;
+        configuration.device = m_webgpuContext->getDevice();
+        configuration.format = m_webgpuSurfaceFormat;
+        configuration.width = m_webgpuSurfaceWidth;
+        configuration.height = m_webgpuSurfaceHeight;
+        configuration.alphaMode = capabilities.alphaModes[0];
+        configuration.presentMode = wgpu::PresentMode::Fifo;
+        m_webgpuSurface.Configure(&configuration);
+
+        ImGui_ImplWGPU_InitInfo initInfo;
+        initInfo.Device = m_webgpuContext->getDevice().Get();
+        initInfo.RenderTargetFormat = static_cast<WGPUTextureFormat>(m_webgpuSurfaceFormat);
+        if (!ImGui_ImplWGPU_Init(&initInfo))
+        {
+            std::cerr << "Unable to initialize the ImGui WebGPU renderer\n";
+            m_webgpuSurface.Unconfigure();
+            m_webgpuSurface = nullptr;
+            return;
+        }
+
+        m_webgpuRendererInitialized = true;
+    }
+
+    void GLView::renderWebGPUFrame()
+    {
+        if (!m_webgpuRendererInitialized || !m_webgpuContext || !m_webgpuSurface)
+        {
+            return;
+        }
+
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+        if (framebufferWidth <= 0 || framebufferHeight <= 0)
+        {
+            return;
+        }
+
+        webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+        auto const width = static_cast<std::uint32_t>(framebufferWidth);
+        auto const height = static_cast<std::uint32_t>(framebufferHeight);
+        if (width != m_webgpuSurfaceWidth || height != m_webgpuSurfaceHeight)
+        {
+            wgpu::SurfaceConfiguration configuration;
+            configuration.device = m_webgpuContext->getDevice();
+            configuration.format = m_webgpuSurfaceFormat;
+            configuration.width = width;
+            configuration.height = height;
+            configuration.alphaMode = wgpu::CompositeAlphaMode::Auto;
+            configuration.presentMode = wgpu::PresentMode::Fifo;
+            m_webgpuSurface.Configure(&configuration);
+            m_webgpuSurfaceWidth = width;
+            m_webgpuSurfaceHeight = height;
+        }
+        wgpu::SurfaceTexture surfaceTexture;
+        m_webgpuSurface.GetCurrentTexture(&surfaceTexture);
+        if (surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
+            surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal)
+        {
+            return;
+        }
+
+        wgpu::TextureView view = surfaceTexture.texture.CreateView();
+        wgpu::CommandEncoder encoder = m_webgpuContext->getDevice().CreateCommandEncoder();
+        wgpu::RenderPassColorAttachment colorAttachment;
+        colorAttachment.view = view;
+        colorAttachment.loadOp = wgpu::LoadOp::Clear;
+        colorAttachment.storeOp = wgpu::StoreOp::Store;
+        colorAttachment.clearValue = {0.08, 0.08, 0.08, 1.0};
+        wgpu::RenderPassDescriptor renderPassDescriptor;
+        renderPassDescriptor.colorAttachmentCount = 1u;
+        renderPassDescriptor.colorAttachments = &colorAttachment;
+        wgpu::RenderPassEncoder renderPass = encoder.BeginRenderPass(&renderPassDescriptor);
+        ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), renderPass.Get());
+        renderPass.End();
+        wgpu::CommandBuffer commandBuffer = encoder.Finish();
+        m_webgpuContext->getQueue().Submit(1u, &commandBuffer);
+        m_webgpuSurface.Present();
+    }
+#endif
 
     auto GLView::isViewSettingsVisible() -> bool
     {
@@ -377,9 +550,17 @@ namespace gladius
 
     void GLView::displayUI()
     {
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glDisable(GL_CULL_FACE);
         // Start the Dear ImGui frame
         ImGui_ImplOpenGL2_NewFrame();
+    #elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+        if (m_webgpuRendererInitialized)
+        {
+            webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+            ImGui_ImplWGPU_NewFrame();
+        }
+    #endif
 
         ImGui_ImplGlfw_NewFrame();
 
@@ -449,9 +630,13 @@ namespace gladius
         // Rendering
         ImGui::Render();
         ImGuiIO & io = ImGui::GetIO();
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glViewport(0, 0, (GLsizei) io.DisplaySize.x, (GLsizei) io.DisplaySize.y);
         glUseProgram(0);
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+    #elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+        renderWebGPUFrame();
+    #endif
 #ifdef IMGUI_HAS_VIEWPORT
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
@@ -830,12 +1015,16 @@ namespace gladius
 
         FrameMark;
 
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwMakeContextCurrent(m_window);
+    #endif
         // applyFullscreenMode is now only called when mode changes via setFullscreenMode()
         m_render();
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glFlush();
         glFinish();
         glPopMatrix();
+    #endif
 
         displayUI();
 
@@ -848,7 +1037,9 @@ namespace gladius
         }
 
         processPendingScreenshot();
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwSwapBuffers(m_window);
+    #endif
     }
 
     std::chrono::milliseconds getTimeStamp_ms()
@@ -915,9 +1106,11 @@ namespace gladius
                     }
                 }
 
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
                 glClearColor(0.0f, 0.0f, 0.0f, 1.00f);
                 glClear(GL_COLOR_BUFFER_BIT);
                 glClear(GL_DEPTH_BUFFER_BIT);
+#endif
                 render();
                 lastFrame_ms = getTimeStamp_ms();
             }
@@ -1050,6 +1243,7 @@ namespace gladius
         std::vector<unsigned char> pixels(width * height * 4);
         
         // Make sure we're reading from the frame buffer
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
         // OpenGL reads bottom-to-top, lodepng expects top-to-bottom.
@@ -1066,5 +1260,9 @@ namespace gladius
         }
 
         currentPromise->set_value(error == 0);
+#else
+    (void) pixels;
+    currentPromise->set_value(false);
+#endif
     }
 }

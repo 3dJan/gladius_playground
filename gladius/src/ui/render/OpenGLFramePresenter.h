@@ -1,6 +1,6 @@
 #pragma once
 
-#include "compute/RenderContracts.h"
+#include "FramePresenter.h"
 
 #include <cstdint>
 #include <optional>
@@ -14,23 +14,23 @@ namespace gladius::ui::async_rendering
      * for the complete viewport and uploads only the completed rows. Every method that creates,
      * changes, or releases the texture must execute while the UI OpenGL context is current.
      */
-    class OpenGLFramePresenter
+    class OpenGLFramePresenter final : public FramePresenter
     {
       public:
         OpenGLFramePresenter() = default;
-        ~OpenGLFramePresenter();
+        ~OpenGLFramePresenter() override;
 
         OpenGLFramePresenter(OpenGLFramePresenter const &) = delete;
         OpenGLFramePresenter & operator=(OpenGLFramePresenter const &) = delete;
 
         [[nodiscard]] static bool canPresent(compute::RenderFrame const & frame) noexcept;
-        [[nodiscard]] bool present(compute::RenderFrame const & frame);
-        void release() noexcept;
+        [[nodiscard]] bool present(compute::RenderFrame const & frame) override;
+        void release() noexcept override;
 
-        [[nodiscard]] std::uint32_t getTextureId() const noexcept;
-        [[nodiscard]] std::uint32_t getWidth() const noexcept;
-        [[nodiscard]] std::uint32_t getHeight() const noexcept;
-        [[nodiscard]] std::optional<compute::RenderFreshnessStamp> getFreshness() const noexcept;
+        [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
+        [[nodiscard]] std::uint32_t getWidth() const noexcept override;
+        [[nodiscard]] std::uint32_t getHeight() const noexcept override;
+        [[nodiscard]] std::optional<compute::RenderFreshnessStamp> getFreshness() const noexcept override;
 
       private:
         void allocateTexture(std::uint32_t width, std::uint32_t height);

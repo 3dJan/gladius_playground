@@ -3,6 +3,7 @@
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "ShortcutManager.h"
+#include "render/WebGPUFramePresenter.h"
 #include "compute/ComputeRendererFactory.h"
 #include "imgui.h"
 
@@ -76,6 +77,7 @@ namespace gladius::ui
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
+        m_neutralFramePresenter.reset();
         m_neutralBackendActive = runtime != nullptr &&
                                  runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
     }
@@ -272,7 +274,8 @@ namespace gladius::ui
 
         if (!m_neutralFramePresenter)
         {
-            m_neutralFramePresenter = std::make_unique<async_rendering::OpenGLFramePresenter>();
+                        m_neutralFramePresenter = std::make_unique<async_rendering::WebGPUFramePresenter>(
+                            m_runtime != nullptr ? m_runtime->getWebGPUContext() : nullptr);
         }
 
         auto const width = static_cast<std::uint32_t>(std::clamp(
@@ -312,8 +315,8 @@ namespace gladius::ui
             queueRenderDecision(m_neutralRenderScheduler.workflow().tick());
         }
 
-        auto pendingCommands = std::move(m_pendingRenderCommands);
-        m_pendingRenderCommands.clear();
+        std::vector<async_rendering::RenderCommand> pendingCommands;
+        pendingCommands.swap(m_pendingRenderCommands);
         auto retainPendingCommands = [&](std::size_t const firstCommand)
         {
             for (std::size_t index = firstCommand; index < pendingCommands.size(); ++index)
@@ -427,6 +430,10 @@ namespace gladius::ui
         }
 
         m_cameraInputInvalidatedThisFrame = false;
+        // Present any completed frame before recording ImGui::Image(). The presenter may
+        // replace its texture when the viewport changes; recording the image first would
+        // leave ImGui holding a view that is released before the WebGPU draw pass.
+        (void) tryRenderWithNeutralBackend(m_renderWindowState);
 
         auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
         if (textureId != 0u)
@@ -493,7 +500,6 @@ namespace gladius::ui
             }
 
             m_dirty = m_dirty || state.isMoving;
-            (void) tryRenderWithNeutralBackend(state);
 
             if (m_view != nullptr)
             {

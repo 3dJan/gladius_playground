@@ -569,6 +569,9 @@ namespace gladius::ui
                 m_doc = std::make_shared<Document>(m_logger);
                 m_computeAvailable = true;
                 m_computeErrorMessage.clear();
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+                m_mainView.setWebGPUContext(m_runtime->getWebGPUContext());
+#endif
                 setup(nullptr, m_doc, m_logger);
 
                 if (m_startupFile)

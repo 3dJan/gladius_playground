@@ -2,15 +2,26 @@
 
 #include "Theme.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 
 #include "imgui.h"
 
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+#include <dawn/webgpu_cpp.h>
+#endif
+
 struct GLFWwindow;
 struct ImGuiTestEngine;
+
+namespace gladius::webgpu
+{
+    class WebGPUComputeContext;
+}
 
 namespace gladius
 {
@@ -42,6 +53,10 @@ namespace gladius
 
         // Ensure a GL context and ImGui are initialized without entering the main loop
         void ensureInitialized();
+
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+    #endif
 
         void startMainLoop();
 
@@ -162,6 +177,18 @@ namespace gladius
         void init();
         void setGladiusTheme(ImGuiIO & io);
         void initImgUI();
+
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        void initializeWebGPURenderer();
+        void renderWebGPUFrame();
+
+        std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
+        wgpu::Surface m_webgpuSurface;
+        wgpu::TextureFormat m_webgpuSurfaceFormat{wgpu::TextureFormat::Undefined};
+        std::uint32_t m_webgpuSurfaceWidth = 0u;
+        std::uint32_t m_webgpuSurfaceHeight = 0u;
+        bool m_webgpuRendererInitialized = false;
+    #endif
 
         void displayUI();
         void determineUiScale();

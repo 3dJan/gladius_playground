@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../EventLogger.h"
-#include <glad/glad.h>
 #include <algorithm>  // Added for std::find_if
 #include <cstdint>
 #include <filesystem>
@@ -112,8 +111,8 @@ namespace gladius::ui
             std::vector<unsigned char> decodedPixels; ///< Decoded RGBA pixels (for async loading)
             bool hasThumbnail = false;                ///< Whether the file has a thumbnail
             bool thumbnailLoaded = false;             ///< Whether the thumbnail has been loaded
-            bool textureCreated = false;              ///< Whether the GL texture has been created
-            GLuint thumbnailTextureId = 0;            ///< OpenGL texture ID
+            bool textureCreated = false;              ///< Whether the display texture has been created
+            std::uintptr_t thumbnailTextureId = 0;    ///< Backend texture handle
             unsigned int thumbnailWidth = 0;          ///< Width of the thumbnail
             unsigned int thumbnailHeight = 0;         ///< Height of the thumbnail
             std::time_t timestamp = 0;                ///< Last modified timestamp

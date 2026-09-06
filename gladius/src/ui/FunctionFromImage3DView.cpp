@@ -14,7 +14,9 @@
 
 #include <chrono>
 #include <fmt/format.h>
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
 #include <glad/glad.h>
+#endif
 
 namespace gladius::ui
 {
@@ -330,6 +332,7 @@ namespace gladius::ui
 
     void FunctionFromImage3DView::updatePreviewTexture()
     {
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         // T042: Sample the ImageStack at the current slice position
         if (!m_modelEditor)
         {
@@ -483,6 +486,10 @@ namespace gladius::ui
         m_state.previewHeight = static_cast<int>(height);
 
         glBindTexture(GL_TEXTURE_2D, 0);
+    #else
+        // Preview texture creation is supplied by the selected graphics backend.
+        m_state.previewTextureId = 0;
+    #endif
     }
 
     bool FunctionFromImage3DView::render()

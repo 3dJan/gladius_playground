@@ -29,6 +29,7 @@
 #include "compute/OpenCLRenderRequestFactory.h"
 #include "imgui.h"
 #include "render/DisplayFrameSelector.h"
+#include "render/OpenGLFramePresenter.h"
 #include "render/ProgressiveBufferPolicy.h"
 #include "render/RenderModeUpdatePolicy.h"
 #include "render/PreviewBackendPolicy.h"

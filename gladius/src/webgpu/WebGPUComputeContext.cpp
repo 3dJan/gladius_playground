@@ -70,6 +70,16 @@ namespace gladius::webgpu
         return m_queue;
     }
 
+    wgpu::Instance const & WebGPUComputeContext::getInstance() const noexcept
+    {
+        return m_instance;
+    }
+
+    wgpu::Adapter const & WebGPUComputeContext::getAdapter() const noexcept
+    {
+        return m_adapter;
+    }
+
     void WebGPUComputeContext::initialize()
     {
         m_instance = wgpu::CreateInstance();
