@@ -17,10 +17,12 @@
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/MeshExporter.h"
 #endif
+#include "compute/ApplicationComputeRuntime.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 #include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUSdfShaderComposer.h"
+#include "webgpu/WebGPUThumbnailRenderer.h"
 #endif
 #include "exceptions.h"
 #include "imguinodeeditor.h"
@@ -1512,6 +1514,44 @@ namespace gladius
 
             m_assembly->setFilename(filename);
         }
+    }
+
+    PlainImage Document::createThumbnailPng(std::uint32_t const size)
+    {
+        if (size == 0u)
+        {
+            throw std::invalid_argument("Thumbnail size must be greater than zero");
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core)
+        {
+            return m_core->createThumbnailPng();
+        }
+#endif
+
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (m_backendRuntime == nullptr ||
+            m_backendRuntime->getBackendKind() != compute::ComputeBackendKind::WebGPU)
+        {
+            throw std::runtime_error("WebGPU thumbnail runtime is unavailable");
+        }
+
+        auto * const session = m_backendRuntime->getRenderBackendSession();
+        updateFlatAssembly();
+        auto const flatAssembly = getFlatAssembly();
+        if (session == nullptr || !flatAssembly || !flatAssembly->assemblyModel())
+        {
+            throw std::runtime_error("WebGPU thumbnail requires a flattened assembly");
+        }
+
+        auto const generation = std::max<std::uint64_t>(structuralEditEpoch(), 1u);
+        return webgpu::WebGPUThumbnailRenderer::renderPng(
+          *session, *flatAssembly, getResourceManager(), size, generation);
+#else
+        (void) size;
+        throw std::runtime_error("Thumbnail generation is unavailable for the selected backend");
+#endif
     }
 
     io::SaveSnapshot Document::createSaveSnapshot() const

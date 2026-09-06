@@ -14,6 +14,13 @@
 // Forward declare ImVec2 from imgui
 struct ImVec2;
 
+namespace gladius::webgpu
+{
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+  class WebGPUComputeContext;
+#endif
+}
+
 namespace gladius::ui
 {
     /// Tab identifiers for the welcome screen
@@ -80,6 +87,11 @@ namespace gladius::ui
          * @param logger The event logger
          */
         void setLogger(events::SharedLogger logger);
+
+      #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        /// @brief Sets the Dawn context used for displaying thumbnails.
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+      #endif
 
         /**
          * @brief Renders the welcome screen
@@ -179,6 +191,10 @@ namespace gladius::ui
 
         /// Logger for error reporting
         events::SharedLogger m_logger;
+
+      #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
+      #endif
 
         /// List of thumbnail info for recent files.
         /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers

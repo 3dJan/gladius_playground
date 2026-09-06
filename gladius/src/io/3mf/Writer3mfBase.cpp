@@ -67,16 +67,6 @@ namespace gladius::io
 
     void Writer3mfBase::updateThumbnail(Document & doc, Lib3MF::PModel model3mf)
     {
-#if !defined(GLADIUS_ENABLE_OPENCL)
-        (void) doc;
-        if (m_logger)
-        {
-            m_logger->addEvent({"Thumbnail generation is unavailable for the selected backend",
-                                events::Severity::Warning});
-        }
-        (void) model3mf;
-        return;
-#else
         if (!model3mf)
         {
             if (m_logger)
@@ -88,19 +78,7 @@ namespace gladius::io
 
         try
         {
-            // The document may be coreless when the WebGPU backend is active.
-            auto core = doc.getCore();
-            if (!core)
-            {
-                if (m_logger)
-                {
-                    m_logger->addEvent({"Thumbnail generation is unavailable without a compute core",
-                                        events::Severity::Warning});
-                }
-                return;
-            }
-
-            auto image = core->createThumbnailPng();
+            auto image = doc.createThumbnailPng();
 
             if (model3mf->HasPackageThumbnailAttachment())
             {
@@ -123,7 +101,6 @@ namespace gladius::io
                   {fmt::format("Failed to add thumbnail: {}", e.what()), events::Severity::Error});
             }
         }
-#endif
     }
 
     void Writer3mfBase::addDefaultMetadata(Lib3MF::PModel model3mf)

@@ -45,6 +45,14 @@ namespace gladius::ui
         m_needsRefresh = true;
     }
 
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void ThreemfFileViewer::setWebGPUContext(
+      std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_thumbnailExtractor->setWebGPUContext(std::move(context));
+    }
+#endif
+
     void ThreemfFileViewer::scanDirectory()
     {
         if (!m_needsRefresh)

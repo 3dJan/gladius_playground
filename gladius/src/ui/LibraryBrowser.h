@@ -9,6 +9,13 @@
 #include <unordered_map>
 #include <vector>
 
+namespace gladius::webgpu
+{
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+  class WebGPUComputeContext;
+#endif
+}
+
 namespace gladius::ui
 {
     /**
@@ -29,6 +36,11 @@ namespace gladius::ui
         explicit LibraryBrowser(events::SharedLogger logger);
 
         void setLogger(events::SharedLogger logger);
+
+      #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        /// @brief Sets the Dawn context used by all library thumbnail viewers.
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+      #endif
 
         /**
          * @brief Destructor
@@ -95,6 +107,9 @@ namespace gladius::ui
         bool m_visible = true;
         bool m_needsRefresh = true;    ///< Whether the directories need to be rescanned
         events::SharedLogger m_logger; ///< Logger for events
+      #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
+      #endif
         std::unordered_map<std::string, std::unique_ptr<ThreemfFileViewer>>
           m_fileBrowsers; ///< File browsers for each subfolder
 

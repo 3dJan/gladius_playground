@@ -5,6 +5,7 @@
 #include "Mesh.h"
 #include "MeshSdfMethod.h"
 #include "compute/RenderContracts.h"
+#include "compute/types.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
 #else
@@ -17,6 +18,10 @@ namespace gladius
 namespace gladius::webgpu
 {
     class WebGPUContourGenerator;
+}
+namespace gladius::compute
+{
+    class IBackendRuntime;
 }
 #include "io/3mf/Importer3mf.h"
 #include "io/3mf/ImageStackCreator.h"
@@ -145,6 +150,12 @@ namespace gladius
         explicit Document(std::shared_ptr<ComputeCore> core);
         explicit Document(events::SharedLogger logger);
 
+        /// @brief Associates the document with the application-selected backend runtime.
+        void setBackendRuntime(compute::IBackendRuntime * runtime) noexcept
+        {
+            m_backendRuntime = runtime;
+        }
+
         /// Blocks until any in-flight asynchronous file-load / model-refresh worker
         /// has finished before member teardown begins. Without this, the implicit
         /// std::future destructors join the workers only after members declared after
@@ -199,6 +210,9 @@ namespace gladius
          */
         [[nodiscard]] std::string getLoadingError() const;
         void saveAs(std::filesystem::path filename, bool writeThumbnail = true);
+
+        /// @brief Renders and encodes a thumbnail using the selected backend.
+        [[nodiscard]] PlainImage createThumbnailPng(std::uint32_t size = 256);
 
         /**
          * @brief Captures independent document data for background native 3MF serialization.
@@ -563,6 +577,7 @@ namespace gladius
         std::filesystem::path m_modelFileName;
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
         std::shared_ptr<ComputeCore> m_core;
+        compute::IBackendRuntime * m_backendRuntime{nullptr};
         events::SharedLogger m_logger;
         bool m_fileChanged{false};
         std::atomic<uint64_t> m_saveVersion{0};

@@ -9,6 +9,9 @@
 #include <lodepng.h>
 #include "io/3mf/Lib3mfLoader.h"
 #include "io/3mf/LibraryMetadata.h"
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+#include "webgpu/WebGPUComputeContext.h"
+#endif
 
 namespace gladius::ui
 {
@@ -29,6 +32,14 @@ namespace gladius::ui
     }
 
     ThreemfThumbnailExtractor::~ThreemfThumbnailExtractor() = default;
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void ThreemfThumbnailExtractor::setWebGPUContext(
+      std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_webgpuContext = std::move(context);
+    }
+#endif
 
     std::vector<unsigned char>
     ThreemfThumbnailExtractor::extractThumbnail(const std::filesystem::path & filePath)
@@ -169,6 +180,19 @@ namespace gladius::ui
             info.thumbnailTextureId = 0;
         }
 #else
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        if (m_webgpuContext)
+        {
+            webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_webgpuContext);
+            info.thumbnailTextureView = nullptr;
+            info.thumbnailTexture = nullptr;
+        }
+        else
+        {
+            info.thumbnailTextureView = nullptr;
+            info.thumbnailTexture = nullptr;
+        }
+#endif
         info.thumbnailTextureId = 0;
 #endif
 
@@ -406,6 +430,66 @@ namespace gladius::ui
         info.loadState = ThumbnailLoadState::Ready;
 
         // Clear decoded pixels to free memory
+        info.decodedPixels.clear();
+        info.decodedPixels.shrink_to_fit();
+#elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+        if (info.thumbnailTextureId != 0 || info.decodedPixels.empty() || !m_webgpuContext ||
+            !m_webgpuContext->isValid() || info.thumbnailWidth == 0u ||
+            info.thumbnailHeight == 0u)
+        {
+            return;
+        }
+
+        webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_webgpuContext);
+
+        wgpu::TextureDescriptor descriptor;
+        descriptor.label = "Gladius WebGPU thumbnail texture";
+        descriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding;
+        descriptor.dimension = wgpu::TextureDimension::e2D;
+        descriptor.size = {.width = info.thumbnailWidth,
+                           .height = info.thumbnailHeight,
+                           .depthOrArrayLayers = 1u};
+        descriptor.format = wgpu::TextureFormat::RGBA8Unorm;
+        descriptor.mipLevelCount = 1u;
+        descriptor.sampleCount = 1u;
+
+        auto texture = m_webgpuContext->getDevice().CreateTexture(&descriptor);
+        auto textureView = texture ? texture.CreateView() : wgpu::TextureView{};
+        if (!texture || !textureView)
+        {
+            return;
+        }
+
+        auto const rowBytes = static_cast<std::size_t>(info.thumbnailWidth) * 4u;
+        auto const alignedBytesPerRow = (rowBytes + 255u) & ~std::size_t{255u};
+        std::vector<unsigned char> uploadData(alignedBytesPerRow * info.thumbnailHeight, 0u);
+        for (unsigned int row = 0u; row < info.thumbnailHeight; ++row)
+        {
+            std::copy_n(info.decodedPixels.data() + row * rowBytes,
+                        rowBytes,
+                        uploadData.data() + row * alignedBytesPerRow);
+        }
+
+        wgpu::TexelCopyTextureInfo destination;
+        destination.texture = texture;
+        wgpu::TexelCopyBufferLayout layout;
+        layout.bytesPerRow = static_cast<std::uint32_t>(alignedBytesPerRow);
+        layout.rowsPerImage = info.thumbnailHeight;
+        wgpu::Extent3D writeSize{.width = info.thumbnailWidth,
+                                 .height = info.thumbnailHeight,
+                                 .depthOrArrayLayers = 1u};
+        m_webgpuContext->getQueue().WriteTexture(&destination,
+                                                 uploadData.data(),
+                                                 uploadData.size(),
+                                                 &layout,
+                                                 &writeSize);
+
+        info.thumbnailTexture = std::move(texture);
+        info.thumbnailTextureView = std::move(textureView);
+        info.thumbnailTextureId = reinterpret_cast<std::uintptr_t>(info.thumbnailTextureView.Get());
+        info.textureCreated = true;
+        info.hasThumbnail = true;
+        info.loadState = ThumbnailLoadState::Ready;
         info.decodedPixels.clear();
         info.decodedPixels.shrink_to_fit();
     #else

@@ -12,6 +12,13 @@
 // Forward declare ImVec2 from imgui
 struct ImVec2;
 
+namespace gladius::webgpu
+{
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    class WebGPUComputeContext;
+#endif
+}
+
 namespace gladius::ui
 {
     /**
@@ -55,6 +62,11 @@ namespace gladius::ui
          * @brief Force a refresh of the directory contents
          */
         void refreshDirectory();
+
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        /// @brief Sets the Dawn context used for displaying thumbnails.
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+    #endif
 
         /**
          * @brief Render the 3MF file viewer UI widget

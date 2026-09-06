@@ -9,6 +9,17 @@
 #include <string>
 #include <vector>
 
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+#include <webgpu/webgpu_cpp.h>
+#endif
+
+namespace gladius::webgpu
+{
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    class WebGPUComputeContext;
+#endif
+}
+
 namespace gladius::ui
 {
     /**
@@ -125,6 +136,11 @@ namespace gladius::ui
             std::vector<std::string> libraryFunctionNames;
             /// @brief Whether gladius library metadata was present in this file
             bool hasLibraryMetadata = false;
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+            wgpu::Texture thumbnailTexture;
+            wgpu::TextureView thumbnailTextureView;
+#endif
         };
 
         /**
@@ -138,6 +154,11 @@ namespace gladius::ui
          * @brief Destroy the Threemf Thumbnail Extractor
          */
         ~ThreemfThumbnailExtractor();
+
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        /// @brief Set the Dawn context used to upload thumbnail textures.
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+    #endif
 
         /**
          * @brief Extract thumbnail data from a 3MF file
@@ -214,5 +235,8 @@ namespace gladius::ui
       private:
         events::SharedLogger m_logger; ///< Logger for error reporting
         Lib3MF::PWrapper m_wrapper;    ///< 3MF library wrapper
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
+    #endif
     };
 }

@@ -116,6 +116,7 @@ namespace gladius::ui
         m_core = std::move(core);
         m_doc = std::move(doc);
         m_logger = std::move(logger);
+        m_doc->setBackendRuntime(m_runtime.get());
         m_outline.setDocument(m_doc);
 
         // Set UI mode to true since we're using the MainWindow (UI interface)
@@ -571,6 +572,8 @@ namespace gladius::ui
                 m_computeErrorMessage.clear();
 #if defined(GLADIUS_UI_BACKEND_WEBGPU)
                 m_mainView.setWebGPUContext(m_runtime->getWebGPUContext());
+                m_welcomeScreen.setWebGPUContext(m_runtime->getWebGPUContext());
+                m_modelEditor.setWebGPUContext(m_runtime->getWebGPUContext());
 #endif
                 setup(nullptr, m_doc, m_logger);
 
@@ -846,6 +849,7 @@ namespace gladius::ui
                 }
                 m_core.reset();
                 m_doc = std::make_shared<Document>(m_logger);
+                m_doc->setBackendRuntime(m_runtime.get());
                 m_doc->setUiMode(false);
                 m_computeAvailable = true;
                 m_computeErrorMessage.clear();
@@ -884,6 +888,7 @@ namespace gladius::ui
               std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
             m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
             m_doc = std::make_shared<Document>(m_core);
+                        m_doc->setBackendRuntime(m_runtime.get());
 
             // Explicitly mark document as non-UI mode to disable backups and UI-only behaviors
             m_doc->setUiMode(false);

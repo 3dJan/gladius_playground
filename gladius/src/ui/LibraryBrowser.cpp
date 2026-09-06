@@ -18,6 +18,22 @@ namespace gladius::ui
         m_logger = std::move(logger);
     }
 
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void LibraryBrowser::setWebGPUContext(
+      std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_webgpuContext = std::move(context);
+        for (auto const & entry : m_fileBrowsers)
+        {
+            entry.second->setWebGPUContext(m_webgpuContext);
+        }
+        for (auto const & entry : m_binBrowsers)
+        {
+            entry.second->setWebGPUContext(m_webgpuContext);
+        }
+    }
+#endif
+
     LibraryBrowser::~LibraryBrowser() = default;
 
     void LibraryBrowser::setRootDirectory(const std::filesystem::path & directory)
@@ -94,6 +110,9 @@ namespace gladius::ui
             {
                 auto browser = std::make_unique<ThreemfFileViewer>(m_logger);
                 browser->setDirectory(subfolder);
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+                browser->setWebGPUContext(m_webgpuContext);
+#endif
                 browser->setIsShippedPredicate(
                   [](std::filesystem::path const & filePath) -> bool
                   {
@@ -240,6 +259,9 @@ namespace gladius::ui
             auto const folderName = subfolder.filename().string();
             auto browser = std::make_unique<ThreemfFileViewer>(m_logger);
             browser->setDirectory(subfolder);
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+            browser->setWebGPUContext(m_webgpuContext);
+#endif
 
             browser->setOnRestoreCallback(
               [this](std::filesystem::path const & filePath) -> bool

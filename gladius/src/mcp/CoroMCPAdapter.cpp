@@ -1,10 +1,8 @@
 #include "CoroMCPAdapter.h"
 #include "../Application.h"
 #include "../Document.h"
-#include <chrono>
 #include <filesystem>
 #include <iostream>
-#include <thread>
 
 namespace gladius::mcp
 {
@@ -83,12 +81,7 @@ namespace gladius::mcp
             catch (...)
             {
             }
-            bool const writeThumbnail =
-#ifdef GLADIUS_ENABLE_OPENCL
-              m_application && m_application->isHeadlessMode();
-#else
-              false;
-#endif
+            bool const writeThumbnail = m_application && m_application->isHeadlessMode();
 
             bool preparationSuccess = true;
 #ifdef GLADIUS_ENABLE_OPENCL
@@ -249,46 +242,8 @@ namespace gladius::mcp
 
         try
         {
-            // Start save and thumbnail operations in parallel
-            auto saveTask = [this, &path, document]() -> coro::task<bool>
-            {
-                co_await m_backgroundPool->schedule();
-                document->saveAs(std::filesystem::path(path), true); // Save with thumbnail
-                co_return true;
-            };
-
-            auto thumbnailTask = [this, document]() -> coro::task<bool>
-            {
-                co_await m_computePool->schedule();
-
-                // TODO: Implement proper OpenCL thumbnail generation
-                // This would use our existing thumbnail generation code
-                // but isolated to the compute thread pool
-
-                // For now, just simulate the operation
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                co_return true;
-            };
-
-            // Create the tasks
-            auto saveOperation = saveTask();
-            auto thumbnailOperation = thumbnailTask();
-
-            // Wait for both operations to complete
-            auto [saveTaskResult, thumbnailTaskResult] =
-              co_await coro::when_all(std::move(saveOperation), std::move(thumbnailOperation));
-
-            if (!saveTaskResult.return_value())
-            {
-                setError("Document save failed");
-                co_return false;
-            }
-
-            if (!thumbnailTaskResult.return_value())
-            {
-                setError("Thumbnail generation failed");
-                // Don't fail the save operation just because thumbnail failed
-            }
+            co_await m_backgroundPool->schedule();
+            document->saveAs(std::filesystem::path(path), true);
 
             m_lastErrorMessage = "Document saved successfully with thumbnail";
             co_return true;
@@ -326,15 +281,14 @@ namespace gladius::mcp
 
         try
         {
-            // Switch to compute thread for OpenCL operations
+            // Switch to a worker thread for backend rendering operations.
             co_await m_computePool->schedule();
-
-            // TODO: Implement actual thumbnail generation
-            // This would call into our existing OpenCL rendering code
-            // but safely isolated on the compute thread
-
-            // For now, simulate the operation
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            auto const image = document->createThumbnailPng();
+            if (image.data.empty())
+            {
+                setError("Thumbnail generation returned no image data");
+                co_return false;
+            }
 
             m_lastErrorMessage = "Thumbnail generated successfully";
             co_return true;

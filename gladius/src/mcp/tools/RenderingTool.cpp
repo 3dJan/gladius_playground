@@ -4,11 +4,12 @@
  */
 
 #include "RenderingTool.h"
-#ifdef GLADIUS_ENABLE_OPENCL
 #include "../../Application.h"
 #include "../../Document.h"
-#include "../../ui/OrbitalCamera.h"
 #include <filesystem>
+#include <fstream>
+#ifdef GLADIUS_ENABLE_OPENCL
+#include "../../ui/OrbitalCamera.h"
 #include <nlohmann/json.hpp>
 #endif
 
@@ -40,10 +41,62 @@ namespace gladius
                             "Camera rendering is unavailable in a pure WebGPU MCP build.");
                 }
 
-                nlohmann::json RenderingTool::generateThumbnail(const std::string &, unsigned int)
+                nlohmann::json RenderingTool::generateThumbnail(const std::string & outputPath,
+                                        unsigned int size)
                 {
-                        return createToolError(
-                            "Thumbnail generation is unavailable in a pure WebGPU MCP build.");
+                    nlohmann::json response;
+                    if (!validateActiveDocument())
+                    {
+                        response["success"] = false;
+                        response["error"] = getLastErrorMessage();
+                        return response;
+                    }
+
+                    try
+                    {
+                        auto document = m_application->getCurrentDocument();
+                        if (!document)
+                        {
+                            throw std::runtime_error("No active document");
+                        }
+
+                        auto const outputFile = std::filesystem::path(outputPath);
+                        if (!outputFile.parent_path().empty())
+                        {
+                            std::filesystem::create_directories(outputFile.parent_path());
+                        }
+                        auto image = document->createThumbnailPng(size);
+                        std::ofstream output(outputFile, std::ios::binary);
+                        if (!output)
+                        {
+                            throw std::runtime_error("Unable to open thumbnail output file");
+                        }
+                        output.write(reinterpret_cast<char const *>(image.data.data()),
+                                 static_cast<std::streamsize>(image.data.size()));
+                        if (!output)
+                        {
+                            throw std::runtime_error("Unable to write thumbnail output file");
+                        }
+
+                        response["success"] = true;
+                        response["message"] = "Thumbnail generated successfully";
+                        response["outputPath"] = outputPath;
+                        response["actualWidth"] = size;
+                        response["actualHeight"] = size;
+                        response["requestedWidth"] = size;
+                        response["requestedHeight"] = size;
+                        response["format"] = "png";
+                        response["quality"] = 1.0f;
+                        response["size"] = size;
+                        return response;
+                    }
+                    catch (const std::exception & e)
+                    {
+                        setErrorMessage("Thumbnail generation failed: " + std::string(e.what()));
+                        response["success"] = false;
+                        response["error"] = getLastErrorMessage();
+                        return response;
+                    }
                 }
 
                 nlohmann::json RenderingTool::getOptimalCameraPosition()

@@ -43,6 +43,13 @@ namespace gladius
     class Document;
 }
 
+namespace gladius::webgpu
+{
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    class WebGPUComputeContext;
+#endif
+}
+
 namespace ed = ax::NodeEditor;
 
 namespace gladius::ui
@@ -81,6 +88,11 @@ namespace gladius::ui
 
         /// @brief Set the export state for blocking UI modifications during export
         void setExportState(ExportState * state);
+
+    #if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        /// @brief Sets the Dawn context used by the library thumbnail browser.
+        void setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context);
+    #endif
 
         [[nodiscard]] bool modelWasModified() const;
 

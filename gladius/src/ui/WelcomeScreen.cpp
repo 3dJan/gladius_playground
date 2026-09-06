@@ -344,6 +344,9 @@ namespace gladius::ui
         if (!m_thumbnailExtractor && m_logger)
         {
             m_thumbnailExtractor = std::make_unique<ThreemfThumbnailExtractor>(m_logger);
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+            m_thumbnailExtractor->setWebGPUContext(m_webgpuContext);
+#endif
 
             // Initialize the async thumbnail loader
             m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger);
@@ -363,6 +366,18 @@ namespace gladius::ui
             }
         }
     }
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void WelcomeScreen::setWebGPUContext(
+      std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_webgpuContext = std::move(context);
+        if (m_thumbnailExtractor)
+        {
+            m_thumbnailExtractor->setWebGPUContext(m_webgpuContext);
+        }
+    }
+#endif
 
     void WelcomeScreen::updateActiveTab()
     {

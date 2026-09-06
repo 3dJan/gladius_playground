@@ -2166,6 +2166,14 @@ namespace gladius::ui
         m_beamLatticeView.setExportState(state);
     }
 
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+    void ModelEditor::setWebGPUContext(
+      std::shared_ptr<webgpu::WebGPUComputeContext> context)
+    {
+        m_libraryBrowser.setWebGPUContext(std::move(context));
+    }
+#endif
+
     void ModelEditor::setAssembly(nodes::SharedAssembly assembly)
     {
         if (!assembly)
