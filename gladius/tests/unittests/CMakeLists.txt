@@ -59,6 +59,18 @@ if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "WEBGPU")
   message(STATUS "WebGPU UI backend selected - excluding OpenGL presenter tests")
 endif()
 
+if(NOT GLADIUS_ENABLE_OPENVDB)
+  list(REMOVE_ITEM TEST_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAcceleration_tests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAccelerationReference.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/BeamLatticeVoxelAccelerationReference.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Importer3mfMerge_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ImageStackExporter_tests.cpp"
+  )
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/io/3mf/OpenVdbShellGenerator_tests\\.cpp$")
+  message(STATUS "OpenVDB disabled - excluding OpenVDB-only unit tests")
+endif()
+
 set(SOURCES ${TEST_SOURCES})
 add_executable(${BINARY} ${TEST_SOURCES})
 
@@ -86,7 +98,11 @@ set_property(TARGET ${BINARY} PROPERTY CXX_STANDARD_REQUIRED ON)
 
 target_include_directories(${BINARY} PUBLIC ../../src ../../src/io ../../src/slicer ../../components/nanovdb)
 
-set(DEPENDENCIES ${CMAKE_PROJECT_NAME}_lib GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main ${FMT_LIBRARY} ${OPENMESH_LIBRARIES} Eigen3::Eigen lodepng Boost::boost unofficial::minizip::minizip OpenVDB::openvdb)
+set(DEPENDENCIES ${CMAKE_PROJECT_NAME}_lib GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main ${FMT_LIBRARY} ${OPENMESH_LIBRARIES} Eigen3::Eigen lodepng unofficial::minizip::minizip)
+
+if(GLADIUS_ENABLE_OPENVDB)
+  list(APPEND DEPENDENCIES OpenVDB::openvdb Boost::boost)
+endif()
 
 if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "OPENGL")
   find_package(OpenGL REQUIRED)

@@ -14,6 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(GLADIUS_ENABLE_OPENCL "Build the OpenCL compute backend" ON)
 option(GLADIUS_ENABLE_WEBGPU "Build the native Dawn/WebGPU compute backend" ON)
+option(GLADIUS_ENABLE_OPENVDB "Build OpenVDB/NanoVDB support (VDB import/export, NanoVDB mesh SDF, voxel beam-lattice acceleration)" ON)
 option(ENABLE_OPENCL_TESTS "Enable tests that require OpenCL" OFF)
 option(ENABLE_UI_TESTING "Enable UI test automation via Dear ImGui Test Engine" OFF)
 set(GLADIUS_UI_BACKEND "OPENGL" CACHE STRING "UI graphics backend (OPENGL or WEBGPU)")
@@ -42,6 +43,10 @@ if(GLADIUS_ENABLE_OPENCL)
   set(GLADIUS_VCPKG_OPENCL_DEPENDENCY "      \"opencl\",")
 else()
   set(GLADIUS_VCPKG_OPENCL_DEPENDENCY "")
+endif()
+
+if(GLADIUS_ENABLE_OPENVDB)
+  set(VCPKG_MANIFEST_FEATURES "${VCPKG_MANIFEST_FEATURES};openvdb")
 endif()
 
 if(NOT GLADIUS_ENABLE_OPENCL AND NOT GLADIUS_ENABLE_WEBGPU)
@@ -248,8 +253,10 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 endif()
 find_package(OpenMP REQUIRED COMPONENTS CXX)
-find_package(OpenVDB CONFIG REQUIRED)
-find_package(blosc CONFIG REQUIRED)
+if(GLADIUS_ENABLE_OPENVDB)
+  find_package(OpenVDB CONFIG REQUIRED)
+  find_package(blosc CONFIG REQUIRED)
+endif()
 find_package(ZLIB REQUIRED)
 find_package(lodepng CONFIG REQUIRED)
 find_package(pugixml CONFIG REQUIRED)
@@ -354,13 +361,15 @@ if(GLADIUS_ENABLE_OPENCL)
   configure_file(src/kernel/sdf_generator.cl src/kernel/sdf_generator.cl COPYONLY)
   configure_file(src/kernel/manifold_dual_contouring.cl src/kernel/manifold_dual_contouring.cl COPYONLY)
 
-  # Copy CNanoVDB.h from vcpkg OpenVDB installation instead of using manually maintained copy
-  find_path(NANOVDB_INCLUDE_DIR
-      NAMES nanovdb/CNanoVDB.h
-      HINTS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-      REQUIRED
-  )
-  configure_file(${NANOVDB_INCLUDE_DIR}/nanovdb/CNanoVDB.h src/kernel/CNanoVDB.h COPYONLY)
+  if(GLADIUS_ENABLE_OPENVDB)
+    # Copy CNanoVDB.h from vcpkg OpenVDB installation instead of using manually maintained copy
+    find_path(NANOVDB_INCLUDE_DIR
+        NAMES nanovdb/CNanoVDB.h
+        HINTS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+        REQUIRED
+    )
+    configure_file(${NANOVDB_INCLUDE_DIR}/nanovdb/CNanoVDB.h src/kernel/CNanoVDB.h COPYONLY)
+  endif()
 endif()
 configure_file(components/fonts/Roboto-Medium.ttf src/misc/fonts/Roboto-Medium.ttf COPYONLY)
 configure_file(components/fonts/fontawesome-free-5.14.0-web/fa-regular-400.ttf src/misc/fonts/fa-regular-400.ttf COPYONLY)

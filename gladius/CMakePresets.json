@@ -168,6 +168,7 @@
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "GLADIUS_ENABLE_OPENCL": "OFF",
                 "GLADIUS_ENABLE_WEBGPU": "ON",
+                "GLADIUS_ENABLE_OPENVDB": "OFF",
                 "GLADIUS_UI_BACKEND": "WEBGPU",
                 "ENABLE_OPENCL_TESTS": "OFF"
             }
