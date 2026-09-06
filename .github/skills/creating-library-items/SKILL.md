@@ -9,7 +9,7 @@ description: >-
   scaffold and metadata.
 metadata:
   author: gladius
-  version: "4.0"
+  version: "4.1"
   requires: gladius-mcp-server
 ---
 
@@ -47,8 +47,12 @@ restart the server for changes to take effect. The old binary stays in memory
 as `(deleted)` if not killed. Use:
 
 ```bash
-pkill -9 -f 'gladiusmcp'
+rtk proxy sh -c "pkill -9 -f 'gladiusmcp'"
 ```
+
+Use `rtk proxy` rather than an output-filtering wrapper because the MCP server
+uses stdio protocol traffic. Never pipe its stdout through `rtk err` or another
+filter.
 
 Regular `pkill` without `-9` does not work because the process ignores
 `SIGTERM`. After killing, trigger a restart from your MCP client configuration.

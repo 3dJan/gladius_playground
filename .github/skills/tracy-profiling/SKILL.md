@@ -8,7 +8,7 @@ description: >-
   interpreting results to find blockers.
 metadata:
   author: gladius
-  version: "1.0"
+  version: "1.1"
   tools: tracy-analyze, tracy-csvexport, tracy-profiler
 ---
 
@@ -54,18 +54,34 @@ void myFunction()
 
 The analysis tool lives at `/home/jan/projects/tracy-analyze`. Install it:
 
+From `/home/jan/projects/tracy-analyze`:
+
 ```bash
-cd /home/jan/projects/tracy-analyze
-pip install -e .
+rtk pip install -e .
 ```
 
 It requires `tracy-csvexport`. Build it once:
 
+From `/home/jan/projects/tracy-analyze`:
+
 ```bash
-cd /home/jan/projects/tracy-analyze
-./scripts/build_csvexport.sh
-cp build/tracy-csvexport ~/.local/bin/
+rtk err ./scripts/build_csvexport.sh
+rtk proxy cp build/tracy-csvexport ~/.local/bin/
 ```
+
+### RTK command policy
+
+Use the RTK wrapper for shell commands so build and analysis output does not
+consume unnecessary context:
+
+- `rtk err ...` for builds or scripts where errors and warnings are sufficient.
+- `rtk test ...` for test runners where only failures are needed.
+- `rtk summary ...` for human-readable output from generic analysis tools.
+- `rtk proxy ...` when output must remain unfiltered or byte-for-byte intact.
+
+For VS Code tasks, use the configured **Build ALL (linux-releaseWithDebug)**
+task rather than inventing a raw build command. Debugging commands may remain
+unwrapped, as required by the project instructions.
 
 ## Workflow
 
@@ -89,10 +105,10 @@ Key locations in Gladius:
 
 ### 2. Build and Run with Tracy
 
-Build normally — Tracy is always compiled in:
+Build with the configured task — Tracy is always compiled in:
 
 ```
-Task: Build incremental
+Task: Build ALL (linux-releaseWithDebug)
 ```
 
 Run Gladius and perform the operations that cause stutters. Tracy captures
@@ -103,32 +119,33 @@ automatically while the application runs.
 Option A: Use `tracy-capture` (CLI) to save while Gladius runs:
 
 ```bash
-tracy-capture -o /tmp/tracy/my_capture.tracy
+rtk proxy tracy-capture -o /tmp/tracy/my_capture.tracy
 ```
 
 Option B: Use `tracy-profiler` (GUI) at `~/.local/bin/tracy-profiler` to
-connect, observe live, and save.
+connect, observe live, and save. Launch it with `rtk proxy` if starting it from
+a terminal.
 
 ### 4. Analyze the Capture
 
 ```bash
 # Quick stall report
-tracy-analyze capture.tracy --stalls-only
+rtk summary tracy-analyze capture.tracy --stalls-only
 
 # Full analysis
-tracy-analyze capture.tracy
+rtk summary tracy-analyze capture.tracy
 
 # Focus on a specific zone
-tracy-analyze capture.tracy --filter "isAnyCompilation"
+rtk summary tracy-analyze capture.tracy --filter "isAnyCompilation"
 
 # JSON for scripting/comparison
-tracy-analyze capture.tracy --format json --top 10
+rtk proxy tracy-analyze capture.tracy --format json --top 10 > report.json
 
 # Specific thread
-tracy-analyze capture.tracy --thread 1
+rtk summary tracy-analyze capture.tracy --thread 1
 
 # 30 FPS budget instead of 60
-tracy-analyze capture.tracy --budget-ms 33
+rtk summary tracy-analyze capture.tracy --budget-ms 33
 ```
 
 ### 5. Interpret Results
@@ -186,18 +203,20 @@ them. Pure Release builds strip symbols and zones show as `(unknown)`.
 
 ```bash
 # Install once
-cd /home/jan/projects/tracy-analyze && pip install -e .
-./scripts/build_csvexport.sh && cp build/tracy-csvexport ~/.local/bin/
+# From /home/jan/projects/tracy-analyze
+rtk pip install -e .
+rtk err ./scripts/build_csvexport.sh
+rtk proxy cp build/tracy-csvexport ~/.local/bin/
 
 # Capture
-tracy-capture -o /tmp/tracy/capture.tracy
+rtk proxy tracy-capture -o /tmp/tracy/capture.tracy
 
 # Analyze
-tracy-analyze /tmp/tracy/capture.tracy --stalls-only
-tracy-analyze /tmp/tracy/capture.tracy --format json > report.json
+rtk summary tracy-analyze /tmp/tracy/capture.tracy --stalls-only
+rtk proxy tracy-analyze /tmp/tracy/capture.tracy --format json > report.json
 
 # Compare before/after
-tracy-analyze before.tracy --format json > before.json
-tracy-analyze after.tracy --format json > after.json
-diff <(jq '.stalls' before.json) <(jq '.stalls' after.json)
+rtk proxy tracy-analyze before.tracy --format json > before.json
+rtk proxy tracy-analyze after.tracy --format json > after.json
+rtk diff before.json after.json
 ```

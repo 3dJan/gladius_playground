@@ -24,6 +24,10 @@ When Gladius starts, it often loads a Welcome Screen. Before interacting with ma
 - **Option B (UI Path)**: Simulate a UI click on the welcome screen button:
   `ui_click(path="//Welcome to Gladius/ActionsPane_CF70A5C3/New Project")`
 
+Build the application with the configured **Build ALL (linux-releaseWithDebug)**
+task. If you need to run a build command manually, use the project RTK wrapper
+and keep diagnostic output compact (for example, `rtk err cmake ...`).
+
 ### 2. Discovering Windows
 Once initialized, use `#tool:ui_dump_windows` to see what is currently visible.
 Common windows include:
@@ -70,8 +74,14 @@ Both servers are managed by VS Code's MCP host. They restart automatically when 
 
 The correct pattern is:
 
-- **Headless server** (`gladius`): run `pkill -f 'gladiusmcp --mcp-stdio --headless'`, or use the VS Code task **"Restart Gladius MCP Server (headless)"**.
-- **UI-mode server** (`gladius-ui`): run `pkill -f 'gladiusmcp --mcp-stdio$'`, or use the VS Code task **"Restart Gladius MCP Server (UI mode)"**.
+- **Headless server** (`gladius`): run `rtk proxy sh -c "pkill -f 'gladiusmcp --mcp-stdio --headless'"`, or use the VS Code task **"Restart Gladius MCP Server (headless)"**.
+- **UI-mode server** (`gladius-ui`): run `rtk proxy sh -c "pkill -f 'gladiusmcp --mcp-stdio$'"`, or use the VS Code task **"Restart Gladius MCP Server (UI mode)"**.
+
+Prefer the configured VS Code restart task. For manual process control, use
+`rtk proxy sh -c "pkill ..."` when RTK tracking is useful, but do not use
+`rtk err`, `rtk summary`, or other output filters around an MCP stdio server.
+MCP protocol bytes must remain unmodified; never pipe the server's stdout
+through a filtering wrapper.
 
 VS Code detects the process exiting and **automatically relaunches** the server with the new binary on the next tool call. Wait ~2 seconds before issuing the next MCP call.
 
