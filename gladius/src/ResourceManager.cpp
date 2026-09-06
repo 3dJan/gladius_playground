@@ -7,19 +7,21 @@
 #include "ResourceContext.h"
 #endif
 #include "SpatialMeshResource.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "StlResource.h"
 #include "VdbImporter.h"
 #include "VdbResource.h"
+#include "MeshResourceVdb.h"
+#endif
 
 #include <fmt/format.h>
 #include <lodepng.h>
 
 #include <algorithm>
 
-#include "MeshResourceVdb.h"
-
 namespace gladius
 {
+#if defined(GLADIUS_ENABLE_OPENVDB)
     void StlResource::loadImpl()
     {
         m_payloadData.meta.clear();
@@ -28,6 +30,7 @@ namespace gladius
         reader.loadStl(getFilename());
         reader.writeMesh(m_payloadData);
     }
+#endif
 
     ResourceManager::ResourceManager(SharedResources resourceContext,
                                      std::filesystem::path assemblyDir)
@@ -49,13 +52,24 @@ namespace gladius
               fmt::format("Loading {} failed, the file does not exist", filename.string()));
         }
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
         if (filename.extension() == ".stl" || filename.extension() == ".STL")
         {
             m_resources[ResourceKey{filename}] =
               std::make_unique<StlResource>(ResourceKey{filename});
         }
+#else
+        if (filename.extension() == ".stl" || filename.extension() == ".STL")
+        {
+            throw std::runtime_error(
+              fmt::format("Loading {} failed, STL import requires a build with "
+                          "GLADIUS_ENABLE_OPENVDB enabled",
+                          filename.string()));
+        }
+#endif
     }
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
     void ResourceManager::addResource(ResourceKey key, vdb::TriangleMesh && mesh)
     {
         m_resources[key] = std::make_unique<MeshResourceVdb>(key, std::move(mesh));
@@ -65,6 +79,7 @@ namespace gladius
     {
         m_resources[key] = std::make_unique<VdbResource>(key, std::move(grid));
     }
+#endif
 
     void ResourceManager::addResource(ResourceKey key, io::ImageStack && stack)
     {

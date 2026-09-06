@@ -15,7 +15,9 @@
 #include "compute/ComputeCore.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/MeshExporter.h"
+#endif
 #endif
 #include "compute/ApplicationComputeRuntime.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
@@ -34,7 +36,9 @@
 #include "io/3mf/ResourceIdUtil.h" // for resourceIdToUniqueResourceId
 #include "io/3mf/Writer3mf.h"
 #include "io/ImporterVdb.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/VdbImporter.h"
+#endif
 #include "nodes/GraphFlattener.h"
 #include "nodes/LowerFunctionGradient.h"
 #include "nodes/LowerNormalizeDistanceField.h"
@@ -1200,6 +1204,11 @@ namespace gladius
         {
         case io::SurfaceExtractionMethod::LayeredMarchingCubes:
         {
+#if !defined(GLADIUS_ENABLE_OPENVDB)
+            throw std::runtime_error(
+              "Layered marching cubes STL export requires a build with "
+              "GLADIUS_ENABLE_OPENVDB enabled");
+#else
             vdb::MeshExporter exporter;
             exporter.setQualityLevel(options.marchingCubesQualityLevel);
             exporter.beginExport(filename, *m_core);
@@ -1213,6 +1222,7 @@ namespace gladius
                 }
             }
             exporter.finalizeExportSTL(*m_core);
+#endif
             break;
         }
         case io::SurfaceExtractionMethod::DualContouring:
@@ -1844,6 +1854,9 @@ namespace gladius
     {
     #if !defined(GLADIUS_ENABLE_OPENCL)
         throw std::runtime_error("Mesh generation is unavailable for the selected backend");
+    #elif !defined(GLADIUS_ENABLE_OPENVDB)
+        throw std::runtime_error(
+          "Mesh generation requires a build with GLADIUS_ENABLE_OPENVDB enabled");
     #else
         if (!m_core)
         {
@@ -2460,9 +2473,13 @@ namespace gladius
 #if !defined(GLADIUS_ENABLE_OPENCL)
         (void) filename;
         throw std::runtime_error("STL mesh import is unavailable for the selected backend");
+#elif !defined(GLADIUS_ENABLE_OPENVDB)
+    (void) filename;
+    throw std::runtime_error(
+        "STL mesh import requires a build with GLADIUS_ENABLE_OPENVDB enabled");
 #else
-        vdb::VdbImporter reader;
-        auto logger = getSharedLogger();
+    vdb::VdbImporter reader;
+    auto logger = getSharedLogger();
         try
         {
             reader.loadStl(filename);
@@ -2482,6 +2499,7 @@ namespace gladius
     #endif
     }
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
     ResourceKey Document::addMeshResource(vdb::TriangleMesh && mesh, std::string const & name)
     {
         if (!m_3mfmodel)
@@ -2534,6 +2552,7 @@ namespace gladius
 
         return key;
     }
+#endif
 
     void Document::deleteResource(ResourceId id)
     {
@@ -2605,6 +2624,10 @@ namespace gladius
 
     void Document::addBoundingBoxAsMesh()
     {
+#if !defined(GLADIUS_ENABLE_OPENVDB)
+        throw std::runtime_error(
+          "Adding a bounding box mesh requires a build with GLADIUS_ENABLE_OPENVDB enabled");
+#else
         auto const bbox = computeBoundingBox();
 
         // create mesh from bounding box
@@ -2665,6 +2688,7 @@ namespace gladius
                          {bbox.max.x, bbox.max.y, bbox.min.z});
 
         addMeshResource(std::move(mesh), "bounding box");
+#endif
     }
 
     void Document::addCustomBoxMesh(float width,
@@ -2674,6 +2698,16 @@ namespace gladius
                                     float startY,
                                     float startZ)
     {
+#if !defined(GLADIUS_ENABLE_OPENVDB)
+        (void) width;
+        (void) height;
+        (void) depth;
+        (void) startX;
+        (void) startY;
+        (void) startZ;
+        throw std::runtime_error(
+          "Adding a custom box mesh requires a build with GLADIUS_ENABLE_OPENVDB enabled");
+#else
         // Create a custom box mesh with user-defined dimensions
         vdb::TriangleMesh mesh;
 
@@ -2716,6 +2750,7 @@ namespace gladius
 
         std::string name = fmt::format("{}x{}x{} box", width, height, depth);
         addMeshResource(std::move(mesh), name);
+#endif
     }
 
     void Document::addMeshAsBeamLattice(std::filesystem::path const & stlFilename, float beamRadius)
@@ -2724,6 +2759,11 @@ namespace gladius
         (void) stlFilename;
         (void) beamRadius;
         throw std::runtime_error("Beam lattice import is unavailable for the selected backend");
+#elif !defined(GLADIUS_ENABLE_OPENVDB)
+        (void) stlFilename;
+        (void) beamRadius;
+        throw std::runtime_error(
+          "Beam lattice import requires a build with GLADIUS_ENABLE_OPENVDB enabled");
 #else
         // Load the STL file
         vdb::VdbImporter reader;
@@ -2900,9 +2940,15 @@ namespace gladius
 
         if (pixelFormat == io::PixelFormat::GRAYSCALE_8BIT)
         {
+#if defined(GLADIUS_ENABLE_OPENVDB)
             // Use VDB grid for grayscale 8-bit images
             auto grid = extractor.loadAsVdbGrid(files, io::FileLoaderType::Filesystem);
             resourceManager.addResource(key, std::move(grid));
+#else
+            // Without OpenVDB, fall back to the generic image stack representation
+            auto stack = extractor.loadImageStack(files, io::FileLoaderType::Filesystem);
+            resourceManager.addResource(key, std::move(stack));
+#endif
         }
         else
         {

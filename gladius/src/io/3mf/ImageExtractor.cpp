@@ -210,6 +210,7 @@ namespace gladius::io
         return images;
     }
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
     openvdb::GridBase::Ptr ImageExtractor::loadAsVdbGrid(FileList const & filenames,
                                                          FileLoaderType fileLoaderType) const
     {
@@ -314,6 +315,7 @@ namespace gladius::io
 
         return {};
     }
+#endif
 
     void ImageExtractor::printAllFiles() const
     {

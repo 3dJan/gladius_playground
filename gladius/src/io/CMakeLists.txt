@@ -11,15 +11,20 @@ if(NOT GLADIUS_ENABLE_OPENCL)
 	list(FILTER SOURCES EXCLUDE REGEX ".*/MeshExporter3mf\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/FaceColorSampler\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/ShellExporter\\.cpp$")
-	list(FILTER SOURCES EXCLUDE REGEX ".*/ImporterVdb\\.cpp$")
-	list(FILTER SOURCES EXCLUDE REGEX ".*/VdbImporter\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/MeshColorExportPipeline\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/MeshWriter3mf\\.cpp$")
-	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/PaletteExtractor\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/ShellGenerator\\.cpp$")
+	list(APPEND SOURCES
+	    "${CMAKE_CURRENT_SOURCE_DIR}/3mf/FaceColorSamplerMath.cpp")
+endif()
+if(NOT GLADIUS_ENABLE_OPENVDB)
+	# These translation units are OpenVDB/NanoVDB-only: VDB mesh import/export,
+	# the VDB shell generator, and OpenVDB-based palette extraction.
+	list(FILTER SOURCES EXCLUDE REGEX ".*/ImporterVdb\\.cpp$")
+	list(FILTER SOURCES EXCLUDE REGEX ".*/VdbImporter\\.cpp$")
+	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/PaletteExtractor\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/3mf/OpenVdbShellGenerator\\.cpp$")
 	list(APPEND SOURCES
-	    "${CMAKE_CURRENT_SOURCE_DIR}/3mf/FaceColorSamplerMath.cpp"
 	    "${CMAKE_CURRENT_SOURCE_DIR}/3mf/OpenVdbShellGeneratorMath.cpp")
 endif()
 target_sources(${BINARY}_lib PRIVATE ${SOURCES})

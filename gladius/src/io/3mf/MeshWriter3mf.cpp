@@ -8,9 +8,11 @@
 #include "ComputeContext.h"
 #include "Document.h"
 #include "EventLogger.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "MeshResourceVdb.h"
-#include "ResourceKey.h"
 #include "VdbResource.h"
+#endif
+#include "ResourceKey.h"
 #include "io/3mf/ColorQuantizer.h"
 #include "io/3mf/ColorRegionizer.h"
 #include "io/3mf/MmuSegmentationWriter.h"
@@ -751,6 +753,17 @@ namespace gladius::io
                                                ResourceKey const & resourceKey,
                                                bool writeThumbnail)
     {
+#if !defined(GLADIUS_ENABLE_OPENVDB)
+        (void) filePath;
+        (void) writeThumbnail;
+        auto & resourceManager = document.getResourceManager();
+        auto & resource = resourceManager.getResource(resourceKey);
+        (void) resource;
+        throw std::runtime_error(fmt::format(
+          "Exporting a VDB mesh resource requires a build with GLADIUS_ENABLE_OPENVDB "
+          "enabled: {}",
+          resourceKey.getDisplayName()));
+#else
         // Get mesh from document's resource manager
         auto & resourceManager = document.getResourceManager();
         auto & resource = resourceManager.getResource(resourceKey);
@@ -810,6 +823,7 @@ namespace gladius::io
         }
 
         exportMesh(filePath, gladiusMesh, meshName, &document, writeThumbnail);
+#endif
     }
 
     Lib3MF::PMeshObject MeshWriter3mf::addMeshToModel(Lib3MF::PModel model3mf,

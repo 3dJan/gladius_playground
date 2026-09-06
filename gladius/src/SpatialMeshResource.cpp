@@ -5,7 +5,9 @@
 #include "SpatialMeshResource.h"
 #include "MeshVoxelGrid.h"
 #include "Profiling.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/vdb.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +29,15 @@ namespace gladius
         constexpr float NANOVDB_MAX_SUGGESTED_VOXEL_SIZE_MM = 2.0f;
         constexpr float NANOVDB_SUGGESTION_GROWTH_FACTOR = 1.25f;
         constexpr int NANOVDB_MAX_SUGGESTION_STEPS = 32;
+
+        [[nodiscard]] MeshSdfMethod normalizeMeshSdfMethod(MeshSdfMethod const method) noexcept
+        {
+#if defined(GLADIUS_ENABLE_OPENVDB)
+            return method;
+#else
+            return method == MeshSdfMethod::NanoVDB ? MeshSdfMethod::PureBVH : method;
+#endif
+        }
 
         struct NanoVdbWorkingSetEstimate
         {
@@ -339,8 +350,10 @@ namespace gladius
     bool SpatialMeshResource::setEvaluationConfig(MeshSdfEvaluationConfig const & cfg)
     {
         ProfileFunction;
-        bool const touchesFwn = cfg.method == MeshSdfMethod::FastWindingNumber ||
-                                m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        auto const normalizedCurrentMethod = normalizeMeshSdfMethod(m_evaluationConfig.method);
+        auto const normalizedNewMethod = normalizeMeshSdfMethod(cfg.method);
+        bool const touchesFwn = normalizedNewMethod == MeshSdfMethod::FastWindingNumber ||
+                                normalizedCurrentMethod == MeshSdfMethod::FastWindingNumber;
         GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::setEvaluationConfig", touchesFwn);
 
         bool const rebuildPotentiallyRequired = requiresMeshRebuild(m_evaluationConfig, cfg);
@@ -374,13 +387,13 @@ namespace gladius
             // new method does not need one, the companion would cause the kernel to dispatch
             // through the NanoVDB path even after the method switch. Force a rebuild to remove it.
             bool const hasNanoVdbCompanion = (m_nanovdbGridOffset != 0u);
-            bool const newMethodNeedsNanoVdb = (cfg.method == MeshSdfMethod::NanoVDB);
+            bool const newMethodNeedsNanoVdb = (normalizedNewMethod == MeshSdfMethod::NanoVDB);
             if (hasNanoVdbCompanion && !newMethodNeedsNanoVdb)
             {
                 return false;
             }
 
-            switch (cfg.method)
+            switch (normalizedNewMethod)
             {
             case MeshSdfMethod::PureBVH:
                 return true;
@@ -396,7 +409,7 @@ namespace gladius
         bool const rebuildRequired = resolutionChanged || !newMethodSatisfied;
 
         m_evaluationConfig = cfg;
-        if (cfg.method == MeshSdfMethod::VoxelAccelerated)
+        if (normalizedNewMethod == MeshSdfMethod::VoxelAccelerated)
         {
             m_needsVoxelGridBuild = m_voxelCount > 0u;
         }
@@ -405,7 +418,7 @@ namespace gladius
             m_needsVoxelGridBuild = false;
         }
 
-        if (cfg.method == MeshSdfMethod::FastWindingNumber && cfg.fwnUseSignCache &&
+        if (normalizedNewMethod == MeshSdfMethod::FastWindingNumber && cfg.fwnUseSignCache &&
             (fwnBetaChanged || fwnSignCacheUsageChanged))
         {
             // Existing GPU sign caches were generated for the previous beta. Keep
@@ -413,12 +426,12 @@ namespace gladius
             // next time post-upload cache work is collected.
             resetSignCacheBuildProgress();
         }
-        else if (cfg.method == MeshSdfMethod::FastWindingNumber && !cfg.fwnUseSignCache)
+        else if (normalizedNewMethod == MeshSdfMethod::FastWindingNumber && !cfg.fwnUseSignCache)
         {
             m_needsSignCacheBuild = false;
             m_signCacheNextWord = 0;
         }
-        else if (cfg.method != MeshSdfMethod::FastWindingNumber)
+        else if (normalizedNewMethod != MeshSdfMethod::FastWindingNumber)
         {
             m_needsFwnAggregateBuild = false;
             m_needsSignCacheBuild = false;
@@ -432,7 +445,7 @@ namespace gladius
             m_payloadData.data.clear();
             m_payloadData.meta.clear();
             m_needsRebuild = true;
-            m_needsVoxelGridBuild = (cfg.method == MeshSdfMethod::VoxelAccelerated);
+            m_needsVoxelGridBuild = (normalizedNewMethod == MeshSdfMethod::VoxelAccelerated);
             reload();
         }
         // Report rebuildPotentiallyRequired so callers see "the config changed"
@@ -692,7 +705,9 @@ namespace gladius
 
         m_nanovdbBuildInfo = {};
 
-        bool const useFwn = m_evaluationConfig.method == MeshSdfMethod::FastWindingNumber;
+        auto const normalizedMethod = normalizeMeshSdfMethod(m_evaluationConfig.method);
+        bool const requestedNanoVdb = (m_evaluationConfig.method == MeshSdfMethod::NanoVDB);
+        bool const useFwn = normalizedMethod == MeshSdfMethod::FastWindingNumber;
         GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl FWN payload", useFwn);
         GLADIUS_FWN_PREP_LOG_IF(useFwn,
                                 "SpatialMeshResource::loadImpl prepare nodes=" +
@@ -751,8 +766,7 @@ namespace gladius
 
         // Compute voxel grid header from bounding box. Resolution and whether the
         // grid is actually populated are governed by the active evaluation config.
-        bool const useVoxelGrid =
-            (m_evaluationConfig.method == MeshSdfMethod::VoxelAccelerated);
+        bool const useVoxelGrid = (normalizedMethod == MeshSdfMethod::VoxelAccelerated);
         int const voxelResolution = (m_evaluationConfig.voxelGridResolution > 0)
                                         ? m_evaluationConfig.voxelGridResolution
                                         : kDefaultVoxelGridResolution;
@@ -977,7 +991,17 @@ namespace gladius
         // sparse grid. Only the near SDF (i+2) uses the user-configured resolution.
         // Fixed sizes match VdbImporter::writeMesh() which is the proven reference.
         m_nanovdbGridOffset = 0u;
-        bool const useNanovdb = (m_evaluationConfig.method == MeshSdfMethod::NanoVDB);
+        bool const useNanovdb = (normalizedMethod == MeshSdfMethod::NanoVDB);
+        if (requestedNanoVdb && !useNanovdb)
+        {
+            m_nanovdbBuildInfo.result = NanoVdbBuildResult::PreflightRejected;
+            m_nanovdbBuildInfo.requestedVoxelSize_mm =
+              std::max(m_evaluationConfig.nanovdbVoxelSize_mm, NANOVDB_MIN_VOXEL_SIZE_MM);
+            m_nanovdbBuildInfo.reason =
+              "this build was compiled without GLADIUS_ENABLE_OPENVDB";
+        }
+
+#if defined(GLADIUS_ENABLE_OPENVDB)
         if (useNanovdb && !m_data.triangles.empty())
         {
             float const voxelSize_mm =
@@ -1199,6 +1223,7 @@ namespace gladius
                 return;
             }
         }
+#endif
 
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);

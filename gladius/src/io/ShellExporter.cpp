@@ -1,7 +1,9 @@
 #include "ShellExporter.h"
 
 #include "3mf/MeshWriter3mf.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "3mf/OpenVdbShellGenerator.h"
+#endif
 #include "3mf/ShellGenerator.h"
 #include "ComputeContext.h"
 #include "ComputeCore.h"
@@ -211,6 +213,7 @@ namespace gladius::io
         }
 
         std::vector<ShellGenerator::ShellMesh> shells;
+#if defined(GLADIUS_ENABLE_OPENVDB)
         if (m_config.generationMode == ShellGenerationMode::OpenVdbColorThickness)
         {
             OpenVdbShellGenerator shellGenerator(generator);
@@ -233,6 +236,7 @@ namespace gladius::io
             }
         }
         else
+#endif
         {
             ShellGenerator shellGenerator(generator, *const_cast<Document*>(m_document));
             shells = shellGenerator.generateShells(

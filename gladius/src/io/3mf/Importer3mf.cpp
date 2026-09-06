@@ -20,7 +20,9 @@
 #include "Parameter.h"
 #include "Profiling.h"
 #include "SpatialMeshResource.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "VdbImporter.h"
+#endif
 #include "nodes/DerivedNodes.h"
 #include "nodes/utils.h"
 #include <Eigen/Core>
@@ -951,10 +953,12 @@ namespace gladius::io
         return Vector3(a.m_Coordinates[0], a.m_Coordinates[1], a.m_Coordinates[2]);
     }
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
     openvdb::Vec3s toOpenVdbVector(Lib3MF::sPosition const & a)
     {
         return openvdb::Vec3s(a.m_Coordinates[0], a.m_Coordinates[1], a.m_Coordinates[2]);
     }
+#endif
 
     nodes::Matrix4x4 matrix4x4From3mfTransform(Lib3MF::sTransform const & transform)
     {
@@ -2271,8 +2275,13 @@ namespace gladius::io
                         fileList.push_back(sheet->GetPath());
                     }
 
-                    bool const useVdb = extractor.determinePixelFormat(fileList.front()) ==
+                    bool const useVdb =
+#if defined(GLADIUS_ENABLE_OPENVDB)
+                                        extractor.determinePixelFormat(fileList.front()) ==
                                         PixelFormat::GRAYSCALE_8BIT;
+#else
+                                        false;
+#endif
 
                     ResourceType resourceType =
                       useVdb ? ResourceType::Vdb : ResourceType::ImageStack;
@@ -2299,6 +2308,7 @@ namespace gladius::io
                     }
                     if (useVdb)
                     {
+#if defined(GLADIUS_ENABLE_OPENVDB)
                         if (!resMan.hasResource(key))
                         {
                             auto grid = extractor.loadAsVdbGrid(fileList, FileLoaderType::Archive);
@@ -2318,6 +2328,7 @@ namespace gladius::io
                             imageStack.setResourceId(image3d->GetModelResourceID());
                             resMan.addResource(imageStackKey, std::move(imageStack));
                         }
+#endif
                     }
                     else
                     {

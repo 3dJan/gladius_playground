@@ -2444,7 +2444,7 @@ namespace gladius::ui
 
     void ModelEditor::importStlDrop(std::filesystem::path const & path, ImVec2 screenPos)
     {
-#if !defined(GLADIUS_ENABLE_OPENCL)
+#if !defined(GLADIUS_ENABLE_OPENCL) || !defined(GLADIUS_ENABLE_OPENVDB)
         (void) path;
         (void) screenPos;
         if (m_doc)
@@ -2501,6 +2501,10 @@ namespace gladius::ui
 
     void ModelEditor::processPendingStlImports()
     {
+#if !defined(GLADIUS_ENABLE_OPENCL) || !defined(GLADIUS_ENABLE_OPENVDB)
+        m_pendingStlImports.clear();
+        return;
+#else
         if (m_pendingStlImports.empty() || !m_doc || !m_currentModel)
         {
             return;
@@ -2586,6 +2590,7 @@ namespace gladius::ui
 
             it = m_pendingStlImports.erase(it);
         }
+#endif
     }
 
     void ModelEditor::createMeshSdfNodesAtCanvasPos(ResourceKey const & key, ImVec2 canvasPos)

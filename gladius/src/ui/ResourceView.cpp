@@ -443,7 +443,11 @@ namespace gladius::ui
                     continue;
                 }
                 auto const * stack = dynamic_cast<ImageStackResource const *>(res.get());
+#if defined(GLADIUS_ENABLE_OPENVDB)
                 auto const * grid = dynamic_cast<VdbResource const *>(res.get());
+#else
+                void const * grid = nullptr;
+#endif
                 if (!stack && !grid)
                 {
                     continue;
@@ -457,6 +461,7 @@ namespace gladius::ui
                                                         stack ? "image stack" : "vdb grid")
                                               .c_str()));
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
                     if (grid)
                     {
                         auto dimensions = grid->getGridSize();
@@ -469,6 +474,7 @@ namespace gladius::ui
                             ImGui::TreePop();
                         }
                     }
+#endif
 
                     // Render ImageStackView for image stacks
                     if (stack)

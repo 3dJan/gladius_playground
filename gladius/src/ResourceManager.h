@@ -6,9 +6,12 @@
 #include "types.h"
 
 #include <fmt/format.h>
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include <openvdb/Grid.h>
+#endif
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -147,8 +150,10 @@ namespace gladius
                                  std::filesystem::path assemblyDir);
 
         void addResource(const std::filesystem::path & filename);
+#if defined(GLADIUS_ENABLE_OPENVDB)
         void addResource(ResourceKey key, vdb::TriangleMesh && mesh);
         void addResource(ResourceKey key, openvdb::GridBase::Ptr && grid);
+#endif
         void addResource(ResourceKey key, io::ImageStack && stack);
         void addResource(ResourceKey key, std::unique_ptr<BeamLatticeResource> && resource);
         void addResource(ResourceKey key, SpatialMeshData && spatialData);

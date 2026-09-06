@@ -33,13 +33,19 @@ if(NOT GLADIUS_ENABLE_OPENCL)
     list(FILTER SOURCES EXCLUDE REGEX ".*/ToOCLVisitor\\.cpp$")
 endif()
 
+if(NOT GLADIUS_ENABLE_OPENVDB)
+    list(FILTER SOURCES EXCLUDE REGEX ".*/VdbResource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/MeshResourceVdb\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*/BeamLatticeVoxelAcceleration\\.cpp$")
+endif()
+
 list(APPEND SOURCES
     io/3mf/ShellMaterialOrdering.h
     io/3mf/ShellMaterialOrdering.cpp
     io/3mf/ShellThicknessPartition.h
     io/3mf/ShellThicknessPartition.cpp
 )
-if(GLADIUS_ENABLE_OPENCL)
+if(GLADIUS_ENABLE_OPENCL AND GLADIUS_ENABLE_OPENVDB)
     list(APPEND SOURCES
         io/3mf/OpenVdbShellGenerator.h
         io/3mf/OpenVdbShellGenerator.cpp
@@ -116,7 +122,6 @@ set(DEPENDENCIES_CORE
     tinyfiledialogs::tinyfiledialogs
     Threads::Threads
     sago::platform_folders
-    OpenVDB::openvdb
     ZLIB::ZLIB
     gladius::rc
     lodepng
@@ -148,17 +153,20 @@ if(GLADIUS_ENABLE_WEBGPU)
     list(APPEND DEPENDENCIES_CORE dawn::webgpu_dawn)
 endif()
 
+if(GLADIUS_ENABLE_OPENVDB)
+    list(APPEND DEPENDENCIES_CORE OpenVDB::openvdb)
+    if (WIN32)
+        list(APPEND DEPENDENCIES_CORE blosc_shared)
+    else()
+        list(APPEND DEPENDENCIES_CORE blosc_static)
+    endif()
+endif()
+
 # MCP-only dependencies
 set(DEPENDENCIES_MCP
     httplib::httplib
     nlohmann_json::nlohmann_json
 )
-
-if (WIN32)
-    set(DEPENDENCIES_CORE ${DEPENDENCIES_CORE} blosc_shared)
-else()
-    set(DEPENDENCIES_CORE ${DEPENDENCIES_CORE} blosc_static)
-endif()
 
 if (ENABLE_TRACY)
     set(DEPENDENCIES_CORE ${DEPENDENCIES_CORE} Tracy::TracyClient)
@@ -180,6 +188,9 @@ foreach(target ${BINARY}_lib ${BINARY}_lib_mcp ${BINARY})
     endif()
     if(GLADIUS_ENABLE_WEBGPU)
         target_compile_definitions(${target} PUBLIC GLADIUS_ENABLE_WEBGPU=1)
+    endif()
+    if(GLADIUS_ENABLE_OPENVDB)
+        target_compile_definitions(${target} PUBLIC GLADIUS_ENABLE_OPENVDB=1)
     endif()
 endforeach()
 

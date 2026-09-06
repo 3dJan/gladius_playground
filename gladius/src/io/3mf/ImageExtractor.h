@@ -1,7 +1,9 @@
 #pragma once
 
 #include "ImageStack.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/vdb.h"
+#endif
 
 #include <filesystem>
 #include <lodepng.h>
@@ -33,8 +35,10 @@ namespace gladius::io
         ImageExtractor() = default;
         ~ImageExtractor();
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
         openvdb::GridBase::Ptr loadAsVdbGrid(FileList const & filenames,
                                              FileLoaderType fileLoaderType) const;
+#endif
 
         bool loadFromArchive(std::filesystem::path const & filename);
 

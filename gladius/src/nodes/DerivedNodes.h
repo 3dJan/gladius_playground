@@ -15,7 +15,9 @@
 #include "ImageStackResource.h"
 #include "ResourceKey.h"
 #include "ResourceManager.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "VdbResource.h"
+#endif
 
 namespace gladius::nodes
 {
@@ -1992,9 +1994,14 @@ namespace gladius::nodes
 
                                 // Resolve resource using typed keys (ResourceKey now includes type).
                                 // Prefer VDB when a grayscale stack retains both representations.
+#if defined(GLADIUS_ENABLE_OPENVDB)
                 IResource * resPtr =
                                     resMan.getResourcePtr(ResourceKey{imageResourceId, ResourceType::Vdb});
                                 bool isVdb = resPtr != nullptr;
+#else
+                IResource * resPtr = nullptr;
+                                bool isVdb = false;
+#endif
                                 bool isImageStack = false;
                 if (!resPtr)
                 {
@@ -2015,7 +2022,11 @@ namespace gladius::nodes
                 resPtr->setInUse(true);
                 ImageStackResource * imageStack =
                   isImageStack ? dynamic_cast<ImageStackResource *>(resPtr) : nullptr;
+#if defined(GLADIUS_ENABLE_OPENVDB)
                 VdbResource * vdbResource = isVdb ? dynamic_cast<VdbResource *>(resPtr) : nullptr;
+#else
+                IResource * vdbResource = nullptr;
+#endif
 
                 if (imageStack)
                 {
@@ -2029,6 +2040,7 @@ namespace gladius::nodes
 
                     m_numberOfChannels = imageStack->getNumChannels();
                 }
+#if defined(GLADIUS_ENABLE_OPENVDB)
                 else if (vdbResource)
                 {
                     m_parameter.at(FieldNames::Start).setValue(vdbResource->getStartIndex());
@@ -2040,6 +2052,7 @@ namespace gladius::nodes
                     m_numberOfChannels = 1;
                     m_isVdbGrid = true;
                 }
+#endif
                 else
                 {
                     throw std::runtime_error(

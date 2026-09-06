@@ -1,5 +1,7 @@
 #include "BeamLatticeResource.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "BeamLatticeVoxelAcceleration.h"
+#endif
 #include "Primitives.h"
 
 #include <algorithm>
@@ -55,6 +57,7 @@ namespace gladius
 
     void BeamLatticeResource::buildAccelerationStructure()
     {
+#if defined(GLADIUS_ENABLE_OPENVDB)
         if (m_acceleration == BeamLatticeAcceleration::Voxel)
         {
             buildVoxelAcceleration();
@@ -63,6 +66,10 @@ namespace gladius
         {
             buildBVH();
         }
+#else
+        // Voxel acceleration requires OpenVDB/NanoVDB; fall back to BVH when unavailable.
+        buildBVH();
+#endif
     }
 
     void BeamLatticeResource::buildBVH()
@@ -87,6 +94,7 @@ namespace gladius
 
     void BeamLatticeResource::buildVoxelAcceleration()
     {
+#if defined(GLADIUS_ENABLE_OPENVDB)
         // Build voxel grids from beam/ball data
         BeamLatticeVoxelSettings settings;
         settings.voxelSize = 0.5f; // TODO: expose as parameter
@@ -196,6 +204,7 @@ namespace gladius
         // Write beam and ball raw data blocks for distance evaluation
         writeBeamPrimitivesToPayload();
         writeBallPrimitivesToPayload();
+#endif
     }
 
     void BeamLatticeResource::write(Primitives & primitives)

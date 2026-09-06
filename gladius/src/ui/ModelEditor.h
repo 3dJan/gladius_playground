@@ -31,7 +31,9 @@
 #include "Outline.h"
 #include "ResourceView.h"
 #include "io/3mf/LibraryExampleExtractor.h"
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/VdbImporter.h"
+#endif
 #include "Style.h"
 #include "nodes/Assembly.h"
 #include "nodes/FunctionExtractor.h"
@@ -454,7 +456,9 @@ namespace gladius::ui
         // Async STL import
         struct PendingStlImport
         {
+#if defined(GLADIUS_ENABLE_OPENVDB)
             std::future<vdb::TriangleMesh> geometryFuture;
+#endif
             std::optional<ResourceKey> existingResourceKey;
             std::string displayName;
             ImVec2 dropScreenPos;

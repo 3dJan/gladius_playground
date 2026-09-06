@@ -4,7 +4,9 @@
 #include "ShellThicknessPartition.h"
 #include "SurfaceThicknessField.h"
 
+#if defined(GLADIUS_ENABLE_OPENVDB)
 #include "../vdb.h"
+#endif
 
 #include <functional>
 
@@ -54,6 +56,7 @@ namespace gladius::io
             bool isInnermostLayer) noexcept;
 
       private:
+#if defined(GLADIUS_ENABLE_OPENVDB)
         [[nodiscard]] openvdb::FloatGrid::Ptr createShellGrid(
             PreComputedSdf& sdf,
             BoundingBox const& bbox,
@@ -66,6 +69,7 @@ namespace gladius::io
             SurfaceThicknessField const* outerField,
             SurfaceThicknessField const* innerField,
             float narrowBandWidth) const;
+#endif
 
         [[nodiscard]] bool sampleSurfaceColors(
             std::vector<Eigen::Vector3f> const& surfaceVertices,
