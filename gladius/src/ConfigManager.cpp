@@ -28,7 +28,13 @@ namespace gladius
 
     void ConfigManager::init()
     {
+#ifdef __EMSCRIPTEN__
+        // Emscripten's virtual filesystem is the browser-side configuration
+        // store. Native platform-folder discovery is not available there.
+        m_configDir = std::filesystem::path{"/gladius"};
+#else
         m_configDir = sago::getConfigHome() / std::filesystem::path{"gladius"};
+#endif
         m_configFilePath = m_configDir / "settings.json";
 
         if (!std::filesystem::is_directory(m_configDir))

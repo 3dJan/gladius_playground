@@ -79,8 +79,18 @@ namespace gladius::ui
 
     CopyRightInfoCache::CopyRightInfoCache(std::filesystem::path licenseDir)
     {
-        for (auto const & dir : std::filesystem::directory_iterator(licenseDir))
+        std::error_code error;
+        if (!std::filesystem::is_directory(licenseDir, error))
         {
+            return;
+        }
+
+        for (auto const & dir : std::filesystem::directory_iterator(licenseDir, error))
+        {
+            if (error)
+            {
+                break;
+            }
             m_licenses.emplace_back(dir);
         }
     }

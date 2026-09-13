@@ -1355,70 +1355,73 @@ namespace gladius
             m_loadingError.clear();
         }
 
-        // Launch async file loading
+        // Browser builds do not enable Emscripten pthreads. Keep the same load body, but run it
+        // synchronously on the browser thread instead of asking std::async to create a worker.
         m_isLoading.store(true, std::memory_order_relaxed);
+        auto loadFile = [this, filename]()
+        {
+            ScopedLoadingFlag loadingScope{m_isLoading};
+            ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
+                                                          NanoVdbFailurePolicy::Degrade};
+
+            try
+            {
+                auto const refreshMode = filename.extension() == ".3mf"
+                                           ? RefreshMode::InteractiveFirst
+                                           : RefreshMode::Normal;
+                auto const previewMeshSdfConfig =
+                  makeInteractivePreviewMeshSdfConfig(m_meshSdfEvaluationConfig);
+                ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
+                  *this, previewMeshSdfConfig, refreshMode == RefreshMode::InteractiveFirst};
+
+                loadImpl(filename);
+                // Initial validation with FileLoad context - logs errors once.
+                validateAssembly(nodes::ValidationContext::FileLoad);
+                if (!m_core)
+                {
+                    updateFlatAssembly();
+                    return;
+                }
+
+                // Chain into async model refresh. 3MF loads publish a lightweight command-stream
+                // preview first, then start the optimized renderer and slicer compilation in the
+                // background.
+                refreshWorker(refreshMode);
+            }
+            catch (std::exception const & e)
+            {
+                // Store error for UI to display.
+                {
+                    std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                    m_loadingError = e.what();
+                }
+                auto logger = getSharedLogger();
+                if (logger)
+                {
+                    logger->addEvent({fmt::format("File load error: {}", e.what()),
+                                      events::Severity::Error});
+                }
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
+                m_loadingError = "Unknown file load error";
+            }
+        };
+
+#ifdef __EMSCRIPTEN__
+        loadFile();
+#else
         try
         {
-            m_futureFileLoad = std::async(
-              std::launch::async,
-              [this, filename]()
-              {
-                  ScopedLoadingFlag loadingScope{m_isLoading};
-                  ScopedNanoVdbFailurePolicy failurePolicyScope{m_nanovdbFailurePolicy,
-                                                                NanoVdbFailurePolicy::Degrade};
-
-                  try
-                  {
-                      auto const refreshMode = filename.extension() == ".3mf"
-                                                 ? RefreshMode::InteractiveFirst
-                                                 : RefreshMode::Normal;
-                      auto const previewMeshSdfConfig =
-                        makeInteractivePreviewMeshSdfConfig(m_meshSdfEvaluationConfig);
-                      ScopedMeshSdfEvaluationConfigOverride previewMeshConfigOverride{
-                        *this, previewMeshSdfConfig, refreshMode == RefreshMode::InteractiveFirst};
-
-                      loadImpl(filename);
-                      // Initial validation with FileLoad context - logs
-                      // errors once
-                      validateAssembly(nodes::ValidationContext::FileLoad);
-                      if (!m_core)
-                      {
-                          updateFlatAssembly();
-                          return;
-                      }
-
-                      // Chain into async model refresh. 3MF loads publish
-                      // a lightweight command-stream preview first, then
-                      // start the optimized renderer and slicer
-                      // compilation in the background.
-                      refreshWorker(refreshMode);
-                  }
-                  catch (std::exception const & e)
-                  {
-                      // Store error for UI to display
-                      {
-                          std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
-                          m_loadingError = e.what();
-                      }
-                      auto logger = getSharedLogger();
-                      if (logger)
-                      {
-                          logger->addEvent({fmt::format("File load error: {}", e.what()),
-                                            events::Severity::Error});
-                      }
-                  }
-                  catch (...)
-                  {
-                      std::lock_guard<std::mutex> lock(m_loadingErrorMutex);
-                      m_loadingError = "Unknown file load error";
-                  }
-              });
+            m_futureFileLoad = std::async(std::launch::async, std::move(loadFile));
         }
         catch (...)
         {
             m_isLoading.store(false, std::memory_order_relaxed);
             throw;
         }
+#endif
     }
 
     bool Document::isLoadingInProgress() const

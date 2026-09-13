@@ -478,6 +478,9 @@ namespace gladius::ui
         /// @brief Start async compute initialization
         void startAsyncComputeInit();
 
+        /// @brief Finalize a WebGPU runtime after its device callback completes.
+        void finalizeWebGPUInitialization();
+
         /// @brief Poll and finalize async compute initialization (called from render loop)
         void pollComputeInit();
 

@@ -12,7 +12,7 @@
 #include "imgui.h"
 
 #if defined(GLADIUS_UI_BACKEND_WEBGPU)
-#include <dawn/webgpu_cpp.h>
+#include <webgpu/webgpu_cpp.h>
 #endif
 
 struct GLFWwindow;

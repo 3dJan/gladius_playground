@@ -26,7 +26,18 @@ namespace gladius::webgpu
 
     WebGPUComputeContext::WebGPUComputeContext()
     {
-        initialize();
+        try
+        {
+            initialize();
+        }
+        catch (std::exception const & ex)
+        {
+            m_errorMessage = ex.what();
+        }
+        catch (...)
+        {
+            m_errorMessage = "Unknown error while initialising the WebGPU context";
+        }
     }
 
     bool WebGPUComputeContext::isValid() const noexcept
@@ -53,11 +64,6 @@ namespace gladius::webgpu
         {
             m_instance.ProcessEvents();
         }
-
-        if (m_device)
-        {
-            m_device.Tick();
-        }
     }
 
     wgpu::Device const & WebGPUComputeContext::getDevice() const noexcept
@@ -80,6 +86,31 @@ namespace gladius::webgpu
         return m_adapter;
     }
 
+#ifdef __EMSCRIPTEN__
+    bool WebGPUComputeContext::completeDeviceInitialization()
+    {
+        if (m_isValid)
+        {
+            return true;
+        }
+
+        if (!m_device)
+        {
+            return false;
+        }
+
+        m_queue = m_device.GetQueue();
+        if (!m_queue)
+        {
+            m_errorMessage = "Unable to acquire the WebGPU device queue";
+            return false;
+        }
+
+        m_isValid = true;
+        return true;
+    }
+#endif
+
     void WebGPUComputeContext::initialize()
     {
         m_instance = wgpu::CreateInstance();
@@ -88,15 +119,32 @@ namespace gladius::webgpu
             throw std::runtime_error("Unable to create the WebGPU instance");
         }
 
+#ifdef __EMSCRIPTEN__
+        // Browser adapter and device requests complete through JavaScript
+        // promises.  Returning to the browser event loop is required before
+        // their callbacks can run; polling here would prevent that progress.
+        wgpu::RequestAdapterOptions options{};
+        options.powerPreference = wgpu::PowerPreference::HighPerformance;
+        m_instance.RequestAdapter(
+          &options,
+          wgpu::CallbackMode::AllowSpontaneous,
+          [](wgpu::RequestAdapterStatus const status,
+              wgpu::Adapter adapter,
+              wgpu::StringView const message,
+              WebGPUComputeContext * const context)
+          { context->handleAdapterRequest(status, std::move(adapter), message); },
+          this);
+        return;
+#else
         bool adapterRequestCompleted = false;
         wgpu::RequestAdapterStatus adapterStatus = wgpu::RequestAdapterStatus::Error;
         std::string adapterError;
         m_instance.RequestAdapter(
           nullptr,
           wgpu::CallbackMode::AllowProcessEvents,
-                    [&](wgpu::RequestAdapterStatus const status,
-                            wgpu::Adapter adapter,
-                            wgpu::StringView const message)
+          [&](wgpu::RequestAdapterStatus const status,
+              wgpu::Adapter adapter,
+              wgpu::StringView const message)
           {
               adapterStatus = status;
               m_adapter = std::move(adapter);
@@ -118,17 +166,19 @@ namespace gladius::webgpu
         wgpu::DeviceDescriptor deviceDescriptor;
         deviceDescriptor.SetDeviceLostCallback(
           wgpu::CallbackMode::AllowProcessEvents,
-             [](wgpu::Device const &,
-                 wgpu::DeviceLostReason const reason,
-                 wgpu::StringView const message,
-                 WebGPUComputeContext * const context) { context->setDeviceLost(reason, message); },
-             this);
+          [](wgpu::Device const &,
+             wgpu::DeviceLostReason const reason,
+             wgpu::StringView const message,
+             WebGPUComputeContext * const context)
+          { context->setDeviceLost(reason, message); },
+          this);
         deviceDescriptor.SetUncapturedErrorCallback(
-             [](wgpu::Device const &,
-                 wgpu::ErrorType const type,
-                 wgpu::StringView const message,
-                 WebGPUComputeContext * const context) { context->setUncapturedError(type, message); },
-             this);
+          [](wgpu::Device const &,
+             wgpu::ErrorType const type,
+             wgpu::StringView const message,
+             WebGPUComputeContext * const context)
+          { context->setUncapturedError(type, message); },
+          this);
 
         bool deviceRequestCompleted = false;
         wgpu::RequestDeviceStatus deviceStatus = wgpu::RequestDeviceStatus::Error;
@@ -163,7 +213,61 @@ namespace gladius::webgpu
         }
 
         m_isValid = true;
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    void WebGPUComputeContext::requestDevice()
+    {
+        wgpu::DeviceDescriptor deviceDescriptor;
+        deviceDescriptor.SetUncapturedErrorCallback(
+          [](wgpu::Device const &,
+             wgpu::ErrorType const type,
+             wgpu::StringView const message,
+             WebGPUComputeContext * const context)
+          { context->setUncapturedError(type, message); },
+          this);
+
+        m_adapter.RequestDevice(
+          &deviceDescriptor,
+          wgpu::CallbackMode::AllowSpontaneous,
+          [](wgpu::RequestDeviceStatus const status,
+             wgpu::Device device,
+             wgpu::StringView const message,
+             WebGPUComputeContext * const context)
+          { context->handleDeviceRequest(status, std::move(device), message); },
+          this);
+    }
+
+    void WebGPUComputeContext::handleAdapterRequest(wgpu::RequestAdapterStatus const status,
+                                                    wgpu::Adapter adapter,
+                                                    wgpu::StringView const message)
+    {
+        if (status != wgpu::RequestAdapterStatus::Success || !adapter)
+        {
+            std::string const error = toString(message);
+            m_errorMessage = error.empty() ? "Unable to acquire a WebGPU adapter" : error;
+            return;
+        }
+
+        m_adapter = std::move(adapter);
+        requestDevice();
+    }
+
+    void WebGPUComputeContext::handleDeviceRequest(wgpu::RequestDeviceStatus const status,
+                                                   wgpu::Device device,
+                                                   wgpu::StringView const message)
+    {
+        if (status != wgpu::RequestDeviceStatus::Success || !device)
+        {
+            std::string const error = toString(message);
+            m_errorMessage = error.empty() ? "Unable to create a WebGPU device" : error;
+            return;
+        }
+
+        m_device = std::move(device);
+    }
+#endif
 
     void WebGPUComputeContext::setDeviceLost(wgpu::DeviceLostReason const reason,
                                               wgpu::StringView const message)

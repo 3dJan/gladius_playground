@@ -44,8 +44,16 @@ namespace gladius::ui
             return;
         }
 
-        // Start immediately if capacity available, otherwise queue
-        if (m_activeTasks.size() < m_maxConcurrentLoads)
+        // Browser builds do not enable Emscripten pthreads. Use one deferred
+        // extraction per update instead of asking std::async for a worker thread.
+#ifdef __EMSCRIPTEN__
+        constexpr size_t concurrentLimit = 1u;
+    #else
+        size_t const concurrentLimit = m_maxConcurrentLoads;
+    #endif
+
+        // Start immediately if capacity is available, otherwise queue.
+        if (m_activeTasks.size() < concurrentLimit)
         {
             startLoad(info);
         }
@@ -66,7 +74,12 @@ namespace gladius::ui
         ThumbnailLoadTask task;
         task.info = &info;
         task.startTime = std::chrono::steady_clock::now();
-        task.future = std::async(std::launch::async,
+#ifdef __EMSCRIPTEN__
+        constexpr auto launchPolicy = std::launch::deferred;
+    #else
+        constexpr auto launchPolicy = std::launch::async;
+    #endif
+        task.future = std::async(launchPolicy,
                                  [filePath]()
                                  {
                                      return ThreemfThumbnailExtractor::extractThumbnailDataOnly(
@@ -83,8 +96,10 @@ namespace gladius::ui
         while (it != m_activeTasks.end())
         {
             // Check if future is ready (non-blocking)
-            if (it->future.valid() &&
-                it->future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+            auto const status = it->future.valid()
+                                  ? it->future.wait_for(std::chrono::milliseconds(0))
+                                  : std::future_status::timeout;
+            if (status == std::future_status::ready || status == std::future_status::deferred)
             {
                 try
                 {
@@ -192,7 +207,12 @@ namespace gladius::ui
 
     void AsyncThumbnailLoader::processQueue()
     {
-        while (m_activeTasks.size() < m_maxConcurrentLoads && !m_pendingQueue.empty())
+    #ifdef __EMSCRIPTEN__
+        constexpr size_t concurrentLimit = 1u;
+    #else
+        size_t const concurrentLimit = m_maxConcurrentLoads;
+    #endif
+        while (m_activeTasks.size() < concurrentLimit && !m_pendingQueue.empty())
         {
             auto * info = m_pendingQueue.front();
             m_pendingQueue.erase(m_pendingQueue.begin());

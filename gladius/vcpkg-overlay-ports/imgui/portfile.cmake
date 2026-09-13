@@ -18,13 +18,87 @@ else()
     )
 endif()
 
-file(COPY "${CMAKE_CURRENT_LIST_DIR}/imgui-config.cmake.in" DESTINATION "${SOURCE_PATH}")
-file(COPY "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt" DESTINATION "${SOURCE_PATH}")
+configure_file("${CMAKE_CURRENT_LIST_DIR}/imgui-config.cmake.in" "${SOURCE_PATH}/imgui-config.cmake.in" COPYONLY)
+configure_file("${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt" "${SOURCE_PATH}/CMakeLists.txt" COPYONLY)
+
+# emdawnwebgpu uses Dawn's current WebGPU C ABI on Emscripten.  The upstream
+# backend selects its legacy Emscripten ABI whenever __EMSCRIPTEN__ is defined,
+# so allow the Dawn branch when the package is compiled against the vcpkg Dawn
+# header.
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "#else\n    #if defined(IMGUI_IMPL_WEBGPU_BACKEND_DAWN) || defined(IMGUI_IMPL_WEBGPU_BACKEND_WGPU)\n    #error neither IMGUI_IMPL_WEBGPU_BACKEND_DAWN nor IMGUI_IMPL_WEBGPU_BACKEND_WGPU may be defined if targeting emscripten!\n    #endif\n#endif"
+    "#else\n    #if defined(IMGUI_IMPL_WEBGPU_BACKEND_WGPU)\n    #error IMGUI_IMPL_WEBGPU_BACKEND_WGPU is not supported when targeting emscripten!\n    #endif\n#endif")
 
 # Set ImDrawIdx to unsigned int in imconfig.h
 file(READ "${SOURCE_PATH}/imconfig.h" IMCONFIG_CONTENT)
 string(REPLACE "//#define ImDrawIdx unsigned int" "#define ImDrawIdx unsigned int" IMCONFIG_CONTENT_MODIFIED "${IMCONFIG_CONTENT}")
 file(WRITE "${SOURCE_PATH}/imconfig.h" "${IMCONFIG_CONTENT_MODIFIED}")
+
+# Dawn's WebGPU structures include a nextInChain field. The upstream backend
+# leaves this field indeterminate in its vertex-buffer layout array, which
+# triggers Emscripten's descriptor validation before the first frame renders.
+# Apply this to both the regular and docking source revisions.
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "WGPUVertexBufferLayout buffer_layouts[1];"
+    "WGPUVertexBufferLayout buffer_layouts[1] = {};"
+)
+
+# Uniform buffers are bound at offset zero; use the WebGPU minimum uniform
+# binding alignment for the allocation and binding range as well.
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "MEMALIGN(sizeof(Uniforms), 16)"
+    "MEMALIGN(sizeof(Uniforms), 256)"
+)
+
+set(IMGUI_IMAGE_BIND_GROUP_OLD [=[
+    WGPUBindGroupEntry image_bg_entries[] = { { nullptr, 0, 0, 0, 0, 0, texture } };
+]=])
+set(IMGUI_IMAGE_BIND_GROUP_NEW [=[
+    WGPUBindGroupEntry image_bg_entries[1] = {};
+    image_bg_entries[0].binding = 0;
+    image_bg_entries[0].textureView = texture;
+]=])
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "${IMGUI_IMAGE_BIND_GROUP_OLD}"
+    "${IMGUI_IMAGE_BIND_GROUP_NEW}")
+
+set(IMGUI_COMMON_BIND_GROUP_OLD [=[
+    WGPUBindGroupEntry common_bg_entries[] =
+    {
+        { nullptr, 0, bd->renderResources.Uniforms, 0, MEMALIGN(sizeof(Uniforms), 256), 0, 0 },
+        { nullptr, 1, 0, 0, 0, bd->renderResources.Sampler, 0 },
+    };
+]=])
+set(IMGUI_COMMON_BIND_GROUP_NEW [=[
+    WGPUBindGroupEntry common_bg_entries[2] = {};
+    common_bg_entries[0].binding = 0;
+    common_bg_entries[0].buffer = bd->renderResources.Uniforms;
+    common_bg_entries[0].size = MEMALIGN(sizeof(Uniforms), 256);
+    common_bg_entries[1].binding = 1;
+    common_bg_entries[1].sampler = bd->renderResources.Sampler;
+]=])
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "${IMGUI_COMMON_BIND_GROUP_OLD}"
+    "${IMGUI_COMMON_BIND_GROUP_NEW}")
+
+# GLFW reports a browser device-pixel ratio to ImGui, while the Emscripten
+# canvas is configured using its framebuffer dimensions. Keep draw-data
+# clipping in the canvas coordinate space for the WebGPU target.
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "    int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);\n    int fb_height = (int)(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);"
+    "    int fb_width = (int)draw_data->DisplaySize.x;\n    int fb_height = (int)draw_data->DisplaySize.y;"
+)
+vcpkg_replace_string(
+    "${SOURCE_PATH}/backends/imgui_impl_wgpu.cpp"
+    "    ImVec2 clip_scale = draw_data->FramebufferScale;"
+    "    ImVec2 clip_scale = ImVec2(1.0f, 1.0f);"
+)
 
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
     FEATURES 

@@ -18,6 +18,7 @@ Interface version: 1.2.0
 
 #include <exception>
 #include <stdexcept>
+#include <string>
 #include "gladius_types.hpp"
 
 /*************************************************************************************************************************

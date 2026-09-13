@@ -58,7 +58,7 @@ void NodeFocusManager::updateNodePositions() {
             continue; // Skip the background/legend node
         }
 
-        nodes::NodeId nodeId = static_cast<nodes::NodeId>(static_cast<uint64_t>(edNodeId));
+        nodes::NodeId nodeId = static_cast<nodes::NodeId>(edNodeId.Get());
         ImVec2 pos = getNodePosition(nodeId);
         ImVec2 size = getNodeSize(nodeId);
         

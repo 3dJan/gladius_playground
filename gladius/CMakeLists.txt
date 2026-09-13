@@ -30,11 +30,26 @@ if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "WEBGPU" AND NOT GLADIUS_ENABLE_WEBGPU
 endif()
 
 if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "WEBGPU")
-  set(GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE "          \"wgpu-binding\",")
+  set(GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE "wgpu-binding")
   set(GLADIUS_VCPKG_GLAD_DEPENDENCY "")
 else()
-  set(GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE "          \"opengl2-binding\",")
+  set(GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE "opengl2-binding")
   set(GLADIUS_VCPKG_GLAD_DEPENDENCY "  \"glad\",")
+endif()
+
+if(EMSCRIPTEN)
+  set(GLADIUS_VCPKG_IMGUI_EXTRA_FEATURES "")
+elseif(WIN32)
+  set(GLADIUS_VCPKG_IMGUI_EXTRA_FEATURES "win32-binding;test-engine")
+else()
+  set(GLADIUS_VCPKG_IMGUI_EXTRA_FEATURES "test-engine")
+endif()
+
+if(GLADIUS_VCPKG_IMGUI_EXTRA_FEATURES)
+  string(REPLACE ";" "\",\n          \"" GLADIUS_VCPKG_IMGUI_FEATURE_LINES
+    "${GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE};${GLADIUS_VCPKG_IMGUI_EXTRA_FEATURES}")
+else()
+  set(GLADIUS_VCPKG_IMGUI_FEATURE_LINES "${GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE}")
 endif()
 
 message(STATUS "Gladius UI backend: ${GLADIUS_UI_BACKEND_NORMALIZED}")
@@ -139,6 +154,26 @@ if(_change_MSVC_flags)
 endif()
 
 project(gladius)
+
+if(EMSCRIPTEN AND VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+  # Some Emscripten/vcpkg combinations do not append each manifest package's
+  # share directory to CMAKE_PREFIX_PATH. Add those package prefixes explicitly
+  # so the real target graph can resolve the installed config packages.
+  set(_gladius_web_vcpkg_share "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share")
+  file(GLOB _gladius_web_vcpkg_packages LIST_DIRECTORIES true "${_gladius_web_vcpkg_share}/*")
+  list(APPEND CMAKE_PREFIX_PATH ${_gladius_web_vcpkg_packages})
+  set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}" CACHE STRING "Package search paths" FORCE)
+endif()
+
+if(EMSCRIPTEN)
+  set(GLADIUS_BROWSER ON CACHE BOOL "Build the Gladius browser target" FORCE)
+  set(GLADIUS_ENABLE_OPENCL OFF CACHE BOOL "Build the OpenCL compute backend" FORCE)
+  set(GLADIUS_ENABLE_WEBGPU ON CACHE BOOL "Build the browser WebGPU backend" FORCE)
+  set(GLADIUS_ENABLE_OPENVDB OFF CACHE BOOL "Build OpenVDB/NanoVDB support" FORCE)
+  set(GLADIUS_UI_BACKEND WEBGPU CACHE STRING "UI graphics backend" FORCE)
+  set(ENABLE_UI_TESTING OFF CACHE BOOL "Enable UI test automation via Dear ImGui Test Engine" FORCE)
+  set(ENABLE_TRACY ON CACHE BOOL "Enable Tracy profiling" FORCE)
+endif()
 
 # Include coverage support after project declaration so compiler info is available
 include(cmake/Coverage.cmake)
@@ -247,12 +282,14 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenMesh REQUIRED)
 find_package(tinyfiledialogs CONFIG REQUIRED)
 find_package(platform_folders REQUIRED)
-if(UNIX)
-find_package(X11 REQUIRED)
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
+if(UNIX AND NOT EMSCRIPTEN)
+  find_package(X11 REQUIRED)
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
 endif()
-find_package(OpenMP REQUIRED COMPONENTS CXX)
+if(NOT EMSCRIPTEN)
+  find_package(OpenMP REQUIRED COMPONENTS CXX)
+endif()
 if(GLADIUS_ENABLE_OPENVDB)
   find_package(OpenVDB CONFIG REQUIRED)
   find_package(blosc CONFIG REQUIRED)
@@ -286,6 +323,10 @@ if(GLADIUS_ENABLE_WEBGPU)
 endif()
 
 cmrc_add_resource_library(gladius_resources ALIAS gladius::rc ${KERNEL_FILES})
+cmrc_add_resources(gladius_resources
+  examples/template.3mf
+  src/imgui.ini
+)
 if (MSVC)
     set_property(TARGET gladius_resources PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
@@ -340,7 +381,9 @@ if(UNIX)
   endif()
 endif()
 
-add_subdirectory(tests)
+if(NOT EMSCRIPTEN)
+  add_subdirectory(tests)
+endif()
 add_subdirectory(src)
 add_subdirectory(src/compute)
 if(GLADIUS_ENABLE_WEBGPU)
@@ -352,7 +395,9 @@ add_subdirectory(src/io)
 add_subdirectory(src/contour)
 add_subdirectory(src/slicer)
 add_subdirectory(src/api)
-add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
+if(NOT EMSCRIPTEN)
+  add_subdirectory(src/api/GladiusLib_component/Examples/CppDynamic)
+endif()
 
 if(GLADIUS_ENABLE_OPENCL)
   configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
@@ -394,7 +439,10 @@ file(COPY components/licenses DESTINATION "src/")
 
 
 
-# Install fonts
+# Browser builds are emitted by Emscripten and do not use the native install or
+# CPack layout. The resource files above remain available to the real Gladius
+# target through the normal build tree.
+if(NOT EMSCRIPTEN)
 install(DIRECTORY components/fonts/fontawesome-free-5.14.0-web/ DESTINATION ${INSTALL_PREFIX}/misc/fonts/)
 
 # Install licenses
@@ -550,4 +598,5 @@ add_custom_target(Generate_Installer
   # Make sure both desktop app variants are built before packaging
   DEPENDS gladius gladiusmcp gladius_lib gladiuslib
   COMMENT "Running CPack. Please wait...")
+endif()
 

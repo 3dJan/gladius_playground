@@ -340,6 +340,13 @@ namespace gladius::ui
     {
         m_logger = std::move(logger);
 
+#ifdef __EMSCRIPTEN__
+        // The browser build has no working ImGui WGPU backend or thread
+        // pool, and the welcome screen is hidden anyway.  Skip creating
+        // the async thumbnail loader and the thumbnail extractor to
+        // avoid std::async spinning on the main thread.
+        (void)m_logger;
+#else
         // Initialize the thumbnail extractor if it doesn't exist
         if (!m_thumbnailExtractor && m_logger)
         {
@@ -365,6 +372,7 @@ namespace gladius::ui
                 updateExampleThumbnailInfos();
             }
         }
+#endif
     }
 
 #if defined(GLADIUS_UI_BACKEND_WEBGPU)
@@ -414,6 +422,13 @@ namespace gladius::ui
         {
             return false;
         }
+#ifdef __EMSCRIPTEN__
+        // The welcome screen uses WebGPU textures for thumbnails, and the
+        // browser build does not yet have a working ImGui WGPU backend, so
+        // skip the welcome screen entirely.  The application can still be
+        // used once a file is opened programmatically.
+        return false;
+#endif
 
         // Update async thumbnail loading - process completed background loads
         if (m_asyncLoader)

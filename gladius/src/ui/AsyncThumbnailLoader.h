@@ -25,7 +25,9 @@ namespace gladius::ui
      *
      * This class manages asynchronous loading of thumbnails from 3MF files.
      * It uses std::async to offload file I/O and PNG decoding to background threads,
-     * while texture creation happens on the main thread (OpenGL requirement).
+    * while texture creation happens on the main thread (OpenGL requirement). Browser
+    * builds do not have pthreads, so they use deferred futures and perform at most one
+    * extraction when update() polls each frame.
      *
      * Usage:
      * 1. Call requestLoad() for each thumbnail that needs loading
@@ -57,7 +59,7 @@ namespace gladius::ui
         AsyncThumbnailLoader & operator=(AsyncThumbnailLoader &&) = delete;
 
         /**
-         * @brief Queue a thumbnail for background loading
+         * @brief Queue a thumbnail for loading
          *
          * If the thumbnail is already loading or ready, this is a no-op.
          * If max concurrent loads is reached, the request is queued.
@@ -67,7 +69,7 @@ namespace gladius::ui
         void requestLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info);
 
         /**
-         * @brief Poll futures and update thumbnail states
+         * @brief Poll loading operations and update thumbnail states
          *
          * Call this each frame. It checks for completed async operations
          * and transitions thumbnails from Loading to DecodedPending state.

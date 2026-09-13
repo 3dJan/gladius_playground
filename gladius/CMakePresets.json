@@ -172,6 +172,35 @@
                 "GLADIUS_UI_BACKEND": "WEBGPU",
                 "ENABLE_OPENCL_TESTS": "OFF"
             }
+        },
+        {
+            "name": "web-base",
+            "displayName": "WebAssembly browser base",
+            "description": "Configure the browser target with the active Emscripten SDK",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+                "VCPKG_TARGET_TRIPLET": "wasm32-emscripten",
+                "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
+                "VCPKG_MANIFEST_DIR": "${sourceDir}",
+                "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed",
+                "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg_installed/wasm32-emscripten",
+                "CMAKE_FIND_ROOT_PATH_MODE_PACKAGE": "BOTH",
+                "CMAKE_FIND_ROOT_PATH": "${sourceDir}/vcpkg_installed/wasm32-emscripten",
+                "GLADIUS_ENABLE_OPENCL": "OFF",
+                "GLADIUS_ENABLE_WEBGPU": "ON",
+                "GLADIUS_ENABLE_OPENVDB": "OFF",
+                "GLADIUS_UI_BACKEND": "WEBGPU"
+            }
+        },
+        {
+            "name": "web-release",
+            "displayName": "WebAssembly Release",
+            "description": "Build the full Gladius application for WebGPU-enabled browsers with Emscripten",
+            "inherits": "web-base"
         }
     ],
     "version": 3,
@@ -230,6 +259,12 @@
             "name": "linux-webgpu-releaseWithDebug",
             "displayName": "Linux RelWithDebInfo (WebGPU only)",
             "configurePreset": "linux-webgpu-releaseWithDebug",
+            "jobs": 8
+        },
+        {
+            "name": "web-release",
+            "displayName": "WebAssembly Release",
+            "configurePreset": "web-release",
             "jobs": 8
         }
     ],

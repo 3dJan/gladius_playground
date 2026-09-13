@@ -55,9 +55,33 @@ namespace gladius::webgpu
         [[nodiscard]] wgpu::Queue const & getQueue() const noexcept;
         [[nodiscard]] wgpu::Instance const & getInstance() const noexcept;
         [[nodiscard]] wgpu::Adapter const & getAdapter() const noexcept;
+        // Returns true until initialize() completes or fails.  Polled by the
+        // UI so that the browser can show a status while the WebGPU adapter
+        // and device are still being requested.
+        [[nodiscard]] bool isInitializing() const noexcept
+        {
+            return !m_isValid && m_errorMessage.empty();
+        }
+
+      #ifdef __EMSCRIPTEN__
+        /// Complete browser-side device setup after the spontaneous callback has returned.
+        /// Emscripten's WebGPU shim can stall the browser callback if the queue is acquired from
+        /// inside the device-request callback, so queue acquisition is deliberately deferred to
+        /// the next UI turn.
+        [[nodiscard]] bool completeDeviceInitialization();
+      #endif
 
       private:
         void initialize();
+      #ifdef __EMSCRIPTEN__
+        void requestDevice();
+        void handleAdapterRequest(wgpu::RequestAdapterStatus status,
+                                  wgpu::Adapter adapter,
+                                  wgpu::StringView message);
+        void handleDeviceRequest(wgpu::RequestDeviceStatus status,
+                                 wgpu::Device device,
+                                 wgpu::StringView message);
+      #endif
         void setDeviceLost(wgpu::DeviceLostReason reason, wgpu::StringView message);
         void setUncapturedError(wgpu::ErrorType type, wgpu::StringView message);
 

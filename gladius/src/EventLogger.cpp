@@ -38,6 +38,19 @@ namespace gladius::events
             return;
         }
 
+#ifdef __EMSCRIPTEN__
+        // Emscripten cannot create native threads for libcoro's thread pool.
+        // Force file logging off in the browser; events still flow to the
+        // in-memory event list and (when enabled) to the console.
+        m_fileLoggingEnabled = false;
+#endif
+
+        if (!m_fileLoggingEnabled)
+        {
+            m_initialized = true;
+            return;
+        }
+
         // Initialize log directory
         m_logDirectory = std::filesystem::temp_directory_path() / "gladius" / "logs";
         ensureLogDirectoryExists();

@@ -4,7 +4,11 @@
 #include <csignal>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 using namespace std;
 
@@ -34,7 +38,7 @@ void printUsage()
     std::cout << "  gladius --test-beam-bvh           # Run beam BVH tests\n";
 }
 
-int main(int argc, char ** argv)
+int runApplication(int argc, char ** argv)
 {
     bool enableMCP = false;
     bool mcpStdio = false;
@@ -176,7 +180,6 @@ int main(int argc, char ** argv)
         std::cerr << "Warning: could not set working directory (" << ex.what() << ")" << std::endl;
         // continue
     }
-
     // Redirect stdout before application setup in stdio mode. Headless backend
     // initialization may emit diagnostics; protocol stdout must remain clean.
     std::streambuf * originalCout = nullptr;
@@ -186,17 +189,24 @@ int main(int argc, char ** argv)
     }
 
     // Create application based on arguments
-    gladius::Application app(headless, backendOverride);
+#ifdef __EMSCRIPTEN__
+    // emscripten_set_main_loop_arg() simulates an infinite call and unwinds the
+    // current stack. Keep the application on the heap so its UI and WebGPU
+    // resources outlive runApplication().
+    auto * app = new gladius::Application(headless, backendOverride);
+#else
+    auto app = std::make_unique<gladius::Application>(headless, backendOverride);
+#endif
     if (mcpStdio)
     {
-        app.setLoggerOutputMode(gladius::events::OutputMode::Silent);
+        app->setLoggerOutputMode(gladius::events::OutputMode::Silent);
     }
     // Propagate OpenCL debug flag to UI/MainWindow before setup
     for (int i = 1; i < argc; ++i)
     {
         if (std::string(argv[i]) == "--debug-opencl")
         {
-            app.getMainWindow().setOpenCLDebugEnabled(true);
+            app->getMainWindow().setOpenCLDebugEnabled(true);
             break;
         }
     }
@@ -213,7 +223,7 @@ int main(int argc, char ** argv)
             std::cout.rdbuf(originalCout);
             originalCout = nullptr;
 
-            success = app.enableMCPServerStdio();
+            success = app->enableMCPServerStdio();
             if (!success)
             {
                 // Use stderr for error since stdout is reserved for MCP protocol
@@ -224,10 +234,10 @@ int main(int argc, char ** argv)
         }
         else
         {
-            success = app.enableMCPServer(mcpPort);
+            success = app->enableMCPServer(mcpPort);
             if (success)
             {
-                auto logger = app.getGlobalLogger();
+                auto logger = app->getGlobalLogger();
                 if (logger)
                 {
                     logger->logInfo("MCP Server enabled on port " + std::to_string(mcpPort));
@@ -251,19 +261,19 @@ int main(int argc, char ** argv)
         {
             if (!mcpStdio)
             {
-                auto logger = app.getGlobalLogger();
+                auto logger = app->getGlobalLogger();
                 if (logger)
                 {
                     logger->logInfo("Opening file: " + filename->string());
                 }
             }
-            app.getMainWindow().setStartupFile(*filename);
+            app->getMainWindow().setStartupFile(*filename);
         }
         else
         {
             if (!mcpStdio)
             {
-                auto logger = app.getGlobalLogger();
+                auto logger = app->getGlobalLogger();
                 if (logger)
                 {
                     logger->logError("File does not exist: " + filename->string());
@@ -276,13 +286,17 @@ int main(int argc, char ** argv)
     if (!headless)
     {
         // Normal mode: run UI loop (blocks until exit)
-        app.startMainLoop();
+        app->startMainLoop();
+
+    #ifdef __EMSCRIPTEN__
+        return 0;
+    #endif
 
         // Clean up MCP server before exit
         if (enableMCP)
         {
 #if defined(GLADIUS_ENABLE_MCP)
-            app.disableMCPServer();
+            app->disableMCPServer();
 #endif
         }
     }
@@ -299,7 +313,7 @@ int main(int argc, char ** argv)
             }
 // If server has stopped externally, exit the loop
 #if defined(GLADIUS_ENABLE_MCP)
-            if (!app.isMCPServerEnabled())
+            if (!app->isMCPServerEnabled())
             {
                 break;
             }
@@ -309,12 +323,30 @@ int main(int argc, char ** argv)
 
 // Clean up MCP server before exit (HTTP or stdio)
 #if defined(GLADIUS_ENABLE_MCP)
-        if (enableMCP && app.isMCPServerEnabled())
+        if (enableMCP && app->isMCPServerEnabled())
         {
-            app.disableMCPServer();
+            app->disableMCPServer();
         }
 #endif
     }
 
     return 0;
+}
+
+int main(int argc, char ** argv)
+{
+    try
+    {
+        return runApplication(argc, argv);
+    }
+    catch (std::exception const & exception)
+    {
+        std::cerr << "Fatal application error: " << exception.what() << std::endl;
+        return 1;
+    }
+    catch (...)
+    {
+        std::cerr << "Fatal application error: unknown exception" << std::endl;
+        return 1;
+    }
 }

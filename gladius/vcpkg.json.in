@@ -41,9 +41,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-@GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE@
-          "win32-binding",
-          "test-engine"
+          "@GLADIUS_VCPKG_IMGUI_FEATURE_LINES@"
         ]
     },
     {
@@ -53,8 +51,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-@GLADIUS_VCPKG_IMGUI_RENDERER_FEATURE@
-          "test-engine"
+          "@GLADIUS_VCPKG_IMGUI_FEATURE_LINES@"
         ]
     },
     "imgui-node-editor",
@@ -66,7 +63,10 @@
     {
       "name": "lib3mf"
     },
-    "pkgconf",
+    {
+      "name": "pkgconf",
+      "platform": "!emscripten"
+    },
     "minizip",
     "tracy",
     "clipper2",

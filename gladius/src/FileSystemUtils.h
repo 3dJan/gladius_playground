@@ -10,6 +10,7 @@ namespace gladius
     std::filesystem::path getShippedLibraryDir();
 
     /// @brief Returns the per-user library directory: ~/.local/share/gladius/library
+    /// (or /gladius/user-library in browser builds).
     /// Creates the directory if it does not exist.
     std::filesystem::path getUserLibraryDir();
 

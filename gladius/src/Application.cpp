@@ -9,6 +9,9 @@
 
 #include <filesystem>
 #include <iostream>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 namespace gladius
 {
@@ -305,7 +308,13 @@ namespace gladius
 
     void Application::propagateComputeCapabilities()
     {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window.__dbg) window.__dbg.stages.push('C0'); });
+#endif
         auto const capabilities = m_mainWindow.getBackendCapabilities();
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window.__dbg) window.__dbg.stages.push('C1'); });
+#endif
         if (compute::hasCapability(capabilities, compute::RendererCapability::VdbSampling))
         {
             m_mainWindow.setVdbSupported(true);
@@ -321,6 +330,9 @@ namespace gladius
         }
 
         m_mainWindow.setVdbSupported(false, "No compute backend is available.");
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window.__dbg) window.__dbg.stages.push('C2'); });
+#endif
     }
 
     std::size_t Application::applyMeshSdfSettingsToCurrentDocument()

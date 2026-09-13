@@ -76,7 +76,14 @@ namespace gladius::ui
     bool SliceView::render(Document & doc, GLView & view)
     {
         m_document = &doc;
+#ifdef __EMSCRIPTEN__
+        // Emscripten build: std::async with std::launch::async requires pthreads
+        // which the browser target does not enable. Skip the slice preview rather
+        // than crashing the whole app. The 3D preview and other widgets still work.
+        return false;
+#else
         return renderImpl(nullptr, view);
+#endif
     }
 
     void SliceView::setSliceHeight(float zHeight_mm)

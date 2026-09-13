@@ -1,6 +1,11 @@
 set(BINARY ${CMAKE_PROJECT_NAME})
 file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 
+# This standalone browser diagnostic has Emscripten-only dependencies and is
+# built as its own target below. It must never become part of the production
+# executable, because it defines its own main loop and ImGui demo UI.
+list(FILTER SOURCES EXCLUDE REGEX ".*/webgpu_demo\\.cpp$")
+
 if(NOT GLADIUS_ENABLE_OPENCL)
     # These translation units are the legacy OpenCL host pipeline.  They must not
     # enter a pure-WebGPU target: including them and relying on section garbage
@@ -81,7 +86,45 @@ else()
     add_executable(${BINARY} ${SOURCES} )
 endif()
 
-# Add include paths
+if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    # The browser executable is the real Gladius application, not the standalone
+    # WebGPU bootstrap.  Emit Emscripten's HTML launcher beside its JS/Wasm/data
+    # files and package the assets resolved through the normal application paths.
+    set_target_properties(${BINARY}
+        PROPERTIES
+            SUFFIX ".html"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web")
+    # Enable C++ exception handling at compile-time; without this the
+    # try/catch blocks in our code are compiled away and any throw
+    # becomes an uncaught exception.
+    target_compile_options(${BINARY} PRIVATE -fexceptions)
+    target_link_options(${BINARY} PRIVATE
+        "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
+        "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/misc@misc"
+        "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/library@/gladius/library"
+        "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/examples@/gladius/examples"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sASSERTIONS=2"
+        "-sENVIRONMENT=web"
+        "-sFORCE_FILESYSTEM=1"
+        "-sNO_EXIT_RUNTIME=1"
+        "-sSINGLE_FILE=1"
+        # Allow C++ exceptions (e.g. thrown by the WebGPU context
+        # initialiser) to be caught on the browser target.  Without
+        # this, any throw causes the runtime to abort with
+        # "exception catching is not enabled".
+        "-sNO_DISABLE_EXCEPTION_CATCHING=1"
+        )
+    # Patch the Emscripten-generated JS for canvas scissor clipping.
+    include(${CMAKE_SOURCE_DIR}/cmake/patch_webgpu_js.cmake)
+    add_custom_command(TARGET ${BINARY} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DHTML_FILE=$<TARGET_FILE:${BINARY}>
+                -DPATCH_FUNCTION=patch_webgpu_js
+                -P ${CMAKE_SOURCE_DIR}/cmake/patch_webgpu_js.cmake
+        COMMENT "Patching WebGPU JS in $<TARGET_FILE_NAME:${BINARY}>"
+        VERBATIM)
+endif()
+
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders
@@ -107,20 +150,30 @@ set (INCLUDE_PATHS
     ${OPENMESH_INCLUDE_DIRS}
     ${AdditionalIncludes}
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    list(GET CMAKE_FIND_ROOT_PATH 0 GLADIUS_VCPKG_ROOT)
+    set(GLADIUS_WEBGPU_INCLUDE_DIR "${GLADIUS_VCPKG_ROOT}/include")
+    if(NOT EXISTS "${GLADIUS_WEBGPU_INCLUDE_DIR}/webgpu/webgpu.h")
+        message(FATAL_ERROR "Could not find the vcpkg WebGPU headers at ${GLADIUS_WEBGPU_INCLUDE_DIR}")
+    endif()
+endif()
 target_include_directories(${BINARY}_lib PUBLIC ${INCLUDE_PATHS})
 target_include_directories(${BINARY}_lib_mcp PUBLIC ${INCLUDE_PATHS})
 target_include_directories(${BINARY} PUBLIC ${INCLUDE_PATHS})
+if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    target_include_directories(${BINARY}_lib SYSTEM BEFORE PUBLIC ${GLADIUS_WEBGPU_INCLUDE_DIR})
+    target_include_directories(${BINARY}_lib_mcp SYSTEM BEFORE PUBLIC ${GLADIUS_WEBGPU_INCLUDE_DIR})
+    target_include_directories(${BINARY} SYSTEM BEFORE PUBLIC ${GLADIUS_WEBGPU_INCLUDE_DIR})
+endif()
 
 find_package(NLopt CONFIG REQUIRED)
 
 # Core dependencies (shared by gladius and gladiusmcp)
 set(DEPENDENCIES_CORE
-    ${X11_LIBRARIES}
     glfw
     fmt::fmt-header-only
     Eigen3::Eigen
     tinyfiledialogs::tinyfiledialogs
-    Threads::Threads
     sago::platform_folders
     ZLIB::ZLIB
     gladius::rc
@@ -135,8 +188,11 @@ set(DEPENDENCIES_CORE
     NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
-    OpenMP::OpenMP_CXX
 )
+
+if(NOT EMSCRIPTEN)
+    list(APPEND DEPENDENCIES_CORE ${X11_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX)
+endif()
 
 if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "OPENGL")
     list(APPEND DEPENDENCIES_CORE
@@ -247,41 +303,72 @@ target_precompile_headers(${BINARY} PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 # Enable AVX2 SIMD instructions for Phase 3 optimization
 # PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
 # avoiding ODR violations from mismatched struct layouts.
-if (NOT WIN32)
+if (NOT WIN32 AND NOT EMSCRIPTEN)
     target_compile_options(${BINARY}_lib PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY}_lib_mcp PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
 endif()
 
-install(TARGETS ${BINARY} RUNTIME DESTINATION ${INSTALL_PREFIX}/)
+# Emscripten compiles with -fno-exceptions by default; turn exceptions back
+# on so the try/catch blocks around WebGPU initialisation actually work.
+if(EMSCRIPTEN)
+    target_compile_options(${BINARY}_lib PUBLIC -fexceptions)
+    target_compile_options(${BINARY} PUBLIC -fexceptions)
 
-#
-# gladiusmcp: gladius with MCP server support
-#
-# Build gladiusmcp by linking the MCP-enabled core library and MCP sources
-add_executable(gladiusmcp ${MCP_SOURCES} ${MCP_TOOLS_SOURCES} main.cpp)
-target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/io
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui
-    ${CMAKE_CURRENT_SOURCE_DIR}/contour
-    ${CMAKE_CURRENT_SOURCE_DIR}/nodes
-    ${CMAKE_CURRENT_SOURCE_DIR}/mcp
-)
-target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
-if(ENABLE_UI_TESTING)
-    target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    add_executable(imgui_webgpu_demo webgpu_demo.cpp)
+    target_link_libraries(imgui_webgpu_demo PRIVATE
+        glfw
+        imgui::imgui
+        dawn::webgpu_dawn
+    )
+    target_include_directories(imgui_webgpu_demo SYSTEM BEFORE PUBLIC ${GLADIUS_WEBGPU_INCLUDE_DIR})
+    set_target_properties(imgui_webgpu_demo
+        PROPERTIES
+            SUFFIX ".html"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web")
+    target_compile_options(imgui_webgpu_demo PRIVATE -fexceptions)
+    target_link_options(imgui_webgpu_demo PRIVATE
+        "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sASSERTIONS=2"
+        "-sENVIRONMENT=web"
+        "-sNO_EXIT_RUNTIME=1"
+        "-sSINGLE_FILE=1"
+        "-sNO_DISABLE_EXCEPTION_CATCHING=1"
+    )
+    add_custom_command(TARGET imgui_webgpu_demo POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DHTML_FILE=$<TARGET_FILE:imgui_webgpu_demo>
+                -DPATCH_FUNCTION=patch_webgpu_js
+                -P ${CMAKE_SOURCE_DIR}/cmake/patch_webgpu_js.cmake
+        COMMENT "Patching WebGPU JS in $<TARGET_FILE_NAME:imgui_webgpu_demo>"
+        VERBATIM)
 endif()
-target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
-# Ensure the MCP-enabled static library is built before linking the executable
-add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
-# Use an MCP-specific PCH instead of reusing the core/UI PCH; the MCP tools mostly need
-# standard library + JSON, not the full Eigen/ImGui-heavy core baseline.
-target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
-if (NOT WIN32)
-    target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
+
+if(NOT EMSCRIPTEN)
+    install(TARGETS ${BINARY} RUNTIME DESTINATION ${INSTALL_PREFIX}/)
 endif()
-# Install MCP variant if it was built in this build tree; do not fail packaging if absent
-install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)
+
+if(NOT EMSCRIPTEN)
+    # gladiusmcp: gladius with MCP server support
+    add_executable(gladiusmcp ${MCP_SOURCES} ${MCP_TOOLS_SOURCES} main.cpp)
+    target_include_directories(gladiusmcp PUBLIC ${INCLUDE_PATHS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/io
+        ${CMAKE_CURRENT_SOURCE_DIR}/ui
+        ${CMAKE_CURRENT_SOURCE_DIR}/nodes
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp
+    )
+    target_compile_definitions(gladiusmcp PRIVATE GLADIUS_ENABLE_MCP)
+    if(ENABLE_UI_TESTING)
+        target_compile_definitions(gladiusmcp PRIVATE ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)
+    endif()
+    target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
+    add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
+    target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
+    if (NOT WIN32)
+        target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
+    endif()
+    install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)
+endif()
 
 if (ENABLE_UI_TESTING)
     target_compile_definitions(${BINARY}_lib PUBLIC ENABLE_UI_TESTING=1 IMGUI_ENABLE_TEST_ENGINE)

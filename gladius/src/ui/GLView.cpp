@@ -26,14 +26,23 @@
 
 #include <GLFW/glfw3.h>
 
-#if defined(GLADIUS_UI_BACKEND_WEBGPU) && defined(__linux__)
+#ifdef __EMSCRIPTEN__
+#include <cmrc/cmrc.hpp>
+CMRC_DECLARE(gladius_resources);
+#endif
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU) && defined(__linux__) && !defined(__EMSCRIPTEN__)
 #define GLFW_EXPOSE_NATIVE_X11
 #endif
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
 #endif
-#if defined(GLADIUS_UI_BACKEND_WEBGPU) || defined(_WIN32)
+#if (defined(GLADIUS_UI_BACKEND_WEBGPU) && !defined(__EMSCRIPTEN__)) || defined(_WIN32)
 #include <GLFW/glfw3native.h>
+#endif
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
 #endif
 #include "Profiling.h"
 #include <algorithm>
@@ -136,10 +145,6 @@ namespace gladius
     void GLView::setWebGPUContext(std::shared_ptr<webgpu::WebGPUComputeContext> context)
     {
         m_webgpuContext = std::move(context);
-        if (m_initialized && m_webgpuContext && !m_webgpuRendererInitialized)
-        {
-            initializeWebGPURenderer();
-        }
     }
 #endif
 
@@ -183,7 +188,6 @@ namespace gladius
     void GLView::init()
     {
         LOG_SCOPE_DURATION_NAMED("GLView::init()");
-
         if (m_initialized)
         {
             return;
@@ -287,6 +291,7 @@ namespace gladius
         ImGuiIO & io = ImGui::GetIO();
 
         // Set up the UI configuration file path
+#ifndef __EMSCRIPTEN__
         try
         {
             std::filesystem::path gladiusConfigDir =
@@ -311,6 +316,11 @@ namespace gladius
             // Fall back to default ImGui behavior
             m_gladiusImgUiFilename.clear();
         }
+#else
+        // Browser builds keep ImGui settings in browser-managed storage rather
+        // than attempting to access a native configuration directory.
+        io.IniFilename = nullptr;
+#endif
 
         // Set the ini filename storage before using it
         if (!m_gladiusImgUiFilename.empty())
@@ -358,6 +368,24 @@ namespace gladius
         io.ConfigWindowsMoveFromTitleBarOnly = true;
         io.ConfigInputTrickleEventQueue = true;
 
+#ifdef __EMSCRIPTEN__
+        // The browser build has no native config directory. Load the shipped
+        // docking layout from the embedded resources as its initial layout.
+        try
+        {
+            auto const resources = cmrc::gladius_resources::get_filesystem();
+            if (resources.exists("src/imgui.ini"))
+            {
+                auto const layout = resources.open("src/imgui.ini");
+                ImGui::LoadIniSettingsFromMemory(layout.begin(), layout.size());
+            }
+        }
+        catch (const std::exception & ex)
+        {
+            std::cerr << "Warning: Failed to load embedded ImGui layout: " << ex.what() << "\n";
+        }
+#endif
+
         setGladiusTheme(io);
 
         auto const font_scaling_factor = 2.f;
@@ -392,12 +420,15 @@ namespace gladius
         m_originalStyle = ImGui::GetStyle();
 
         // Setup Platform/Renderer bindings
-    #if defined(GLADIUS_UI_BACKEND_OPENGL)
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         ImGui_ImplGlfw_InitForOpenGL(m_window, true);
         ImGui_ImplOpenGL2_Init();
-    #else
+#else
         ImGui_ImplGlfw_InitForOther(m_window, true);
-    #endif
+#ifdef __EMSCRIPTEN__
+        ImGui_ImplGlfw_InstallEmscriptenCallbacks(m_window, "#gladius-canvas");
+#endif
+#endif
 
 #ifdef ENABLE_UI_TESTING
         m_testEngine = ImGuiTestEngine_CreateContext();
@@ -405,7 +436,7 @@ namespace gladius
         test_io.ConfigVerboseLevel = ImGuiTestVerboseLevel_Info;
         test_io.ConfigVerboseLevelOnError = ImGuiTestVerboseLevel_Debug;
         test_io.ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
-        
+
         ImGuiTestEngine_Start(m_testEngine, ImGui::GetCurrentContext());
 #endif
     }
@@ -418,9 +449,14 @@ namespace gladius
             return;
         }
 
+#ifndef __EMSCRIPTEN__
         webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+#endif
 
-#if defined(__linux__)
+#if defined(__EMSCRIPTEN__)
+        wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector surfaceSource;
+        surfaceSource.selector = "#gladius-canvas";
+#elif defined(__linux__)
         wgpu::SurfaceSourceXlibWindow surfaceSource;
         surfaceSource.display = glfwGetX11Display();
         surfaceSource.window = static_cast<std::uint64_t>(glfwGetX11Window(m_window));
@@ -455,20 +491,38 @@ namespace gladius
         int framebufferWidth = 0;
         int framebufferHeight = 0;
         glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+#ifdef __EMSCRIPTEN__
+        int canvasWidth = EM_ASM_INT({
+            var canvas = document.getElementById('gladius-canvas');
+            return canvas ? canvas.width : 0;
+        });
+        int canvasHeight = EM_ASM_INT({
+            var canvas = document.getElementById('gladius-canvas');
+            return canvas ? canvas.height : 0;
+        });
+        if (canvasWidth > 0 && canvasHeight > 0)
+        {
+            framebufferWidth = canvasWidth;
+            framebufferHeight = canvasHeight;
+        }
+#endif
         m_webgpuSurfaceWidth = static_cast<std::uint32_t>(std::max(framebufferWidth, 1));
         m_webgpuSurfaceHeight = static_cast<std::uint32_t>(std::max(framebufferHeight, 1));
         wgpu::SurfaceConfiguration configuration;
         configuration.device = m_webgpuContext->getDevice();
         configuration.format = m_webgpuSurfaceFormat;
+        configuration.usage = wgpu::TextureUsage::RenderAttachment;
         configuration.width = m_webgpuSurfaceWidth;
         configuration.height = m_webgpuSurfaceHeight;
-        configuration.alphaMode = capabilities.alphaModes[0];
+        configuration.alphaMode = wgpu::CompositeAlphaMode::Auto;
         configuration.presentMode = wgpu::PresentMode::Fifo;
         m_webgpuSurface.Configure(&configuration);
 
-        ImGui_ImplWGPU_InitInfo initInfo;
+        ImGui_ImplWGPU_InitInfo initInfo{};
         initInfo.Device = m_webgpuContext->getDevice().Get();
+        initInfo.NumFramesInFlight = 3;
         initInfo.RenderTargetFormat = static_cast<WGPUTextureFormat>(m_webgpuSurfaceFormat);
+        initInfo.DepthStencilFormat = WGPUTextureFormat_Undefined;
         if (!ImGui_ImplWGPU_Init(&initInfo))
         {
             std::cerr << "Unable to initialize the ImGui WebGPU renderer\n";
@@ -486,16 +540,39 @@ namespace gladius
         {
             return;
         }
+#ifdef __EMSCRIPTEN__
+        if (!m_webgpuContext->isValid())
+        {
+            return;
+        }
+#endif
 
         int framebufferWidth = 0;
         int framebufferHeight = 0;
         glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+#ifdef __EMSCRIPTEN__
+        int canvasWidth = EM_ASM_INT({
+            var canvas = document.getElementById('gladius-canvas');
+            return canvas ? canvas.width : 0;
+        });
+        int canvasHeight = EM_ASM_INT({
+            var canvas = document.getElementById('gladius-canvas');
+            return canvas ? canvas.height : 0;
+        });
+        if (canvasWidth > 0 && canvasHeight > 0)
+        {
+            framebufferWidth = canvasWidth;
+            framebufferHeight = canvasHeight;
+        }
+#endif
         if (framebufferWidth <= 0 || framebufferHeight <= 0)
         {
             return;
         }
 
+#ifndef __EMSCRIPTEN__
         webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+#endif
         auto const width = static_cast<std::uint32_t>(framebufferWidth);
         auto const height = static_cast<std::uint32_t>(framebufferHeight);
         if (width != m_webgpuSurfaceWidth || height != m_webgpuSurfaceHeight)
@@ -503,6 +580,7 @@ namespace gladius
             wgpu::SurfaceConfiguration configuration;
             configuration.device = m_webgpuContext->getDevice();
             configuration.format = m_webgpuSurfaceFormat;
+            configuration.usage = wgpu::TextureUsage::RenderAttachment;
             configuration.width = width;
             configuration.height = height;
             configuration.alphaMode = wgpu::CompositeAlphaMode::Auto;
@@ -525,16 +603,30 @@ namespace gladius
         colorAttachment.view = view;
         colorAttachment.loadOp = wgpu::LoadOp::Clear;
         colorAttachment.storeOp = wgpu::StoreOp::Store;
-        colorAttachment.clearValue = {0.08, 0.08, 0.08, 1.0};
+        colorAttachment.clearValue = {0.14, 0.14, 0.14, 1.0};
         wgpu::RenderPassDescriptor renderPassDescriptor;
         renderPassDescriptor.colorAttachmentCount = 1u;
         renderPassDescriptor.colorAttachments = &colorAttachment;
         wgpu::RenderPassEncoder renderPass = encoder.BeginRenderPass(&renderPassDescriptor);
+
         ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), renderPass.Get());
+
         renderPass.End();
         wgpu::CommandBuffer commandBuffer = encoder.Finish();
         m_webgpuContext->getQueue().Submit(1u, &commandBuffer);
+#ifdef __EMSCRIPTEN__
+        std::string const webgpuError = m_webgpuContext->getErrorMessage();
+        if (!webgpuError.empty())
+        {
+            EM_ASM({
+                var status = document.getElementById('gladius-status');
+                if (status) status.textContent = UTF8ToString($0);
+            }, webgpuError.c_str());
+        }
+#endif
+#ifndef __EMSCRIPTEN__
         m_webgpuSurface.Present();
+#endif
     }
 #endif
 
@@ -550,31 +642,52 @@ namespace gladius
 
     void GLView::displayUI()
     {
-    #if defined(GLADIUS_UI_BACKEND_OPENGL)
+        bool webgpuRendererInitializedLate = false;
+#if defined(GLADIUS_UI_BACKEND_OPENGL)
         glDisable(GL_CULL_FACE);
         // Start the Dear ImGui frame
         ImGui_ImplOpenGL2_NewFrame();
-    #elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+#elif defined(GLADIUS_UI_BACKEND_WEBGPU)
+        if (!m_webgpuRendererInitialized && m_webgpuContext && m_webgpuContext->isValid())
+        {
+            initializeWebGPURenderer();
+        }
         if (m_webgpuRendererInitialized)
         {
+    #ifdef __EMSCRIPTEN__
+            ImGui_ImplWGPU_NewFrame();
+    #else
             webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
             ImGui_ImplWGPU_NewFrame();
+#endif
         }
-    #endif
+#endif
 
         ImGui_ImplGlfw_NewFrame();
+
+#ifdef __EMSCRIPTEN__
+        // The WebGPU canvas is configured in framebuffer pixels by GLFW. Do not
+        // apply the browser's device-pixel ratio a second time to ImGui's draw
+        // data, or its scissor rectangles exceed the configured surface.
+        ImGui::GetIO().DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+        if (m_webgpuRendererInitialized)
+        {
+            ImGui::GetIO().DisplaySize = ImVec2(static_cast<float>(m_webgpuSurfaceWidth),
+                                                 static_cast<float>(m_webgpuSurfaceHeight));
+        }
+#endif
 
 // ImGuiTestEngineHook_PreNewFrame is handled natively when IMGUI_ENABLE_TEST_ENGINE is defined.
 
         ImGui::NewFrame();
-        
+
+
 #ifdef ENABLE_UI_TESTING
         if (m_testEngine && m_show_demo_window)
         {
             ImGuiTestEngine_ShowTestEngineWindows(m_testEngine, NULL);
         }
 #endif
-
         if (m_showViewSettings)
         {
             ImGui::Begin("Settings", &m_showViewSettings);
@@ -615,27 +728,63 @@ namespace gladius
 
             ImGui::End();
         }
-
         // Set all scales in style to the same value
         ImGui::GetIO().FontGlobalScale = m_uiScale * 0.5f;
         ImGui::GetStyle() = m_originalStyle;
         ImGuiStyle & style = ImGui::GetStyle();
         style.ScaleAllSizes(m_uiScale);
 
-        for (auto view : m_viewCallBacks)
+        for (std::size_t callbackIndex = 0; callbackIndex < m_viewCallBacks.size(); ++callbackIndex)
         {
-            view();
+            m_viewCallBacks[callbackIndex]();
         }
 
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        // Compute initialization can complete from the UI callback above. In that
+        // case initialize the renderer before finalizing this same ImGui frame.
+        if (!m_webgpuRendererInitialized && m_webgpuContext && m_webgpuContext->isValid())
+        {
+            initializeWebGPURenderer();
+            webgpuRendererInitializedLate = true;
+        }
+#endif
+
         // Rendering
-        ImGui::Render();
+        try {
+            ImGui::Render();
+        } catch (std::exception const & ex) {
+#ifdef __EMSCRIPTEN__
+            EM_ASM({
+                var msg = UTF8ToString($0);
+                var status = document.getElementById('gladius-status');
+                if (status) status.textContent = 'ImGui::Render EXC: ' + msg;
+            }, ex.what());
+#endif
+        }
+#ifdef __EMSCRIPTEN__
+    ImGui::GetDrawData()->FramebufferScale = ImVec2(1.0f, 1.0f);
+#endif
         ImGuiIO & io = ImGui::GetIO();
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glViewport(0, 0, (GLsizei) io.DisplaySize.x, (GLsizei) io.DisplaySize.y);
         glUseProgram(0);
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
     #elif defined(GLADIUS_UI_BACKEND_WEBGPU)
-        renderWebGPUFrame();
+        if (!webgpuRendererInitializedLate)
+        {
+            try {
+                renderWebGPUFrame();
+            } catch (std::exception const & ex) {
+#ifdef __EMSCRIPTEN__
+                EM_ASM({
+                    var msg = UTF8ToString($0);
+                    var status = document.getElementById('gladius-status');
+                    if (status) status.textContent = 'renderWebGPUFrame EXC: ' + msg;
+                }, ex.what());
+#endif
+            }
+        }
     #endif
 #ifdef IMGUI_HAS_VIEWPORT
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -1018,15 +1167,41 @@ namespace gladius
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwMakeContextCurrent(m_window);
     #endif
-        // applyFullscreenMode is now only called when mode changes via setFullscreenMode()
-        m_render();
-    #if defined(GLADIUS_UI_BACKEND_OPENGL)
-        glFlush();
-        glFinish();
-        glPopMatrix();
-    #endif
+        try
+        {
+            m_render();
+        }
+        catch (std::exception const & ex)
+        {
+#ifdef __EMSCRIPTEN__
+            EM_ASM({
+                var msg = UTF8ToString($0);
+                var status = document.getElementById('gladius-status');
+                if (status) status.textContent = 'render EXC: ' + msg;
+                console.error('render exception:', msg);
+            }, ex.what());
+#else
+            std::cerr << "Render exception: " << ex.what() << "\n";
+#endif
+        }
 
-        displayUI();
+        try
+        {
+            displayUI();
+        }
+        catch (std::exception const & ex)
+        {
+#ifdef __EMSCRIPTEN__
+            EM_ASM({
+                var msg = UTF8ToString($0);
+                var status = document.getElementById('gladius-status');
+                if (status) status.textContent = 'displayUI EXC: ' + msg;
+                console.error('displayUI exception:', msg);
+            }, ex.what());
+#else
+            std::cerr << "DisplayUI exception: " << ex.what() << "\n";
+#endif
+        }
 
         // ImGui automatically saves settings periodically, but this ensures
         // we're using our custom file path if ImGui decides to save this frame
@@ -1037,9 +1212,6 @@ namespace gladius
         }
 
         processPendingScreenshot();
-    #if defined(GLADIUS_UI_BACKEND_OPENGL)
-        glfwSwapBuffers(m_window);
-    #endif
     }
 
     std::chrono::milliseconds getTimeStamp_ms()
@@ -1055,6 +1227,53 @@ namespace gladius
         {
             init();
         }
+
+#ifdef __EMSCRIPTEN__
+        emscripten_set_main_loop_arg(
+          [](void * const userData)
+          {
+              auto * const view = static_cast<GLView *>(userData);
+              try
+              {
+                  glfwPollEvents();
+                  if (!view->m_stateCloseRequested)
+                  {
+                      view->render();
+                  }
+              }
+              catch (std::exception const & exception)
+              {
+#ifdef __EMSCRIPTEN__
+                  EM_ASM({
+                      var msg = UTF8ToString($0);
+                      var status = document.getElementById('gladius-status');
+                      if (status) status.textContent = 'frame EXC: ' + msg;
+                      console.error('frame exception:', msg);
+                  }, exception.what());
+#else
+                  std::cerr << "Fatal WebAssembly frame error: " << exception.what() << "\n";
+#endif
+                  view->m_stateCloseRequested = true;
+              }
+              catch (...)
+              {
+#ifdef __EMSCRIPTEN__
+                  EM_ASM({
+                      var status = document.getElementById('gladius-status');
+                      if (status) status.textContent = 'frame EXC: unknown';
+                      console.error('frame exception: unknown');
+                  });
+#else
+                  std::cerr << "Fatal WebAssembly frame error: unknown exception\n";
+#endif
+                  view->m_stateCloseRequested = true;
+              }
+          },
+          this,
+                    0,
+                    true);
+        emscripten_exit_with_live_runtime();
+#else
 
         auto lastAnimationTimePoint_ms = getTimeStamp_ms();
         auto lastFrame_ms = getTimeStamp_ms();
@@ -1119,6 +1338,7 @@ namespace gladius
         {
             std::cerr << e.what() << '\n';
         }
+#endif
     }
 
     void GLView::setRenderCallback(const ViewCallBack & func)

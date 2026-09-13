@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gladius WebGPU</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #16181d;
+      position: fixed;
+    }
+    #gladius-canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      position: absolute;
+      top: 0;
+      left: 0;
+      background: #16181d;
+      border: none;
+      outline: none;
+    }
+    #gladius-status {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 100;
+      color: #aeb8c8;
+      background: rgba(22, 24, 29, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+  </style>
+</head>
+<body>
+  <p id="gladius-status" data-ready="false">Starting Gladius…</p>
+  <canvas id="gladius-canvas"></canvas>
+  <script>
+    var gladiusWebGPUUnavailable = false;
+    var Module = {
+      print: function (text) { console.log(text); },
+      printErr: function (text) {
+        console.error(text);
+        var status = document.getElementById('gladius-status');
+        if (status) {
+          status.textContent = 'Gladius startup error: ' + text;
+          status.dataset.ready = 'false';
+          status.style.display = 'block';
+          status.style.opacity = '1';
+        }
+      },
+      setStatus: function (text) {
+        var status = document.getElementById('gladius-status');
+        if (!status) return;
+        if (!text || text === 'Running...') {
+          status.style.opacity = '0';
+          setTimeout(function() { if (status.style.opacity === '0') status.style.display = 'none'; }, 300);
+        } else {
+          status.style.display = 'block';
+          status.style.opacity = '1';
+          if (!gladiusWebGPUUnavailable) status.textContent = text;
+        }
+      },
+      onAbort: function (reason) {
+        var status = document.getElementById('gladius-status');
+        if (status) {
+          status.textContent = 'Gladius startup failed: ' + reason;
+          status.dataset.ready = 'false';
+          status.style.display = 'block';
+          status.style.opacity = '1';
+        }
+      },
+      canvas: document.getElementById('gladius-canvas')
+    };
+
+    (async function () {
+      var status = document.getElementById('gladius-status');
+      if (!navigator.gpu) {
+        gladiusWebGPUUnavailable = true;
+        if (status) status.textContent = 'WebGPU is not available in this browser.';
+        return;
+      }
+      try {
+        var adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        }
+        if (!adapter) {
+          gladiusWebGPUUnavailable = true;
+          if (status) status.textContent = 'WebGPU is available, but no compatible adapter was found.';
+        }
+      } catch (error) {
+        gladiusWebGPUUnavailable = true;
+        if (status) status.textContent = 'WebGPU initialization failed: ' + error;
+      }
+    })();
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

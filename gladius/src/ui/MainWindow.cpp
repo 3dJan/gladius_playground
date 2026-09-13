@@ -40,11 +40,17 @@
 #endif
 #include "compute/ComputeBackendSettings.h"
 #include "compute/types.h"
+#if defined(GLADIUS_ENABLE_WEBGPU)
+#include "webgpu/WebGPUComputeContext.h"
+#endif
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
 #endif
 #include "exceptions.h"
 #include "imgui.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 #include "imgui_internal.h"
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/Writer3mf.h"
@@ -219,10 +225,18 @@ namespace gladius::ui
                                                  { open(backupPath); });
 
         // Set recent files
+    #ifndef __EMSCRIPTEN__
         m_welcomeScreen.setRecentFiles(getRecentFiles(100));
+    #endif
 
         // Set examples directory
+    #ifndef __EMSCRIPTEN__
         m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
+    #else
+        // Browser builds have no native recent-file or welcome-screen workflow.
+        // Start directly in the editor with the embedded/default document.
+        m_welcomeScreen.hide();
+    #endif
 
         // Wire up export state to dialogs and editors that need it
     #if defined(GLADIUS_ENABLE_OPENCL)
@@ -238,6 +252,17 @@ namespace gladius::ui
         {
             newModel();
         }
+    #ifdef __EMSCRIPTEN__
+        // The browser preview renderer is not enabled yet, so expose the graph
+        // editor immediately instead of leaving the canvas with only an empty
+        // preview area until the user discovers the Graph toolbar button.
+        m_modelEditor.setVisibility(true);
+        // Do not open the library browser automatically. Its thumbnail loader uses
+        // std::async, which requires Emscripten pthreads that the browser target does
+        // not enable; the browser can still open it explicitly after a safe loader is
+        // available.
+        m_modelEditor.setLibraryVisibility(false);
+    #endif
         loadRenderSettings();
     }
 
@@ -512,15 +537,20 @@ namespace gladius::ui
         {
             LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - setLogger");
             m_welcomeScreen.setLogger(m_logger);
+#ifdef __EMSCRIPTEN__
+            m_welcomeScreen.hide();
+#endif
         }
         {
             LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - getRecentFiles");
+#ifndef __EMSCRIPTEN__
             m_welcomeScreen.setRecentFiles(getRecentFiles(100));
+#endif
         }
 
         // Set up minimal callbacks - will be replaced after compute init completes
         m_mainView.clearViewCallback();
-        m_renderCallback = [&]() { /* no-op until compute ready */ };
+        m_renderCallback = [&]() { pollComputeInit(); };
         m_mainView.setRenderCallback(m_renderCallback);
         m_mainView.addViewCallBack([&]() { render(); });
         m_mainView.setFileDropCallback(
@@ -563,31 +593,18 @@ namespace gladius::ui
                 m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
                 if (!m_runtime->isAvailable())
                 {
+#ifdef __EMSCRIPTEN__
+                    if (auto const context = m_runtime->getWebGPUContext();
+                        context && context->isInitializing())
+                    {
+                        m_computeInitState = ComputeInitState::InProgress;
+                        return;
+                    }
+#endif
                     throw std::runtime_error(m_runtime->getErrorMessage());
                 }
 
-                m_core.reset();
-                m_doc = std::make_shared<Document>(m_logger);
-                m_computeAvailable = true;
-                m_computeErrorMessage.clear();
-#if defined(GLADIUS_UI_BACKEND_WEBGPU)
-                m_mainView.setWebGPUContext(m_runtime->getWebGPUContext());
-                m_welcomeScreen.setWebGPUContext(m_runtime->getWebGPUContext());
-                m_modelEditor.setWebGPUContext(m_runtime->getWebGPUContext());
-#endif
-                setup(nullptr, m_doc, m_logger);
-
-                if (m_startupFile)
-                {
-                    loadFileDeferred(*m_startupFile);
-                    m_startupFile.reset();
-                }
-
-                if (m_logger)
-                {
-                    m_logger->addEvent({"WebGPU initialized successfully", events::Severity::Info});
-                }
-                m_computeInitState = ComputeInitState::Finalized;
+                finalizeWebGPUInitialization();
             }
             catch (std::exception const & exception)
             {
@@ -595,6 +612,20 @@ namespace gladius::ui
                 setComputeUnavailable(
                   std::string{"WebGPU initialization failed: "} + exception.what(), true);
                 m_computeInitState = ComputeInitState::Finalized;
+#ifdef __EMSCRIPTEN__
+                // Hide the canvas and rely on the on-page status indicator so
+                // the user gets clear feedback when WebGPU is unavailable.
+                EM_ASM({
+                    var status = document.getElementById('gladius-status');
+                    if (status)
+                    {
+                        status.textContent = 'WebGPU unavailable';
+                        status.dataset.ready = 'false';
+                    }
+                    var canvas = document.getElementById('gladius-canvas');
+                    if (canvas) canvas.style.display = 'none';
+                });
+#endif
             }
             if (m_logger)
             {
@@ -687,8 +718,80 @@ namespace gladius::ui
 #endif
     }
 
+    void MainWindow::finalizeWebGPUInitialization()
+    {
+        m_core.reset();
+        m_doc = std::make_shared<Document>(m_logger);
+        m_computeAvailable = true;
+        m_computeErrorMessage.clear();
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        auto context = m_runtime->getWebGPUContext();
+        m_mainView.setWebGPUContext(context);
+        m_welcomeScreen.setWebGPUContext(context);
+        m_modelEditor.setWebGPUContext(context);
+#endif
+        setup(nullptr, m_doc, m_logger);
+
+        if (m_startupFile)
+        {
+            loadFileDeferred(*m_startupFile);
+            m_startupFile.reset();
+        }
+
+        if (m_logger)
+        {
+            m_logger->addEvent({"WebGPU initialized successfully", events::Severity::Info});
+        }
+        m_computeInitState = ComputeInitState::Finalized;
+    }
+
     void MainWindow::pollComputeInit()
     {
+#ifdef __EMSCRIPTEN__
+        if (m_computeInitState == ComputeInitState::InProgress && m_runtime)
+        {
+            // Browser adapter/device requests use AllowSpontaneous callbacks.
+            // Calling Instance::ProcessEvents() here can block the browser event
+            // loop before those callbacks get a chance to run.
+            auto const context = m_runtime->getWebGPUContext();
+            if (context && context->isInitializing())
+            {
+                (void) context->completeDeviceInitialization();
+            }
+            bool const runtimeAvailable = m_runtime->isAvailable();
+            if (runtimeAvailable)
+            {
+                finalizeWebGPUInitialization();
+                if (m_logger)
+                {
+                    m_logger->addEvent({"WebGPU initialized successfully", events::Severity::Info});
+                }
+                m_computeInitState = ComputeInitState::Finalized;
+                if (m_onComputeReadyCallback)
+                {
+                    m_onComputeReadyCallback();
+                }
+            }
+            else
+            {
+                bool const contextInitializing = context && context->isInitializing();
+                if (!contextInitializing)
+                {
+                    m_computeInitState = ComputeInitState::Finalized;
+                    setComputeUnavailable(
+                      m_runtime->getErrorMessage().empty()
+                        ? "WebGPU initialization failed"
+                        : m_runtime->getErrorMessage(),
+                      true);
+                    if (m_onComputeReadyCallback)
+                    {
+                        m_onComputeReadyCallback();
+                    }
+                }
+            }
+            return;
+        }
+#endif
 #if !defined(GLADIUS_ENABLE_OPENCL)
         return;
 #else
@@ -1030,7 +1133,6 @@ namespace gladius::ui
                 showGamepadQuickReference();
             }
         }
-
         // If compute is available, validate the legacy OpenCL context.
     #if defined(GLADIUS_ENABLE_OPENCL)
         if (m_computeAvailable && m_core)
@@ -1124,7 +1226,6 @@ namespace gladius::ui
                 ImGui::End();
                 ImGui::PopStyleVar();
             }
-
             // Always render the docking area to preserve layout (even behind welcome screen)
             // This ensures the dock space state is maintained across welcome screen transitions
             mainWindowDockingArea();
@@ -1133,14 +1234,12 @@ namespace gladius::ui
             if (!welcomeScreenVisible)
             {
                 // If compute is not available, show a non-blocking banner in status areas
-
                 if (m_showStyleEditor)
                 {
                     ImGui::Begin("Style Editor", &m_showStyleEditor);
                     ImGui::ShowStyleEditor();
                     ImGui::End();
                 }
-
                 if (m_mainView.isViewSettingsVisible())
                 {
                     renderSettingsDialog();
@@ -1148,7 +1247,8 @@ namespace gladius::ui
 
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
                                     {12.f * m_uiScale, 8.f * m_uiScale});
-                if (ImGui::BeginMainMenuBar())
+                bool const showMainMenu = true;
+                if (showMainMenu && ImGui::BeginMainMenuBar())
                 {
                     if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_BARS)))
                     {
@@ -1721,18 +1821,41 @@ namespace gladius::ui
 
         // Defer editor reset until the async load inside newFromTemplate() completes.
         // (Same deferred pattern used by loadFileDeferred().)
+#ifdef __EMSCRIPTEN__
+        // Browser builds do not enable Emscripten pthreads, so std::async cannot
+        // be used for the initial template load.  Start with a valid empty model
+        // and leave file loading to an explicit browser action.
+        m_doc->newModel();
+#else
         m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->newFromTemplate();
+#endif
     }
 
     void MainWindow::renderWindow()
     {
+#ifdef __EMSCRIPTEN__
+        // The 3D preview window uses WebGPU compute pipelines that are not
+        // yet stable in this browser target.  The rest of the UI is still
+        // functional and visible.
+        if (!m_computeAvailable)
+        {
+            return;
+        }
+        return;
+        // Intentionally fall through on non-Emscripten builds.
+        if (false)
+        {
+#endif
         if (!m_computeAvailable)
         {
             return; // skip rendering UI when compute is disabled
         }
 
         m_renderWindow.renderWindow();
+#ifdef __EMSCRIPTEN__
+        }
+#endif
 
         // Process render window shortcuts after rendering so current-frame hover/focus state is
         // available. This lets mouse-wheel zoom work as soon as the cursor is over the preview.

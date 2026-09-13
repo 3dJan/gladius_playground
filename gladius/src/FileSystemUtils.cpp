@@ -22,7 +22,10 @@ namespace gladius
 {
     std::filesystem::path getAppDir()
     {
-#ifdef WIN32
+#ifdef __EMSCRIPTEN__
+        // Emscripten has no /proc/self/exe; return a stable virtual path.
+        return std::filesystem::path{"/gladius"};
+#elif defined(WIN32)
         char * executablePath;
         if (_get_pgmptr(&executablePath) != 0)
         {
@@ -47,6 +50,14 @@ namespace gladius
 
     std::filesystem::path getUserLibraryDir()
     {
+#ifdef __EMSCRIPTEN__
+    // Keep user entries separate from the read-only library embedded at
+    // /gladius/library.  MEMFS is session-local unless persistence is added.
+    auto const dir = std::filesystem::path{"/gladius/user-library"};
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return dir;
+#else
         auto const dir =
           std::filesystem::path{sago::getDataHome()} / "gladius" / "library";
 
@@ -54,6 +65,7 @@ namespace gladius
         std::filesystem::create_directories(dir, ec);
         // Silently ignore errors — the caller will notice if the dir is missing.
         return dir;
+#endif
     }
 
     std::size_t syncLibraryDirectory(
@@ -102,7 +114,13 @@ namespace gladius
 
     std::size_t syncShippedLibrary()
     {
+#ifdef __EMSCRIPTEN__
+        auto const shipDir = getShippedLibraryDir();
+        auto const userDir = getUserLibraryDir();
+        return syncLibraryDirectory(shipDir, userDir);
+#else
         return syncLibraryDirectory(getShippedLibraryDir(), getUserLibraryDir());
+#endif
     }
 
     std::filesystem::path getBinDir()

@@ -3,7 +3,9 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#ifndef __EMSCRIPTEN__
 #include <syncstream>
+#endif
 #include <thread>
 #include <tracy/Tracy.hpp>
 #include <utility>
@@ -98,8 +100,12 @@ namespace gladius
 
             auto const end = std::chrono::high_resolution_clock::now();
             auto const duration = std::chrono::duration<double, std::milli>(end - m_start);
-            std::osyncstream(std::clog)
-              << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
+#ifdef __EMSCRIPTEN__
+                        std::clog << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
+#else
+                        std::osyncstream(std::clog)
+                            << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
+#endif
         }
 
       private:
@@ -110,7 +116,11 @@ namespace gladius
 
     inline void logFwnPrepTiming(std::string const & message)
     {
+    #ifdef __EMSCRIPTEN__
+        std::clog << "[FWN prep] " << message << std::endl;
+    #else
         std::osyncstream(std::clog) << "[FWN prep] " << message << std::endl;
+    #endif
     }
 
 #define GLADIUS_FWN_PREP_JOIN_INNER(left, right) left##right
