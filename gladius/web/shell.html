@@ -25,6 +25,7 @@
       background: #16181d;
       border: none;
       outline: none;
+      touch-action: none;
     }
     #gladius-status {
       position: absolute;
@@ -46,6 +47,33 @@
   <p id="gladius-status" data-ready="false">Starting Gladius…</p>
   <canvas id="gladius-canvas"></canvas>
   <script>
+    (function () {
+      var canvas = document.getElementById('gladius-canvas');
+      if (!canvas) return;
+
+      // Keep mouse releases on the canvas after a drag leaves its bounds. GLFW's
+      // browser backend listens on the canvas, while a normal browser drag sends
+      // the release to the element currently under the pointer.
+      canvas.addEventListener('pointerdown', function (event) {
+        if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+      });
+      canvas.addEventListener('pointerup', function (event) {
+        if (canvas.hasPointerCapture && canvas.hasPointerCapture(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      });
+      canvas.addEventListener('pointercancel', function (event) {
+        if (canvas.hasPointerCapture && canvas.hasPointerCapture(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      });
+
+      // Right mouse drags are used by the application for camera interaction.
+      canvas.addEventListener('contextmenu', function (event) {
+        event.preventDefault();
+      });
+    })();
+
     var gladiusWebGPUUnavailable = false;
     var Module = {
       print: function (text) { console.log(text); },

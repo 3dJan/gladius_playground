@@ -120,4 +120,50 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(ledger.presentedFrame()->source,
                   FramePresentationSource::ProgressiveHighQuality);
     }
+
+    TEST(PresentedFrameLedger, CameraCompatibleMask_NewerViewPreview_SupersedesOldFullQualityFrame)
+    {
+        PresentedFrameLedger ledger;
+        auto const presentedStamp = makeStamp(1, 2, 1, 4, 5);
+        auto const candidateStamp = makeStamp(1, 2, 2, 4, 5);
+        auto const targetStamp = makeStamp(1, 2, 3, 4, 5);
+
+        ledger.seedPresentedFrame(
+          presentedFrame(presentedStamp, FramePresentationQuality::FullQuality));
+
+        EXPECT_TRUE(ledger.presentCandidate(
+          candidate(candidateStamp, FramePresentationQuality::Preview),
+          targetStamp,
+          RenderStampMask::cameraCompatibleFrame()));
+
+        ASSERT_TRUE(ledger.presentedFrame().has_value());
+        EXPECT_EQ(ledger.presentedFrame()->quality, FramePresentationQuality::Preview);
+        EXPECT_EQ(ledger.presentedFrame()->stamp.viewEpoch, 2);
+    }
+
+    TEST(PresentedFrameLedger, CameraCompatibleMask_OlderOrEqualView_RejectsPreviewRegression)
+    {
+        PresentedFrameLedger ledger;
+        auto const presentedStamp = makeStamp(1, 2, 2, 4, 5);
+        auto const candidateOlderStamp = makeStamp(1, 2, 1, 4, 5);
+        auto const candidateEqualStamp = makeStamp(1, 2, 2, 4, 5);
+        auto const targetStamp = makeStamp(1, 2, 3, 4, 5);
+
+        ledger.seedPresentedFrame(
+          presentedFrame(presentedStamp, FramePresentationQuality::FullQuality));
+
+        EXPECT_FALSE(ledger.presentCandidate(
+          candidate(candidateOlderStamp, FramePresentationQuality::Preview),
+          targetStamp,
+          RenderStampMask::cameraCompatibleFrame()));
+
+        EXPECT_FALSE(ledger.presentCandidate(
+          candidate(candidateEqualStamp, FramePresentationQuality::Preview),
+          targetStamp,
+          RenderStampMask::cameraCompatibleFrame()));
+
+        ASSERT_TRUE(ledger.presentedFrame().has_value());
+        EXPECT_EQ(ledger.presentedFrame()->quality, FramePresentationQuality::FullQuality);
+        EXPECT_EQ(ledger.presentedFrame()->stamp.viewEpoch, 2);
+    }
 }

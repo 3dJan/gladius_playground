@@ -806,6 +806,18 @@ namespace gladius
 
     void GLView::determineUiScale()
     {
+    #ifdef __EMSCRIPTEN__
+        // Browser CSS coordinates are already logical pixels. Emscripten's
+        // GLFW implementation reports window.devicePixelRatio from
+        // glfwGetWindowContentScale(), even though this target intentionally
+        // keeps the canvas in CSS-sized coordinates and handles framebuffer
+        // sizing separately for WebGPU. Do not use browser DPR to enlarge the
+        // ImGui style and fonts a second time.
+        m_baseScale = 1.0f;
+        recomputeTotalScale();
+        return;
+    #endif
+
 #ifdef _WIN32
         // Windows DPI scaling
         HWND hwnd = glfwGetWin32Window(m_window);

@@ -2,7 +2,10 @@
 
 #include "webgpu/WebGPUComputeContext.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <limits>
+#include <iostream>
 #include <utility>
 
 namespace gladius::ui::async_rendering
@@ -26,10 +29,35 @@ namespace gladius::ui::async_rendering
         }
 
         auto const rowCount = frame.endRow - frame.firstRow;
-        auto const bytesPerRow = static_cast<std::size_t>(frame.width) * sizeof(std::uint32_t);
-        if (bytesPerRow > std::numeric_limits<std::uint32_t>::max())
+        auto const width = static_cast<std::size_t>(frame.width);
+        if (width > std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t))
         {
             return false;
+        }
+        auto const rowBytes = width * sizeof(std::uint32_t);
+        constexpr std::size_t rowAlignment = 256u;
+        if (rowBytes > std::numeric_limits<std::size_t>::max() - (rowAlignment - 1u))
+        {
+            return false;
+        }
+        auto const alignedBytesPerRow =
+          (rowBytes + rowAlignment - 1u) & ~(rowAlignment - 1u);
+        if (alignedBytesPerRow > std::numeric_limits<std::uint32_t>::max() ||
+            static_cast<std::size_t>(rowCount) >
+              std::numeric_limits<std::size_t>::max() / alignedBytesPerRow)
+        {
+            return false;
+        }
+
+        auto const uploadSize = alignedBytesPerRow * static_cast<std::size_t>(rowCount);
+        m_uploadData.resize(uploadSize);
+        for (std::uint32_t row = 0u; row < rowCount; ++row)
+        {
+            auto const * sourceRow = reinterpret_cast<unsigned char const *>(frame.pixels.data()) +
+                                     static_cast<std::size_t>(row) * rowBytes;
+            std::copy_n(sourceRow,
+                        rowBytes,
+                        m_uploadData.data() + static_cast<std::size_t>(row) * alignedBytesPerRow);
         }
 
         webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
@@ -47,17 +75,52 @@ namespace gladius::ui::async_rendering
         destination.origin = {.x = 0u, .y = frame.firstRow, .z = 0u};
 
         wgpu::TexelCopyBufferLayout layout;
-        layout.bytesPerRow = static_cast<std::uint32_t>(bytesPerRow);
+        layout.bytesPerRow = static_cast<std::uint32_t>(alignedBytesPerRow);
         layout.rowsPerImage = rowCount;
 
         wgpu::Extent3D writeSize{.width = frame.width, .height = rowCount, .depthOrArrayLayers = 1u};
         m_context->getQueue().WriteTexture(&destination,
-                                           frame.pixels.data(),
-                                           frame.pixels.size() * sizeof(std::uint32_t),
+                                           m_uploadData.data(),
+                                           m_uploadData.size(),
                                            &layout,
                                            &writeSize);
 
+        auto const errorMessage = m_context->getErrorMessage();
+#ifdef __EMSCRIPTEN__
+        if (errorMessage != m_lastReportedError)
+        {
+            if (!errorMessage.empty())
+            {
+                std::cerr << "[WebGPUFramePresenter] Dawn error after upload: " << errorMessage << '\n';
+            }
+            m_lastReportedError = errorMessage;
+        }
+        bool const dimensionsChanged = frame.width != m_lastLoggedWidth || frame.height != m_lastLoggedHeight;
+        bool const viewChanged = frame.freshness.viewGeneration != m_lastLoggedViewGeneration;
+        if (m_presentCount < 5u || dimensionsChanged || viewChanged)
+        {
+            std::uint64_t checksum = 0u;
+            for (auto const pixel : frame.pixels)
+            {
+                checksum = (checksum * 16777619u) ^ pixel;
+            }
+            std::cerr << "[WebGPUFramePresenter] upload #" << m_presentCount
+                      << " frame=" << frame.width << 'x' << frame.height
+                      << " rows=[" << frame.firstRow << ',' << frame.endRow << ')'
+                      << " bytes=" << frame.pixels.size() * sizeof(std::uint32_t)
+                      << " view=" << frame.freshness.viewGeneration
+                      << " hash=0x" << std::hex << checksum
+                      << " first=0x" << std::hex << frame.pixels.front()
+                      << " last=0x" << frame.pixels.back() << std::dec
+                      << " texture=" << reinterpret_cast<std::uintptr_t>(m_textureView.Get()) << '\n';
+            m_lastLoggedViewGeneration = frame.freshness.viewGeneration;
+            m_lastLoggedWidth = frame.width;
+            m_lastLoggedHeight = frame.height;
+        }
+#endif
+
         m_freshness = frame.freshness;
+        ++m_presentCount;
         return true;
     }
 
@@ -72,6 +135,11 @@ namespace gladius::ui::async_rendering
         m_width = 0u;
         m_height = 0u;
         m_freshness.reset();
+        m_presentCount = 0u;
+        m_lastLoggedViewGeneration = 0u;
+        m_lastLoggedWidth = 0u;
+        m_lastLoggedHeight = 0u;
+        m_lastReportedError.clear();
     }
 
     std::uintptr_t WebGPUFramePresenter::getTextureId() const noexcept

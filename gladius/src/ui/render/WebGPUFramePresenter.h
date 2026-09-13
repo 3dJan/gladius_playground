@@ -2,7 +2,10 @@
 
 #include "FramePresenter.h"
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -45,5 +48,11 @@ namespace gladius::ui::async_rendering
         std::uint32_t m_width{};
         std::uint32_t m_height{};
         std::optional<compute::RenderFreshnessStamp> m_freshness;
+        std::vector<unsigned char> m_uploadData;
+        std::uint64_t m_presentCount{};
+        std::uint64_t m_lastLoggedViewGeneration{};
+        std::uint32_t m_lastLoggedWidth{};
+        std::uint32_t m_lastLoggedHeight{};
+        std::string m_lastReportedError;
     };
 }

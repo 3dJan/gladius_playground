@@ -48,6 +48,7 @@ namespace gladius::ui::async_rendering
         FramePresentationQuality quality{FramePresentationQuality::Unknown};
         FramePresentationSource source{FramePresentationSource::Unknown};
         bool completedFrame{false};
+        RenderStampMask presentationMask{RenderStampMask::displayFrame()};
     };
 
     struct PresentedFrame

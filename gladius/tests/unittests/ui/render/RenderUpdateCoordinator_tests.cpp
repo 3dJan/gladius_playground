@@ -130,6 +130,19 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::SdfPrecomputation));
     }
 
+    TEST(RenderUpdateCoordinator, CameraInteractionStarted_FromStatic_ResumesInteractiveScheduling)
+    {
+        RenderUpdateCoordinator coordinator;
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+        auto const before = coordinator.latestStamp();
+
+        auto const decision = coordinator.notifyCameraInteractionStarted();
+
+        EXPECT_EQ(coordinator.latestStamp().viewEpoch, before.viewEpoch);
+        EXPECT_EQ(coordinator.interactionState(), RenderInteractionState::CameraInteracting);
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+    }
+
     TEST(RenderUpdateCoordinator, CameraChanged_WithAutoPreviewInFlight_KeepsCurrentFrame)
     {
         RenderUpdateCoordinator coordinator;

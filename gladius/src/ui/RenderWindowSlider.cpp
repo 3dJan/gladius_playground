@@ -34,6 +34,18 @@ namespace gladius::ui
         }
     }
 
+    void RenderWindow::beginCameraInteraction()
+    {
+        m_cameraIdleFrames = 0;
+        m_lastCameraIdleTime = TimeStamp{};
+        m_renderWindowState.isMoving = true;
+        queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionStarted());
+        if (m_view != nullptr)
+        {
+            m_view->startAnimationMode();
+        }
+    }
+
     void RenderWindow::slider(ImVec2 const & areaMin, ImVec2 const & areaMax)
     {
         ProfileFunction;

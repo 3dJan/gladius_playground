@@ -52,9 +52,16 @@ namespace gladius::ui::async_rendering
                 return true;
             }
 
-            if (!mask.view && candidate.stamp.viewEpoch < current.stamp.viewEpoch)
+            if (!mask.view)
             {
-                return false;
+                if (candidate.stamp.viewEpoch > current.stamp.viewEpoch)
+                {
+                    return true;
+                }
+                if (candidate.stamp.viewEpoch < current.stamp.viewEpoch)
+                {
+                    return false;
+                }
             }
 
             return framePresentationQualityRank(candidate.quality) >=

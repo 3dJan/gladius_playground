@@ -118,6 +118,11 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.notifyCameraChanged(replaceStaleInteractiveInFlight));
         }
 
+        [[nodiscard]] RenderWorkflowDecision notifyCameraInteractionStarted()
+        {
+            return applyCoordinatorDecision(m_coordinator.notifyCameraInteractionStarted());
+        }
+
         [[nodiscard]] RenderWorkflowDecision notifyCameraInteractionEnded()
         {
             return applyCoordinatorDecision(m_coordinator.notifyCameraInteractionEnded());
@@ -170,15 +175,26 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.completeTask(result, scheduleFollowUp));
         }
 
+                [[nodiscard]] RenderWorkflowDecision completeTaskForPresentation(
+                    RenderTaskResult const & result,
+                    bool scheduleFollowUp = true)
+                {
+                        return applyCoordinatorDecision(m_coordinator.completeTask(result, scheduleFollowUp), true);
+                }
+
         [[nodiscard]] bool canPresentCandidate(
           FramePresentationCandidate const & candidate) const noexcept
         {
-            return m_presentedFrames.canPresentCandidate(candidate, latestStamp());
+                        return m_presentedFrames.canPresentCandidate(candidate,
+                                                                                                                 latestStamp(),
+                                                                                                                 candidate.presentationMask);
         }
 
         [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate) noexcept
         {
-            return m_presentedFrames.presentCandidate(candidate, latestStamp());
+            return m_presentedFrames.presentCandidate(candidate,
+                                                      latestStamp(),
+                                                      candidate.presentationMask);
         }
 
         [[nodiscard]] bool presentCandidate(FramePresentationCandidate const & candidate,
@@ -264,10 +280,12 @@ namespace gladius::ui::async_rendering
         }
 
         [[nodiscard]] RenderWorkflowDecision applyCoordinatorDecision(
-          RenderUpdateDecision coordinatorDecision)
+                    RenderUpdateDecision coordinatorDecision,
+                    bool const deferPhysicalPresentation = false)
         {
             RenderWorkflowDecision workflowDecision{};
             workflowDecision.commands = std::move(coordinatorDecision.commands);
+                        PresentedFrameLedger decisionLedger = m_presentedFrames;
 
             for (auto const & command : workflowDecision.commands)
             {
@@ -279,7 +297,8 @@ namespace gladius::ui::async_rendering
                 }
 
                 auto candidate = makeCandidate(command.result);
-                if (presentCandidate(candidate, latestStamp(), command.presentationMask))
+                candidate.presentationMask = command.presentationMask;
+                if (decisionLedger.presentCandidate(candidate, latestStamp(), command.presentationMask))
                 {
                     workflowDecision.acceptedFrames.push_back(candidate);
                     workflowDecision.presentedFrameChanged = true;
@@ -288,6 +307,11 @@ namespace gladius::ui::async_rendering
                 {
                     workflowDecision.rejectedFrames.push_back(candidate);
                 }
+            }
+
+            if (!deferPhysicalPresentation)
+            {
+                m_presentedFrames = std::move(decisionLedger);
             }
 
             return workflowDecision;

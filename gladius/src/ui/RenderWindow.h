@@ -266,6 +266,7 @@ namespace gladius::ui
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void notifyAsyncEpochIncrement();
         void invalidateCameraView();
+        void beginCameraInteraction();
         void processNeutralCameraInput(ImVec2 const & contentMin, ImVec2 const & contentMax);
         void adjustProgressFromDuration(RenderWindowState & state, uint64_t computeDurationNs);
         [[nodiscard]] async_rendering::RealtimeRaymarchConfig loadRealtimeRaymarchConfig() const;
@@ -356,6 +357,7 @@ namespace gladius::ui
         std::atomic<bool> m_forceLowResRenderOnNextFrame{false};
 
         ui::OrbitalCamera m_camera;
+        int m_cameraDragButton{-1};
 
         float2 m_renderWindowSize_px{128, 128};
 

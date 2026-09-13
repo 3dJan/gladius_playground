@@ -302,7 +302,13 @@ namespace gladius::ui
         {
             if (accepted.frame.isValid())
             {
-                (void) m_neutralFramePresenter->present(accepted.frame);
+                if (m_neutralFramePresenter->present(accepted.frame))
+                {
+                    (void) m_neutralRenderScheduler.workflow().presentCandidate(
+                      accepted.candidate,
+                      m_neutralRenderScheduler.workflow().latestStamp(),
+                      accepted.candidate.presentationMask);
+                }
             }
         }
         queueRenderDecision(async_rendering::RenderWorkflowDecision{
@@ -448,7 +454,7 @@ namespace gladius::ui
 
         slider(contentMin, contentMax);
 
-        if (!ImGui::IsAnyItemActive())
+        if (!ImGui::IsAnyItemActive() || m_cameraDragButton >= 0)
         {
             processNeutralCameraInput(contentMin, contentMax);
         }
@@ -471,7 +477,8 @@ namespace gladius::ui
 
             (void) updateCameraCentering();
             auto const cameraActuallyMoving = m_camera.update(ImGui::GetIO().DeltaTime * 1000.0f);
-            if (cameraActuallyMoving)
+            bool const cameraDragActive = m_cameraDragButton >= 0;
+            if (cameraActuallyMoving || cameraDragActive)
             {
                 m_cameraIdleFrames = 0;
                 state.isMoving = true;
@@ -607,7 +614,9 @@ namespace gladius::ui
     void RenderWindow::processNeutralCameraInput(ImVec2 const & contentMin,
                                                  ImVec2 const & contentMax)
     {
-        if (!m_isWindowHovered || ImGui::IsAnyItemActive())
+        bool const cameraDragActive = m_cameraDragButton >= 0;
+        if ((!m_isWindowHovered && !cameraDragActive) ||
+            (ImGui::IsAnyItemActive() && !cameraDragActive))
         {
             return;
         }
@@ -617,37 +626,62 @@ namespace gladius::ui
         auto const mousePos = io.MousePos;
         bool const contentHovered = ImGui::IsMouseHoveringRect(contentMin, contentMax);
 
+        bool const unmodifiedWheelInput = contentHovered && io.MouseWheel != 0.0f &&
+                                          !io.KeyCtrl && !io.KeyAlt && !io.KeyShift;
+        if (unmodifiedWheelInput)
+        {
+            beginCameraInteraction();
+        }
+
         if (m_shortcutManager && contentHovered)
         {
             m_shortcutManager->processInput(ShortcutContext::RenderWindow);
         }
 
-        if (contentHovered && m_camera.mouseMotionHandler(mousePos.x, mousePos.y))
+        bool cameraMotionApplied = false;
+        if (m_cameraDragButton >= 0)
         {
-            invalidateCameraView();
+            cameraMotionApplied = m_camera.mouseMotionHandler(mousePos.x, mousePos.y);
+            if (cameraMotionApplied)
+            {
+                invalidateCameraView();
+            }
         }
-        if (!ImGui::IsAnyMouseDown())
+
+        bool const clickedLeft = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        bool const clickedRight = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+        bool const clickedMiddle = ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
+        if (m_cameraDragButton >= 0)
+        {
+            if (!ImGui::IsMouseDown(m_cameraDragButton))
+            {
+                m_camera.mouseInputHandler(m_cameraDragButton, -1, mousePos.x, mousePos.y);
+                m_cameraDragButton = -1;
+            }
+        }
+        else if (contentHovered)
+        {
+            for (int const button : {ImGuiMouseButton_Left,
+                                     ImGuiMouseButton_Right,
+                                     ImGuiMouseButton_Middle})
+            {
+                bool const clicked = (button == ImGuiMouseButton_Left && clickedLeft) ||
+                                     (button == ImGuiMouseButton_Right && clickedRight) ||
+                                     (button == ImGuiMouseButton_Middle && clickedMiddle);
+                if (clicked)
+                {
+                    m_cameraDragButton = button;
+                    m_camera.mouseInputHandler(button, 0, mousePos.x, mousePos.y);
+                    beginCameraInteraction();
+                    break;
+                }
+            }
+        }
+        else if (!ImGui::IsAnyMouseDown())
         {
             m_camera.mouseInputHandler(ImGuiMouseButton_Left, -1, mousePos.x, mousePos.y);
         }
 
-        if (!contentHovered)
-        {
-            return;
-        }
-
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
-        {
-            m_camera.mouseInputHandler(ImGuiMouseButton_Left, 0, mousePos.x, mousePos.y);
-        }
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
-        {
-            m_camera.mouseInputHandler(ImGuiMouseButton_Right, 0, mousePos.x, mousePos.y);
-        }
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle))
-        {
-            m_camera.mouseInputHandler(ImGuiMouseButton_Middle, 0, mousePos.x, mousePos.y);
-        }
     }
 
     bool RenderWindow::isForceRealtimeMode() const noexcept

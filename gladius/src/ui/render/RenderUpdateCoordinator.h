@@ -179,6 +179,24 @@ namespace gladius::ui::async_rendering
             return decision;
         }
 
+        /// @brief Resume camera-interactive scheduling for a newly started gesture.
+        ///
+        /// A mouse press or wheel event can arrive after the previous camera gesture has settled,
+        /// before the camera's interpolated values have changed. Those input events still need to
+        /// wake the interactive loop; the view epoch is advanced separately by notifyCameraChanged
+        /// once the camera target actually changes.
+        [[nodiscard]] RenderUpdateDecision notifyCameraInteractionStarted()
+        {
+            RenderUpdateDecision decision{};
+            if (m_interactionState != RenderInteractionState::CameraInteracting)
+            {
+                releaseStaleInteractiveInFlight();
+                m_interactionState = RenderInteractionState::CameraInteracting;
+            }
+            scheduleInteractiveFrame(decision);
+            return decision;
+        }
+
         [[nodiscard]] RenderUpdateDecision notifyCameraInteractionEnded()
         {
             RenderUpdateDecision decision{};

@@ -108,7 +108,7 @@ namespace gladius::ui::async_rendering
         NeutralRenderPollResult result;
         for (auto & completion : m_submissions.poll())
         {
-            auto decision = m_workflow.completeTask(completion.taskResult, scheduleFollowUp);
+            auto decision = m_workflow.completeTaskForPresentation(completion.taskResult, scheduleFollowUp);
             result.commands.insert(result.commands.end(),
                                    std::make_move_iterator(decision.commands.begin()),
                                    std::make_move_iterator(decision.commands.end()));
