@@ -1834,28 +1834,12 @@ namespace gladius::ui
 
     void MainWindow::renderWindow()
     {
-#ifdef __EMSCRIPTEN__
-        // The 3D preview window uses WebGPU compute pipelines that are not
-        // yet stable in this browser target.  The rest of the UI is still
-        // functional and visible.
-        if (!m_computeAvailable)
-        {
-            return;
-        }
-        return;
-        // Intentionally fall through on non-Emscripten builds.
-        if (false)
-        {
-#endif
         if (!m_computeAvailable)
         {
             return; // skip rendering UI when compute is disabled
         }
 
         m_renderWindow.renderWindow();
-#ifdef __EMSCRIPTEN__
-        }
-#endif
 
         // Process render window shortcuts after rendering so current-frame hover/focus state is
         // available. This lets mouse-wheel zoom work as soon as the cursor is over the preview.

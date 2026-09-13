@@ -221,7 +221,7 @@ namespace gladius::ui
             return false;
         }
 
-        if (!getActiveRenderBackendSession())
+        if (!getActiveRenderBackendSession() && m_runtime == nullptr)
         {
             try
             {
@@ -308,12 +308,12 @@ namespace gladius::ui
         queueRenderDecision(async_rendering::RenderWorkflowDecision{
           .commands = std::move(pollResult.commands)});
 
-                bool const hasPendingStartTask = std::any_of(
-                    m_pendingRenderCommands.begin(),
-                    m_pendingRenderCommands.end(),
-                    [](async_rendering::RenderCommand const & command)
-                    { return command.type == async_rendering::RenderCommandType::StartTask; });
-                if (!hasPendingStartTask)
+        bool const hasPendingStartTask = std::any_of(
+          m_pendingRenderCommands.begin(),
+          m_pendingRenderCommands.end(),
+          [](async_rendering::RenderCommand const & command)
+          { return command.type == async_rendering::RenderCommandType::StartTask; });
+        if (!hasPendingStartTask)
         {
             queueRenderDecision(m_neutralRenderScheduler.workflow().tick());
         }

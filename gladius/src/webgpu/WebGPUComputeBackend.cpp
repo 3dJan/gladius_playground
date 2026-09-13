@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -39,6 +41,24 @@ namespace gladius::webgpu
             return std::string(value.data, value.length);
         }
 
+        struct WebGPUSliceSubmissionState
+        {
+            mutable std::mutex mutex;
+            WebGPUBufferSet buffers;
+            compute::ComputeCompletionStatus status{compute::ComputeCompletionStatus::Pending};
+            std::optional<compute::SliceResult> result;
+            std::string errorMessage;
+        };
+
+        struct WebGPUFrameSubmissionState
+        {
+            mutable std::mutex mutex;
+            WebGPUFrameBufferSet buffers;
+            compute::ComputeCompletionStatus status{compute::ComputeCompletionStatus::Pending};
+            std::optional<compute::FrameResult> result;
+            std::string errorMessage;
+        };
+
         class WebGPUSliceSubmission final : public compute::ISliceSubmission
         {
           public:
@@ -47,6 +67,7 @@ namespace gladius::webgpu
                 : m_context(std::move(context))
                 , m_width(request.width)
                 , m_height(request.height)
+                , m_state(std::make_shared<WebGPUSliceSubmissionState>())
             {
                 try
                 {
@@ -54,14 +75,16 @@ namespace gladius::webgpu
                 }
                 catch (std::exception const & exception)
                 {
-                    m_status = compute::ComputeCompletionStatus::Failed;
-                    m_errorMessage = exception.what();
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->status = compute::ComputeCompletionStatus::Failed;
+                    m_state->errorMessage = exception.what();
                 }
             }
 
             ~WebGPUSliceSubmission() override
             {
-                if (m_status == compute::ComputeCompletionStatus::Pending)
+#ifndef __EMSCRIPTEN__
+                if (getStatus() == compute::ComputeCompletionStatus::Pending)
                 {
                     try
                     {
@@ -71,37 +94,55 @@ namespace gladius::webgpu
                     {
                     }
                 }
+#endif
             }
 
             [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override
-            { return m_status; }
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->status;
+            }
 
             void wait() override
             {
-                while (m_status == compute::ComputeCompletionStatus::Pending)
+#ifdef __EMSCRIPTEN__
+                // Browser callbacks are delivered by the event loop. Waiting here would block
+                // that loop and prevent the readback callback from ever running.
+                return;
+#else
+                while (getStatus() == compute::ComputeCompletionStatus::Pending)
                 {
                     m_context->processEvents();
                     if (!m_context->isValid())
                     {
-                        m_status = compute::ComputeCompletionStatus::Failed;
-                        m_errorMessage = m_context->getErrorMessage();
+                        std::scoped_lock lock{m_state->mutex};
+                        if (m_state->status == compute::ComputeCompletionStatus::Pending)
+                        {
+                            m_state->status = compute::ComputeCompletionStatus::Failed;
+                            m_state->errorMessage = m_context->getErrorMessage();
+                        }
                     }
                 }
+#endif
             }
 
             [[nodiscard]] std::optional<compute::SliceResult> takeResult() override
             {
-                if (m_status != compute::ComputeCompletionStatus::Succeeded)
+                std::scoped_lock lock{m_state->mutex};
+                if (m_state->status != compute::ComputeCompletionStatus::Succeeded)
                 {
                     return std::nullopt;
                 }
 
-                m_status = compute::ComputeCompletionStatus::Failed;
-                return std::exchange(m_result, std::nullopt);
+                m_state->status = compute::ComputeCompletionStatus::Failed;
+                return std::exchange(m_state->result, std::nullopt);
             }
 
             [[nodiscard]] std::string getErrorMessage() const override
-            { return m_errorMessage; }
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->errorMessage;
+            }
 
           private:
             static std::string loadDefaultShader()
@@ -131,16 +172,16 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     throw std::invalid_argument("Invalid WebGPU slice dimensions");
                 }
 
-                m_buffers.resize(m_context->getDevice(),
-                                 request.width,
-                                 request.height,
-                                 request.parameterValues.size());
-                m_buffers.writeUniforms(m_context->getQueue(),
-                                        SliceUniforms{.sliceZ = request.sliceZ,
-                                                      .width = request.width,
-                                                      .height = request.height,
-                                                      .scale = request.scale});
-                m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
+                m_state->buffers.resize(m_context->getDevice(),
+                                        request.width,
+                                        request.height,
+                                        request.parameterValues.size());
+                m_state->buffers.writeUniforms(m_context->getQueue(),
+                                               SliceUniforms{.sliceZ = request.sliceZ,
+                                                             .width = request.width,
+                                                             .height = request.height,
+                                                             .scale = request.scale});
+                m_state->buffers.writeParameters(m_context->getQueue(), request.parameterValues);
 
                 if (request.shaderSource.empty())
                 {
@@ -161,7 +202,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindings[1].binding = 1u;
                 bindings[1].visibility = wgpu::ShaderStage::Compute;
                 bindings[1].buffer.type = wgpu::BufferBindingType::Storage;
-                bindings[1].buffer.minBindingSize = m_buffers.getOutputSizeBytes();
+                bindings[1].buffer.minBindingSize = m_state->buffers.getOutputSizeBytes();
                 bindings[2].binding = 2u;
                 bindings[2].visibility = wgpu::ShaderStage::Compute;
                 bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -188,14 +229,14 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
                 wgpu::BindGroupEntry bindGroupEntries[3]{};
                 bindGroupEntries[0].binding = 0u;
-                bindGroupEntries[0].buffer = m_buffers.getUniformBuffer();
+                bindGroupEntries[0].buffer = m_state->buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(SliceUniforms);
                 bindGroupEntries[1].binding = 1u;
-                bindGroupEntries[1].buffer = m_buffers.getOutputBuffer();
-                bindGroupEntries[1].size = m_buffers.getOutputSizeBytes();
+                bindGroupEntries[1].buffer = m_state->buffers.getOutputBuffer();
+                bindGroupEntries[1].size = m_state->buffers.getOutputSizeBytes();
                 bindGroupEntries[2].binding = 2u;
-                bindGroupEntries[2].buffer = m_buffers.getParameterBuffer();
-                bindGroupEntries[2].size = m_buffers.getParameterSizeBytes();
+                bindGroupEntries[2].buffer = m_state->buffers.getParameterBuffer();
+                bindGroupEntries[2].size = m_state->buffers.getParameterSizeBytes();
 
                 wgpu::BindGroupDescriptor bindGroupDescriptor;
                 bindGroupDescriptor.layout = bindGroupLayout;
@@ -210,56 +251,60 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 computePass.DispatchWorkgroups(dispatchSize->workgroupsX,
                                                dispatchSize->workgroupsY);
                 computePass.End();
-                encoder.CopyBufferToBuffer(m_buffers.getOutputBuffer(),
+                encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
                                            0u,
-                                           m_buffers.getStagingBuffer(),
+                                           m_state->buffers.getStagingBuffer(),
                                            0u,
-                                           m_buffers.getOutputSizeBytes());
+                                           m_state->buffers.getOutputSizeBytes());
                 auto const commandBuffer = encoder.Finish();
                 m_context->getQueue().Submit(1u, &commandBuffer);
 
-                m_buffers.getStagingBuffer().MapAsync(
+                                auto const state = m_state;
+                                state->buffers.getStagingBuffer().MapAsync(
                   wgpu::MapMode::Read,
                   0u,
-                  m_buffers.getOutputSizeBytes(),
-                  wgpu::CallbackMode::AllowProcessEvents,
-                  [this](wgpu::MapAsyncStatus const status, wgpu::StringView const message)
+                                    state->buffers.getOutputSizeBytes(),
+#ifdef __EMSCRIPTEN__
+                                    wgpu::CallbackMode::AllowSpontaneous,
+#else
+                                    wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                                    [state, width = m_width, height = m_height](wgpu::MapAsyncStatus const status,
+                                                                                                                             wgpu::StringView const message)
                   {
+                                            std::scoped_lock lock{state->mutex};
                       if (status != wgpu::MapAsyncStatus::Success)
                       {
-                          m_status = compute::ComputeCompletionStatus::Failed;
-                          m_errorMessage = "WebGPU slice readback failed: " + toString(message);
+                                                    state->status = compute::ComputeCompletionStatus::Failed;
+                                                    state->errorMessage = "WebGPU slice readback failed: " + toString(message);
                           return;
                       }
 
                       auto const * mappedPixels = static_cast<std::uint32_t const *>(
-                        m_buffers.getStagingBuffer().GetConstMappedRange(
-                          0u, m_buffers.getOutputSizeBytes()));
+                                                state->buffers.getStagingBuffer().GetConstMappedRange(
+                                                    0u, state->buffers.getOutputSizeBytes()));
                       if (mappedPixels == nullptr)
                       {
-                          m_status = compute::ComputeCompletionStatus::Failed;
-                          m_errorMessage = "WebGPU slice staging buffer returned no mapped data";
+                                                    state->status = compute::ComputeCompletionStatus::Failed;
+                                                    state->errorMessage = "WebGPU slice staging buffer returned no mapped data";
                           return;
                       }
 
                       auto const pixelCount =
-                        m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
-                      m_result =
-                        compute::SliceResult{.width = m_width,
-                                             .height = m_height,
-                                             .pixels = {mappedPixels, mappedPixels + pixelCount}};
-                      m_buffers.getStagingBuffer().Unmap();
-                      m_status = compute::ComputeCompletionStatus::Succeeded;
+                                                state->buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
+                                            state->result = compute::SliceResult{.width = width,
+                                                                                                                     .height = height,
+                                                                                                                     .pixels = {mappedPixels,
+                                                                                                                                            mappedPixels + pixelCount}};
+                                            state->buffers.getStagingBuffer().Unmap();
+                                            state->status = compute::ComputeCompletionStatus::Succeeded;
                   });
             }
 
             std::shared_ptr<WebGPUComputeContext> m_context;
-            WebGPUBufferSet m_buffers;
             std::uint32_t m_width{};
             std::uint32_t m_height{};
-            compute::ComputeCompletionStatus m_status{compute::ComputeCompletionStatus::Pending};
-            std::optional<compute::SliceResult> m_result;
-            std::string m_errorMessage;
+            std::shared_ptr<WebGPUSliceSubmissionState> m_state;
         };
 
         class WebGPUFrameSubmission final : public compute::IFrameSubmission
@@ -270,6 +315,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 : m_context(std::move(context))
                 , m_width(request.width)
                 , m_height(request.height)
+                , m_state(std::make_shared<WebGPUFrameSubmissionState>())
             {
                 try
                 {
@@ -277,14 +323,16 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 }
                 catch (std::exception const & exception)
                 {
-                    m_status = compute::ComputeCompletionStatus::Failed;
-                    m_errorMessage = exception.what();
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->status = compute::ComputeCompletionStatus::Failed;
+                    m_state->errorMessage = exception.what();
                 }
             }
 
             ~WebGPUFrameSubmission() override
             {
-                if (m_status == compute::ComputeCompletionStatus::Pending)
+#ifndef __EMSCRIPTEN__
+                if (getStatus() == compute::ComputeCompletionStatus::Pending)
                 {
                     try
                     {
@@ -294,60 +342,82 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     {
                     }
                 }
+#endif
             }
 
             [[nodiscard]] compute::ComputeCompletionStatus getStatus() const noexcept override
-            { return m_status; }
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->status;
+            }
 
             void progress() noexcept override
             {
-                if (m_status != compute::ComputeCompletionStatus::Pending || !m_context)
+                if (getStatus() != compute::ComputeCompletionStatus::Pending || !m_context)
                 {
                     return;
                 }
 
                 try
                 {
+#ifndef __EMSCRIPTEN__
                     m_context->processEvents();
+#endif
                     if (!m_context->isValid())
                     {
-                        m_status = compute::ComputeCompletionStatus::Failed;
-                        m_errorMessage = m_context->getErrorMessage();
+                        std::scoped_lock lock{m_state->mutex};
+                        if (m_state->status == compute::ComputeCompletionStatus::Pending)
+                        {
+                            m_state->status = compute::ComputeCompletionStatus::Failed;
+                            m_state->errorMessage = m_context->getErrorMessage();
+                        }
                     }
                 }
                 catch (std::exception const & error)
                 {
-                    m_status = compute::ComputeCompletionStatus::Failed;
-                    m_errorMessage = error.what();
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->status = compute::ComputeCompletionStatus::Failed;
+                    m_state->errorMessage = error.what();
                 }
                 catch (...)
                 {
-                    m_status = compute::ComputeCompletionStatus::Failed;
-                    m_errorMessage = "WebGPU event processing failed";
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->status = compute::ComputeCompletionStatus::Failed;
+                    m_state->errorMessage = "WebGPU event processing failed";
                 }
             }
 
             void wait() override
             {
-                while (m_status == compute::ComputeCompletionStatus::Pending)
+#ifdef __EMSCRIPTEN__
+                // Browser callbacks are delivered by the event loop. Waiting here would block
+                // that loop and prevent the readback callback from ever running.
+                return;
+#else
+                while (getStatus() == compute::ComputeCompletionStatus::Pending)
                 {
                     progress();
                 }
+#endif
             }
 
             [[nodiscard]] std::optional<compute::FrameResult> takeResult() override
             {
-                if (m_status != compute::ComputeCompletionStatus::Succeeded)
+                std::scoped_lock lock{m_state->mutex};
+                if (m_state->status != compute::ComputeCompletionStatus::Succeeded)
                 {
                     return std::nullopt;
                 }
 
-                m_status = compute::ComputeCompletionStatus::Failed;
-                return std::exchange(m_result, std::nullopt);
+                m_state->status = compute::ComputeCompletionStatus::Failed;
+                return std::exchange(m_state->result, std::nullopt);
             }
 
             [[nodiscard]] std::string getErrorMessage() const override
-            { return m_errorMessage; }
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->errorMessage;
+            }
 
           private:
             static std::string loadDefaultShader()
@@ -454,21 +524,21 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                request.modelBounds->max[2],
                                                0.0f};
                 }
-                m_buffers.resize(
+                m_state->buffers.resize(
                   m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
-                m_buffers.writeUniforms(
+                m_state->buffers.writeUniforms(
                   m_context->getQueue(),
                   uniforms);
-                m_buffers.writeParameters(m_context->getQueue(), request.parameterValues);
-                m_buffers.setMeshPayloads(m_context->getDevice(),
-                                          m_context->getQueue(),
-                                          request.meshPayloadTable);
-                m_buffers.setBeamPayloads(m_context->getDevice(),
-                                          m_context->getQueue(),
-                                          request.beamPayloadTable);
-                m_buffers.setImagePayloads(m_context->getDevice(),
-                                           m_context->getQueue(),
-                                           request.imagePayloadTable);
+                m_state->buffers.writeParameters(m_context->getQueue(), request.parameterValues);
+                m_state->buffers.setMeshPayloads(m_context->getDevice(),
+                                                 m_context->getQueue(),
+                                                 request.meshPayloadTable);
+                m_state->buffers.setBeamPayloads(m_context->getDevice(),
+                                                 m_context->getQueue(),
+                                                 request.beamPayloadTable);
+                m_state->buffers.setImagePayloads(m_context->getDevice(),
+                                                  m_context->getQueue(),
+                                                  request.imagePayloadTable);
 
                 if (request.shaderSource.empty())
                 {
@@ -481,9 +551,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 shaderDescriptor.nextInChain = &wgsl;
                 auto const shader = m_context->getDevice().CreateShaderModule(&shaderDescriptor);
 
-                bool const hasMeshPayloads = m_buffers.hasMeshPayloads();
-                bool const hasBeamPayloads = m_buffers.hasBeamPayloads();
-                bool const hasImagePayloads = m_buffers.hasImagePayloads();
+                bool const hasMeshPayloads = m_state->buffers.hasMeshPayloads();
+                bool const hasBeamPayloads = m_state->buffers.hasBeamPayloads();
+                bool const hasImagePayloads = m_state->buffers.hasImagePayloads();
                 wgpu::BindGroupLayoutEntry bindings[9]{};
                 bindings[0].binding = 0u;
                 bindings[0].visibility = wgpu::ShaderStage::Compute;
@@ -492,7 +562,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindings[1].binding = 1u;
                 bindings[1].visibility = wgpu::ShaderStage::Compute;
                 bindings[1].buffer.type = wgpu::BufferBindingType::Storage;
-                bindings[1].buffer.minBindingSize = m_buffers.getOutputSizeBytes();
+                bindings[1].buffer.minBindingSize = m_state->buffers.getOutputSizeBytes();
                 bindings[2].binding = 2u;
                 bindings[2].visibility = wgpu::ShaderStage::Compute;
                 bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -559,54 +629,54 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
                 wgpu::BindGroupEntry bindGroupEntries[9]{};
                 bindGroupEntries[0].binding = 0u;
-                bindGroupEntries[0].buffer = m_buffers.getUniformBuffer();
+                bindGroupEntries[0].buffer = m_state->buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(FrameUniforms);
                 bindGroupEntries[1].binding = 1u;
-                bindGroupEntries[1].buffer = m_buffers.getOutputBuffer();
-                bindGroupEntries[1].size = m_buffers.getOutputSizeBytes();
+                bindGroupEntries[1].buffer = m_state->buffers.getOutputBuffer();
+                bindGroupEntries[1].size = m_state->buffers.getOutputSizeBytes();
                 bindGroupEntries[2].binding = 2u;
-                bindGroupEntries[2].buffer = m_buffers.getParameterBuffer();
-                bindGroupEntries[2].size = m_buffers.getParameterSizeBytes();
+                bindGroupEntries[2].buffer = m_state->buffers.getParameterBuffer();
+                bindGroupEntries[2].size = m_state->buffers.getParameterSizeBytes();
                 std::size_t bindGroupEntryCount = 3u;
                 if (hasMeshPayloads)
                 {
                     bindGroupEntries[bindGroupEntryCount].binding = 4u;
-                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getMeshPayloadBuffer();
+                                        bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getMeshPayloadBuffer();
                     bindGroupEntries[bindGroupEntryCount].size =
-                      m_buffers.getMeshPayloadBuffer().GetSize();
+                                            m_state->buffers.getMeshPayloadBuffer().GetSize();
                     ++bindGroupEntryCount;
                     bindGroupEntries[bindGroupEntryCount].binding = 5u;
-                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getMeshOffsetTableBuffer();
+                                        bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getMeshOffsetTableBuffer();
                     bindGroupEntries[bindGroupEntryCount].size =
-                      m_buffers.getMeshOffsetTableBuffer().GetSize();
+                                            m_state->buffers.getMeshOffsetTableBuffer().GetSize();
                     ++bindGroupEntryCount;
                 }
                 if (hasBeamPayloads)
                 {
                     bindGroupEntries[bindGroupEntryCount].binding = 6u;
-                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getBeamPayloadBuffer();
+                                        bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getBeamPayloadBuffer();
                     bindGroupEntries[bindGroupEntryCount].size =
-                      m_buffers.getBeamPayloadBuffer().GetSize();
+                                            m_state->buffers.getBeamPayloadBuffer().GetSize();
                     ++bindGroupEntryCount;
                     bindGroupEntries[bindGroupEntryCount].binding = 7u;
-                    bindGroupEntries[bindGroupEntryCount].buffer = m_buffers.getBeamOffsetTableBuffer();
+                                        bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getBeamOffsetTableBuffer();
                     bindGroupEntries[bindGroupEntryCount].size =
-                      m_buffers.getBeamOffsetTableBuffer().GetSize();
+                                            m_state->buffers.getBeamOffsetTableBuffer().GetSize();
                     ++bindGroupEntryCount;
                 }
                                 if (hasImagePayloads)
                                 {
                                         bindGroupEntries[bindGroupEntryCount].binding = 8u;
                                         bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_buffers.getImagePayloadBuffer();
+                                            m_state->buffers.getImagePayloadBuffer();
                                         bindGroupEntries[bindGroupEntryCount].size =
-                                            m_buffers.getImagePayloadBuffer().GetSize();
+                                            m_state->buffers.getImagePayloadBuffer().GetSize();
                                         ++bindGroupEntryCount;
                                         bindGroupEntries[bindGroupEntryCount].binding = 9u;
                                         bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_buffers.getImageOffsetTableBuffer();
+                                            m_state->buffers.getImageOffsetTableBuffer();
                                         bindGroupEntries[bindGroupEntryCount].size =
-                                            m_buffers.getImageOffsetTableBuffer().GetSize();
+                                            m_state->buffers.getImageOffsetTableBuffer().GetSize();
                                         ++bindGroupEntryCount;
                                 }
 
@@ -623,56 +693,60 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 computePass.SetBindGroup(0u, bindGroup);
                 computePass.DispatchWorkgroups(dispatchSize.workgroupsX, dispatchSize.workgroupsY);
                 computePass.End();
-                encoder.CopyBufferToBuffer(m_buffers.getOutputBuffer(),
+                encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
                                            0u,
-                                           m_buffers.getStagingBuffer(),
+                                           m_state->buffers.getStagingBuffer(),
                                            0u,
-                                           m_buffers.getOutputSizeBytes());
+                                           m_state->buffers.getOutputSizeBytes());
                 auto const commandBuffer = encoder.Finish();
                 m_context->getQueue().Submit(1u, &commandBuffer);
 
-                m_buffers.getStagingBuffer().MapAsync(
+                                auto const state = m_state;
+                                state->buffers.getStagingBuffer().MapAsync(
                   wgpu::MapMode::Read,
                   0u,
-                  m_buffers.getOutputSizeBytes(),
-                  wgpu::CallbackMode::AllowProcessEvents,
-                  [this](wgpu::MapAsyncStatus const status, wgpu::StringView const message)
+                                    state->buffers.getOutputSizeBytes(),
+#ifdef __EMSCRIPTEN__
+                                    wgpu::CallbackMode::AllowSpontaneous,
+#else
+                                    wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                                    [state, width = m_width, height = m_height](wgpu::MapAsyncStatus const status,
+                                                                                                                             wgpu::StringView const message)
                   {
+                                            std::scoped_lock lock{state->mutex};
                       if (status != wgpu::MapAsyncStatus::Success)
                       {
-                          m_status = compute::ComputeCompletionStatus::Failed;
-                          m_errorMessage = "WebGPU frame readback failed: " + toString(message);
+                                                    state->status = compute::ComputeCompletionStatus::Failed;
+                                                    state->errorMessage = "WebGPU frame readback failed: " + toString(message);
                           return;
                       }
 
                       auto const * mappedPixels = static_cast<std::uint32_t const *>(
-                        m_buffers.getStagingBuffer().GetConstMappedRange(
-                          0u, m_buffers.getOutputSizeBytes()));
+                                                state->buffers.getStagingBuffer().GetConstMappedRange(
+                                                    0u, state->buffers.getOutputSizeBytes()));
                       if (mappedPixels == nullptr)
                       {
-                          m_status = compute::ComputeCompletionStatus::Failed;
-                          m_errorMessage = "WebGPU frame staging buffer returned no mapped data";
+                                                    state->status = compute::ComputeCompletionStatus::Failed;
+                                                    state->errorMessage = "WebGPU frame staging buffer returned no mapped data";
                           return;
                       }
 
                       auto const pixelCount =
-                        m_buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
-                      m_result =
-                        compute::FrameResult{.width = m_width,
-                                             .height = m_height,
-                                             .pixels = {mappedPixels, mappedPixels + pixelCount}};
-                      m_buffers.getStagingBuffer().Unmap();
-                      m_status = compute::ComputeCompletionStatus::Succeeded;
+                                                state->buffers.getOutputSizeBytes() / sizeof(std::uint32_t);
+                                            state->result = compute::FrameResult{.width = width,
+                                                                                                                     .height = height,
+                                                                                                                     .pixels = {mappedPixels,
+                                                                                                                                            mappedPixels + pixelCount}};
+                                            state->buffers.getStagingBuffer().Unmap();
+                                            state->status = compute::ComputeCompletionStatus::Succeeded;
                   });
             }
 
             std::shared_ptr<WebGPUComputeContext> m_context;
-            WebGPUFrameBufferSet m_buffers;
             std::uint32_t m_width{};
             std::uint32_t m_height{};
-            compute::ComputeCompletionStatus m_status{compute::ComputeCompletionStatus::Pending};
-            std::optional<compute::FrameResult> m_result;
-            std::string m_errorMessage;
+            std::shared_ptr<WebGPUFrameSubmissionState> m_state;
         };
     }
 

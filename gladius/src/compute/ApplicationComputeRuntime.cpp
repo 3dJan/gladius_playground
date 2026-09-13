@@ -36,9 +36,10 @@ namespace gladius::compute
                 {
                     auto boundsService = std::make_shared<OpenCLBoundsService>(m_core);
                     m_renderBackendSession = std::make_unique<RenderBackendSession>(
-                      ComputeRendererFactory::create(ComputeBackendKind::OpenCL,
-                                                                                                         m_core->createRenderSession()),
-                                            std::move(boundsService));
+                             ComputeRendererFactory::create(ComputeBackendKind::OpenCL,
+
+                                 m_core->createRenderSession()),
+                                                          std::move(boundsService));
                 }
                 catch (std::exception const & exception)
                 {
@@ -114,17 +115,10 @@ namespace gladius::compute
                 {
                     auto context = std::make_shared<webgpu::WebGPUComputeContext>();
                     m_webgpuContext = context;
-#ifndef __EMSCRIPTEN__
-                    // The bounds service and renderer depend on a working
-                    // WebGPU context and aren't useful while we're still
-                    // porting the rest of the application to the browser
-                    // build.  Skipping them keeps the WebGPU runtime
-                    // constructable even when the device fails to come up.
                     auto boundsService = std::make_shared<webgpu::WebGPUBoundsService>(context);
                     m_renderBackendSession = std::make_unique<RenderBackendSession>(
                       std::make_unique<webgpu::WebGPUComputeRenderer>(context),
                       std::move(boundsService));
-#endif
                 }
                 catch (std::exception const & exception)
                 {
@@ -139,12 +133,7 @@ namespace gladius::compute
 
             [[nodiscard]] bool isAvailable() const noexcept override
             {
-#ifdef __EMSCRIPTEN__
                 return m_webgpuContext != nullptr && m_webgpuContext->isValid() && m_errorMessage.empty();
-#else
-                return m_renderBackendSession != nullptr &&
-                       m_renderBackendSession->isAvailable() && m_errorMessage.empty();
-#endif
             }
 
             [[nodiscard]] std::string const & getErrorMessage() const noexcept override
@@ -152,6 +141,10 @@ namespace gladius::compute
                 if (!m_errorMessage.empty())
                 {
                     return m_errorMessage;
+                }
+                if (m_webgpuContext && !m_webgpuContext->getErrorMessage().empty())
+                {
+                    return m_webgpuContext->getErrorMessage();
                 }
                 static std::string const emptyMessage;
                 return emptyMessage;

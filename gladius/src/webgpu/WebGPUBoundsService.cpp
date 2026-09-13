@@ -764,6 +764,18 @@ namespace gladius::webgpu
               "WebGPU bounds currently supports analytic scene snapshots only"));
         }
 
+#ifdef __EMSCRIPTEN__
+                // The browser build is single-threaded. The native implementation below uses
+                // std::async around synchronous GPU readbacks, which would either require pthreads or
+                // block the browser event loop. Rendering does not require bounds: the frame shader can
+                // evaluate the model and build plate without clipping/field overlays, so leave bounds
+                // absent rather than stalling preview startup.
+                return std::make_unique<WebGPUBoundsSubmission>(makeError(
+                    request,
+                    compute::BoundsResultStatus::Unavailable,
+                    compute::BoundsErrorCode::Unavailable,
+                    "WebGPU model bounds are deferred in the browser preview"));
+#else
         try
         {
             auto const state = m_state;
@@ -800,5 +812,6 @@ namespace gladius::webgpu
               compute::BoundsErrorCode::DispatchFailed,
               "Unable to submit WebGPU bounds work"));
         }
+#endif
     }
 }
