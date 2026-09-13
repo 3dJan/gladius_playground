@@ -1785,6 +1785,82 @@ namespace gladius::ui
         ImGui::SetWindowPos("MainWindowDockingArea", {0, menuBarHeight}, ImGuiCond_Always);
         ImGui::End();
         ImGui::PopStyleVar();
+
+#ifdef __EMSCRIPTEN__
+                if (ImGui::GetFrameCount() == 120)
+        {
+            ImGuiContext * const context = ImGui::GetCurrentContext();
+            ImGuiWindow * const hostWindow = ImGui::FindWindowByName("MainWindowDockingArea");
+            ImGuiWindow * const previewWindow = ImGui::FindWindowByName("Preview");
+                        ImGuiWindow * const sliceWindow = ImGui::FindWindowByName("Slice");
+                        ImGuiWindow * const outlineWindow = ImGui::FindWindowByName("Outline");
+                        ImGuiWindow * const modelEditorWindow = ImGui::FindWindowByName("Model Editor");
+                        ImGuiWindow * const libraryWindow = ImGui::FindWindowByName("3MF Library Browser");
+            ImGuiWindowSettings * const previewSettings =
+              ImGui::FindWindowSettingsByID(ImHashStr("Preview"));
+                        ImGuiDockNode * const runtimeDockspaceNode =
+                            ImGui::DockContextFindNodeByID(context, dockspaceID);
+                        ImGuiDockNode * const savedDockspaceNode =
+                            ImGui::DockContextFindNodeByID(context, 0xAD22B2C9);
+                        ImGuiDockNode * const previewNode =
+                            previewWindow && previewWindow->DockId
+                                ? ImGui::DockContextFindNodeByID(context, previewWindow->DockId)
+                                : nullptr;
+
+                        std::ostringstream probe;
+                        probe << "configFlags=" << static_cast<unsigned>(context->IO.ConfigFlags)
+                                    << " hostId=" << (hostWindow ? hostWindow->ID : 0)
+                            << " hashHost=" << ImHashStr("MainWindowDockingArea")
+                                    << " dockspaceId=" << dockspaceID
+                            << " hashDockspace=" << ImHashStr("MainDockingSpace", 0, hostWindow ? hostWindow->ID : 0)
+                                    << " settingsLoaded=" << (context->SettingsLoaded ? 1 : 0)
+                                    << " settingsBytes=" << context->SettingsWindows.size()
+                                    << " nodeSettings=" << context->DockContext.NodesSettings.Size
+                                    << " activeNodes=" << context->DockContext.Nodes.Data.Size
+                                    << " windows=" << context->Windows.Size
+                                    << " previewSettingsDockId=" << (previewSettings ? previewSettings->DockId : 0)
+                                    << " previewDockId=" << (previewWindow ? previewWindow->DockId : 0)
+                                    << " previewDockNode="
+                                    << (previewWindow && previewWindow->DockNode ? previewWindow->DockNode->ID : 0)
+                                      << " sliceDockId=" << (sliceWindow ? sliceWindow->DockId : 0)
+                                      << " sliceDockNode="
+                                      << (sliceWindow && sliceWindow->DockNode ? sliceWindow->DockNode->ID : 0)
+                                      << " outlineDockId=" << (outlineWindow ? outlineWindow->DockId : 0)
+                                      << " outlineDockNode="
+                                      << (outlineWindow && outlineWindow->DockNode ? outlineWindow->DockNode->ID : 0)
+                                      << " modelEditorDockId=" << (modelEditorWindow ? modelEditorWindow->DockId : 0)
+                                      << " modelEditorDockNode="
+                                      << (modelEditorWindow && modelEditorWindow->DockNode ? modelEditorWindow->DockNode->ID : 0)
+                                      << " libraryDockId=" << (libraryWindow ? libraryWindow->DockId : 0)
+                                      << " libraryDockNode="
+                                      << (libraryWindow && libraryWindow->DockNode ? libraryWindow->DockNode->ID : 0)
+                                    << " previewFlags="
+                                    << (previewWindow ? static_cast<unsigned>(previewWindow->Flags) : 0)
+                                    << " previewSettingsOffset="
+                                    << (previewWindow ? previewWindow->SettingsOffset : -1)
+                                    << " previewPosAllow="
+                                    << (previewWindow ? static_cast<unsigned>(previewWindow->SetWindowPosAllowFlags) : 0)
+                                    << " previewNodeAlive=" << (previewNode ? previewNode->LastFrameAlive : -1)
+                                    << " runtimeDockspaceAlive="
+                                    << (runtimeDockspaceNode ? runtimeDockspaceNode->LastFrameAlive : -1)
+                                    << " runtimeDockspaceVisible="
+                                    << (runtimeDockspaceNode && runtimeDockspaceNode->IsVisible ? 1 : 0)
+                                    << " runtimeDockspaceHost="
+                                    << (runtimeDockspaceNode && runtimeDockspaceNode->HostWindow ? 1 : 0)
+                                    << " savedDockspaceAlive="
+                                    << (savedDockspaceNode ? savedDockspaceNode->LastFrameAlive : -1)
+                                    << " savedDockspaceHost="
+                                    << (savedDockspaceNode && savedDockspaceNode->HostWindow ? 1 : 0)
+                                    << " hostDockNode=" << (hostWindow && hostWindow->DockNode ? 1 : 0);
+                        auto const probeText = probe.str();
+                        EM_ASM({
+                                window.__gladiusDockProbe = UTF8ToString($0);
+                                const status = document.getElementById('gladius-status');
+                                if (status) status.dataset.dockProbe = window.__gladiusDockProbe;
+                        },
+                                     probeText.c_str());
+        }
+#endif
     }
 
     void MainWindow::newModel()
