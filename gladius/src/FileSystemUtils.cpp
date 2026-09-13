@@ -1,11 +1,13 @@
 #include "FileSystemUtils.h"
 
 #include <filesystem>
+#include <fstream>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <cmrc/cmrc.hpp>
 #ifndef _MSVC_LANG
 #include <unistd.h>
 #endif
@@ -18,8 +20,82 @@
 #endif
 #include <sago/platform_folders.h>
 
+CMRC_DECLARE(gladius_resources);
+
 namespace gladius
 {
+    namespace
+    {
+        constexpr char const * EMBEDDED_LIBRARY_ROOT = "library";
+
+#ifdef __EMSCRIPTEN__
+        std::size_t syncEmbeddedLibrary(std::filesystem::path const & target)
+        {
+            auto const resources = cmrc::gladius_resources::get_filesystem();
+            if (!resources.is_directory(EMBEDDED_LIBRARY_ROOT))
+            {
+                return 0;
+            }
+
+            std::size_t copiedCount = 0;
+            for (auto const category : resources.iterate_directory(EMBEDDED_LIBRARY_ROOT))
+            {
+                if (!category.is_directory())
+                {
+                    continue;
+                }
+
+                auto const categoryName = category.filename();
+                auto const resourceCategory =
+                  std::string(EMBEDDED_LIBRARY_ROOT) + "/" + categoryName;
+                auto const targetCategory = target / categoryName;
+
+                for (auto const entry : resources.iterate_directory(resourceCategory))
+                {
+                    if (!entry.is_file() || entry.filename().ends_with(".3mf") == false)
+                    {
+                        continue;
+                    }
+
+                    auto const resourcePath = resourceCategory + "/" + entry.filename();
+                    auto const targetPath = targetCategory / entry.filename();
+                    if (std::filesystem::exists(targetPath))
+                    {
+                        continue;
+                    }
+
+                    std::error_code ec;
+                    std::filesystem::create_directories(targetCategory, ec);
+                    if (ec)
+                    {
+                        continue;
+                    }
+
+                    auto const resource = resources.open(resourcePath);
+                    std::ofstream output(targetPath, std::ios::binary);
+                    if (!output)
+                    {
+                        continue;
+                    }
+
+                    output.write(resource.begin(),
+                                 static_cast<std::streamsize>(resource.size()));
+                    if (output)
+                    {
+                        ++copiedCount;
+                    }
+                    else
+                    {
+                        std::filesystem::remove(targetPath, ec);
+                    }
+                }
+            }
+
+            return copiedCount;
+        }
+#endif
+    }
+
     std::filesystem::path getAppDir()
     {
 #ifdef __EMSCRIPTEN__
@@ -51,8 +127,8 @@ namespace gladius
     std::filesystem::path getUserLibraryDir()
     {
 #ifdef __EMSCRIPTEN__
-    // Keep user entries separate from the read-only library embedded at
-    // /gladius/library.  MEMFS is session-local unless persistence is added.
+    // Keep user entries separate from the read-only library embedded with CMRC.
+    // MEMFS is session-local unless persistence is added.
     auto const dir = std::filesystem::path{"/gladius/user-library"};
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
@@ -115,9 +191,7 @@ namespace gladius
     std::size_t syncShippedLibrary()
     {
 #ifdef __EMSCRIPTEN__
-        auto const shipDir = getShippedLibraryDir();
-        auto const userDir = getUserLibraryDir();
-        return syncLibraryDirectory(shipDir, userDir);
+        return syncEmbeddedLibrary(getUserLibraryDir());
 #else
         return syncLibraryDirectory(getShippedLibraryDir(), getUserLibraryDir());
 #endif
@@ -130,8 +204,14 @@ namespace gladius
 
     bool isShippedEntry(std::string const & category, std::string const & name)
     {
+#ifdef __EMSCRIPTEN__
+        auto const resources = cmrc::gladius_resources::get_filesystem();
+        return resources.is_file(std::string(EMBEDDED_LIBRARY_ROOT) + "/" + category + "/" +
+                                 name + ".3mf");
+#else
         auto const shippedPath = getShippedLibraryDir() / category / (name + ".3mf");
         return std::filesystem::exists(shippedPath);
+#endif
     }
 
     std::filesystem::path disambiguateFilename(std::filesystem::path const & directory,

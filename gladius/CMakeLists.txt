@@ -323,10 +323,17 @@ if(GLADIUS_ENABLE_WEBGPU)
 endif()
 
 cmrc_add_resource_library(gladius_resources ALIAS gladius::rc ${KERNEL_FILES})
+file(GLOB_RECURSE GLADIUS_LIBRARY_FILES CONFIGURE_DEPENDS
+  RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+  "library/*.3mf"
+)
 cmrc_add_resources(gladius_resources
   examples/template.3mf
   src/imgui.ini
 )
+if(EMSCRIPTEN)
+  cmrc_add_resources(gladius_resources ${GLADIUS_LIBRARY_FILES})
+endif()
 if (MSVC)
     set_property(TARGET gladius_resources PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()

@@ -44,7 +44,7 @@ namespace gladius::ui
             return;
         }
 
-        // Browser builds do not enable Emscripten pthreads. Use one deferred
+        // Browser builds do not enable Emscripten pthreads. Use one main-thread
         // extraction per update instead of asking std::async for a worker thread.
 #ifdef __EMSCRIPTEN__
         constexpr size_t concurrentLimit = 1u;
@@ -68,23 +68,19 @@ namespace gladius::ui
     {
         info.loadState = ThumbnailLoadState::Loading;
 
-        // Capture path by value for the async operation
-        std::filesystem::path filePath = info.filePath;
-
         ThumbnailLoadTask task;
         task.info = &info;
         task.startTime = std::chrono::steady_clock::now();
-#ifdef __EMSCRIPTEN__
-        constexpr auto launchPolicy = std::launch::deferred;
-    #else
-        constexpr auto launchPolicy = std::launch::async;
-    #endif
-        task.future = std::async(launchPolicy,
-                                 [filePath]()
-                                 {
-                                     return ThreemfThumbnailExtractor::extractThumbnailDataOnly(
-                                       filePath);
-                                 });
+#ifndef __EMSCRIPTEN__
+        // Capture path by value for the background operation.
+        std::filesystem::path filePath = info.filePath;
+        task.future = std::async(std::launch::async,
+        [filePath]()
+        {
+            return ThreemfThumbnailExtractor::extractThumbnailDataOnly(
+             filePath);
+        });
+#endif
 
         m_activeTasks.push_back(std::move(task));
     }
@@ -95,15 +91,26 @@ namespace gladius::ui
         auto it = m_activeTasks.begin();
         while (it != m_activeTasks.end())
         {
+#ifdef __EMSCRIPTEN__
+            // Emscripten builds are pthread-free. Execute one extraction from the
+            // active queue on the UI thread instead of constructing a future at all.
+            auto const status = std::future_status::ready;
+#else
             // Check if future is ready (non-blocking)
             auto const status = it->future.valid()
                                   ? it->future.wait_for(std::chrono::milliseconds(0))
                                   : std::future_status::timeout;
+#endif
             if (status == std::future_status::ready || status == std::future_status::deferred)
             {
                 try
                 {
+#ifdef __EMSCRIPTEN__
+                    ThumbnailLoadResult result =
+                      ThreemfThumbnailExtractor::extractThumbnailDataOnly(it->info->filePath);
+#else
                     ThumbnailLoadResult result = it->future.get();
+#endif
 
                     if (result.success && it->info)
                     {

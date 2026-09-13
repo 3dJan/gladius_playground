@@ -101,7 +101,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     target_link_options(${BINARY} PRIVATE
         "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
         "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/misc@misc"
-        "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/library@/gladius/library"
         "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/examples@/gladius/examples"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sASSERTIONS=2"

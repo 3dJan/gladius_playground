@@ -6,7 +6,8 @@ namespace gladius
     /// @brief Returns the directory containing the running executable.
     std::filesystem::path getAppDir();
 
-    /// @brief Returns the shipped (read-only) library directory: <appDir>/library
+    /// @brief Returns the shipped (read-only) library directory: <appDir>/library.
+    /// Browser builds use CMRC resources and materialize them into the user library.
     std::filesystem::path getShippedLibraryDir();
 
     /// @brief Returns the per-user library directory: ~/.local/share/gladius/library

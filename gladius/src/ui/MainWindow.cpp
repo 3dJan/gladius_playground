@@ -257,11 +257,6 @@ namespace gladius::ui
         // editor immediately instead of leaving the canvas with only an empty
         // preview area until the user discovers the Graph toolbar button.
         m_modelEditor.setVisibility(true);
-        // Do not open the library browser automatically. Its thumbnail loader uses
-        // std::async, which requires Emscripten pthreads that the browser target does
-        // not enable; the browser can still open it explicitly after a safe loader is
-        // available.
-        m_modelEditor.setLibraryVisibility(false);
     #endif
         loadRenderSettings();
     }

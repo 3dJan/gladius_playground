@@ -23,11 +23,11 @@ namespace gladius::ui
     /**
      * @brief Component responsible for background thumbnail loading
      *
-     * This class manages asynchronous loading of thumbnails from 3MF files.
-     * It uses std::async to offload file I/O and PNG decoding to background threads,
-    * while texture creation happens on the main thread (OpenGL requirement). Browser
-    * builds do not have pthreads, so they use deferred futures and perform at most one
-    * extraction when update() polls each frame.
+      * This class manages asynchronous loading of thumbnails from 3MF files.
+      * It uses std::async to offload file I/O and PNG decoding to background threads
+      * on native builds, while texture creation happens on the main thread (OpenGL
+      * requirement). Browser builds do not have pthreads, so they perform at most one
+      * extraction on the main thread when update() is called each frame.
      *
      * Usage:
      * 1. Call requestLoad() for each thumbnail that needs loading
