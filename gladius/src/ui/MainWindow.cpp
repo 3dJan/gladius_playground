@@ -128,6 +128,18 @@ namespace gladius::ui
         // Set UI mode to true since we're using the MainWindow (UI interface)
         m_doc->setUiMode(true);
 
+#ifdef __EMSCRIPTEN__
+        if (!m_browserFileDropInbox.has_value())
+        {
+            m_browserFileDropInbox.emplace(getAppDir() / "browser-imports");
+        }
+        if (!m_browserFileDropInbox->ensureDirectory() && m_logger)
+        {
+            m_logger->addEvent({"Browser file-drop inbox is unavailable",
+                                events::Severity::Warning});
+        }
+#endif
+
         m_modelEditor.setDocument(m_doc);
 
         // Sync shipped library items into the user's persistent library directory.
@@ -1049,6 +1061,10 @@ namespace gladius::ui
 
         // Poll for async compute initialization completion
         pollComputeInit();
+
+    #ifdef __EMSCRIPTEN__
+        pollBrowserFileDrop();
+    #endif
 
         // Detect completion of async file load and refresh editors to the new Assembly.
         // (MainWindow::open() starts the async load; we defer resetEditorState() until loading finishes.)
@@ -2363,6 +2379,32 @@ namespace gladius::ui
 
         loadFileDeferred(filename);
     }
+
+#ifdef __EMSCRIPTEN__
+    void MainWindow::pollBrowserFileDrop()
+    {
+        if (!m_browserFileDropInbox || !m_computeAvailable || !m_doc ||
+            m_doc->isLoadingInProgress() || m_asyncLoadState != AsyncLoadState::Idle ||
+            m_showSaveBeforeFileOperation)
+        {
+            return;
+        }
+
+        auto filename = m_browserFileDropInbox->claimNext();
+        if (!filename.has_value())
+        {
+            return;
+        }
+
+        if (m_logger)
+        {
+            m_logger->addEvent({fmt::format("Opening dropped browser file: {}",
+                                            filename->filename().string()),
+                                events::Severity::Info});
+        }
+        open(filename.value());
+    }
+#endif
 
     void MainWindow::setStartupFile(std::filesystem::path filename)
     {
@@ -3711,6 +3753,12 @@ namespace gladius::ui
      */
     void MainWindow::addToRecentFiles(const std::filesystem::path & filePath)
     {
+#ifdef __EMSCRIPTEN__
+        if (m_browserFileDropInbox && m_browserFileDropInbox->isManagedPath(filePath))
+        {
+            return;
+        }
+#endif
         if (m_recentFilesManager)
         {
             m_recentFilesManager->addFile(filePath);

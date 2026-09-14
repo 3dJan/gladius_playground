@@ -10,6 +10,9 @@
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "AboutDialog.h"
+#ifdef __EMSCRIPTEN__
+#include "BrowserFileDropInbox.h"
+#endif
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "CliExportDialog.h"
 #endif
@@ -37,6 +40,7 @@
 #include "GamepadQuickRef.h"
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -493,5 +497,14 @@ namespace gladius::ui
 
         /// @brief Marks compute unavailable without constructing a different backend.
         void setComputeUnavailable(std::string errorMessage, bool showModal);
+
+    #ifdef __EMSCRIPTEN__
+        /// @brief Open completed browser file drops after the WebGPU document is ready.
+        void pollBrowserFileDrop();
+    #endif
+
+    #ifdef __EMSCRIPTEN__
+        std::optional<BrowserFileDropInbox> m_browserFileDropInbox;
+    #endif
     };
 }

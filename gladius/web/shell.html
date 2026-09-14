@@ -41,15 +41,159 @@
       pointer-events: none;
       transition: opacity 0.3s ease;
     }
+    #gladius-file-status {
+      position: absolute;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%);
+      z-index: 100;
+      max-width: min(80vw, 640px);
+      color: #d8e4f5;
+      background: rgba(22, 24, 29, 0.9);
+      border: 1px solid rgba(126, 177, 255, 0.55);
+      border-radius: 8px;
+      padding: 9px 16px;
+      font-size: 14px;
+      text-align: center;
+      pointer-events: none;
+      display: none;
+    }
+    #gladius-file-status[data-error="true"] {
+      color: #ffd2d2;
+      border-color: rgba(255, 110, 110, 0.7);
+    }
+    #gladius-canvas.gladius-drop-target {
+      outline: 3px dashed rgba(126, 177, 255, 0.9);
+      outline-offset: -10px;
+    }
   </style>
 </head>
 <body>
   <p id="gladius-status" data-ready="false">Starting Gladius…</p>
+  <p id="gladius-file-status" data-error="false"></p>
   <canvas id="gladius-canvas"></canvas>
   <script>
+    var gladiusBrowserFileStatusTimer = null;
+    window.gladiusSetBrowserFileStatus = function (message, isError) {
+      var status = document.getElementById('gladius-file-status');
+      if (!status) return;
+      if (gladiusBrowserFileStatusTimer !== null) {
+        clearTimeout(gladiusBrowserFileStatusTimer);
+        gladiusBrowserFileStatusTimer = null;
+      }
+      status.textContent = message || '';
+      status.dataset.error = isError ? 'true' : 'false';
+      status.style.display = message ? 'block' : 'none';
+      if (message && !isError) {
+        gladiusBrowserFileStatusTimer = setTimeout(function () {
+          status.style.display = 'none';
+          gladiusBrowserFileStatusTimer = null;
+        }, 5000);
+      }
+    };
+
     (function () {
       var canvas = document.getElementById('gladius-canvas');
       if (!canvas) return;
+
+      var browserDropSequence = 0;
+      var browserImportDirectory = '/gladius/browser-imports';
+
+      function getEmscriptenFileSystem() {
+        if (typeof FS !== 'undefined') return FS;
+        if (window.FS) return window.FS;
+        if (window.Module && window.Module.FS) return window.Module.FS;
+        return null;
+      }
+
+      function getStagedFilename(file) {
+        var originalName = String(file.name || 'dropped-model');
+        var safeName = originalName.replace(/\\/g, '/').split('/').pop();
+        safeName = safeName.replace(/[^A-Za-z0-9._-]/g, '_');
+        var stem = safeName.replace(/\.[^.]*$/, '').replace(/^\.+/, '');
+        if (!stem) stem = 'dropped-model';
+        browserDropSequence += 1;
+        return Date.now().toString(36) + '-' + browserDropSequence.toString(36) + '-' +
+          stem.slice(0, 80) + '.3mf';
+      }
+
+      function stageBrowserFile(file, attempt) {
+        var fs = getEmscriptenFileSystem();
+        if (!fs) {
+          if (attempt < 100) {
+            setTimeout(function () { stageBrowserFile(file, attempt + 1); }, 50);
+            return;
+          }
+          window.gladiusSetBrowserFileStatus(
+            'Gladius is not ready to receive files yet. Please try again.', true);
+          return;
+        }
+
+        var finalPath = browserImportDirectory + '/' + getStagedFilename(file);
+        var temporaryPath = finalPath + '.part';
+        try {
+          if (typeof fs.mkdirTree === 'function') fs.mkdirTree(browserImportDirectory);
+        } catch (error) {
+          window.gladiusSetBrowserFileStatus('Could not prepare the browser file inbox.', true);
+          return;
+        }
+
+        file.arrayBuffer().then(function (buffer) {
+          try {
+            fs.writeFile(temporaryPath, new Uint8Array(buffer));
+            fs.rename(temporaryPath, finalPath);
+            window.gladiusSetBrowserFileStatus('Opening ' + file.name + '…', false);
+          } catch (error) {
+            try { if (typeof fs.unlink === 'function') fs.unlink(temporaryPath); } catch (_) {}
+            window.gladiusSetBrowserFileStatus(
+              'Could not stage ' + file.name + ' for opening.', true);
+          }
+        }).catch(function () {
+          window.gladiusSetBrowserFileStatus('Could not read ' + file.name + '.', true);
+        });
+      }
+
+      function clearDropTarget() {
+        canvas.classList.remove('gladius-drop-target');
+      }
+
+      canvas.addEventListener('dragenter', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        canvas.classList.add('gladius-drop-target');
+      });
+      canvas.addEventListener('dragover', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+        canvas.classList.add('gladius-drop-target');
+      });
+      canvas.addEventListener('dragleave', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearDropTarget();
+      });
+      canvas.addEventListener('drop', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearDropTarget();
+
+        var files = event.dataTransfer && event.dataTransfer.files;
+        var file = null;
+        if (files) {
+          for (var index = 0; index < files.length; index += 1) {
+            if (/\.3mf$/i.test(files[index].name || '')) {
+              file = files[index];
+              break;
+            }
+          }
+        }
+        if (!file) {
+          window.gladiusSetBrowserFileStatus('Only .3mf files can be opened here.', true);
+          return;
+        }
+        stageBrowserFile(file, 0);
+      });
 
       // Keep mouse releases on the canvas after a drag leaves its bounds. GLFW's
       // browser backend listens on the canvas, while a normal browser drag sends
