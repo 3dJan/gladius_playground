@@ -338,6 +338,8 @@ namespace gladius::ui
         [[nodiscard]] bool tryRenderWithNeutralBackend(RenderWindowState & state);
         [[nodiscard]] bool updateNeutralModelBounds(compute::RenderBackendSession & session);
         [[nodiscard]] compute::RenderBackendSession * getActiveRenderBackendSession() noexcept;
+        void logNeutralRenderRequest(async_rendering::RenderTaskRequest const & task,
+                                     compute::RenderRequest const & request);
 
         GLView * m_view{};
 
@@ -501,6 +503,14 @@ namespace gladius::ui
                   auto const eye = m_camera.getEyePosition();
                   auto const & matrix = m_camera.computeModelViewPerspectiveMatrix();
                   auto const modelBounds = getNeutralModelBounds();
+                  auto settings = m_neutralRenderSettings;
+                  // A missing model bound is not the build-volume bound. The fallback cutoff
+                  // plane would otherwise clip every object above z=0, including a freshly
+                  // imported model, until the backend can provide authoritative bounds.
+                  if (!modelBounds.has_value())
+                  {
+                      settings.flags &= ~RF_CUT_OFF_OBJECT;
+                  }
                   compute::RenderRequest request{
                     .camera = {.eyePosition = {eye.x, eye.y, eye.z},
                                .forwardDirection = {matrix.s8, matrix.s9, matrix.sa},
@@ -508,12 +518,16 @@ namespace gladius::ui
                                .upDirection = {matrix.s4, matrix.s5, matrix.s6}},
                     .frustum = {.horizontalScale = 0.5f,
                                 .verticalScale = 0.5f / static_cast<float>(width) * height},
-                    .settings = m_neutralRenderSettings,
+                    .settings = settings,
                     .modelBounds = modelBounds,
                     .viewport = viewport,
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
                                   .parameterGeneration = task.stamp.parameterEpoch}};
+                  if (request.isValid())
+                  {
+                      logNeutralRenderRequest(task, request);
+                  }
                   return request.isValid() ? std::optional<compute::RenderRequest>{request}
                                            : std::nullopt;
               }
@@ -568,6 +582,7 @@ namespace gladius::ui
         bool m_neutralBackendActive{false};
         std::uint32_t m_neutralViewportWidth{0u};
         std::uint32_t m_neutralViewportHeight{0u};
+        std::uint64_t m_lastNeutralDiagnosticSceneGeneration{0u};
         std::vector<async_rendering::RenderCommand> m_pendingRenderCommands;
         std::shared_ptr<async_rendering::AsyncRenderController> m_asyncController;
         std::atomic<uint64_t> m_asyncEpochCounter{0};

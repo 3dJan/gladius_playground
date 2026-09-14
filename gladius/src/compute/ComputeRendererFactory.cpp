@@ -162,8 +162,14 @@ namespace gladius::compute
         nodes::Assembly const * assembly,
         nodes::Model & model,
         std::uint64_t generation,
-        ResourceManager const * resourceManager)
+        ResourceManager const * resourceManager,
+        std::string * errorMessage)
     {
+        if (errorMessage != nullptr)
+        {
+            errorMessage->clear();
+        }
+
         try
         {
             if (assembly != nullptr)
@@ -176,8 +182,20 @@ namespace gladius::compute
             }
             return AnalyticRenderSceneSnapshotFactory::create(model, generation);
         }
+        catch (std::exception const & error)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = error.what();
+            }
+            return RenderSceneSnapshot{}; // Invalid snapshot on failure
+        }
         catch (...)
         {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Unknown render scene materialization failure";
+            }
             return RenderSceneSnapshot{}; // Invalid snapshot on failure
         }
     }

@@ -10,7 +10,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#if defined(__EMSCRIPTEN__)
+#include <iomanip>
+#include <iostream>
+#endif
 #include <numbers>
+#include <string>
 #include <utility>
 
 namespace gladius::ui
@@ -32,6 +37,86 @@ namespace gladius::ui
                    std::isfinite(box.max.y) && std::isfinite(box.max.z) &&
                    box.max.x > box.min.x && box.max.y > box.min.y && box.max.z > box.min.z;
         }
+
+#if defined(__EMSCRIPTEN__)
+        [[nodiscard]] std::uint64_t hashText(std::string const & text) noexcept
+        {
+            std::uint64_t hash = 1469598103934665603ull;
+            for (auto const character : text)
+            {
+                hash ^= static_cast<unsigned char>(character);
+                hash *= 1099511628211ull;
+            }
+            return hash;
+        }
+
+        [[nodiscard]] std::string compactShaderSnippet(std::string const & shader,
+                                                        bool const suffix)
+        {
+            constexpr std::size_t snippetLength = 120u;
+            auto const start = suffix && shader.size() > snippetLength ? shader.size() - snippetLength : 0u;
+            auto snippet = shader.substr(start, snippetLength);
+            for (auto & character : snippet)
+            {
+                if (character == '\n' || character == '\r')
+                {
+                    character = ' ';
+                }
+            }
+            return snippet;
+        }
+
+        void logNeutralSceneDiagnostics(compute::RenderSceneSnapshot const & snapshot,
+                                        std::string const & materializationError)
+        {
+            std::cerr << "[WebGPU] scene materialization generation=" << snapshot.sceneGeneration
+                      << " valid=" << (snapshot.isValid() ? "true" : "false")
+                      << " evaluatorBytes=" << snapshot.analyticEvaluatorWgsl.size()
+                      << " evaluatorHash=0x" << std::hex
+                      << hashText(snapshot.analyticEvaluatorWgsl) << std::dec << '\n';
+            if (!materializationError.empty())
+            {
+                std::cerr << "[WebGPU] scene materialization error: " << materializationError << '\n';
+            }
+            if (!snapshot.analyticEvaluatorWgsl.empty())
+            {
+                std::cerr << "[WebGPU] evaluator prefix=\""
+                          << compactShaderSnippet(snapshot.analyticEvaluatorWgsl, false)
+                          << "\" suffix=\""
+                          << compactShaderSnippet(snapshot.analyticEvaluatorWgsl, true) << "\"\n";
+            }
+
+            std::cerr << "[WebGPU] parameters(" << snapshot.parameterValues.size() << ")=";
+            for (std::size_t index = 0u; index < snapshot.parameterValues.size(); ++index)
+            {
+                std::cerr << ' ' << index << ':' << std::setprecision(9)
+                          << snapshot.parameterValues[index];
+            }
+            std::cerr << '\n';
+
+            auto const logPayloadTable = [](char const * const name,
+                                            std::vector<compute::MeshResourcePayload> const & table)
+            {
+                std::cerr << "[WebGPU] " << name << " slots=" << table.size() << " payloads=";
+                for (std::size_t index = 0u; index < table.size(); ++index)
+                {
+                    if (!table[index].data.empty())
+                    {
+                        std::cerr << ' ' << index << ':' << table[index].data.size();
+                    }
+                }
+                std::cerr << '\n';
+            };
+            logPayloadTable("mesh", snapshot.meshResources);
+            logPayloadTable("beam", snapshot.beamLatticeResources);
+            logPayloadTable("image", snapshot.imageResources);
+        }
+#else
+        void logNeutralSceneDiagnostics(compute::RenderSceneSnapshot const &,
+                                        std::string const &)
+        {
+        }
+#endif
     }
 
     void RenderWindow::initialize(ComputeCore * core,
@@ -74,6 +159,7 @@ namespace gladius::ui
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
         m_neutralSliceHeightInitialized = false;
+        m_lastNeutralDiagnosticSceneGeneration = 0u;
         m_runtime = runtime;
         m_runtimeRenderBackendSession = runtime != nullptr ? runtime->getRenderBackendSession() : nullptr;
         m_renderBackendSession.reset();
@@ -103,6 +189,7 @@ namespace gladius::ui
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
         m_neutralSliceHeightInitialized = false;
+        m_lastNeutralDiagnosticSceneGeneration = 0u;
         m_document = doc;
         m_renderBackendSession.reset();
         m_neutralViewportWidth = 0u;
@@ -214,6 +301,46 @@ namespace gladius::ui
         return false;
     }
 
+    void RenderWindow::logNeutralRenderRequest(async_rendering::RenderTaskRequest const & task,
+                                                compute::RenderRequest const & request)
+    {
+#if defined(__EMSCRIPTEN__)
+        if (task.stamp.sceneEpoch == m_lastNeutralDiagnosticSceneGeneration)
+        {
+            return;
+        }
+
+        std::cerr << "[WebGPU] request task=" << static_cast<unsigned>(task.type)
+                  << " scene=" << task.stamp.sceneEpoch
+                  << " view=" << task.stamp.viewEpoch
+                  << " parameter=" << task.stamp.parameterEpoch
+                  << " viewport=" << request.viewport.width << 'x' << request.viewport.height
+                  << " rows=[" << request.viewport.firstRow << ',' << request.viewport.endRow << ')'
+                  << " flags=0x" << std::hex << request.settings.flags << std::dec
+                  << " sliceHeight=" << std::setprecision(9) << request.settings.sliceHeight
+                  << " bounds=" << (request.modelBounds.has_value() ? "present" : "absent") << '\n';
+        std::cerr << "[WebGPU] camera eye=(" << request.camera.eyePosition[0] << ','
+                  << request.camera.eyePosition[1] << ',' << request.camera.eyePosition[2]
+                  << ") forward=(" << request.camera.forwardDirection[0] << ','
+                  << request.camera.forwardDirection[1] << ',' << request.camera.forwardDirection[2]
+                  << ") right=(" << request.camera.rightDirection[0] << ','
+                  << request.camera.rightDirection[1] << ',' << request.camera.rightDirection[2]
+                  << ") up=(" << request.camera.upDirection[0] << ','
+                  << request.camera.upDirection[1] << ',' << request.camera.upDirection[2] << ")\n";
+        if (request.modelBounds.has_value())
+        {
+            std::cerr << "[WebGPU] bounds min=(" << request.modelBounds->min[0] << ','
+                      << request.modelBounds->min[1] << ',' << request.modelBounds->min[2]
+                      << ") max=(" << request.modelBounds->max[0] << ','
+                      << request.modelBounds->max[1] << ',' << request.modelBounds->max[2] << ")\n";
+        }
+        m_lastNeutralDiagnosticSceneGeneration = task.stamp.sceneEpoch;
+#else
+        (void) task;
+        (void) request;
+#endif
+    }
+
     bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
     {
         if (!m_neutralBackendActive || !m_document)
@@ -253,13 +380,24 @@ namespace gladius::ui
                 return false;
             }
 
+            std::string materializationError;
             auto const snapshot = compute::ComputeRendererFactory::materializeScene(
-                            assembly.get(),
-                            *assembly->assemblyModel(),
-                            sceneGeneration,
-                            &m_document->getResourceManager());
+              assembly.get(),
+              *assembly->assemblyModel(),
+              sceneGeneration,
+              &m_document->getResourceManager(),
+              &materializationError);
+            logNeutralSceneDiagnostics(snapshot, materializationError);
+            if (!snapshot.isValid())
+            {
+                return false;
+            }
             if (!session->replaceScene(snapshot))
             {
+#if defined(__EMSCRIPTEN__)
+                std::cerr << "[WebGPU] scene replacement failed: " << session->getErrorMessage()
+                          << '\n';
+#endif
                 return false;
             }
         }
@@ -298,6 +436,18 @@ namespace gladius::ui
         }
 
         auto pollResult = m_neutralRenderScheduler.poll(true);
+#if defined(__EMSCRIPTEN__)
+        for (auto const & completion : pollResult.completions)
+        {
+            if (completion.taskResult.status == async_rendering::RenderTaskStatus::Failed)
+            {
+                std::cerr << "[WebGPU] submission failed request="
+                          << completion.taskResult.requestId << " error="
+                          << (completion.errorMessage.empty() ? "unknown" : completion.errorMessage)
+                          << '\n';
+            }
+        }
+#endif
         for (auto & accepted : pollResult.acceptedFrames)
         {
             if (accepted.frame.isValid())

@@ -223,13 +223,6 @@
       print: function (text) { console.log(text); },
       printErr: function (text) {
         console.error(text);
-        var status = document.getElementById('gladius-status');
-        if (status) {
-          status.textContent = 'Gladius startup error: ' + text;
-          status.dataset.ready = 'false';
-          status.style.display = 'block';
-          status.style.opacity = '1';
-        }
       },
       setStatus: function (text) {
         var status = document.getElementById('gladius-status');

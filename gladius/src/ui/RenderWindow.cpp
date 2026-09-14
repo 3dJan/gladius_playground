@@ -40,6 +40,13 @@ namespace gladius::ui
 {
     using namespace std;
 
+    void RenderWindow::logNeutralRenderRequest(async_rendering::RenderTaskRequest const & task,
+                                                compute::RenderRequest const & request)
+    {
+        (void) task;
+        (void) request;
+    }
+
     namespace
     {
         class ClEventAwaiter

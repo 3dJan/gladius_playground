@@ -141,11 +141,8 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
     var sample = SceneSample(model.w, model.xyz, 1.0f);
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;
-    if ((flags & RF_CUT_OFF_OBJECT) != 0u) {
-        var clipping_distance = position.z - slice_height;
-        if (has_model_bounds()) {
-            clipping_distance = clipping_box_distance(position, slice_height);
-        }
+    if ((flags & RF_CUT_OFF_OBJECT) != 0u && has_model_bounds()) {
+        let clipping_distance = clipping_box_distance(position, slice_height);
         sample.distance = max(sample.distance, clipping_distance);
     }
 

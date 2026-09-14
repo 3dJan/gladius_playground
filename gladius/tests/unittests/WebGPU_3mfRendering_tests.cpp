@@ -417,6 +417,65 @@ namespace gladius::tests
         EXPECT_GT(countChangedPixels(unboundedNegative->pixels, clippedZero->pixels), 16u);
     }
 
+    TEST(WebGPU3mfRendering, CutoffWithoutModelBoundsDoesNotClipModel)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        constexpr std::string_view evaluator = R"(
+        fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
+            let distance = length(position - vec3<f32>(50.0, 50.0, 50.0)) - 20.0;
+            return vec4<f32>(vec3<f32>(0.8, 0.4, 0.2), distance);
+        }
+        )";
+
+        auto createRequest = [&evaluator](std::uint32_t const flags)
+        {
+            return compute::FrameRequest{.width = 64u,
+                                          .height = 64u,
+                                          .firstRow = 0u,
+                                          .endRow = 64u,
+                                          .eyePosition = {50.0f, 50.0f, 100.0f},
+                                          .forwardDirection = {0.0f, 0.0f, -1.0f},
+                                          .rightDirection = {1.0f, 0.0f, 0.0f},
+                                          .upDirection = {0.0f, 1.0f, 0.0f},
+                                          .horizontalScale = 0.5f,
+                                          .verticalScale = 0.5f,
+                                          .maxRaySteps = 512u,
+                                          .maxTravelDistance = 300.0f,
+                                          .renderingFlags = flags,
+                                          .shaderSource = webgpu::WebGPUFrameShaderComposer::compose(evaluator)};
+        };
+
+        webgpu::WebGPUComputeBackend backend;
+        ASSERT_TRUE(backend.isAvailable());
+
+        auto withoutCutoff = backend.submitFrame(createRequest(RF_DISABLE_ADAPTIVE_OMEGA));
+        withoutCutoff->wait();
+        ASSERT_EQ(withoutCutoff->getStatus(), compute::ComputeCompletionStatus::Succeeded)
+          << withoutCutoff->getErrorMessage();
+        auto withoutCutoffResult = withoutCutoff->takeResult();
+        ASSERT_TRUE(withoutCutoffResult.has_value());
+
+        auto withCutoff = backend.submitFrame(
+          createRequest(RF_CUT_OFF_OBJECT | RF_DISABLE_ADAPTIVE_OMEGA));
+        withCutoff->wait();
+        ASSERT_EQ(withCutoff->getStatus(), compute::ComputeCompletionStatus::Succeeded)
+          << withCutoff->getErrorMessage();
+        auto withCutoffResult = withCutoff->takeResult();
+        ASSERT_TRUE(withCutoffResult.has_value());
+
+        EXPECT_EQ(withoutCutoffResult->pixels, withCutoffResult->pixels);
+        auto const background = 0xFF1A1A1Au;
+        auto const nonBackground = std::count_if(
+          withCutoffResult->pixels.begin(),
+          withCutoffResult->pixels.end(),
+          [background](std::uint32_t const pixel) { return pixel != background; });
+        EXPECT_GT(nonBackground, 16u);
+    }
+
     TEST(WebGPU3mfRendering, FieldOverlayUsesModelBoundingBox)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)

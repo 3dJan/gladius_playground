@@ -93,12 +93,14 @@ namespace gladius::compute
          * @param model The model to materialize from (required if assembly is null).
          * @param generation Scene generation counter for freshness tracking.
          * @param resourceManager Optional resource manager providing mesh payloads.
+         * @param errorMessage Optional destination for a materialization exception message.
          * @return A valid RenderSceneSnapshot, or an invalid one on failure.
          */
         [[nodiscard]] static RenderSceneSnapshot materializeScene(
             nodes::Assembly const * assembly,
             nodes::Model & model,
             std::uint64_t generation,
-            ResourceManager const * resourceManager = nullptr);
+            ResourceManager const * resourceManager = nullptr,
+            std::string * errorMessage = nullptr);
     };
 }
